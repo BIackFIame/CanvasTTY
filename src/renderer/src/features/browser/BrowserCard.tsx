@@ -571,7 +571,7 @@ export function BrowserCard({
       )}
 
       {panel === "downloads" && (
-        <section className="browser-card__popover browser-card__download-panel" data-browser-action="true" data-wheel-owner="local">
+        <section className="browser-card__popover browser-card__download-panel" data-browser-action="true" data-wheel-owner="local" data-canvas-wheel-priority="local">
           <header>
             <strong>{t(locale, "browserDownloads")}</strong>
             <button type="button" onClick={() => setPanel(null)} aria-label={t(locale, "close")}><UiIcon name="close" size={14} /></button>
