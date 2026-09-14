@@ -35,6 +35,8 @@ The tool surface covers tabs, navigation, observation/read, screenshot, click/ho
 
 Agent mutations are ordered FIFO per tab, deduplicated by request ID, revision-checked before side effects, rate-limited, bounded by timeouts, and blocked when their required audit attempt cannot be written. Reads can run concurrently; different tabs keep independent mutation lanes.
 
+If the browser view has zero width or height, `browser_observe` returns `VIEWPORT_UNAVAILABLE` instead of a misleading empty list of controls. `browser_screenshot` returns the same retryable error for an empty capture. Bring the Browser card into view, then observe or capture again; reopening the tab is unnecessary. `browser_read_page` can still read document text while no drawable view is available.
+
 ## Website and file boundaries
 
 - Remote pages run sandboxed with context isolation and no Node.js or CanvasTTY preload.
