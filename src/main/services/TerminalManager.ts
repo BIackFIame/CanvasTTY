@@ -148,6 +148,22 @@ export class TerminalManager {
     return [...this.sessions.values()].map((session) => snapshot(session));
   }
 
+  listMetadata(): SessionMetadata[] {
+    return [...this.sessions.values()].map(session => structuredClone(session.metadata));
+  }
+
+  geometry(id: string): { cols: number; rows: number } {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Terminal unavailable");
+    return { cols: session.cols, rows: session.rows };
+  }
+
+  inputChecked(id: string, data: string): boolean {
+    const session = this.sessions.get(id);
+    if (!session?.process || session.metadata.exitCode !== null) return false;
+    return tryPtyOperation(() => session.process!.write(data));
+  }
+
   readBuffer(id: string): TerminalBufferSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");

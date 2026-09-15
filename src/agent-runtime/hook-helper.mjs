@@ -28,7 +28,9 @@ const turnId = firstString(
   input?.prompt_id,
   input?.promptId
 );
-await reportLifecycle({ state, event, turnId });
+const lastAssistantMessage = event === 'Stop' && typeof input?.last_assistant_message === 'string'
+  ? input.last_assistant_message.slice(0, 4000) : undefined;
+await reportLifecycle({ state, event, turnId, lastAssistantMessage });
 
 function firstString(...values) {
   return values.find((value) => typeof value === "string" && value.length > 0) ?? null;

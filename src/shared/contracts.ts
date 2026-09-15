@@ -1,4 +1,9 @@
 export type ProviderId = "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi";
+export const PROVIDER_LABELS: Record<ProviderId, string> = {
+  terminal: "Terminal", codex: "Codex", claude: "Claude", qwen: "Qwen Code",
+  kimi: "Kimi", opencode: "OpenCode", hermes: "Hermes", grok: "Grok Build",
+  omp: "OMP", pi: "Pi",
+};
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
 export type LaunchProfileId = "normal" | "yolo";
@@ -898,6 +903,7 @@ export interface LimitsSnapshot {
 }
 
 export interface CanvasTTYApi {
+  evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
   clipboard: {
     readText(): Promise<string>;
@@ -1072,6 +1078,10 @@ export const IPC = {
   pluginsBrowserOpenRequested: "plugins:browser-open-requested",
   pluginsBrowserOpenResponded: "plugins:browser-open-responded",
   pluginsStorageChanged: "plugins:storage-changed",
+  evenG2State: "even-g2:state",
+  evenG2Command: "even-g2:command",
+  evenG2BrowserRequest: "even-g2:browser-request",
+  evenG2BrowserResponse: "even-g2:browser-response",
   browserGetState: "browser:get-state",
   browserOpen: "browser:open",
   browserClose: "browser:close",
