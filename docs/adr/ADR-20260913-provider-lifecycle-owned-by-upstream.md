@@ -4,6 +4,12 @@
 **Scope / Component:** agent session status, approval handling, provider integration, and the preload contract
 **Risk/Strictness Profile:** Production
 **Status:** Accepted
+
+**Main intake clarification (2026-09-15):** references below to attention queues and OS
+notifications describe the source branch; those features remain pending in PRs #35 and #37.
+The existing upstream lifecycle owner is retained. See the
+[main intake amendment](./ADR-20260913-selective-intake-from-v121.md#main-intake-amendment-2026-09-15).
+
 **Related:** [ADR: Selective Intake from the v1.2.1 Line](./ADR-20260913-selective-intake-from-v121.md)
 **Implementation:** [`providerLifecycle.ts`](../../src/main/services/providerLifecycle.ts), [`TerminalManager`](../../src/main/services/TerminalManager.ts), [`agent-runtime/`](../../src/main/services/agent-runtime/), [`LimitsService`](../../src/main/services/LimitsService.ts), and [`contracts.ts`](../../src/shared/contracts.ts)
 

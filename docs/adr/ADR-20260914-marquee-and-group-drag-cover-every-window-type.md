@@ -4,6 +4,13 @@
 **Scope / Component:** empty-canvas marquee intersection, group drag membership, and window commit dispatch
 **Risk/Strictness Profile:** Production
 **Status:** Accepted
+
+**Main intake clarification (2026-09-15):** the future-tense implementation notes and references
+to an earlier Invariant 8 describe source-branch history, not the exact predecessor text imported
+here. Upstream already has layer-based selection through PR #47; importing this record does not
+accept the pending attention or independent-browser features. See the
+[main intake amendment](./ADR-20260913-selective-intake-from-v121.md#main-intake-amendment-2026-09-15).
+
 **Amends:** [ADR: Additive Marquee Selection on Empty Canvas](./ADR-20260913-shift-drag-marquee-selection.md)
 **Implementation:** [`canvasSelectionGesture.ts`](../../src/renderer/src/features/workspace/canvasSelectionGesture.ts), [`useCanvasPointerNavigation.ts`](../../src/renderer/src/features/workspace/useCanvasPointerNavigation.ts), and [`WorkspaceCanvas.tsx`](../../src/renderer/src/features/workspace/WorkspaceCanvas.tsx)
 

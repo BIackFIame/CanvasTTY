@@ -4,6 +4,11 @@
 **Scope / Component:** Electron packaging, binary fuse configuration, and bundled helper execution
 **Risk/Strictness Profile:** Production
 **Status:** Accepted
+
+**Main intake clarification (2026-09-15):** this is a source-branch decision record. The fuse
+configuration below belongs to pending PR #35 and is not enabled by importing this document.
+See the [main intake amendment](./ADR-20260913-selective-intake-from-v121.md#main-intake-amendment-2026-09-15).
+
 **Related:** [ADR: Selective Intake from the v1.2.1 Line](./ADR-20260913-selective-intake-from-v121.md)
 **Implementation:** [`electron-builder.yml`](../../electron-builder.yml), [`src/main/index.ts`](../../src/main/index.ts), [`src/agent-runtime/`](../../src/agent-runtime/), [`agent-browser/ProviderLaunch.ts`](../../src/main/services/agent-browser/ProviderLaunch.ts), and [`agent-runtime/ProviderRuntimeLaunch.ts`](../../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts)
 

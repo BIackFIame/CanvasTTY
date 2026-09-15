@@ -4,6 +4,14 @@
 **Scope / Component:** native Browser wheel ownership, cross-surface hit testing, frozen rendering, and pointer routing
 **Risk/Strictness Profile:** Production
 **Status:** Accepted
+
+**Main intake clarification (2026-09-15):** the historical macOS/Windows observations below do
+not establish Linux acceptance. The maintainer reports resize, scaling, movement, and clipping
+regressions in the combined Linux DEV build; see the
+[PR #34 review](https://github.com/howdeploy/CanvasTTY/pull/34#pullrequestreview-5209192918) and
+[PR #40 follow-up](https://github.com/howdeploy/CanvasTTY/pull/40#issuecomment-5679224145).
+This documentation intake does not resolve those defects or claim new interactive validation.
+
 **Related:** [ADR: Use Intent-Aware Canvas Navigation](./ADR-20260808-intent-aware-canvas-navigation.md)
 **Implementation:** [`BrowserCanvasGestureController`](../../src/main/services/browser/BrowserCanvasGestureController.ts), [`BrowserCanvasPointerRouter`](../../src/main/services/browser/BrowserCanvasPointerRouter.ts), [`BrowserCanvasFreeze`](../../src/main/services/browser/BrowserCanvasFreeze.ts), [`BrowserCanvasSinkViewport`](../../src/main/services/browser/BrowserCanvasSinkViewport.ts), [`browser` preload](../../src/preload/browser.ts), and [`BrowserCard`](../../src/renderer/src/features/browser/BrowserCard.tsx)
 

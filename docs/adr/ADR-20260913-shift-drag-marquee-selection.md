@@ -4,6 +4,12 @@
 **Scope / Component:** empty-canvas pointer navigation, multi-window selection, and group movement
 **Risk/Strictness Profile:** Production
 **Status:** Accepted
+
+**Main intake clarification (2026-09-15):** the rationale and original validation below are
+source-branch history. Selection code already accepted through PR #47 is separate from the
+pending attention feature in PR #37. See the
+[main intake amendment](./ADR-20260913-selective-intake-from-v121.md#main-intake-amendment-2026-09-15).
+
 **Amends:** [ADR: Use Intent-Aware Canvas Navigation](./ADR-20260808-intent-aware-canvas-navigation.md)
 **Amended by:** [ADR: Marquee Selection and Group Drag Cover Every Window Type](./ADR-20260914-marquee-and-group-drag-cover-every-window-type.md)
 **Implementation:** [`useCanvasPointerNavigation.ts`](../../src/renderer/src/features/workspace/useCanvasPointerNavigation.ts), [`WorkspaceCanvas.tsx`](../../src/renderer/src/features/workspace/WorkspaceCanvas.tsx), and [`.canvas-marquee`](../../src/renderer/src/styles/app.css)

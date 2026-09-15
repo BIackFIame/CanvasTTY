@@ -7,6 +7,10 @@
 **Related:** [ADR: Keep Provider Lifecycle Owned by the Upstream Runtime](./ADR-20260913-provider-lifecycle-owned-by-upstream.md), [ADR: Additive Marquee Selection on Empty Canvas](./ADR-20260913-shift-drag-marquee-selection.md), [ADR: Keep `runAsNode` Enabled in Packaged Builds](./ADR-20260913-packaged-fuses-keep-run-as-node.md)
 **Implementation:** the merged tree itself; see the ported and dropped inventories below
 
+**Main intake clarification (2026-09-15):** the original status, inventories, and validation
+describe the contributor's source branch. They are not an inventory of shipped upstream features.
+See the [main intake amendment](#main-intake-amendment-2026-09-15) for the acceptance boundary.
+
 ## Context and Problem Statement
 
 Two lines diverged from the same origin. The upstream line continued to v1.5.1 and owns the
@@ -133,3 +137,37 @@ implementation, or if a ported feature leaves two owners behind.
 - [ADR: Keep Provider Lifecycle Owned by the Upstream Runtime](./ADR-20260913-provider-lifecycle-owned-by-upstream.md)
 - [ADR: Additive Marquee Selection on Empty Canvas](./ADR-20260913-shift-drag-marquee-selection.md)
 - [ADR: Keep `runAsNode` Enabled in Packaged Builds](./ADR-20260913-packaged-fuses-keep-run-as-node.md)
+
+## Main intake amendment 2026-09-15
+
+Upstream imports only the seven documentation changes from
+[`cff22e20`](https://github.com/howdeploy/CanvasTTY/commit/cff22e20c10d502111b62ebd79110e3e0717a313)
+in [PR #45](https://github.com/howdeploy/CanvasTTY/pull/45). The original record above remains
+source-branch history. Importing its text does not approve the implementation commits underneath
+that stacked PR, and its original validation claims do not establish upstream release coverage.
+
+At this intake, upstream main is based on
+[`dd27b8a`](https://github.com/howdeploy/CanvasTTY/commit/dd27b8a9e5b655337af8f33fda1a5e9bd8f52381),
+which accepted the selected provider and behavior fixes from PRs #38–40 and #42–44 through
+[PR #47](https://github.com/howdeploy/CanvasTTY/pull/47).
+
+The following feature PRs remain outside main pending rework:
+
+- [#32](https://github.com/howdeploy/CanvasTTY/pull/32): orchestration requires an explicit
+  launch-menu option and support for every agent provider.
+- [#34](https://github.com/howdeploy/CanvasTTY/pull/34): independent browser cards require
+  resize, movement, and rendering corrections with platform-specific evidence.
+- [#35](https://github.com/howdeploy/CanvasTTY/pull/35): app permissions, fuse changes, recovery,
+  hidden-output gating, notifications, and self-update remain pending as a feature bundle.
+- [#36](https://github.com/howdeploy/CanvasTTY/pull/36): terminal and workspace additions require
+  title-editing, shortcut, and browser-integration rework.
+- [#37](https://github.com/howdeploy/CanvasTTY/pull/37): attention UI requires settings for enabling
+  it and choosing its position, plus scaling, contrast, and error-detail improvements. Some
+  selection code already reached main with the accepted behavior fixes; this does not accept
+  the remaining attention feature.
+- [#41](https://github.com/howdeploy/CanvasTTY/pull/41): the two-row HOME launcher remains pending
+  a solution for HOME sizing, scaling, and button usability.
+
+[PR #46](https://github.com/howdeploy/CanvasTTY/pull/46), the README/documentation follow-up, is
+excluded from this intake. The only dependency change accompanying these records is the separately
+reviewed `js-yaml` override and lockfile pin to `4.3.2`; it remains a development dependency.
