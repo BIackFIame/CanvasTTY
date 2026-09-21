@@ -34,6 +34,12 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 }
 
 const api: CanvasTTYApi = {
+  evenG2: {
+    state: () => ipcRenderer.invoke(IPC.evenG2State),
+    command: (command) => ipcRenderer.invoke(IPC.evenG2Command, command),
+    onOpenBrowser: (listener) => subscribe<string>(IPC.evenG2BrowserRequest, listener),
+    completeOpenBrowser: (requestId, ok) => ipcRenderer.send(IPC.evenG2BrowserResponse, { requestId, ok })
+  },
   appVersion: () => ipcRenderer.invoke(IPC.appVersion),
   clipboard: {
     readText: () => ipcRenderer.invoke(IPC.clipboardRead),
