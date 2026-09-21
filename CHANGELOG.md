@@ -2,6 +2,14 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## 1.5.2
+
+- Fixed terminal history jumping to the beginning when Codex clears and redraws its history after a card resize. Readers retain their relative scroll position, while terminals at the bottom continue following new output.
+- Fixed deferred terminal sizing after an offscreen alternate-screen resize, preserving follow-output mode when the card returns to view.
+- Includes the already merged OMP/Pi providers and agent transport, startup, plugin installation, canvas gesture, and browser fixes from PRs #33 and #47.
+- Includes the Even G2 companion with local pairing and voice control from PR #50.
+- Includes architecture decision documentation, the `js-yaml 4.3.2` pin, and build dependency updates from PRs #48 and #49.
+
 ## 1.5.1
 
 - Fixed the HOME Terminal button passing a mouse event as canvas coordinates and failing with “Session position is invalid”.
