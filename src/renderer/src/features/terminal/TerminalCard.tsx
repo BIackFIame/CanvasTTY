@@ -27,7 +27,7 @@ import {
   shouldScrollTerminalPage,
   shouldSendTerminalLineBreak
 } from "./terminalShortcuts";
-import { fitTerminalPreservingViewport } from "./terminalViewport";
+import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
 import { attachTerminalOutput } from "./terminalOutput";
 import {
   constrainResize,
@@ -181,6 +181,7 @@ export function TerminalCard({
     terminal.loadAddon(fitAddon);
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
     let lastReportedGrid = "";
     const reportGrid = (cols: number, rows: number): void => {
       const grid = `${cols}x${rows}`;
@@ -275,6 +276,7 @@ export function TerminalCard({
       input.dispose();
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
+      detachRedrawViewport();
       terminal.dispose();
     };
   }, [session.id]);
