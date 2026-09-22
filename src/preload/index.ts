@@ -52,6 +52,10 @@ const api: CanvasTTYApi = {
     get: () => ipcRenderer.invoke(IPC.settingsGet),
     update: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsUpdate, patch)
   },
+  agents: {
+    availability: () => ipcRenderer.invoke(IPC.agentsAvailability),
+    recheck: () => ipcRenderer.invoke(IPC.agentsRecheck)
+  },
   dialog: {
     pickDirectory: (defaultPath?: string) => ipcRenderer.invoke(IPC.dialogPickDirectory, defaultPath),
     pickMedia: () => ipcRenderer.invoke(IPC.dialogPickMedia)

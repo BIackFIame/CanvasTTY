@@ -4,6 +4,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type {
   AppSettings,
+  AgentCliAvailability,
   BrowserCommand,
   CanvasNavigationPointerBindingInput,
   CreateSessionRequest,
@@ -16,6 +17,7 @@ import { IPC } from "../../shared/contracts";
 import { isCanvasNavigationMouseButton } from "../../shared/canvasNavigation";
 import { observeWindowState, readWindowState } from "../windowState";
 import type { SettingsStore } from "../services/SettingsStore";
+import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
@@ -39,6 +41,8 @@ const MEDIA_MIME: Record<string, string> = {
 
 interface Dependencies {
   settings: SettingsStore;
+  providerClis: ProviderCliRegistry;
+  recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
   limits: LimitsService;
   plugins: PluginManager;
@@ -60,6 +64,8 @@ interface Dependencies {
 
 export function registerIpc({
   settings,
+  providerClis,
+  recheckProviderClis,
   terminals,
   limits,
   plugins,
@@ -98,6 +104,14 @@ export function registerIpc({
     return app.getVersion();
   });
   ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.agentsAvailability, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return providerCliAvailability(providerClis);
+  });
+  ipcMain.handle(IPC.agentsRecheck, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return recheckProviderClis();
+  });
   ipcMain.handle(IPC.settingsUpdate, async (_event, patch: Partial<AppSettings>) => {
     const next = await settings.update(patch);
     await applyBrowserSettings(next);

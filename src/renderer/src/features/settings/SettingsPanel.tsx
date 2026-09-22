@@ -2,6 +2,8 @@ import { EvenG2Controls } from "./EvenG2Controls";
 import { useEffect, useState } from "react";
 import type {
   AppSettings,
+  AgentCliAvailability,
+  AgentProviderId,
   BrowserActivityEvent,
   BrowserCommandType,
   BrowserDownloadSnapshot,
@@ -107,6 +109,8 @@ const CANVAS_COLOR_PREVIEWS: Record<CanvasColorId, string> = {
 interface SettingsPanelProps {
   open: boolean;
   settings: AppSettings;
+  agentAvailability: AgentCliAvailability | null;
+  onRecheckAgentClis(): Promise<void>;
   plugins: InstalledPlugin[];
   browser: BrowserSnapshot;
   onClose(): void;
@@ -132,6 +136,8 @@ interface SettingsPanelProps {
 export function SettingsPanel({
   open,
   settings,
+  agentAvailability,
+  onRecheckAgentClis,
   plugins,
   browser,
   onClose,
@@ -165,6 +171,39 @@ export function SettingsPanel({
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearingBrowserData, setClearingBrowserData] = useState(false);
   const [browserDataMessage, setBrowserDataMessage] = useState<string | null>(null);
+  const [checkingAgentClis, setCheckingAgentClis] = useState(false);
+  const [agentCliError, setAgentCliError] = useState<string | null>(null);
+
+  const openAgentInstall = (provider: AgentProviderId): void => {
+    const url = PROVIDERS[provider].installUrl;
+    if (!url) return;
+    void window.canvasTTY.external.openUrl(url).catch(() => setAgentCliError(t(locale, "agentInstallLinkFailed")));
+  };
+
+  const recheckAgentClis = async (): Promise<void> => {
+    setCheckingAgentClis(true);
+    setAgentCliError(null);
+    try {
+      await onRecheckAgentClis();
+    } catch {
+      setAgentCliError(t(locale, "agentCliRecheckFailed"));
+    } finally {
+      setCheckingAgentClis(false);
+    }
+  };
+
+  const missingAgentRow = (provider: AgentProviderId, label = PROVIDERS[provider].label): React.JSX.Element => (
+    <div className="agent-launcher-settings__row" key={provider}>
+      <span className="agent-launcher-settings__identity">
+        <ProviderIcon provider={provider} size="small" />
+        <strong>{label}</strong>
+        <small>{t(locale, "limitCliNotFound")}</small>
+      </span>
+      <button className="setting-inline-action" type="button" onClick={() => openAgentInstall(provider)}>
+        {t(locale, "install")}
+      </button>
+    </div>
+  );
 
   useEffect(() => {
     if (!open) {
@@ -515,6 +554,12 @@ export function SettingsPanel({
 
           {section === "agents" && (
             <>
+              <div className="agent-cli-recheck">
+                <button className="setting-inline-action" type="button" disabled={checkingAgentClis} onClick={() => void recheckAgentClis()}>
+                  {t(locale, checkingAgentClis ? "agentCliRechecking" : "agentCliRecheck")}
+                </button>
+                {agentCliError && <span role="alert">{agentCliError}</span>}
+              </div>
               <AgentHooksSettings
                 settings={settings}
                 plugins={plugins}
@@ -529,6 +574,7 @@ export function SettingsPanel({
                 <div className="canvas-menu canvas-launcher-settings-menu">
                   <CanvasMenuLabel>{t(locale, "canvasLauncherSettingsLabel")}</CanvasMenuLabel>
                   {CANVAS_LAUNCHER_ITEMS.map((item: CanvasLauncherItemId) => {
+                    if (item !== "terminal" && !agentAvailability?.[item]) return missingAgentRow(item);
                     const enabled = settings.canvasLauncherItems.includes(item);
                     return (
                       <CanvasMenuRow
@@ -569,6 +615,9 @@ export function SettingsPanel({
                 <div className="canvas-menu canvas-launcher-settings-menu">
                   <CanvasMenuLabel>{t(locale, "quickLauncherCount").replace("{count}", String(settings.radialLauncherItems.length))}</CanvasMenuLabel>
                   {RADIAL_LAUNCHER_ITEMS.map((item: RadialLauncherItemId) => {
+                    if (item !== "terminal" && item !== "note" && item !== "browser" && item !== "settings" && !agentAvailability?.[item]) {
+                      return missingAgentRow(item);
+                    }
                     const enabled = settings.radialLauncherItems.includes(item);
                     return (
                       <CanvasMenuRow
@@ -603,6 +652,7 @@ export function SettingsPanel({
               >
                 <div className="agent-launcher-settings">
                   {AGENT_PROVIDERS.map((provider) => {
+                    if (!agentAvailability?.[provider]) return missingAgentRow(provider);
                     const enabled = homeLauncherProviders.includes(provider);
                     return (
                       <div className="agent-launcher-settings__row" key={provider}>
@@ -633,6 +683,7 @@ export function SettingsPanel({
               >
                 <div className="agent-launcher-settings">
                   {LIMIT_PROVIDERS.map((provider: LimitProviderId) => {
+                    if (!agentAvailability?.[provider]) return missingAgentRow(provider, PROVIDERS[provider].limitsLabel ?? PROVIDERS[provider].label);
                     const enabled = homeLimitProviders.includes(provider);
                     return (
                       <div className="agent-launcher-settings__row" key={provider}>

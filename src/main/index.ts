@@ -12,6 +12,7 @@ import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { LimitsService } from "./services/LimitsService";
 import {
   createProviderCliRegistry,
+  providerCliAvailability,
   type ProviderCliRegistry
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
@@ -206,7 +207,7 @@ async function initializeServices(): Promise<void> {
   const kimiHomeDirectory = resolveKimiHomeDirectory();
   recoverKimiConfigurationOnStartup(kimiHomeDirectory);
   const userDataPath = app.getPath("userData");
-  const settings = new SettingsStore(userDataPath, app.getLocale());
+  const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
   await settings.load();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
@@ -367,6 +368,15 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   registerIpc({
     settings,
+    providerClis,
+    recheckProviderClis: async () => {
+      providerClis!.refresh();
+      agentBrowserBridge?.providerClisRefreshed();
+      await limitsService!.providerClisRefreshed();
+      const availability = providerCliAvailability(providerClis!);
+      const updatedSettings = await settings.setAvailableProviders(availability);
+      return { availability, settings: updatedSettings };
+    },
     terminals: terminalManager,
     limits: limitsService,
     plugins: pluginManager,

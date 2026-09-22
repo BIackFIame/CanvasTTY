@@ -5,6 +5,7 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
   omp: "OMP", pi: "Pi",
 };
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
+export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
 export type LaunchProfileId = "normal" | "yolo";
 export type SessionStatus = "idle" | "working" | "needs_approval" | "unavailable" | "done" | "failed";
@@ -916,6 +917,10 @@ export interface CanvasTTYApi {
     get(): Promise<AppSettings>;
     update(patch: Partial<AppSettings>): Promise<AppSettings>;
   };
+  agents: {
+    availability(): Promise<AgentCliAvailability>;
+    recheck(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
+  };
   dialog: {
     pickDirectory(defaultPath?: string): Promise<string | null>;
     pickMedia(): Promise<MediaSelection | null>;
@@ -1120,6 +1125,8 @@ export const IPC = {
   terminalList: "terminal:list",
   terminalReadBuffer: "terminal:read-buffer",
   terminalCreate: "terminal:create",
+  agentsAvailability: "agents:availability",
+  agentsRecheck: "agents:recheck",
   terminalRestart: "terminal:restart",
   terminalInput: "terminal:input",
   terminalResize: "terminal:resize",

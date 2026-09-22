@@ -620,6 +620,10 @@ button { border: 0; }
 .agent-launcher-settings__row { min-height: 4.3em; padding: .55em .65em .55em .85em; display: grid; grid-template-columns: minmax(0, 1fr) 14em; align-items: center; gap: .9em; border-radius: .75em; color: var(--text); background: var(--surface-soft); }
 .agent-launcher-settings__identity { min-width: 0; display: flex; align-items: center; gap: 10px; }
 .agent-launcher-settings__identity strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-launcher-settings__identity small { color: var(--text-muted); white-space: nowrap; }
+.agent-launcher-settings__row > .setting-inline-action { justify-self: end; }
+.agent-cli-recheck { display: flex; align-items: center; gap: 10px; }
+.agent-cli-recheck [role="alert"] { color: var(--text-muted); font-size: 12px; }
 .canvas-launcher-settings-menu { position: relative; left: auto; top: auto; z-index: auto; width: 100%; min-width: 0; max-width: 100%; background: var(--surface-soft); box-shadow: none; }
 .canvas-launcher-settings-menu .canvas-menu__icon { background: var(--surface); }
 .ui-scale-setting { display: grid; grid-template-columns: minmax(0, 1fr) 4.6em; align-items: center; gap: 1em; }
