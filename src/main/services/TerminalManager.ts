@@ -173,7 +173,10 @@ export class TerminalManager {
     };
   }
 
-  create(request: CreateSessionRequest): SessionSnapshot {
+  create(
+    request: CreateSessionRequest,
+    control: { answerCaptureGrantExpiresAt?: number } = {}
+  ): SessionSnapshot {
     assertCreateRequest(request);
     assertDirectory(request.cwd);
 
@@ -197,7 +200,16 @@ export class TerminalManager {
       && this.providerClis.get(request.provider).state === "available";
     const launched = awaitMeasuredGrid
       ? { process: null, agentBrowser: null, agentRuntime: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd);
+      : this.spawnProcess(
+        id,
+        request.provider,
+        request.profile,
+        request.cwd,
+        INITIAL_TERMINAL_COLS,
+        INITIAL_TERMINAL_ROWS,
+        false,
+        control.answerCaptureGrantExpiresAt
+      );
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -537,7 +549,8 @@ export class TerminalManager {
     cwd: string,
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
-    resumePrevious = false
+    resumePrevious = false,
+    answerCaptureGrantExpiresAt?: number
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -550,7 +563,12 @@ export class TerminalManager {
     }
     const agentRuntime = provider === "terminal"
       ? null
-      : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd }) ?? null;
+      : this.agentRuntime?.prepareLaunch({
+        terminalSessionId: id,
+        provider,
+        cwd,
+        ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt })
+      }) ?? null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
     try {
       // omp and pi take no browser bridge, exactly like grok: the adapter chain below

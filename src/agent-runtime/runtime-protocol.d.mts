@@ -6,4 +6,6 @@ export const AGENT_RUNTIME_ENV: Readonly<{
   provider: "CANVASTTY_RUNTIME_PROVIDER";
   capabilityToken: "CANVASTTY_RUNTIME_CAPABILITY";
 }>;
+export const CAPTURE_ANSWER_ENV: "CANVASTTY_RUNTIME_CAPTURE_ANSWER";
+export const CAPTURE_ANSWER_EXPIRES_AT_ENV: "CANVASTTY_RUNTIME_CAPTURE_ANSWER_EXPIRES_AT";
 export const RUNTIME_STATES: readonly ["idle", "working", "needs_approval"];
