@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   AgentProviderId,
+  AgentCliAvailability,
   AppSettings,
   BrowserCanvasState,
   CanvasLauncherItemId,
@@ -98,11 +99,15 @@ export class SettingsStore {
   private value: AppSettings;
   private hasPersistedLegacyWheelCapture = false;
   private writeQueue = Promise.resolve();
+  private availableProviders: ReadonlySet<AgentProviderId>;
 
-  constructor(userDataPath: string, systemLocale: string, platform: string = process.platform) {
+  constructor(userDataPath: string, systemLocale: string, platform: string = process.platform, availability?: AgentCliAvailability) {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
-    this.value = createDefaults(systemLocale, this.platform);
+    this.availableProviders = new Set(availability
+      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
+      : AGENT_PROVIDERS);
+    this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
   }
 
   async load(): Promise<AppSettings> {
@@ -190,13 +195,15 @@ export class SettingsStore {
           };
         }
       }
-      this.value = normalizeSettings(migratedCandidate, {
+      const normalized = normalizeSettings(migratedCandidate, {
         ...this.value,
         useScrollWheelToZoom: true
       }, this.platform);
+      this.value = filterUnavailableProviders(normalized, this.availableProviders);
+      const availabilityChanged = providerSelectionsChanged(normalized, this.value);
       if (!this.value.persistCanvasRegions) this.value.canvasRegions = [];
       if (!this.value.persistStickyNotes) this.value.stickyNotes = [];
-      if (needsMigration) await this.persist();
+      if (needsMigration || availabilityChanged) await this.persist();
     } catch (error) {
       if (isMissingFile(error)) {
         await this.persist();
@@ -212,6 +219,16 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
 
+  async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
+    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
+    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+    if (providerSelectionsChanged(this.value, filtered)) {
+      this.value = filtered;
+      await this.persist();
+    }
+    return this.get();
+  }
+
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
     if (patch.canvasWheelCaptureMode !== undefined) this.hasPersistedLegacyWheelCapture = true;
     const nextPatch = patch.canvasWheelCaptureMode === "key"
@@ -219,7 +236,10 @@ export class SettingsStore {
       && this.value.canvasWheelOverride === null
       ? { ...patch, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) }
       : patch;
-    this.value = normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform);
+    this.value = filterUnavailableProviders(
+      normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform),
+      this.availableProviders
+    );
     await this.persist();
     return this.get();
   }
@@ -554,6 +574,25 @@ function normalizeAgentProviderSelection(
     typeof provider === "string" && AGENT_PROVIDERS.has(provider as AgentProviderId)
   )));
   return [...AGENT_PROVIDERS].filter((provider) => selected.has(provider));
+}
+
+function filterUnavailableProviders(settings: AppSettings, available: ReadonlySet<AgentProviderId>): AppSettings {
+  return {
+    ...settings,
+    homeLauncherProviders: settings.homeLauncherProviders.filter((provider) => available.has(provider)),
+    homeLimitProviders: settings.homeLimitProviders.filter((provider) => available.has(provider)),
+    canvasLauncherItems: settings.canvasLauncherItems.filter((provider) => provider === "terminal" || available.has(provider)),
+    radialLauncherItems: settings.radialLauncherItems.filter((provider) => (
+      provider === "terminal" || provider === "note" || provider === "browser" || provider === "settings" || available.has(provider)
+    ))
+  };
+}
+
+function providerSelectionsChanged(before: AppSettings, after: AppSettings): boolean {
+  return before.homeLauncherProviders.length !== after.homeLauncherProviders.length
+    || before.homeLimitProviders.length !== after.homeLimitProviders.length
+    || before.canvasLauncherItems.length !== after.canvasLauncherItems.length
+    || before.radialLauncherItems.length !== after.radialLauncherItems.length;
 }
 
 function normalizeLimitProviderSelection(

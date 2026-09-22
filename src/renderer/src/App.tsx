@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentProviderId,
+  AgentCliAvailability,
   AppSettings,
   BrowserCanvasState,
   BrowserSnapshot,
@@ -46,6 +47,7 @@ import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
+import { AGENT_PROVIDERS } from "./lib/providers";
 import {
   mergeSessionSnapshots,
   upsertSession,
@@ -179,6 +181,8 @@ export function App(): React.JSX.Element {
   const [sessions, setSessions] = useState<SessionSnapshot[]>([]);
   const [limits, setLimits] = useState<LimitsSnapshot | null>(null);
   const [limitsLoadState, setLimitsLoadState] = useState<LimitsLoadState>("loading");
+  const [limitsRevision, setLimitsRevision] = useState(0);
+  const [agentAvailability, setAgentAvailability] = useState<AgentCliAvailability | null>(null);
   const [mediaData, setMediaData] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
   const [browser, setBrowser] = useState<BrowserSnapshot>(EMPTY_BROWSER_SNAPSHOT);
@@ -241,16 +245,18 @@ export function App(): React.JSX.Element {
     });
 
     const settingsRequest = window.canvasTTY.settings.get();
+    const availabilityRequest = window.canvasTTY.agents.availability();
     const sessionsRequest = window.canvasTTY.terminal.list().then((loadedSessions) => {
       if (active) setSessions((current) => mergeSessionSnapshots(current, loadedSessions));
       return loadedSessions;
     });
     const pluginsRequest = window.canvasTTY.plugins.list();
 
-    void Promise.all([settingsRequest, sessionsRequest, pluginsRequest])
-      .then(async ([loadedSettings, _loadedSessions, loadedPlugins]) => {
+    void Promise.all([settingsRequest, availabilityRequest, sessionsRequest, pluginsRequest])
+      .then(async ([loadedSettings, availability, _loadedSessions, loadedPlugins]) => {
         if (!active) return;
         setSettings(loadedSettings);
+        setAgentAvailability(availability);
         setPlugins(loadedPlugins);
         if (loadedSettings.browserCanvas && browserApi) {
           const browserState = await browserApi.open();
@@ -310,7 +316,7 @@ export function App(): React.JSX.Element {
       active = false;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, []);
+  }, [limitsRevision]);
 
   useEffect(() => {
     const recenterHome = (): void => {
@@ -335,6 +341,15 @@ export function App(): React.JSX.Element {
       showToast(t(settings.locale, "settingsFailed"));
     }
   }, [persistSettings, settings.locale, showToast]);
+
+  const recheckAgentClis = useCallback(async (): Promise<void> => {
+    const result = await window.canvasTTY.agents.recheck();
+    setAgentAvailability(result.availability);
+    setSettings(result.settings);
+    setLimits(null);
+    setLimitsLoadState("loading");
+    setLimitsRevision((current) => current + 1);
+  }, []);
 
   const createSession = useCallback(async (
     provider: ProviderId,
@@ -364,9 +379,13 @@ export function App(): React.JSX.Element {
   }, [createSession, settings.lastDirectory, settings.locale, showToast]);
 
   const openAgent = useCallback((provider: AgentProviderId, position?: Point): void => {
+    if (!agentAvailability?.[provider]) {
+      showToast(t(settings.locale, "agentCliNotFound"));
+      return;
+    }
     setLaunchPosition(position ?? null);
     setLaunchProvider(provider);
-  }, []);
+  }, [agentAvailability, settings.locale, showToast]);
 
   useEffect(() => window.canvasTTY.plugins.onOpenLauncher(({ provider }) => {
     if (provider === "terminal") void openTerminal();
@@ -990,11 +1009,19 @@ export function App(): React.JSX.Element {
     }) as React.CSSProperties,
     [appearance.homeAccentColors, appearance.homeAccentPreset, settings.uiScale]
   );
-  const workspaceSettings = useMemo(() => homeEditDraft ? {
-    ...settings,
-    homeGridSize: homeEditDraft.homeGridSize,
-    homeLayout: homeEditDraft.homeLayout
-  } : settings, [homeEditDraft, settings]);
+  const workspaceSettings = useMemo(() => {
+    const available = new Set(AGENT_PROVIDERS.filter((provider) => agentAvailability?.[provider]));
+    return {
+      ...settings,
+      ...(homeEditDraft ? { homeGridSize: homeEditDraft.homeGridSize, homeLayout: homeEditDraft.homeLayout } : {}),
+      homeLauncherProviders: settings.homeLauncherProviders.filter((provider) => available.has(provider)),
+      homeLimitProviders: settings.homeLimitProviders.filter((provider) => available.has(provider)),
+      canvasLauncherItems: settings.canvasLauncherItems.filter((provider) => provider === "terminal" || available.has(provider)),
+      radialLauncherItems: settings.radialLauncherItems.filter((provider) => (
+        provider === "terminal" || provider === "note" || provider === "browser" || provider === "settings" || available.has(provider)
+      ))
+    };
+  }, [agentAvailability, homeEditDraft, settings]);
 
   return (
     <div className={rootClasses} style={rootStyle}>
@@ -1100,6 +1127,8 @@ export function App(): React.JSX.Element {
       <SettingsPanel
         open={settingsOpen}
         settings={settings}
+        agentAvailability={agentAvailability}
+        onRecheckAgentClis={recheckAgentClis}
         plugins={plugins}
         browser={browser}
         onClose={() => setSettingsOpen(false)}
