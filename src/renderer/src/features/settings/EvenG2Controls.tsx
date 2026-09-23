@@ -257,9 +257,11 @@ export function EvenG2Controls({
               <UiIcon name="arrow" />
             </button>
           </div>
-          <button onClick={() => setStage("transport")}>
-            {text("Local network settings", "Параметры локальной сети")}
-          </button>
+          <div className="g2-settings__network">
+            <button onClick={() => setStage("transport")}>
+              {text("Local network settings", "Параметры локальной сети")}
+            </button>
+          </div>
           {state.peers.map((peer) => (
             <div className="g2-peer" key={peer.id}>
               <div className="g2-peer__top">
