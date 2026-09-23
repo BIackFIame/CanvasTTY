@@ -19,7 +19,7 @@ import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, net, protocol, safeStorage } from "electron";
+import { app, BrowserWindow, dialog, net, protocol, safeStorage, session } from "electron";
 import { IPC, type PluginCanvasRequest } from "../shared/contracts";
 import { registerIpc } from "./ipc/registerIpc";
 import { SavedHostDiagnostics } from "./services/SavedHostDiagnostics";
@@ -193,6 +193,16 @@ async function createWindow(): Promise<BrowserWindow> {
     if (currentUrl && url !== currentUrl) event.preventDefault();
   });
   canvasNavigationInput?.attach(window.webContents, { preventMouseBindings: false });
+  // A dead renderer must not leave a blank window: reload the application surface in place.
+  // Services, sessions and scrollback live in this process and stay untouched. A clean exit is
+  // the normal teardown path.
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (details.reason === "clean-exit") return;
+    console.warn(`CanvasTTY renderer is gone (reason=${details.reason}, exitCode=${details.exitCode}). Reloading the application.`);
+    if (shellWindowGone(window) || window.webContents.isDestroyed()) return;
+    void reloadApplicationSurface(window)
+      .catch((error) => console.warn("CanvasTTY could not reload the application after a renderer crash.", error));
+  });
   window.on("blur", () => {
     canvasNavigationInput?.reset();
     browserService?.cancelCanvasNavigationGesture();
@@ -232,6 +242,12 @@ function shellWindowGone(window: BrowserWindow): boolean {
 }
 
 async function initializeServices(): Promise<void> {
+  // Deny-by-default web permissions on the default session: the app window and plugin windows
+  // never need camera, microphone, location, notifications or device access. The Browser card uses
+  // its own partition with its own policy in BrowserService.
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
+  session.defaultSession.setPermissionCheckHandler(() => false);
+  session.defaultSession.setDevicePermissionHandler(() => false);
   providerClis = buildProviderCliRegistry();
   // Recovery is independent of gateway availability: interrupted provider config
   // overlays must be restored before any new terminal can launch, including on Windows.
@@ -572,6 +588,12 @@ async function initializeServices(): Promise<void> {
   servicesReady = true;
 }
 
+/** Loads only the renderer entry; used to recover from a renderer crash. */
+async function reloadApplicationSurface(window: BrowserWindow): Promise<void> {
+  if (process.env.ELECTRON_RENDERER_URL) await window.loadURL(process.env.ELECTRON_RENDERER_URL);
+  else await window.loadFile(join(__dirname, "../renderer/index.html"));
+}
+
 async function loadApplication(window: BrowserWindow): Promise<void> {
   if (shellWindowGone(window)) return;
   try {
@@ -775,6 +797,12 @@ app.on("before-quit", (event) => {
 });
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
+});
+// Crash diagnostics: a lost GPU or utility child is logged with its reason; the window itself
+// recovers through render-process-gone.
+app.on("child-process-gone", (_event, details) => {
+  const service = details.serviceName ? `, service=${details.serviceName}` : "";
+  console.warn(`CanvasTTY child process exited: type=${details.type}, reason=${details.reason}, exitCode=${details.exitCode}${service}.`);
 });
 
 // Keep shared event names in the main bundle so accidental channel drift fails at build time.
