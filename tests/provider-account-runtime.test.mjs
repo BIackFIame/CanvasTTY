@@ -308,7 +308,10 @@ test("remote API binding and missing selected home binding fail closed before an
   assert.equal(f.calls.length, 0);
   const profile = { ...api(), hostId: "remote" }, account = apiAccount("opencode", { hostId: "remote" });
   f.update({ providerAccounts: [account], apiProfiles: [profile] });
-  await assert.rejects(f.service.prepare({ ...session, provider: "opencode", accountId: account.id, hostId: "remote" }, false), /never forwarded/);
+  await assert.rejects(f.service.prepare({ ...session, provider: "opencode", accountId: account.id, hostId: "remote" }, false), /credential reference is invalid/);
+  const remoteProfile = { ...profile, remoteCredential: { kind: "environment", name: "FIXTURE_REMOTE_KEY" } }; delete remoteProfile.secretRef;
+  f.update({ apiProfiles: [remoteProfile] });
+  await assert.rejects(f.service.prepare({ ...session, provider: "opencode", accountId: account.id, hostId: "remote" }, false), /Remote API.*container/i);
 });
 
 test("oversized initial prompt is rejected before a child reservation is created", async (t) => {

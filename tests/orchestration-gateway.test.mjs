@@ -93,7 +93,7 @@ class TestClient {
 
 }
 
-async function fixture(t) {
+async function fixture(t, handler) {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const calls = [];
@@ -101,7 +101,7 @@ async function fixture(t) {
   const control = new AgentControlService(terminals);
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
-    handler: new ScopedOrchestrationHandler(control)
+    handler: handler ?? new ScopedOrchestrationHandler(control)
   });
   await gateway.start();
   t.after(() => gateway.stop());
@@ -160,7 +160,7 @@ async function authenticatedClient(gateway, capability) {
 }
 
 test("spawn_agent over the socket creates a scoped subagent and delivers its prompt", async (t) => {
-  const { terminals, gateway } = await fixture(t);
+  const { terminals, gateway, calls } = await fixture(t);
   const orchestrator = terminals.create({
     provider: "codex",
     cwd: process.cwd(),
@@ -185,7 +185,8 @@ test("spawn_agent over the socket creates a scoped subagent and delivers its pro
   const child = terminals.list().find((session) => session.id === spawned.result.sessionId);
   assert.equal(child.role, "subagent");
   assert.equal(child.parentSessionId, orchestrator.id);
-  assert.match(writes.join(""), /Fix the Button test\r/u);
+  assert.equal(writes.join(""), "");
+  assert.equal(calls[1].args.at(-1), "CanvasTTY task:\nFix the Button test");
 
   const listed = await line(client, {
     v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION,
@@ -358,4 +359,24 @@ test("unknown tools and invalid arguments never reach the handler", async (t) =>
   assert.equal(failure.error.code, "INVALID_REQUEST");
   assert.match(failure.error.message, /cwd/u);
   terminals.disposeAll();
+});
+
+
+test('authenticated cancellation reaches the active operation before it mutates state', async t => {
+  let started; const ready = new Promise(resolve => { started = resolve; });
+  let receivedSignal;
+  const { terminals, gateway } = await fixture(t, { async execute(_session, _request, signal) {
+    receivedSignal = signal; started();
+    await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
+    signal.throwIfAborted();
+    throw new Error('Unreachable write');
+  } });
+  const parent = terminals.create({ provider: 'codex', cwd: process.cwd(), profile: 'normal', position: { x: 0, y: 0 }, role: 'orchestrator' });
+  const { client } = await authenticatedClient(gateway, gateway.registerOrchestrator({ terminalSessionId: parent.id }));
+  const response = line(client, { v: 1, type: 'request', id: 'cancel-apply', tool: 'apply_capsule', arguments: { capsuleId: '11111111-1111-4111-8111-111111111111', reviewId: '22222222-2222-4222-8222-222222222222' } });
+  await ready;
+  client.send({ v: 1, type: 'cancel', id: 'cancel-apply' });
+  assert.equal((await response).error.code, 'CANCELED');
+  assert.equal(receivedSignal.aborted, true);
+  client.socket.destroy(); terminals.disposeAll();
 });

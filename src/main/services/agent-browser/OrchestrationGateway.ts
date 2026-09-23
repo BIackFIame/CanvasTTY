@@ -327,7 +327,7 @@ export class OrchestrationGateway {
         id,
         tool: tool as never,
         arguments: args
-      });
+      }, controller.signal);
       if (connection.closed) return;
       this.send(connection, { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "response", id, result: value });
     } catch (error) {

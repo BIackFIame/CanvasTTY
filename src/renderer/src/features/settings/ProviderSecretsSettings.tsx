@@ -18,9 +18,10 @@ const SECRET_LABELS: Record<ProviderSecretId, string> = {
 
 interface ProviderSecretsSettingsProps {
   locale: LocaleId;
+  onChanged?(): Promise<void>;
 }
 
-export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps): React.JSX.Element {
+export function ProviderSecretsSettings({ locale, onChanged }: ProviderSecretsSettingsProps): React.JSX.Element {
   const [status, setStatus] = useState<Record<ProviderSecretId, boolean>>(
     () => Object.fromEntries(PROVIDER_SECRET_IDS.map((secretId) => [secretId, false])) as Record<ProviderSecretId, boolean>
   );
@@ -29,7 +30,9 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    window.canvasTTY.providerSecrets.status().then(setStatus, () => undefined);
+    let active = true;
+    window.canvasTTY.providerSecrets.status().then(next => { if (active) setStatus(next); }, () => undefined);
+    return () => { active = false; };
   }, []);
 
   const save = async (secretId: ProviderSecretId): Promise<void> => {
@@ -39,6 +42,7 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
     setError(null);
     try {
       await window.canvasTTY.providerSecrets.set(secretId, value);
+      await onChanged?.();
       setStatus((current) => ({ ...current, [secretId]: true }));
       setDrafts((current) => ({ ...current, [secretId]: "" }));
     } catch (cause) {
@@ -53,6 +57,7 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
     setError(null);
     try {
       await window.canvasTTY.providerSecrets.clear(secretId);
+      await onChanged?.();
       setStatus((current) => ({ ...current, [secretId]: false }));
       setDrafts((current) => ({ ...current, [secretId]: "" }));
     } catch (cause) {

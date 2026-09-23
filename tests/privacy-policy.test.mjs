@@ -89,7 +89,7 @@ test("dataClassSatisfies answers every class pair by rank", () => {
   }
 });
 
-test("defaultDataClass defaults to D2, round-trips, and falls back on invalid tiers", async (t) => {
+test("defaultDataClass defaults to D2, round-trips, and rejects invalid edits while legacy normalization stays conservative", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-settings-dataclass-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new SettingsStore(directory, "en");
@@ -102,8 +102,11 @@ test("defaultDataClass defaults to D2, round-trips, and falls back on invalid ti
   assert.equal(persisted.defaultDataClass, "D3");
   assert.equal((await new SettingsStore(directory, "en").load()).defaultDataClass, "D3");
 
-  // An unparseable tier reads as confidential, never as public.
-  assert.equal((await store.update({ defaultDataClass: "top-secret" })).defaultDataClass, "D2");
+  // An invalid edit cannot silently replace the last confirmed classification.
+  await assert.rejects(store.update({ defaultDataClass: "top-secret" }), /D0-D3/u);
+  assert.equal(store.get().defaultDataClass, "D3");
+  assert.equal((await new SettingsStore(directory, "en").load()).defaultDataClass, "D3");
+  // Unparseable legacy input still reads as confidential, never as public.
   assert.equal(normalizeSettings({ defaultDataClass: "D9" }, loaded).defaultDataClass, "D2");
   assert.equal(normalizeSettings({ defaultDataClass: 7 }, loaded).defaultDataClass, "D2");
 });

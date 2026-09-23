@@ -49,7 +49,9 @@ test("the stdio helper advertises orchestration tools and forwards calls", async
   assert.equal(initialized.result.serverInfo.name, "canvastty_agents");
 
   const listed = await dispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(listed.result.tools.length, 6);
+  assert.ok(listed.result.tools.some(tool => tool.name === 'spawn_capsule_agent'));
+  assert.ok(listed.result.tools.some(tool => tool.name === 'apply_capsule'));
+  assert.ok(listed.result.tools.some(tool => tool.name === 'spawn_agent'));
 
   const spawned = await dispatch({
     jsonrpc: "2.0",

@@ -5,8 +5,8 @@ export function remoteContainerCommand(host: RemoteHost, command: string, args: 
   if (remoteHostInvalidReason(host)) throw new Error('Invalid remote container host.');
   return { command: 'ssh', args: [tty ? '-tt' : '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ForwardAgent=no', '-o', 'ClearAllForwardings=yes', ...(host.sshPort ? ['-p', String(host.sshPort)] : []), '--', host.sshUser ? `${host.sshUser}@${host.sshHost}` : host.sshHost, [command, ...args].map(quoteRemoteWord).join(' ')] };
 }
-/** One-shot host helper. It never prints environment/auth files, starts engines or deletes output. */
-export const REMOTE_CONTAINER_HOST = String.raw`
+/** Shared host-only workspace and endpoint verification. */
+export const REMOTE_CONTAINER_HOST_LIBRARY = String.raw`
 import os, sys, json, stat, uuid, subprocess, tempfile, hashlib
 
 def checked_dir(path, private=False):
@@ -15,7 +15,7 @@ def checked_dir(path, private=False):
     return path
 
 def git(cwd, args):
-    env = {k:v for k,v in os.environ.items() if not k.startswith('GIT_')}
+    env = {k:os.environ[k] for k in ['HOME','PATH','LANG','LC_ALL'] if k in os.environ}
     env['GIT_TERMINAL_PROMPT']='0'; env['GIT_LFS_SKIP_SMUDGE']='1'
     with tempfile.TemporaryFile() as out:
         result = subprocess.run(['/usr/bin/git', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', cwd] + args, stdout=out, stderr=subprocess.DEVNULL, env=env, timeout=30)
@@ -32,7 +32,7 @@ def main():
     if not os.path.lexists(config_file):
         fd=os.open(config_file, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o600); os.write(fd, b'{}'); os.close(fd)
     info=os.lstat(config_file)
-    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size != 2: raise ValueError('config identity')
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077 or info.st_size != 2: raise ValueError('config identity')
     with open(config_file) as f:
         if f.read() != '{}': raise ValueError('config content')
     if action == 'endpoint':
@@ -93,7 +93,9 @@ def main():
                 if not stat.S_ISREG(info.st_mode) or info.st_nlink!=1 or os.read(fd,129).decode()!=token: raise ValueError('marker changed')
             finally: os.close(fd)
             os.unlink(marker)
-    return dict(w,relativeCwd='' if relative=='.' else relative,uid=os.stat(checkout).st_uid,gid=os.stat(checkout).st_gid)
+    return dict(w,relativeCwd='' if relative=='.' else relative,uid=os.stat(checkout).st_uid,gid=os.stat(checkout).st_gid)`;
+/** One-shot host helper. It never prints environment/auth files, starts engines or deletes output. */
+export const REMOTE_CONTAINER_HOST = REMOTE_CONTAINER_HOST_LIBRARY + String.raw`
 try:
     os.umask(0o077)
     print(json.dumps(main()))

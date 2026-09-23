@@ -14,6 +14,8 @@ const object = (properties, required = []) => ({
 const sessionId = string({ minLength: 1, maxLength: 128 });
 const prompt = string({ minLength: 1, maxLength: 65_536 });
 const title = string({ minLength: 1, maxLength: 80 });
+const capsuleId = string({ minLength: 36, maxLength: 36 });
+const reviewId = string({ minLength: 36, maxLength: 36 });
 
 function tool(name, description, properties = {}, required = []) {
   return {
@@ -36,6 +38,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
       model: string({ minLength: 1, maxLength: 100 }),
       accountId: string({ minLength: 1, maxLength: 64 }),
       dataClass: string({ enum: ["D0", "D1", "D2", "D3"] }),
+      transport: string({ enum: ["pty", "acp"] }),
       profile: string({ enum: ["normal", "yolo"] }),
       isolation: string({ enum: ["direct", "worktree", "container"] }),
       worktreeRef: string({ maxLength: 256 }),
@@ -58,7 +61,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "get_agent_result",
-    "Get the exit state (running | done | failed) and terminal tail of one of this session's subagents.",
+    "Get a subagent result: ACP turn completion with stopReason, or PTY process exit and terminal tail.",
     { sessionId },
     ["sessionId"]
   ),
@@ -70,7 +73,23 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   tool(
     "list_agents",
     "List this session's subagents with provider, status, and title."
-  )
+  ),
+  tool('spawn_capsule_agent', 'Capture selected existing files from this local host parent’s current project and launch a direct child in a configured API container. Task text inherits the parent’s data class. No full checkout, raw follow-up prompt or child delegation. Returns session and capsule IDs; retained output is reviewed separately.', {
+    provider: string({ enum: ['opencode', 'minimax', 'omp'] }),
+    files: { type: 'array', minItems: 1, maxItems: 128, uniqueItems: true, items: string({ minLength: 1, maxLength: 1024 }) },
+    task: prompt, containerProfileId: string({ minLength: 1, maxLength: 64 }),
+    accountId: string({ minLength: 1, maxLength: 64 }), model: string({ minLength: 1, maxLength: 100 }), title
+  }, ['provider', 'files', 'task', 'containerProfileId']),
+  tool('list_capsules', 'List output owned by this parent’s current launch, including closed child sessions. Returns at most 16 entries.', { offset: integer({ minimum: 0, maximum: 512 }) }),
+  tool('review_capsule', 'Freeze and review owned, confirmed-stopped capsule output. Returns a bounded patch page. Inspect all pages before applying.', { capsuleId }, ['capsuleId']),
+  tool('read_capsule_patch', 'Read the next 8192-character page of the same current immutable capsule review. Use the returned nextOffset; stale output or authority rejects.', { capsuleId, reviewId, offset: integer({ minimum: 0, maximum: 2097152 }) }, ['capsuleId', 'reviewId', 'offset']),
+  tool('apply_capsule', 'Apply the exact reviewed output to unchanged original selected files. Requires this parent’s current source and delegation authority. No arbitrary patch input.', { capsuleId, reviewId }, ['capsuleId', 'reviewId']),
+  tool('recover_capsule_apply', 'Explicitly recover an interrupted owned apply without overwriting new user edits.', { capsuleId, reviewId }, ['capsuleId', 'reviewId']),
+  tool('list_capsule_test_profiles', 'List saved test commands available in preexisting local images. Commands cannot be supplied or changed by an agent.'),
+  tool('test_capsule', 'Run a saved test profile in a fresh copy of the exact reviewed files, with no provider credentials, network, source checkout or terminal. Returns a run id; fetch the result separately. Missing dependencies never trigger installation or host fallback.', { capsuleId, reviewId, testProfileId: string({ minLength: 1, maxLength: 64 }) }, ['capsuleId', 'reviewId', 'testProfileId']),
+  tool('list_capsule_tests', 'List at most16 retained test runs belonging to this owned capsule.', { capsuleId, offset: integer({ minimum: 0, maximum: 64 }) }, ['capsuleId']),
+  tool('get_capsule_test_result', 'Get owned test state and up to8192 characters of its bounded log. Results apply only to the returned review/profile/image identity.', { runId: capsuleId, offset: integer({ minimum: 0, maximum: 1048576 }) }, ['runId']),
+  tool('cancel_capsule_test', 'Request cancellation of an owned active test and exact container cleanup. Unconfirmed stops retain the snapshot.', { runId: capsuleId }, ['runId']),
 ]);
 
 export const ORCHESTRATION_TOOL_NAMES = Object.freeze(ORCHESTRATION_TOOL_DEFINITIONS.map((definition) => definition.name));
@@ -122,6 +141,10 @@ export function validateOrchestrationArguments(toolName, args) {
       else if (property.minimum !== undefined && candidate < property.minimum) errors.push(`${key} is below the minimum.`);
       else if (property.maximum !== undefined && candidate > property.maximum) errors.push(`${key} is above the maximum.`);
       else value[key] = candidate;
+    } else if (property.type === 'array') {
+      if (!Array.isArray(candidate) || candidate.length < property.minItems || candidate.length > property.maxItems || candidate.some(item => typeof item !== 'string' || item.length < property.items.minLength || item.length > property.items.maxLength)) errors.push(`${key} must be a bounded array of strings.`);
+      else if (new Set(candidate.map(item => item.toLowerCase())).size !== candidate.length) errors.push(`${key} must contain unique paths.`);
+      else value[key] = [...candidate];
     }
   }
   for (const key of Object.keys(args)) {

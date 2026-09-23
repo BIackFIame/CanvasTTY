@@ -36,6 +36,7 @@ const AGENT_PROVIDERS: readonly AgentProviderId[] = CANVAS_LAUNCHER_ITEMS.filter
 );
 
 export interface SpawnAgentRequest {
+  transport?: "pty" | "acp";
   isolation?: IsolationRequest;
   parentSessionId: string;
   provider: AgentProviderId;
@@ -92,6 +93,7 @@ export interface AgentResult {
   sessionId: string;
   state: "running" | "done" | "failed";
   exitCode: number | null;
+  stopReason?: string;
   output: string;
 }
 
@@ -113,10 +115,22 @@ export class AgentControlService {
   // Local launches remain synchronous. Remote placement (automatic or explicit)
   // uses async preflight when configured; callers may always await the result.
   spawn(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
+    if (request?.isolation?.mode === 'container' && request.isolation.capsuleId) throw new Error('Use the scoped capsule task operation to launch a capsule.');
+    return this.spawnOwned(request);
+  }
+
+  /** Main-only caller has captured classified Task.md and registered its parent ownership. */
+  spawnCapsule(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
+    if (request.isolation?.mode !== 'container' || !request.isolation.capsuleId || !this.terminals.hasLaunchPolicy()) throw new Error('Registered capsule launch policy is required.');
+    return this.spawnOwned(request);
+  }
+
+  private spawnOwned(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
     if (request.initialPrompt !== undefined && (typeof request.initialPrompt !== "string" || request.initialPrompt.length >= 131_072)) throw new Error("Initial agent prompt exceeds the input limit or is invalid.");
+    if (request.transport === "acp" && request.host !== undefined && request.host !== "local") throw new Error("ACP supports local direct/worktree launches only.");
     const parent = this.requireSession(request.parentSessionId);
     if (parent.role === "subagent" && parent.allowSubagents !== true) throw new Error("Agent delegation is disabled for this parent.");
     assertLaunchPolicyFields(request);
@@ -152,8 +166,9 @@ export class AgentControlService {
     const account = this.resolveAccount(request, model, effectiveDataClass);
 
     const classifiedLaunch = this.terminals.classifyLaunchRequest({
-      isolation: request.isolation, provider: request.provider, cwd: request.cwd, profile: request.profile ?? "normal",
+      transport: request.transport, isolation: request.isolation, provider: request.provider, cwd: request.cwd, profile: request.profile ?? "normal",
       position: { x: 0, y: 0 },
+      parentSessionId: parent.id, role: 'subagent', allowSubagents: request.allowSubagents ?? false,
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(request.accountId !== undefined ? { accountId: request.accountId } : {}),
@@ -222,6 +237,8 @@ export class AgentControlService {
     }
     const created = this.terminals.create({
       ...(request.isolation ? { isolation: request.isolation } : {}),
+      transport: request.transport,
+      initialPrompt: request.initialPrompt,
       provider: request.provider,
       cwd: request.cwd,
       profile: request.profile ?? "normal",
@@ -238,20 +255,18 @@ export class AgentControlService {
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
       allowSubagents: request.allowSubagents ?? false
     });
-    if (request.initialPrompt !== undefined && request.initialPrompt.length > 0) {
-      this.send(created.id, request.initialPrompt);
-    }
     return created;
   }
 
   send(sessionId: string, text: string, submit = true): void {
     const session = this.requireSession(sessionId);
+    if (session.isolation?.mode === 'container' && session.isolation.capsuleId) throw new Error('Capsule tasks must be classified and captured in Task.md; raw agent prompts are unavailable.');
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (!capabilities.send) throw new Error(`${session.provider} cannot receive prompts.`);
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
-    this.terminals.input(sessionId, submit ? `${text}\r` : text);
+    this.terminals.sendAgentPrompt(sessionId, text, submit);
   }
 
   status(sessionId: string): SessionSnapshot {
@@ -295,6 +310,7 @@ export class AgentControlService {
   result(sessionId: string): AgentResult {
     const session = this.requireSession(sessionId);
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
+    if (session.transport === "acp") return { sessionId, exitCode: session.exitCode, state: session.acp?.phase === "failed" || session.exitCode !== null ? "failed" : session.acp?.phase === "done" ? "done" : "running", output: tail(session.acp?.output ?? "", MAX_OBSERVE_CHARS), stopReason: session.acp?.stopReason };
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (capabilities.result === "none") {
       return { sessionId: session.id, state: "running", exitCode: session.exitCode, output: "" };
@@ -314,7 +330,7 @@ export class AgentControlService {
 
   cancel(sessionId: string): void {
     this.requireSession(sessionId);
-    this.terminals.dispose(sessionId);
+    this.terminals.cancelAgentTurn(sessionId);
   }
 
   private requireSession(sessionId: string): SessionSnapshot {

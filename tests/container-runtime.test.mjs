@@ -276,10 +276,11 @@ async function gitSource(root) {
   return source;
 }
 test('real policy + coordinator + account adapter + MCP control launch a scoped API child, without host CLI discovery', async t => {
+  for (const runtime of ['opencode', 'minimax', 'omp']) await t.test(runtime, async t => {
   const f = await fixture(t); const source = await gitSource(f.root);
-  const containerProfile = { ...profile, network: 'bridge', commands: { opencode: '/usr/local/bin/opencode', terminal: '/bin/sh' } };
+  const containerProfile = { ...profile, network: 'bridge', commands: { [runtime]: `/usr/local/bin/${runtime}`, terminal: '/bin/sh' } };
   f.settings.containerProfiles = [containerProfile];
-  const settings = { ...f.settings, providerAccounts: [{ id: 'api-account', label: 'API', provider: 'opencode', binding: { kind: 'api-profile', profileId: 'api-profile' } }],
+  const settings = { ...f.settings, providerAccounts: [{ id: 'api-account', label: 'API', provider: runtime, binding: { kind: 'api-profile', profileId: 'api-profile' } }],
     apiProfiles: [{ id: 'api-profile', name: 'API', protocol: 'openai-compatible', baseUrl: 'https://api.example/v1', secretRef: 'OPENAI_API_KEY', defaultModel: 'fixture-model' }],
     requiresSandboxProfiles: [], pathPolicies: [], defaultDataClass: 'D0', maxAccountsPerProviderPerHost: 1, agentBudgets: { maxLocalAgents: 2, maxRemoteAgentsPerHost: 2, maxChildren: 1, maxDepth: 2 } };
   const calls = []; let keyReads = 0, hostProbes = 0;
@@ -292,7 +293,7 @@ test('real policy + coordinator + account adapter + MCP control launch a scoped 
   const control = new AgentControlService(manager, { place: async () => { hostProbes++; throw new Error('Generic placement must not handle containers'); } });
   t.after(async () => { await manager.shutdown(); await worktrees.dispose(); });
   const parent = manager.create({ provider: 'terminal', cwd: source, profile: 'normal', position: { x: 0, y: 0 }, role: 'orchestrator' }); await manager.waitForLaunch(parent.id);
-  const request = { parentSessionId: parent.id, provider: 'opencode', cwd: source, isolation: { mode: 'container', profileId: profile.id }, accountId: 'api-account' };
+  const request = { parentSessionId: parent.id, provider: runtime, cwd: source, isolation: { mode: 'container', profileId: profile.id }, accountId: 'api-account', initialPrompt: '! literal\n/command @file $(literal)' };
   assert.throws(() => control.spawn({ ...request, host: 'auto' }), /exact host/);
   const child = await control.spawn(request); await manager.waitForLaunch(child.id);
   const actual = manager.list().find(s => s.id === child.id); assert.equal(actual.exitCode, null, actual.failureDetails);
@@ -300,9 +301,12 @@ test('real policy + coordinator + account adapter + MCP control launch a scoped 
   assert.equal(actual.cwd, source); assert.equal(actual.dataClass, 'D0');
   const create = f.calls.find(c => c.args.includes('create'));
   assert.equal(create.environment.CANVASTTY_PROFILE_API_KEY, 'fixture-api-key');
-  assert.ok(JSON.parse(create.environment.CANVASTTY_CONTAINER_RECIPE).args.includes('--model'));
+  const argv = JSON.parse(create.environment.CANVASTTY_CONTAINER_RECIPE).args;
+  if (runtime !== 'minimax') assert.ok(argv.includes('--model'));
+  assert.equal(argv.at(-1), 'CanvasTTY task:\n! literal\n/command @file $(literal)');
   assert.throws(() => control.spawn(request), /child limit/);
   await manager.shutdown(); assert.equal((await f.service.list()).length, 0);
+  });
 });
 
 test('container-specific MiniMax and OMP preparation leaves no host config files and uses fixed private bootstrap recipes', async t => {
@@ -381,40 +385,31 @@ test('remote shell lifecycle uses owned host workspace and exact engine; rejects
   const remoteProfile = { ...profile, hostId: 'server.a', hostPython: '/usr/bin/python3', user: '1000:1000' };
   const host = { id: 'server.a', label: 'Fixture', sshHost: 'server.example', sshUser: 'runner', workspaces: [{ localPath: '/tmp/source', remotePath: '/srv/source' }] };
   const settings = { containerProfiles: [remoteProfile], remoteHosts: [host], providerAccounts: [], requiresSandboxProfiles: [] };
-  const calls = []; let record, exists = false, owner = 2000;
+  const calls = []; let owner = 2000;
   const service = new ContainerExecutionService(() => settings, { rootDirectory: root, runner: async (command, args, env) => {
     assert.equal(command, 'ssh'); assert.equal(env.CANVASTTY_PROFILE_API_KEY, undefined);
     const words = JSON.parse(execFileSync('/usr/bin/python3', ['-I', '-S', '-c', 'import json,shlex,sys;print(json.dumps(shlex.split(sys.argv[1])))', args.at(-1)], { encoding: 'utf8' }));
-    if (words[0] === '/usr/bin/python3') {
-      const request = JSON.parse(words.at(-1)); calls.push({ helper: request.action });
-      if (request.action === 'endpoint') return { stdout: JSON.stringify({ executable: remoteProfile.executable, socket: remoteProfile.endpoint.socket, executableIdentity: 'remote-engine', home: '/home/runner', configDirectory: '/home/runner/.local/share/canvastty-container-workspaces/engine-config' }) };
-      if (request.action === 'create' || request.action === 'verify') return { stdout: JSON.stringify({ ...workspace, directory: '/srv/owned/workspace', sourceDirectory: '/srv/source', relativeCwd: '', uid: owner, gid: owner }) };
-      return { stdout: '{}' };
-    }
-    calls.push({ words });
-    if (words.includes('info')) return { stdout: JSON.stringify(info) };
-    if (words.includes('image')) return { stdout: JSON.stringify([{ Id: image, Os: 'linux', Architecture: 'amd64', Config: {} }]) };
-    if (words.includes('create')) {
-      exists = true; const values = Object.fromEntries(words.slice(2, words.indexOf(remoteProfile.executable)).map(word => { const split = word.indexOf('='); return [word.slice(0, split), word.slice(split + 1)]; }));
-      record = { name: words[words.indexOf('--name') + 1], labels: Object.fromEntries(words.flatMap((word, i) => word === '--label' ? [words[i + 1].split('=')] : [])), directory: '/srv/owned/workspace', user: remoteProfile.user, bootstrap: words.at(-1), env: words.filter(word => word.startsWith('--env=')).flatMap(word => { const item = word.slice(6); return item.includes('=') ? [item] : values[item] === undefined ? [] : [`${item}=${values[item]}`]; }) }; return { stdout: id };
-    }
-    if (words.includes('inspect')) return { stdout: JSON.stringify([inspected(record)]) };
-    if (words.includes('ls')) return { stdout: exists ? id : '' };
-    if (words.includes('rm')) exists = false;
-    return { stdout: '' };
+    assert.equal(words[0], '/usr/bin/python3', 'all remote operations use a fixed helper, never raw engine stdout');
+    const request = JSON.parse(words.at(-1)); calls.push({ helper: request.action });
+    if (request.action === 'endpoint') return { stdout: JSON.stringify({ executable: remoteProfile.executable, socket: remoteProfile.endpoint.socket, executableIdentity: 'remote-engine', home: '/home/runner', configDirectory: '/home/runner/.local/share/canvastty-container-workspaces/engine-config' }) };
+    if (request.action === 'create' || request.action === 'verify') return { stdout: JSON.stringify({ ...workspace, directory: '/srv/owned/workspace', sourceDirectory: '/srv/source', relativeCwd: '', uid: owner, gid: owner }) };
+    if (request.action === 'engine') return { stdout: JSON.stringify(parseEngineInfo(remoteProfile, info)) };
+    if (request.action === 'image') return { stdout: JSON.stringify({ id: image, environmentNames: [] }) };
+    if (['create-owned', 'inspect-owned', 'cleanup-owned'].includes(request.action)) return { stdout: JSON.stringify({ version: 1, generationId: request.plan.id, planDigest: request.planDigest, containerId: id, verified: true, ...(request.action === 'cleanup-owned' ? { removed: true } : { state: { running: false } }) }) };
+    return { stdout: '{}' };
   } });
   const coord = new SessionLaunchCoordinator({ prepare() { throw new Error('Shell has no account'); } }, {}, () => settings, { checkShell: async () => {}, place() { throw new Error('Host CLI discovery prohibited'); } }, service);
   const request = { ...metadata(), hostId: host.id };
   await assert.rejects(coord.prepare(request, false), /UID:GID/);
-  assert.equal(calls.some(call => call.words?.includes('create')), false);
+  assert.equal(calls.some(call => call.helper === 'create-owned'), false);
   owner = 1000;
   const prepared = await coord.prepare(request, false); await prepared.beforeSpawn();
   assert.equal(prepared.process.command, 'ssh'); assert.equal(prepared.process.args[0], '-tt');
-  assert.match(prepared.process.args.at(-1), new RegExp("'container' 'start' '--attach' '--interactive' '" + id + "'"));
+  assert.match(prepared.process.args.at(-1), /start-owned/);
   assert.equal(prepared.execution.sourceCwd, '/tmp/source'); assert.equal(prepared.execution.hostWorkspace, '/srv/owned/workspace');
   assert.equal(prepared.execution.executionCwd, '/workspace');
   await prepared.cleanup(); assert.equal((await service.list())[0].state, 'workspace-retained');
-  assert.ok(!calls.some(call => call.words?.includes('pull') || call.words?.includes('prune')));
+  assert.ok(calls.some(call => call.helper === 'cleanup-owned'));
   const resumed = await coord.prepare({ ...request, execution: prepared.execution }, true); await resumed.cleanup();
   settings.remoteHosts[0] = { ...host, sshHost: 'other.example' };
   await assert.rejects(prepared.beforeSpawn(), /host changed/);

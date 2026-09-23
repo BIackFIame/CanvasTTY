@@ -1,3 +1,4 @@
+import { AcpSessionPanel } from "./AcpSessionPanel";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -307,7 +308,7 @@ export function TerminalCard({
   }, []);
 
   const startDrag = (event: React.PointerEvent<HTMLElement>): void => {
-    if ((event.target as HTMLElement).closest("button, input")) return;
+    if ((event.target as HTMLElement).closest("button, input, select, textarea")) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     dragState.current = {
       pointerId: event.pointerId,
@@ -449,7 +450,7 @@ export function TerminalCard({
       tabIndex={-1}
       onPointerDownCapture={(event) => {
         onSelect(session.id);
-        if (!renaming && !summaryMode && !(event.target as HTMLElement).closest("button, input")) {
+        if (!renaming && !summaryMode && !(event.target as HTMLElement).closest("button, input, select, textarea")) {
           terminalRef.current?.focus();
         }
       }}
@@ -545,7 +546,7 @@ export function TerminalCard({
         </div>
       </header>
       {session.execution?.state === "failed" && session.failureDetails && <div className="terminal-card__launch-error" role="alert">{session.failureDetails}</div>}
-      <div className="terminal-card__surface" ref={terminalHost} />
+      {session.transport === "acp" ? <AcpSessionPanel session={session} locale={locale} /> : <div className="terminal-card__surface" ref={terminalHost} />}
       <button
         className="terminal-card__summary"
         type="button"
@@ -594,5 +595,5 @@ function compactPath(path: string): string {
 }
 
 function isCardControl(target: EventTarget): boolean {
-  return target instanceof Element && Boolean(target.closest("button, input, .terminal-card__resize-handle"));
+  return target instanceof Element && Boolean(target.closest("button, input, select, textarea, .terminal-card__resize-handle"));
 }

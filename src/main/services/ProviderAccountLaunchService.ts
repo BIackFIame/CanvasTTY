@@ -1,9 +1,12 @@
+import type { AgentStartup } from "./AgentStartup.ts";
+import { miniMaxModelValue } from "./ACPAdapter.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
-import type { AgentProviderId, AppSettings, ExecutionWorkspaceSummary, SessionMetadata } from "../../shared/contracts.ts";
-import { accountApiProfile, accountLaunchModel, accountRouteBinding, accountRouteMaxDataClass, accountSupportsRuntime, assertAccountAliases, canonicalApiUrl, validAccountBinding } from "../../shared/providerAccountPolicy.ts";
+import type { AgentProviderId, AppSettings, ExecutionWorkspaceSummary, RemoteApiCredentialRef, SessionMetadata } from "../../shared/contracts.ts";
+import { copyRemoteApiCredential } from "../../shared/apiProfileCredentials.ts";
+import { ACCOUNT_HOME_ENV, accountApiProfile, accountLaunchModel, accountRouteBinding, accountRouteMaxDataClass, accountSupportsRuntime, assertAccountAliases, canonicalApiUrl, validAccountBinding } from "../../shared/providerAccountPolicy.ts";
 import { dataClassSatisfies } from "../../shared/contracts.ts";
 import type { ProviderSecretsService } from "./ProviderSecretsService.ts";
 import type { RemoteProviderDiscovery } from "./RemoteProviderDiscovery.ts";
@@ -11,10 +14,13 @@ import { providerModelArguments } from "./terminalLaunch.ts";
 
 type LaunchSettings = Pick<AppSettings, "providerAccounts" | "apiProfiles" | "remoteHosts">;
 export interface PreparedProviderAccountLaunch {
+  startup?: AgentStartup;
   execution?: ExecutionWorkspaceSummary;
   /** Main-owned container process bypasses host CLI/bridge resolution. Environment is complete. */
   process?: { command: string; args: string[]; cwd: string; environment: Record<string, string> };
   containerRecipe?: { runtime: "opencode" | "minimax" | "omp"; provider: string; model: string; baseUrl: string; api: string };
+  /** Main-only reference. Its value is resolved by the fixed helper on this host. */
+  remoteCredential?: { hostId: string; apiProfileId: string; reference: RemoteApiCredentialRef; routeBinding: string };
   integrationNote?: string;
   beforeSpawn?(): Promise<void>;
   processStarted?(): void;
@@ -23,6 +29,9 @@ export interface PreparedProviderAccountLaunch {
   environment: Record<string, string>;
   unsetEnvironment: readonly string[];
   model?: string;
+  /** Exact ACP catalog value; distinct from CLI argv and policy model names. */
+  acpModel?: string;
+  acpPolicyModelKind?: "raw" | "qualified" | "wire";
   remoteExecutable?: string;
   remoteAccountHome?: string;
   skipBridges: boolean;
@@ -33,7 +42,7 @@ export interface PreparedProviderAccountLaunch {
 }
 export interface ProviderAccountLaunchCoordinator {
   readonly handlesTerminals?: boolean;
-  prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; target?: "container" }): Promise<PreparedProviderAccountLaunch>;
+  prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; target?: "container"; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch>;
 }
 const KEY_ENV = "CANVASTTY_PROFILE_API_KEY";
 // Selected account homes must not inherit another account's API billing route.
@@ -50,10 +59,7 @@ export const PROVIDER_ACCOUNT_ENVIRONMENT = Object.freeze([
   "CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME", "HERMES_HOME", "KIMI_CODE_HOME", "PI_CODING_AGENT_DIR", "OMP_PROFILE", "PI_PROFILE",
   "MINIMAX_DATA_DIR", "MAVIS_DATA_DIR", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", KEY_ENV
 ]);
-const HOME_ENV: Partial<Record<AgentProviderId, string>> = {
-  codex: "CODEX_HOME", claude: "CLAUDE_CONFIG_DIR", grok: "GROK_HOME", hermes: "HERMES_HOME", kimi: "KIMI_CODE_HOME",
-  pi: "PI_CODING_AGENT_DIR", omp: "PI_CODING_AGENT_DIR", minimax: "MINIMAX_DATA_DIR", devin: "XDG_DATA_HOME"
-};
+
 
 /** No authentication reads or global config writes. All I/O is on-demand at launch. */
 export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordinator {
@@ -96,9 +102,12 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
       let environment: Record<string, string> = {};
       let args: string[] = [];
       let launchModel = model;
+      let acpModel = model;
+      let acpPolicyModelKind: PreparedProviderAccountLaunch["acpPolicyModelKind"] = "raw";
       let containerRecipe: PreparedProviderAccountLaunch["containerRecipe"];
+      let remoteCredential: PreparedProviderAccountLaunch["remoteCredential"];
       if (account?.binding?.kind === "cli-home") {
-        const variable = HOME_ENV[metadata.provider];
+        const variable = ACCOUNT_HOME_ENV[metadata.provider];
         if (!variable) throw new Error(`${metadata.provider} has no verified account-home adapter. Configure a supported API runtime instead.`);
         let home = account.binding.directory;
         if (metadata.hostId === undefined) {
@@ -123,17 +132,22 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         if (metadata.provider === "minimax") environment.MAVIS_DATA_DIR = home;
       }
       if (profile) {
-        if (metadata.hostId !== undefined) throw new Error("Remote API profiles require an independently provisioned host-local credential adapter; local vault keys are never forwarded over SSH.");
+        if (metadata.hostId !== undefined && (!targetContainer || !profile.remoteCredential)) throw new Error("Remote API profiles require container execution with an independently provisioned host-local credential reference.");
         if (!model || !model.trim() || model.length > 200 || /[\u0000-\u001f\u007f]/u.test(model)) throw new Error("API profile needs an explicit selected or default model.");
         const baseUrl = canonicalApiUrl(profile.baseUrl);
         if ((profile.protocol === "google" && metadata.provider !== "opencode") || (metadata.provider === "omp" && profile.protocol !== "openai-compatible")) throw new Error("This API protocol/authentication path is not supported by the selected runtime.");
-        secretGeneration = this.secrets.generation;
-        const key = await this.secrets.get(profile.secretRef, { profileId: profile.id, hostId: "local" }).catch(() => { throw new Error("API profile credential could not be read from secure storage for this owner."); });
-        if (!key || !key.trim()) throw new Error("API profile key is not configured in secure storage.");
-        if (this.secrets.generation !== secretGeneration) throw new Error("Provider credentials changed while preparing the launch; retry.");
+        let key: string | undefined;
+        if (metadata.hostId !== undefined) {
+          remoteCredential = { hostId: metadata.hostId, apiProfileId: profile.id, reference: copyRemoteApiCredential(profile.remoteCredential!), routeBinding: accountRouteBinding(account!, settings.apiProfiles) };
+        } else {
+          secretGeneration = this.secrets.generation;
+          key = (await this.secrets.get(profile.secretRef!, { profileId: profile.id, hostId: "local" }).catch(() => { throw new Error("API profile credential could not be read from secure storage for this owner."); })) ?? undefined;
+          if (!key || !key.trim()) throw new Error("API profile key is not configured in secure storage.");
+          if (this.secrets.generation !== secretGeneration) throw new Error("Provider credentials changed while preparing the launch; retry.");
+        }
         const provider = `canvastty_${randomUUID().replaceAll("-", "")}`;
         const api = profile.protocol === "openai-compatible" ? "openai-completions" : "anthropic-messages";
-        environment[KEY_ENV] = key;
+        if (key !== undefined) environment[KEY_ENV] = key;
         const keyReference = `{env:${KEY_ENV}}`;
         if (metadata.provider === "opencode") {
           const npm = profile.protocol === "google" ? "@ai-sdk/google" : profile.protocol === "openai-compatible" ? "@ai-sdk/openai-compatible" : "@ai-sdk/anthropic";
@@ -155,6 +169,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
             environment.MINIMAX_DATA_DIR = directory; environment.MAVIS_DATA_DIR = directory;
             delete environment[KEY_ENV];
             launchModel = undefined;
+            acpModel = miniMaxModelValue(`custom_provider:${provider}`, model);
           } else if (metadata.provider === "omp") {
             await writeFile(join(directory, "models.yml"), JSON.stringify({ providers: { [provider]: { baseUrl, apiKey: KEY_ENV, api, models: [{ id: model }] } } }), { mode: 0o600, flag: "wx" });
             Object.assign(environment, { PI_CODING_AGENT_DIR: directory, OMP_PROFILE: "", PI_PROFILE: "" });
@@ -163,7 +178,11 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         }
       }
       // Validate measured flag contracts even for remote paths before SSH starts.
-      providerModelArguments(metadata.provider, launchModel);
+      if (metadata.transport !== "acp") providerModelArguments(metadata.provider, launchModel);
+      if (metadata.transport === "acp" && metadata.provider === "minimax" && !profile && model) {
+        if (model.startsWith("m:")) { acpModel = model; acpPolicyModelKind = "wire"; }
+        else { const slash = model.indexOf("/"); if (slash < 1) throw new Error("MiniMax ACP requires a provider-qualified model or an exact offered ACP value."); acpModel = miniMaxModelValue(model.slice(0, slash), model.slice(slash + 1)); acpPolicyModelKind = "qualified"; }
+      }
       let remoteExecutable: string | undefined;
       if (metadata.hostId !== undefined && !targetContainer) {
         const host = settings.remoteHosts.find((h) => h.id === metadata.hostId);
@@ -173,7 +192,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         if (!discovery.reachable || !found?.path?.startsWith("/") || /[\u0000-\u001f\u007f]/u.test(found.path)) throw new Error("Remote provider did not resolve to a verified absolute executable path.");
         remoteExecutable = found.path;
       }
-      const prepared: PreparedProviderAccountLaunch = { containerRecipe, args, environment, unsetEnvironment: account ? PROVIDER_ACCOUNT_ENVIRONMENT : [], model: launchModel, remoteExecutable,
+      const prepared: PreparedProviderAccountLaunch = { containerRecipe, remoteCredential, acpModel, acpPolicyModelKind, args, environment, unsetEnvironment: account ? PROVIDER_ACCOUNT_ENVIRONMENT : [], model: launchModel, remoteExecutable,
         ...(metadata.hostId !== undefined && account?.binding?.kind === "cli-home" ? { remoteAccountHome: account.binding.directory } : {}),
         // Legacy adapters mutate the default home. A custom home deliberately keeps PTY/process integration only.
         skipBridges: targetContainer || account?.binding?.kind === "cli-home" && ["kimi", "hermes", "grok"].includes(metadata.provider), bindingDigest,
@@ -191,7 +210,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
   private fingerprint(metadata: SessionMetadata, settings: LaunchSettings): string {
     const account = settings.providerAccounts.find((a) => a.id === metadata.accountId);
     const apiProfile = account?.binding?.kind === "api-profile" ? settings.apiProfiles.find((p) => p.id === (account.binding as { profileId: string }).profileId) : undefined;
-    return digest(JSON.stringify({ provider: metadata.provider, model: metadata.model ?? null, accountId: metadata.accountId ?? null, hostId: metadata.hostId ?? null,
+    return digest(JSON.stringify({ provider: metadata.provider, transport: metadata.transport ?? "pty", model: metadata.model ?? null, accountId: metadata.accountId ?? null, hostId: metadata.hostId ?? null,
       profile: metadata.profile, cwd: metadata.cwd, account: account ?? null, apiProfile: apiProfile ?? null, host: settings.remoteHosts.find((h) => h.id === metadata.hostId) ?? null }));
   }
 }

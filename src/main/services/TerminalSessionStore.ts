@@ -2,6 +2,8 @@ import { assertIsolationRequest } from "../../shared/isolation.ts";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
+  AcpResumeBinding,
+  SessionTransport,
   LaunchProfileId,
   IsolationRequest,
   DataClass,
@@ -32,6 +34,8 @@ const PROVIDERS = new Set<ProviderId>([
 ]);
 
 export interface PersistedTerminalSession {
+  transport?: SessionTransport;
+  acpResume?: AcpResumeBinding;
   isolation?: IsolationRequest;
   workspaceId?: string;
   id: string;
@@ -123,6 +127,7 @@ export class TerminalSessionStore {
 export function persistedTerminalSession(metadata: SessionMetadata): PersistedTerminalSession {
   return {
     id: metadata.id,
+    ...(metadata.transport === "acp" ? { transport: "acp" as const, acpResume: metadata.acpResume } : {}),
     ...(metadata.isolation ? { isolation: structuredClone(metadata.isolation) } : {}),
     ...(metadata.execution?.workspaceId ? { workspaceId: metadata.execution.workspaceId } : {}),
     provider: metadata.provider,
@@ -163,6 +168,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     try { assertIsolationRequest(session.isolation); } catch { continue; }
     if (session.workspaceId !== undefined && (typeof session.workspaceId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(session.workspaceId) || session.isolation?.mode !== "worktree" && session.isolation?.mode !== "container")) continue;
     if ((session.isolation?.mode === "worktree" || session.isolation?.mode === "container") && session.workspaceId === undefined) continue;
+    if (session.isolation?.mode === 'container' && session.isolation.capsuleId && session.isolation.capsuleId !== session.workspaceId) continue;
     if (!isSessionId(session.id) || ids.has(session.id)) continue;
     if (!PROVIDERS.has(session.provider as ProviderId)) continue;
     if (session.profile !== "normal" && session.profile !== "yolo") continue;
@@ -201,8 +207,11 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     if (session.dataClass !== undefined && !["D0", "D1", "D2", "D3"].includes(session.dataClass)) continue;
     if (session.dataClassInherited !== undefined && typeof session.dataClassInherited !== "boolean") continue;
     if (session.allowSubagents !== undefined && typeof session.allowSubagents !== "boolean") continue;
+    if (session.transport !== undefined && session.transport !== "pty" && session.transport !== "acp") continue;
+    const acpResume = session.acpResume && typeof session.acpResume === "object" && typeof session.acpResume.sessionId === "string" && session.acpResume.sessionId.length > 0 && session.acpResume.sessionId.length <= 512 && typeof session.acpResume.binding === "string" && /^[0-9a-f]{64}$/u.test(session.acpResume.binding) ? session.acpResume : undefined;
     sessions.push({
       id: session.id,
+      ...(session.transport === "acp" ? { transport: "acp" as const, ...(acpResume ? { acpResume: structuredClone(acpResume) } : {}) } : {}),
       ...(session.isolation ? { isolation: structuredClone(session.isolation) } : {}),
       ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
       provider: session.provider as ProviderId,

@@ -1,12 +1,10 @@
-import type { AgentProviderId, ApiProfile, DataClass, DataHandlingAssessment, ProviderAccount, ProviderSecretRef } from "./contracts.ts";
-import { DATA_CLASS_RANK, PROVIDER_SECRET_IDS, providerMaxDataClass } from "./contracts.ts";
+import type { AgentProviderId, ApiProfile, DataClass, DataHandlingAssessment, ProviderAccount } from "./contracts.ts";
+import { DATA_CLASS_RANK, providerMaxDataClass } from "./contracts.ts";
+import { copyRemoteApiCredential, isProviderSecretRef, validApiProfileCredential, validRemoteApiCredential } from "./apiProfileCredentials.ts";
+export { isProviderSecretRef } from "./apiProfileCredentials.ts";
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const API_RUNTIMES: readonly AgentProviderId[] = ["minimax", "opencode", "omp"];
-export function isProviderSecretRef(value: unknown): value is ProviderSecretRef {
-  return typeof value === "string" && (/^secret:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(value)
-    || (PROVIDER_SECRET_IDS as readonly string[]).includes(value));
-}
 export function canonicalApiUrl(value: unknown): string {
   if (typeof value !== "string" || value.length > 500 || /[\u0000-\u0020\u007f]/u.test(value)) throw new Error("API profile needs an explicit valid HTTPS base URL.");
   let url: URL;
@@ -20,7 +18,7 @@ export function accountApiProfile(account: ProviderAccount, profiles: readonly A
   const profile = profiles.find((candidate) => candidate.id === id);
   if (!profile) throw new Error(`Account ${account.id} API profile is missing.`);
   canonicalApiUrl(profile.baseUrl);
-  if (!isProviderSecretRef(profile.secretRef)) throw new Error("API profile credential reference is invalid.");
+  if (!validApiProfileCredential(profile)) throw new Error("API profile credential reference is invalid for its fixed host.");
   if ((profile.hostId ?? "local") !== (account.hostId ?? "local")) throw new Error("API profile and account must belong to the same host.");
   return profile;
 }
@@ -42,11 +40,24 @@ export function accountServiceKey(account: ProviderAccount, profiles: readonly A
   // A backend is counted once regardless of which compatible CLI consumes it.
   return profile ? `api:${new URL(canonicalApiUrl(profile.baseUrl)).origin}` : `cli:${account.provider}`;
 }
+/** Count service identities on a fixed host, independently of consuming runtime. */
+export function accountServiceCount(account: ProviderAccount, accounts: readonly ProviderAccount[], profiles: readonly ApiProfile[]): number {
+  const service = accountServiceKey(account, profiles);
+  return accounts.filter(other => {
+    if (other.bindingRequired || other.models?.length === 0 || (other.hostId ?? "local") !== (account.hostId ?? "local")) return false;
+    try { return accountServiceKey(other, profiles) === service; } catch { return false; }
+  }).length;
+}
+export const ACCOUNT_HOME_ENV: Partial<Record<AgentProviderId, string>> = {
+  codex: "CODEX_HOME", claude: "CLAUDE_CONFIG_DIR", grok: "GROK_HOME", hermes: "HERMES_HOME", kimi: "KIMI_CODE_HOME",
+  pi: "PI_CODING_AGENT_DIR", omp: "PI_CODING_AGENT_DIR", minimax: "MINIMAX_DATA_DIR", devin: "XDG_DATA_HOME"
+};
 export function accountRouteBinding(account: ProviderAccount, profiles: readonly ApiProfile[] = []): string {
   const profile = accountApiProfile(account, profiles);
-  return JSON.stringify({ version: 1, account: account.id, host: account.hostId ?? "local",
+  return JSON.stringify({ version: profile?.remoteCredential ? 2 : 1, account: account.id, host: account.hostId ?? "local",
     service: accountServiceKey(account, profiles), binding: account.binding ?? null,
-    ...(profile ? { profile: profile.id, endpoint: canonicalApiUrl(profile.baseUrl), protocol: profile.protocol, secretRef: profile.secretRef } : { provider: account.provider }) });
+    ...(profile ? { profile: profile.id, endpoint: canonicalApiUrl(profile.baseUrl), protocol: profile.protocol,
+      ...(profile.remoteCredential ? { remoteCredential: copyRemoteApiCredential(profile.remoteCredential) } : { secretRef: profile.secretRef }) } : { provider: account.provider }) });
 }
 export function validAssessment(value: unknown): value is DataHandlingAssessment {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -76,7 +87,7 @@ export function copyAssessment(value: DataHandlingAssessment): DataHandlingAsses
 }
 export function accountRouteMaxDataClass(account: ProviderAccount, profiles: readonly ApiProfile[] = [], model?: string, now = Date.now()): DataClass {
   const profile = accountApiProfile(account, profiles);
-  if (account.assessmentInvalid || profile?.assessmentInvalid) throw new Error("Account data-handling assessment is invalid; review it before launching.");
+  if (account.assessmentInvalid || !account.assessment && profile?.assessmentInvalid) throw new Error("Account data-handling assessment is invalid; review it before launching.");
   const assessment = account.assessment ?? profile?.assessment;
   let cap: DataClass = profile ? "D0" : providerMaxDataClass(account.provider);
   if (assessment !== undefined) {
@@ -112,7 +123,8 @@ export function assertAccountAliases(accounts: readonly ProviderAccount[], profi
     const binding = account.binding;
     const profile = binding.kind === "api-profile" ? profiles.find((p) => p.id === binding.profileId) : undefined;
     if (binding.kind === "api-profile" && !profile && (!relevant || relevant.has(account.id))) throw new Error(`Account ${account.id} API profile is missing.`);
-    const aliases = binding.kind === "api-profile" ? [`profile:${binding.profileId}`, ...(profile && isProviderSecretRef(profile.secretRef) ? [`key:${profile.secretRef}`] : [])]
+    const aliases = binding.kind === "api-profile" ? [`profile:${binding.profileId}`, ...(profile && isProviderSecretRef(profile.secretRef) ? [`key:${profile.secretRef}`] : []),
+      ...(profile?.hostId && validRemoteApiCredential(profile.remoteCredential) ? [`remote:${profile.hostId}:${JSON.stringify(copyRemoteApiCredential(profile.remoteCredential))}`] : [])]
       : [`home:${account.provider}:${account.hostId ?? "local"}:${binding.directory.replace(/[\\/]+$/u, "")}`];
     for (const alias of aliases) {
       const other = credentials.get(alias);

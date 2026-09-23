@@ -244,6 +244,7 @@ export interface AppSettings {
   /** Profiles that require a separate worktree or container. Worktrees are not OS sandboxes. */
   requiresSandboxProfiles: LaunchProfileId[];
   containerProfiles: ContainerProfile[];
+  capsuleTestProfiles: import('./capsules.ts').CapsuleTestProfile[];
   homeGridSize: HomeGridSize;
   homeLayout: HomeWidgetPlacement[];
   canvasRegions: CanvasRegion[];
@@ -264,7 +265,7 @@ export interface ContainerProfile {
 export interface ContainerAvailability { available: boolean; runtime: "docker" | "podman"; rootless?: boolean; imageId?: string; reason?: string }
 export interface RetainedContainer { id: string; profileId: string; hostId: string; workspaceId: string; containerId?: string; state: "preparing" | "created" | "cleanup-needed" | "workspace-retained"; reason?: string; hostWorkspace?: string }
 /** Main validates isolation; the renderer never supplies an execution directory. */
-export type IsolationRequest = { mode: "direct" } | { mode: "worktree"; ref?: string } | { mode: "container"; profileId: string };
+export type IsolationRequest = { mode: "direct" } | { mode: "worktree"; ref?: string } | { mode: "container"; profileId: string; capsuleId?: string };
 export interface ExecutionWorkspaceSummary {
   workspaceId?: string;
   mode: "direct" | "worktree" | "container";
@@ -281,9 +282,24 @@ export interface RetainedWorkspace {
   state: "retained" | "running" | "uncertain" | "unavailable"; reason: string; sessionId?: string;
 }
 export interface WorkspaceReview { workspaceId: string; reviewId: string; patch: string; limitations: string[]; baseCommit: string; createdAt: number }
-export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "accountId" | "hostId" | "model">;
+export interface RemoteWorkspaceReview extends WorkspaceReview { generationId: string; hostId: string; digest: string; headCommit: string; untrackedFiles: number; ignoredFiles: number }
+export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "accountId" | "hostId" | "model" | "transport" | "dataClass">;
+
+export type SessionTransport = "pty" | "acp";
+export const ACP_PROVIDERS: readonly ProviderId[] = ["cursor", "minimax", "kimi"];
+export interface AcpModelOption { value: string; name: string }
+export interface AcpPermission { requestId: string; title: string; options: { optionId: string; name: string; kind: string }[] }
+export interface AcpSessionState {
+  phase: "starting" | "idle" | "running" | "done" | "failed";
+  output: string; effectiveModel?: string; models: AcpModelOption[]; permissions: AcpPermission[];
+  stopReason?: string; activity?: string; error?: string;
+}
+export interface AcpResumeBinding { sessionId: string; binding: string }
 
 export interface CreateSessionRequest {
+  transport?: SessionTransport;
+  /** Transient, main-owned delivery; never persisted or replayed. */
+  initialPrompt?: string;
   isolation?: IsolationRequest;
   provider: ProviderId;
   cwd: string;
@@ -309,6 +325,10 @@ export interface CreateSessionRequest {
 }
 
 export interface SessionMetadata {
+  transport?: SessionTransport;
+  acp?: AcpSessionState;
+  /** Only the main process may create a restore binding. */
+  acpResume?: AcpResumeBinding;
   isolation?: IsolationRequest;
   /** Main-owned identity; persisted separately from caller-supplied launch options. */
   execution?: ExecutionWorkspaceSummary;
@@ -663,13 +683,16 @@ export const PROVIDER_SECRET_LIMITS = Object.freeze({ count: 1024, valueBytes: 1
 // restore, it only supplies endpoint and credential references to runtimes
 // that accept custom backends.
 export type ApiProfileProtocol = "openai-compatible" | "anthropic-compatible" | "google";
+export type RemoteApiCredentialRef = { kind: "environment"; name: string } | { kind: "key-file"; path: string };
 
 export interface ApiProfile {
   id: string;
   name: string;
   protocol: ApiProfileProtocol;
   baseUrl?: string;
-  secretRef: ProviderSecretRef;
+  secretRef?: ProviderSecretRef;
+  /** An independently provisioned credential on the fixed remote host, never a key value. */
+  remoteCredential?: RemoteApiCredentialRef;
   defaultModel?: string;
   /** Local vault entries are never forwarded over SSH. */
   hostId?: string;
@@ -1232,6 +1255,7 @@ export interface ProviderAccount {
   /** Absent legacy bindings must be configured before production launch. */
   binding?: { kind: "cli-home"; directory: string } | { kind: "api-profile"; profileId: string };
   assessment?: DataHandlingAssessment;
+  /** True retains stale/invalid evidence for review. False is an explicit reviewed-assessment save intent, consumed by settings persistence. */
   assessmentInvalid?: boolean;
   /** Free-form subscription label, e.g. "chatgpt-plus", "chatgpt-pro",
    *  "claude-pro", "claude-max", "grok-standard". Diagnostic only — tiers
@@ -1836,13 +1860,26 @@ export interface RemoteHostUtilization {
   detail?: string;
 }
 
+export interface AccountHomeInspection { canonicalPath: string; }
+export interface SavedHostDiagnosticSnapshot {
+  hostId: string;
+  discovery: { collectedAt: number; reachable: boolean; providers: Array<{ provider: AgentProviderId; installed: boolean; command?: string; path?: string }>; detail?: string };
+  access: { collectedAt: number; reachable: boolean; providers: Record<string, boolean>; detail?: string };
+  metrics: RemoteHostUtilization;
+}
+
 export interface CanvasTTYApi {
+  capsules: import('./capsules.ts').CapsulesApi;
+  hosts: { inspect(hostId: string): Promise<SavedHostDiagnosticSnapshot>; };
+  accountHomes: { inspect(directory: string): Promise<AccountHomeInspection>; };
   evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
   containers: {
     probe(profileId: string): Promise<ContainerAvailability>;
     list(): Promise<RetainedContainer[]>;
     cleanup(id: string): Promise<void>;
+    review(id: string): Promise<RemoteWorkspaceReview>;
+    exportPatch(id: string, reviewId: string): Promise<boolean>;
   };
   workspaces: {
     list(): Promise<RetainedWorkspace[]>;
@@ -1972,6 +2009,10 @@ export interface CanvasTTYApi {
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
     create(request: CreateSessionRequest): Promise<SessionSnapshot>;
     restart(id: string): Promise<SessionSnapshot>;
+    agentPrompt(id: string, text: string): Promise<void>;
+    cancelTurn(id: string): Promise<void>;
+    acpPermission(id: string, requestId: string, optionId: string): Promise<void>;
+    acpModel(id: string, value: string): Promise<void>;
     input(id: string, data: string): void;
     resize(id: string, cols: number, rows: number): void;
     setBounds(id: string, bounds: SessionBounds): void;
@@ -1996,16 +2037,33 @@ export const IPC = {
   clipboardWrite: "clipboard:write",
   externalOpenUrl: "external:open-url",
   containersProbe: "containers:probe",
+  capsulesSelectFiles: 'capsules:select-files',
+  capsulesTestStart: 'capsules:test-start',
+  capsulesTestList: 'capsules:test-list',
+  capsulesTestResult: 'capsules:test-result',
+  capsulesTestCancel: 'capsules:test-cancel',
+  capsulesTestCleanup: 'capsules:test-cleanup',
+  capsulesPrepare: 'capsules:prepare',
+  capsulesList: 'capsules:list',
+  capsulesReview: 'capsules:review',
+  capsulesExport: 'capsules:export',
+  capsulesApply: 'capsules:apply',
+  capsulesRecover: 'capsules:recover',
+  capsulesCleanup: 'capsules:cleanup',
   containersList: "containers:list",
   containersCleanup: "containers:cleanup",
+  containersReview: "containers:review",
+  containersExport: "containers:export",
   workspacesList: "workspaces:list",
   workspacesReview: "workspaces:review",
   workspacesExport: "workspaces:export",
   workspacesCleanup: "workspaces:cleanup",
   operationalMetricsLocal: "operational-metrics:local",
   operationalMetricsRemote: "operational-metrics:remote",
+  hostsInspect: "hosts:inspect",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
+  accountHomesInspect: "account-homes:inspect",
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",
@@ -2101,6 +2159,10 @@ export const IPC = {
   agentsAvailability: "agents:availability",
   agentsRecheck: "agents:recheck",
   terminalRestart: "terminal:restart",
+  terminalAgentPrompt: "terminal:agent-prompt",
+  terminalCancelTurn: "terminal:cancel-turn",
+  terminalAcpPermission: "terminal:acp-permission",
+  terminalAcpModel: "terminal:acp-model",
   terminalInput: "terminal:input",
   terminalResize: "terminal:resize",
   terminalBounds: "terminal:bounds",

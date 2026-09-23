@@ -1,6 +1,10 @@
 import { ContainerExecutionService } from "./services/ContainerExecutionService";
 import { WorktreeService } from "./services/WorktreeService";
 import { SessionLaunchCoordinator } from "./services/SessionLaunchCoordinator";
+import { TaskCapsuleService } from "./services/TaskCapsuleService";
+import { CapsuleLaunchService } from "./services/CapsuleLaunchService";
+import { ScopedCapsuleControl } from './services/ScopedCapsuleControl';
+import { CapsuleTestService } from './services/CapsuleTestService';
 import { ProviderAccountLaunchService } from "./services/ProviderAccountLaunchService";
 import { LocalOperationalMetricsService } from "./services/LocalOperationalMetrics";
 import { ipcMain } from "electron";
@@ -11,6 +15,7 @@ import { join } from "node:path";
 import { app, BrowserWindow, dialog, net, protocol, safeStorage } from "electron";
 import { IPC, type PluginCanvasRequest } from "../shared/contracts";
 import { registerIpc } from "./ipc/registerIpc";
+import { SavedHostDiagnostics } from "./services/SavedHostDiagnostics";
 import { SettingsStore } from "./services/SettingsStore";
 import { SessionLaunchPolicy } from "./services/SessionLaunchPolicy";
 import { TerminalManager } from "./services/TerminalManager";
@@ -130,6 +135,7 @@ let browserService: BrowserService | null = null;
 let canvasNavigationInput: CanvasNavigationInputController | null = null;
 let agentGateway: AgentGateway | null = null;
 let orchestrationGateway: OrchestrationGateway | null = null;
+let capsuleTestsService: CapsuleTestService | null = null;
 let agentBrowserBridge: AgentBrowserBridge | null = null;
 let agentBrowserHelper: StdioHelperLaunch | null = null;
 let runtimeGateway: RuntimeGateway | null = null;
@@ -352,6 +358,7 @@ async function initializeServices(): Promise<void> {
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureLaunchPolicy(new SessionLaunchPolicy(() => settings.get()));
+  settings.configureHostSessions(() => terminalManager!.listMetadata());
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().restoreTerminalSessions);
 
@@ -384,20 +391,24 @@ async function initializeServices(): Promise<void> {
       };
     }
   });
+  const agentControl = new AgentControlService(terminalManager, { place: request => hostPlacement.place(settings.get().remoteHosts, request) });
+  const orchestrationHandler = new ScopedOrchestrationHandler(agentControl);
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
-    handler: new ScopedOrchestrationHandler(new AgentControlService(
-      terminalManager!,
-      { place: (request) => hostPlacement.place(settings.get().remoteHosts, request) }
-    ))
+    handler: orchestrationHandler
   });
   await orchestrationGateway.start();
+  terminalManager.configureAcp({ orchestrationCommand: {
+    command: process.execPath,
+    args: [app.isPackaged ? join(process.resourcesPath, "agent-browser", "orchestration-helper.mjs") : join(app.getAppPath(), "src", "agent-browser", "orchestration-helper.mjs")],
+    environment: { ELECTRON_RUN_AS_NODE: "1" }
+  } });
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
 
   // Remote shell sessions resolve their host from the live settings registry:
   // a hostId with no matching entry fails the create instead of spawning.
   terminalManager.configureRemoteHosts(
-    (hostId) => settings.get().remoteHosts.find((host) => host.id === hostId) ?? null
+    (hostId) => settings.hostForLaunch(hostId)
   );
 
   providerSecretsService = new ProviderSecretsService(userDataPath, {
@@ -412,9 +423,17 @@ async function initializeServices(): Promise<void> {
   await providerSecretsService.load();
   const worktrees = new WorktreeService({ rootDirectory: join(userDataPath, "execution-workspaces") });
   await worktrees.recover().catch(() => { console.warn("CanvasTTY retained workspaces could not be verified; they remain on disk."); });
-  const containers = new ContainerExecutionService(() => settings.get(), { rootDirectory: join(userDataPath, "container-generations"), onWorkspaceStopped: (id, lease) => worktrees.confirmContainerStopped(id, lease) });
+  const capsuleStorage = new TaskCapsuleService({ rootDirectory: join(userDataPath, 'task-capsules') });
+  await capsuleStorage.recover().catch(() => { console.warn('CanvasTTY retained capsules could not be verified; they remain on disk.'); });
+  const capsules = new CapsuleLaunchService(capsuleStorage, () => settings.get());
+  terminalManager.configureLaunchPolicy(new SessionLaunchPolicy(() => settings.get(), { capsulePolicy: request => capsules.classify(request) }));
+  const containers = new ContainerExecutionService(() => settings.get(), { rootDirectory: join(userDataPath, "container-generations"), onWorkspaceStopped: (id, lease, kind) => kind === 'capsule-test' ? capsuleTests.confirmStopped(id, lease) : kind === 'capsule' ? capsuleStorage.confirmContainerStopped(id, lease) : worktrees.confirmContainerStopped(id, lease) });
+  const capsuleTests = new CapsuleTestService(capsules, containers, () => settings.get(), { rootDirectory: join(userDataPath, 'capsule-test-runs') });
+  capsuleTestsService = capsuleTests;
+  await capsuleTests.recover().catch(() => { console.warn('CanvasTTY retained tests could not be verified; their files remain on disk.'); });
+  orchestrationHandler.configureCapsules(new ScopedCapsuleControl(terminalManager, agentControl, capsules, capsuleTests));
   terminalManager.configureProviderLaunch(new SessionLaunchCoordinator(
-    new ProviderAccountLaunchService(() => settings.get(), providerSecretsService, { discovery: remoteDiscovery }), worktrees, () => settings.get(), hostPlacement, containers));
+    new ProviderAccountLaunchService(() => settings.get(), providerSecretsService, { discovery: remoteDiscovery }), worktrees, () => settings.get(), hostPlacement, containers, capsules));
 
   await terminalManager.restorePersistedSessions();
   limitsService = new LimitsService(providerClis, app.getVersion());
@@ -456,6 +475,9 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   registerIpc({
+    capsuleTests,
+    capsules,
+    hostDiagnostics: new SavedHostDiagnostics(() => settings.get().remoteHosts, remoteDiscovery, remoteAccess, remoteMetrics),
     containers,
     worktrees,
     localMetrics,
@@ -721,6 +743,7 @@ async function shutdownServices(): Promise<void> {
   for (const request of browserRequests.values()) { clearTimeout(request.timer); request.reject(new Error("App closing")); }
   browserRequests.clear();
   await evenG2?.close();
+  await capsuleTestsService?.shutdown();
   if (terminalManager) await terminalManager.shutdown();
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);

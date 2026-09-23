@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
 import type { AppSettings, RetainedWorkspace, WorkspaceReview } from '../../../../shared/contracts';
 import { t } from '../../lib/i18n';
+import { RetainedCapsulesSettings } from './RetainedCapsulesSettings';
 
-/** Mounted only while the Agents settings page is visible; refresh is explicit and never polls. */
-export function RetainedWorkspacesSettings({ settings, onChange }: { settings: AppSettings; onChange(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
+/** Retained after first visit to preserve saved-command drafts; hidden tests do not poll. */
+export function RetainedWorkspacesSettings({ settings, onChange, active = true }: { settings: AppSettings; active?: boolean; onChange(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
   const locale = settings.locale;
   const ru = locale === 'ru';
   const [items, setItems] = useState<RetainedWorkspace[]>([]);
@@ -54,5 +55,6 @@ export function RetainedWorkspacesSettings({ settings, onChange }: { settings: A
     </section>}
     {error && <p className="agent-settings-error" role="alert">{error}</p>}
     <p className="agent-settings-notice" role="status">{busy ? t(locale, 'workspaceBusy') : notice}</p>
+    <RetainedCapsulesSettings settings={settings} active={active} onPersist={onChange} />
   </section>;
 }

@@ -22,6 +22,7 @@ export interface RemoteProviderStatus {
 
 /** The result of probing one remote host for provider CLIs. */
 export interface RemoteDiscoveryResult {
+  collectedAt: number;
   hostId: string;
   reachable: boolean;
   providers: RemoteProviderStatus[];
@@ -41,10 +42,12 @@ const DETAIL_MAX_LENGTH = 300;
 export class RemoteProviderDiscovery {
   private readonly run: RemoteHostRunner;
   private readonly cache: ProbeCache<RemoteDiscoveryResult>;
+  private readonly now: () => number;
 
   constructor(runner: RemoteHostRunner, options: ProbeCacheOptions = {}) {
     this.cache = new ProbeCache(options);
     this.run = runner;
+    this.now = options.now ?? Date.now;
   }
 
   async discover(host: RemoteHost, timeoutMs = DEFAULT_TIMEOUT_MS, probeProviders: readonly AgentProviderId[] = PROVIDER_CLI_IDS): Promise<RemoteDiscoveryResult> {
@@ -53,7 +56,7 @@ export class RemoteProviderDiscovery {
       : "unknown";
     const invalidReason = remoteHostInvalidReason(host);
     if (invalidReason !== null) {
-      return { hostId, reachable: false, providers: [], detail: invalidReason };
+      return { hostId, collectedAt: this.now(), reachable: false, providers: [], detail: invalidReason };
     }
     const providers = PROVIDER_CLI_IDS.filter((provider) => probeProviders.includes(provider));
     return this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.discoverUncached(host, timeoutMs, providers));
@@ -70,6 +73,7 @@ export class RemoteProviderDiscovery {
       if (code !== 0) {
         return {
           hostId,
+          collectedAt: this.now(),
           reachable: false,
           providers: [],
           detail: excerpt(stderr) || `ssh exited with code ${code === null ? "unknown" : code}`
@@ -78,12 +82,14 @@ export class RemoteProviderDiscovery {
       const resolved = parseResolvedCommands(stdout);
       return {
         hostId,
+        collectedAt: this.now(),
         reachable: true,
         providers: providers.map((provider) => providerStatus(provider, resolved))
       };
     } catch (error) {
       return {
         hostId,
+        collectedAt: this.now(),
         reachable: false,
         providers: [],
         detail: excerpt(error instanceof Error ? error.message : String(error))

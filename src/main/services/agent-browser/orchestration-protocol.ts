@@ -20,6 +20,8 @@ export const ORCHESTRATION_ENV = Object.freeze({
 });
 
 export type OrchestrationToolName =
+  | 'spawn_capsule_agent' | 'list_capsules' | 'review_capsule' | 'read_capsule_patch' | 'apply_capsule' | 'recover_capsule_apply'
+  | 'list_capsule_test_profiles' | 'test_capsule' | 'list_capsule_tests' | 'get_capsule_test_result' | 'cancel_capsule_test'
   | "spawn_agent"
   | "send_to_agent"
   | "observe_agent"
@@ -40,7 +42,7 @@ export type OrchestrationResult =
 /** The only implementation the gateway accepts; AgentControlService is
  * wrapped by a scoping adapter, never called directly by the protocol. */
 export interface OrchestrationCommandHandler {
-  execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>>;
+  execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>>;
 }
 
 export interface OrchestrationCapability {

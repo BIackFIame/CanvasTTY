@@ -2,6 +2,7 @@ import type { IsolationRequest } from "../../../shared/contracts.ts";
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { AgentControlService } from "../AgentControlService.ts";
+import type { ScopedCapsuleControl } from '../ScopedCapsuleControl.ts';
 
 /**
  * The only bridge between the orchestration MCP surface and session control.
@@ -11,14 +12,22 @@ import type { AgentControlService } from "../AgentControlService.ts";
  */
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
+  private capsules?: ScopedCapsuleControl;
 
-  constructor(control: AgentControlService) {
+  constructor(control: AgentControlService, capsules?: ScopedCapsuleControl) {
     this.control = control;
+    this.capsules = capsules;
   }
+  configureCapsules(capsules: ScopedCapsuleControl): void { this.capsules = capsules; }
 
-  async execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>> {
+  async execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
+      signal?.throwIfAborted();
       switch (request.tool) {
+        case 'spawn_capsule_agent': case 'list_capsules': case 'review_capsule': case 'read_capsule_patch': case 'apply_capsule': case 'recover_capsule_apply':
+        case 'list_capsule_test_profiles': case 'test_capsule': case 'list_capsule_tests': case 'get_capsule_test_result': case 'cancel_capsule_test':
+          if (!this.capsules) throw new Error('Scoped capsule control is unavailable.');
+          return await this.capsules.execute(sessionId, request.tool, request.arguments, signal);
         case "spawn_agent":
           return await this.spawn(sessionId, request.arguments);
         case "send_to_agent":
@@ -54,6 +63,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(isolation ? { isolation: isolation as IsolationRequest } : {}),
       parentSessionId: orchestratorId,
       provider: args.provider as never,
+      ...(args.transport !== undefined ? { transport: args.transport as never } : {}),
       cwd: args.cwd as string,
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.accountId !== undefined ? { accountId: args.accountId as string } : {}),
@@ -97,6 +107,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     return {
       sessionId: result.sessionId,
       state: result.state,
+      ...(result.stopReason ? { stopReason: result.stopReason } : {}),
       exitCode: result.exitCode,
       output: result.output
     };

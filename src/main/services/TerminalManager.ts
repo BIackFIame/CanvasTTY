@@ -1,12 +1,15 @@
+import { startupArguments, type AgentStartup } from "./AgentStartup.ts";
+import { ACPAdapter, assertAcpPrompt, miniMaxModelIdentity, type AcpOptions } from "./ACPAdapter.ts";
 import { assertIsolationRequest } from "../../shared/isolation.ts";
 import type { PreparedProviderAccountLaunch, ProviderAccountLaunchCoordinator } from "./ProviderAccountLaunchService.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { basename } from "node:path";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
   CreateSessionRequest,
+  DataClass,
   Point,
   ProviderId,
   ProviderAccount,
@@ -21,6 +24,7 @@ import type {
   TerminalDataEvent
 } from "../../shared/contracts.ts";
 import {
+  ACP_PROVIDERS,
   CANVAS_LAUNCHER_ITEMS,
   INITIAL_TERMINAL_COLS,
   INITIAL_TERMINAL_ROWS,
@@ -68,6 +72,9 @@ const MAX_TERMINAL_SIZE = { width: 1_600, height: 1_100 };
 interface ManagedSession {
   metadata: SessionMetadata;
   process: IPty | null;
+  acp: ACPAdapter | null;
+  disposing?: boolean;
+  initialPrompt?: string;
   cols: number;
   rows: number;
   bufferChunks: string[];
@@ -85,6 +92,7 @@ interface ManagedSession {
   resumeOnLaunch: boolean;
   providerLaunch: PreparedProviderAccountLaunch | null;
   launchGeneration: number;
+  delegationGeneration: string;
   launchTask: Promise<void> | null;
 }
 
@@ -105,6 +113,7 @@ export class TerminalManager {
   private readonly providerClis: ProviderCliRegistry;
   private readonly agentBrowser?: AgentBrowserLaunchCoordinator;
   private readonly agentRuntime?: AgentRuntimeLaunchCoordinator;
+  private acpOptions: AcpOptions = {};
   private readonly spawnPty: typeof pty.spawn;
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
@@ -131,6 +140,8 @@ export class TerminalManager {
     this.lifecycleHooksEnabled = lifecycleHooksEnabled;
   }
 
+  configureAcp(options: AcpOptions): void { this.acpOptions = options; }
+
   configureLaunchPolicy(policy: SessionLaunchPolicy): void {
     this.launchPolicy = policy;
   }
@@ -145,7 +156,19 @@ export class TerminalManager {
     return this.launchPolicy !== null;
   }
 
+  /** Main-only authority: a persisted session id never restores delegation rights. */
+  capsuleAuthority(id: string): { generation: string; binding: string; cwd: string; dataClass: DataClass } {
+    const session = this.sessions.get(id), metadata = session?.metadata;
+    if (!session || !metadata || session.disposing || !this.launchPolicy || metadata.exitCode !== null || (!session.process && !session.acp) || metadata.hostId !== undefined || (metadata.isolation && metadata.isolation.mode !== 'direct') || metadata.provider === 'terminal' || (metadata.role !== 'orchestrator' && metadata.allowSubagents !== true)) throw new Error('Capsule operation is not authorized for this session.');
+    const current = this.launchPolicy.classify(metadata);
+    if (current.accountId !== metadata.accountId || current.model !== metadata.model || current.dataClass !== metadata.dataClass) throw new Error('Parent launch policy changed; capsule operation is not authorized.');
+    session.providerLaunch?.assertCurrent(metadata);
+    return { generation: session.delegationGeneration, cwd: metadata.cwd, dataClass: current.dataClass,
+      binding: createHash('sha256').update(JSON.stringify([metadata.provider, metadata.profile, metadata.accountId, metadata.model, metadata.launchBinding, current.dataClass])).digest('hex') };
+  }
+
   classifyLaunchRequest<T extends CreateSessionRequest>(request: T, forPlacement = false): T {
+    assertTransport(request);
     return this.launchPolicy?.classify(request, forPlacement) ?? request;
   }
 
@@ -203,15 +226,16 @@ export class TerminalManager {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
     this.suppressPersistence = true;
+    const stoppedAcp = [...this.sessions.values()].flatMap(session => session.acp ? [session.acp.stopped] : []);
     const pendingLaunches = [...this.sessions.values()].flatMap((session) => session.launchTask ? [session.launchTask] : []);
-    const preparedLaunches = [...this.sessions.values()].flatMap((session) => session.providerLaunch ? [session.providerLaunch] : []);
+    const preparedLaunches = [...this.sessions.values()].flatMap((session) => session.providerLaunch && !session.acp ? [session.providerLaunch] : []);
     this.disposeAll();
-    await Promise.allSettled([...pendingLaunches, ...preparedLaunches.map((prepared) => prepared.cleanup())]);
+    await Promise.allSettled([...stoppedAcp, ...pendingLaunches, ...preparedLaunches.map((prepared) => prepared.cleanup())]);
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
   }
 
   list(): SessionSnapshot[] {
-    return [...this.sessions.values()].map((session) => snapshot(session));
+    return [...this.sessions.values()].filter(session => !session.disposing).map((session) => snapshot(session));
   }
 
   listMetadata(): SessionMetadata[] {
@@ -241,6 +265,9 @@ export class TerminalManager {
 
   create(request: CreateSessionRequest): SessionSnapshot {
     assertCreateRequest(request);
+    if (request.transport !== "acp") startupArguments(request.provider, { task: request.initialPrompt });
+    if (request.isolation?.mode === 'container' && request.isolation.capsuleId && request.initialPrompt !== undefined) throw new Error('Capsule tasks must be classified and captured in Task.md before launch.');
+    assertTransport(request);
     assertDirectory(request.cwd);
     if (request.isolation?.mode === "container" && !this.providerLaunch?.handlesTerminals) throw new Error("Container launch preparation is unavailable.");
     if (request.isolation?.mode === "worktree" && (!this.providerLaunch?.handlesTerminals || request.hostId !== undefined)) throw new Error("Local worktree launch preparation is required for this isolation mode.");
@@ -265,6 +292,7 @@ export class TerminalManager {
     const id = randomUUID();
     const metadata: SessionMetadata = {
       id,
+      ...(request.transport === "acp" ? { transport: "acp" as const, acp: { phase: "starting" as const, output: "", models: [], permissions: [] } } : {}),
       revision: 0,
       provider: request.provider,
       profile: request.profile,
@@ -294,14 +322,15 @@ export class TerminalManager {
     const awaitMeasuredGrid = request.provider === "grok"
       && request.hostId === undefined
       && this.providerClis.get(request.provider).state === "available";
-    const launched = awaitMeasuredGrid || (this.needsPreparedLaunch(request.provider))
+    const launched = request.transport === "acp" || awaitMeasuredGrid || (this.needsPreparedLaunch(request.provider))
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS);
+      : this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, undefined, { task: request.initialPrompt });
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
       metadata,
       process: launched.process,
+      acp: null, initialPrompt: request.transport === "acp" || awaitMeasuredGrid || this.needsPreparedLaunch(request.provider) ? request.initialPrompt : undefined,
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
       bufferChunks: [],
@@ -319,10 +348,10 @@ export class TerminalManager {
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
       resumeOnLaunch: false,
-      providerLaunch: null, launchGeneration: 0, launchTask: null
+      providerLaunch: null, launchGeneration: 0, delegationGeneration: randomUUID(), launchTask: null
     };
     this.sessions.set(id, session);
-    if (this.needsPreparedLaunch(request.provider) && !awaitMeasuredGrid) this.startPreparedLaunch(id, session, false);
+    if ((this.needsPreparedLaunch(request.provider) || request.transport === "acp") && !awaitMeasuredGrid) this.startPreparedLaunch(id, session, false);
     if (launched.process) this.bindProcess(id, session, launched.process);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
@@ -338,8 +367,11 @@ export class TerminalManager {
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
 
     if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
-    session.pendingInput = "";
-    if (this.needsPreparedLaunch(session.metadata.provider)) {
+    assertTransport(session.metadata);
+    session.delegationGeneration = randomUUID();
+    session.pendingInput = ""; session.initialPrompt = undefined;
+    if (session.metadata.transport === "acp" || this.needsPreparedLaunch(session.metadata.provider)) {
+      session.launchGeneration++; session.acp?.dispose(); session.acp = null;
       this.releaseProviderLaunch(session);
       session.agentBrowser?.cleanup(); session.agentRuntime?.cleanup(); session.agentOrchestration?.cleanup();
       session.agentBrowser = null; session.agentRuntime = null; session.agentOrchestration = null; session.process = null;
@@ -347,6 +379,7 @@ export class TerminalManager {
       session.metadata.exitCode = null; session.metadata.failureDetails = null;
       session.awaitingInitialResize = session.metadata.provider === "grok" && session.metadata.hostId === undefined;
       session.resumeOnLaunch = false;
+      if (session.metadata.transport === "acp") session.metadata.acp = { phase: "starting", output: "", models: [], permissions: [] };
       session.lifecycle = this.lifecycleHooksEnabled ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd) : null;
       if (!session.awaitingInitialResize) this.startPreparedLaunch(id, session, false);
       this.emitSession(session.metadata); this.schedulePersistence();
@@ -402,6 +435,7 @@ export class TerminalManager {
     if (typeof data !== "string" || data.length === 0) return;
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null) return;
+    if (session.metadata.transport === "acp") return; // ACP never accepts terminal keystrokes.
     if (session.awaitingInitialResize || session.launchTask) {
       if (session.pendingInput.length + data.length > MAX_PENDING_INPUT_CHARS) throw new Error("Agent pending input exceeds the limit.");
       session.pendingInput += data;
@@ -410,6 +444,51 @@ export class TerminalManager {
     if (!session.process) return;
     const process = session.process;
     tryPtyOperation(() => process.write(data));
+  }
+
+  sendAgentPrompt(id: string, text: string, submit = true): void {
+    const session = this.sessions.get(id);
+    if (!session || session.disposing || session.metadata.exitCode !== null) throw new Error("Agent session is unavailable.");
+    if (session.metadata.transport === "acp") {
+      if (!submit) throw new Error("ACP requires a complete submitted prompt.");
+      if (!session.acp) throw new Error("ACP session is still starting.");
+      session.providerLaunch?.assertCurrent(session.metadata);
+      session.acp.send(text);
+      appendScrollback(session, `\n› ${text}\n`); this.queueOutput(id, session, `\n› ${text}\n`);
+    } else {
+      if (typeof text !== "string" || text.length === 0 || text.length >= MAX_PENDING_INPUT_CHARS) throw new Error("Agent pending input exceeds the limit or is invalid.");
+      this.input(id, submit ? `${text}\r` : text);
+    }
+  }
+
+  cancelAgentTurn(id: string): void {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Agent session is unavailable.");
+    if (session.metadata.transport !== "acp") { this.dispose(id); return; }
+    // A cancelling owner must not leave delegated processes behind.
+    for (const [childId, child] of this.sessions) if (child.metadata.parentSessionId === id) this.dispose(childId);
+    if (!session.acp || session.metadata.acp?.phase === "starting") { this.dispose(id); return; }
+    session.acp.cancel();
+  }
+
+  decideAcpPermission(id: string, requestId: string, optionId: string): void {
+    const session = this.sessions.get(id);
+    if (!session?.acp || typeof requestId !== "string" || typeof optionId !== "string") throw new Error("ACP permission session is unavailable.");
+    session.providerLaunch?.assertCurrent(session.metadata);
+    session.acp.validatePolicy();
+    session.acp.decide(requestId, optionId);
+  }
+
+  async selectAcpModel(id: string, value: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (!session?.acp || typeof value !== "string") throw new Error("ACP model session is unavailable.");
+    session.providerLaunch?.assertCurrent(session.metadata);
+    await session.acp.setModel(value);
+  }
+
+  private deliverInitialPrompt(id: string, session: ManagedSession): void {
+    const text = session.initialPrompt; session.initialPrompt = undefined;
+    if (text) this.sendAgentPrompt(id, text);
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -475,7 +554,8 @@ export class TerminalManager {
     for (const session of this.sessions.values()) {
       session.lifecycle = null;
       if (
-        session.metadata.provider === "terminal"
+        session.metadata.transport === "acp"
+        || session.metadata.provider === "terminal"
         || session.metadata.status === "done"
         || session.metadata.status === "failed"
         || session.metadata.status === "unavailable"
@@ -504,12 +584,15 @@ export class TerminalManager {
 
   private disposeSession(id: string): void {
     const session = this.sessions.get(id);
-    if (!session) return;
+    if (!session || session.disposing) return;
 
     this.flushOutput(id, session);
-    this.sessions.delete(id);
+    session.disposing = true;
+    const awaitAcpExit = !!session.acp && session.metadata.exitCode === null;
+    if (!awaitAcpExit) this.sessions.delete(id);
     session.launchGeneration++;
-    this.releaseProviderLaunch(session);
+    session.initialPrompt = undefined; session.acp?.dispose();
+    if (!awaitAcpExit) this.releaseProviderLaunch(session);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -534,6 +617,7 @@ export class TerminalManager {
     if (this.sessions.has(descriptor.id)) return;
     const metadata: SessionMetadata = {
       id: descriptor.id,
+      ...(descriptor.transport === "acp" ? { transport: "acp" as const, acpResume: descriptor.acpResume } : {}),
       revision: 0,
       provider: descriptor.provider,
       profile: descriptor.profile,
@@ -541,7 +625,7 @@ export class TerminalManager {
       titleCustomized: descriptor.titleCustomized,
       cwd: descriptor.cwd,
       ...(descriptor.isolation ? { isolation: structuredClone(descriptor.isolation) } : {}),
-      ...(descriptor.workspaceId ? { execution: { workspaceId: descriptor.workspaceId, mode: "worktree", sourceCwd: descriptor.cwd, filesystemRestricted: false, state: "preparing" } as const } : {}),
+      ...(descriptor.workspaceId ? { execution: { workspaceId: descriptor.workspaceId, mode: descriptor.isolation?.mode === 'container' ? 'container' : 'worktree', sourceCwd: descriptor.cwd, filesystemRestricted: false, state: "preparing" } as const } : {}),
       position: descriptor.position,
       size: descriptor.size,
       role: descriptor.role ?? "interactive",
@@ -567,6 +651,8 @@ export class TerminalManager {
     let directoryReady = true;
     try {
       assertDirectory(descriptor.cwd);
+      assertTransport(metadata);
+      if (metadata.transport === "acp" && !metadata.acpResume) throw new Error("ACP resume unavailable: no saved conversation binding.");
       if (this.launchPolicy) Object.assign(metadata, this.launchPolicy.check(metadata, this.listMetadata(), descriptor.id));
     } catch (error) {
       directoryReady = false;
@@ -580,7 +666,7 @@ export class TerminalManager {
       && descriptor.hostId === undefined
       && this.providerClis.get(descriptor.provider).state === "available";
 
-    if (directoryReady && !awaitMeasuredGrid && !(this.needsPreparedLaunch(descriptor.provider))) {
+    if (directoryReady && metadata.transport !== "acp" && !awaitMeasuredGrid && !(this.needsPreparedLaunch(descriptor.provider))) {
       try {
         const launched = this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, descriptor.provider !== "terminal");
         process = launched.process;
@@ -597,7 +683,7 @@ export class TerminalManager {
 
     const session: ManagedSession = {
       metadata,
-      process,
+      process, acp: null,
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
       bufferChunks: [],
@@ -615,10 +701,10 @@ export class TerminalManager {
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
       resumeOnLaunch: awaitMeasuredGrid && descriptor.provider !== "terminal",
-      providerLaunch: null, launchGeneration: 0, launchTask: null
+      providerLaunch: null, launchGeneration: 0, delegationGeneration: randomUUID(), launchTask: null
     };
     this.sessions.set(descriptor.id, session);
-    if (directoryReady && !awaitMeasuredGrid && this.needsPreparedLaunch(descriptor.provider)) this.startPreparedLaunch(descriptor.id, session, true);
+    if (directoryReady && !awaitMeasuredGrid && (metadata.transport === "acp" || this.needsPreparedLaunch(descriptor.provider))) this.startPreparedLaunch(descriptor.id, session, true);
     if (process) this.bindProcess(descriptor.id, session, process);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
@@ -630,7 +716,7 @@ export class TerminalManager {
       return Promise.resolve();
     }
     return this.sessionStore.replace(
-      [...this.sessions.values()].map((session) => persistedTerminalSession(session.metadata))
+      [...this.sessions.values()].filter(session => !session.disposing).map((session) => persistedTerminalSession(session.metadata))
     );
   }
 
@@ -653,7 +739,8 @@ export class TerminalManager {
     if (this.needsPreparedLaunch(session.metadata.provider)) { this.startPreparedLaunch(id, session, resumePrevious); return; }
     try {
       if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
-      const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious);
+      const startup = { task: session.initialPrompt }; session.initialPrompt = undefined;
+      const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, undefined, startup);
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
       session.agentRuntime = launched.agentRuntime;
@@ -686,7 +773,7 @@ export class TerminalManager {
 
   private startPreparedLaunch(id: string, session: ManagedSession, resumePrevious: boolean): void {
     const coordinator = this.providerLaunch;
-    if (!coordinator || session.launchTask) return;
+    if ((!coordinator && session.metadata.transport !== "acp") || session.launchTask) return;
     const generation = ++session.launchGeneration;
     if (session.metadata.execution) session.metadata.execution.state = "preparing";
     const active = (): boolean => this.sessions.get(id) === session && session.launchGeneration === generation && session.metadata.exitCode === null;
@@ -694,7 +781,15 @@ export class TerminalManager {
       let prepared: PreparedProviderAccountLaunch | null = null;
       try {
         if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
-        prepared = await coordinator.prepare(structuredClone(session.metadata), resumePrevious, { isCurrent: active });
+        if (!coordinator && session.metadata.accountId) throw new Error("ACP selected accounts require launch preparation.");
+        const startup = session.metadata.transport === "acp" ? undefined : { task: session.initialPrompt };
+        if (session.metadata.transport !== "acp") session.initialPrompt = undefined;
+        prepared = coordinator ? await coordinator.prepare(structuredClone(session.metadata), resumePrevious, { isCurrent: active, startup }) : {
+          args: [], environment: {}, unsetEnvironment: [], model: session.metadata.model, acpModel: session.metadata.model,
+          skipBridges: true, bindingDigest: createHash("sha256").update(JSON.stringify([session.metadata.provider, session.metadata.cwd, session.metadata.model])).digest("hex"),
+          assertCurrent() {}, async cleanup() {}
+        };
+        prepared.startup = startup;
         if (!active()) { await prepared.cleanup(); return; }
         // Live policy cannot authorize stale prepared credentials or endpoint configuration.
         if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
@@ -708,6 +803,11 @@ export class TerminalManager {
         session.lifecycle = this.lifecycleHooksEnabled ? createProviderLifecycleParser(session.metadata.provider, prepared.execution?.executionCwd ?? session.metadata.cwd) : null;
         if (prepared.skipBridges) session.metadata.integrationNote = prepared.integrationNote ?? "Custom account home: runtime hooks and browser bridge are unavailable; PTY/process integration only.";
         else delete session.metadata.integrationNote;
+        if (session.metadata.transport === "acp") {
+          await this.startAcp(id, session, prepared, generation, resumePrevious);
+          if (active()) this.deliverInitialPrompt(id, session);
+          return;
+        }
         const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, prepared);
         session.process = launched.process; session.agentBrowser = launched.agentBrowser;
         session.agentRuntime = launched.agentRuntime; session.agentOrchestration = launched.agentOrchestration;
@@ -726,21 +826,95 @@ export class TerminalManager {
           if (runtimeStatus) session.metadata.status = runtimeStatus;
         }
       } catch (error) {
-        if (prepared) await prepared.cleanup().catch(() => undefined);
+        const acpStarted = !!session.acp && session.metadata.transport === "acp";
+        if (acpStarted) session.acp!.dispose();
+        else if (prepared) await prepared.cleanup().catch(() => undefined);
         if (!active()) return;
-        session.providerLaunch = null; session.process = null;
-        session.metadata.status = "failed"; session.metadata.exitCode = 1;
-        if (session.metadata.execution) session.metadata.execution.state = "failed";
+        if (!acpStarted) {
+          session.providerLaunch = null; session.process = null; session.metadata.exitCode = 1;
+          session.agentOrchestration?.cleanup(); session.agentOrchestration = null;
+          if (session.metadata.execution) session.metadata.execution.state = "failed";
+        }
+        session.metadata.status = "failed";
         session.metadata.failureDetails = error instanceof Error ? error.message : "Provider launch preparation failed.";
       } finally {
         if (this.sessions.get(id) === session && session.launchGeneration === generation) {
-          session.pendingInput = ""; session.launchTask = null;
+          session.pendingInput = ""; session.initialPrompt = undefined; session.launchTask = null;
           this.emitSession(session.metadata); this.schedulePersistence();
         }
       }
     };
     // Yield once so the reservation and promise exist before preparation starts.
     session.launchTask = Promise.resolve().then(operation);
+  }
+
+  private async startAcp(id: string, session: ManagedSession, prepared: PreparedProviderAccountLaunch, generation: number, resume: boolean): Promise<void> {
+    const metadata = session.metadata;
+    assertTransport(metadata);
+    const cli = this.providerClis.get(metadata.provider as Exclude<ProviderId, "terminal">);
+    if (cli.state !== "available") throw new Error(cli.diagnostic);
+    if (cli.launcher !== "native") throw new Error("ACP requires a resolved native executable.");
+    const cwd = prepared.execution?.executionCwd ?? metadata.cwd;
+    const binding = createHash("sha256").update(JSON.stringify([metadata.provider, metadata.accountId ?? null, metadata.hostId ?? "local", metadata.cwd, cwd, prepared.bindingDigest])).digest("hex");
+    if (resume && (!metadata.acpResume || metadata.acpResume.binding !== binding)) throw new Error("ACP resume unavailable: account, host or workspace binding changed.");
+    const environment = terminalEnvironment();
+    for (const name of prepared.unsetEnvironment) delete environment[name];
+    Object.assign(environment, cli.environment, prepared.environment);
+    for (const name of Object.keys(environment)) if (name.startsWith("CANVASTTY_ORCHESTRATION_") || name === "CANVASTTY_TERMINAL_SESSION_ID") delete environment[name];
+    const current = (): boolean => this.sessions.get(id) === session && session.launchGeneration === generation;
+    const mcpServers: Record<string, unknown>[] = [];
+    const helper = this.acpOptions.orchestrationCommand;
+    if ((metadata.role === "orchestrator" || metadata.allowSubagents) && helper && this.agentOrchestration?.isEnabled) {
+      session.agentOrchestration = this.agentOrchestration.prepareLaunch({ terminalSessionId: id });
+      if (session.agentOrchestration) mcpServers.push({ name: "canvastty_agents", command: helper.command, args: helper.args, env: Object.entries({ ...helper.environment, ...session.agentOrchestration.environment }).map(([name, value]) => ({ name, value })) });
+    }
+    metadata.integrationNote = "ACP v1, local direct/worktree only. Agent tools run with CLI permissions; no filesystem sandbox. Browser bridge and native subagent inheritance are unavailable. Permissions require an explicit decision, including YOLO.";
+    session.lifecycle = null;
+    const checkModel = (value: string | undefined): void => {
+      if (!current()) throw new Error("Stale ACP session.");
+      prepared.assertCurrent(metadata);
+      if (metadata.accountId && !value) throw new Error("ACP account model is unconfirmed.");
+      let model = value;
+      if (metadata.provider === "minimax" && value) {
+        const identity = miniMaxModelIdentity(value);
+        if (prepared.acpModel) {
+          const expected = miniMaxModelIdentity(prepared.acpModel);
+          if (identity.provider !== expected.provider) throw new Error("ACP switched to a different MiniMax provider route.");
+          model = prepared.acpPolicyModelKind === "wire" ? value : prepared.acpPolicyModelKind === "qualified" ? `${identity.provider}/${identity.model}` : identity.model;
+        } else model = `${identity.provider}/${identity.model}`;
+      }
+      const checked = this.launchPolicy?.check({ ...metadata, model }, this.listMetadata(), id);
+      if (checked && checked.accountId !== metadata.accountId) throw new Error("ACP effective model requires a different account.");
+    };
+    session.acp = new ACPAdapter({ command: cli.executable, args: ["acp"], cwd, environment, provider: metadata.provider,
+      expectedModel: prepared.acpModel ?? prepared.model, requireModel: !!metadata.accountId,
+      ...(resume ? { restoreId: metadata.acpResume!.sessionId } : {}), mcpServers,
+      checkModel,
+      onSessionId: sessionId => { if (current()) { metadata.acpResume = { sessionId, binding }; this.schedulePersistence(); } },
+      onText: text => { if (current()) { appendScrollback(session, text); this.queueOutput(id, session, text); } },
+      onState: state => {
+        if (!current()) return;
+        metadata.acp = state;
+        metadata.status = state.phase === "failed" ? "failed" : state.permissions.length ? "needs_approval" : state.phase === "running" || state.phase === "starting" ? "working" : "idle";
+        metadata.failureDetails = state.error ?? null;
+        this.emitSession(metadata);
+      },
+      onExit: async () => {
+        if (current()) {
+          metadata.exitCode = 1; if (metadata.execution) metadata.execution.state = "retained";
+          session.agentOrchestration?.cleanup(); session.agentOrchestration = null;
+          this.flushOutput(id, session); this.emitSession(metadata); this.schedulePersistence();
+        } else if (this.sessions.get(id) === session && session.disposing) {
+          this.sessions.delete(id); this.schedulePersistence();
+        }
+        await prepared.processExited?.().catch(() => undefined);
+        await prepared.cleanup().catch(() => undefined);
+      }
+    }, this.acpOptions);
+    prepared.processStarted?.();
+    if (metadata.execution) metadata.execution.state = "running";
+    metadata.launchBinding = prepared.bindingDigest;
+    await session.acp.ready;
   }
 
   private releaseProviderLaunch(session: ManagedSession): void {
@@ -753,7 +927,8 @@ export class TerminalManager {
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
     resumePrevious = false,
-    prepared?: PreparedProviderAccountLaunch
+    prepared?: PreparedProviderAccountLaunch,
+    startup?: AgentStartup
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -827,7 +1002,7 @@ export class TerminalManager {
         const command = prepared?.remoteExecutable ?? PROVIDER_CLI_DEFINITIONS[provider].commands[0];
         const remoteArguments = resolveTerminalLaunch(provider, profile, providerArgs, {
           providerCli: { state: "available", provider, executable: command, launcher: "native", environment: {}, checked: [] },
-          environment: providerEnvironment, model, resumePrevious
+          environment: providerEnvironment, model, resumePrevious, startup: startup ?? prepared?.startup
         });
         launch = remoteAgentLaunch(remoteHost, this.requireRemoteWorkspace(remoteHost, cwd), command, {
           args: remoteArguments.args as string[], environment: { ...providerEnvironment, ...remoteArguments.environment },
@@ -839,7 +1014,7 @@ export class TerminalManager {
         launch = resolveTerminalLaunch(provider, profile, providerArgs, {
           environment: { ...baseEnvironment, ...providerEnvironment },
           ...(providerCli ? { providerCli } : {}),
-          resumePrevious, model
+          resumePrevious, model, startup: startup ?? prepared?.startup
         });
       }
       prepared?.assertCurrent(metadata);
@@ -990,8 +1165,10 @@ const SESSION_ROLES = new Set<SessionRole>(["interactive", "orchestrator", "suba
 
 function assertCreateRequest(request: CreateSessionRequest): void {
   if (request) { assertLaunchPolicyFields(request); assertIsolationRequest(request.isolation);
-    if ("execution" in request || "workspaceId" in request || "launchBinding" in request) throw new Error("Execution identity is owned by the main process.");
+    if ("execution" in request || "workspaceId" in request || "launchBinding" in request || "acpResume" in request || "acp" in request) throw new Error("Execution identity is owned by the main process.");
   }
+  if (request?.initialPrompt !== undefined && (typeof request.initialPrompt !== "string" || request.initialPrompt.length >= MAX_PENDING_INPUT_CHARS)) throw new Error("Initial agent prompt exceeds the input limit or is invalid.");
+  if (request?.transport === "acp" && request.initialPrompt) assertAcpPrompt(request.initialPrompt);
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
   if (request.profile !== "normal" && request.profile !== "yolo") throw new Error("Unknown launch profile.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");
@@ -1075,4 +1252,11 @@ function appendScrollback(session: ManagedSession, data: string): void {
     session.bufferChunks = session.bufferChunks.slice(session.bufferStart);
     session.bufferStart = 0;
   }
+}
+
+function assertTransport(request: Pick<CreateSessionRequest, "provider" | "transport" | "hostId" | "isolation">): void {
+  if (request.transport !== undefined && request.transport !== "pty" && request.transport !== "acp") throw new Error("Unknown session transport.");
+  if (request.transport !== "acp") return;
+  if (!ACP_PROVIDERS.includes(request.provider)) throw new Error("ACP is supported only for Cursor, MiniMax and Kimi.");
+  if (request.hostId !== undefined || request.isolation?.mode === "container") throw new Error("ACP supports local direct/worktree launches only; remote and container transports are unavailable.");
 }

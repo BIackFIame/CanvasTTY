@@ -118,16 +118,18 @@ test("nested delegation is opt-in and enforces depth without changing ownership"
   f.terminals.disposeAll();
 });
 
-test("Grok initial prompt waits for its deferred PTY and pending input is bounded", () => {
+test("Grok initial task waits for its deferred launch and enters argv exactly once", () => {
   const f = fixture();
   const parent = f.terminals.create(request({ role: "orchestrator" }));
   const child = f.control.spawn({ parentSessionId: parent.id, provider: "grok", cwd: process.cwd(), initialPrompt: "Please inspect the project" });
   assert.deepEqual(f.written, []);
   assert.throws(() => f.control.send(child.id, "x".repeat(131072)), /pending input/u);
   f.terminals.resize(child.id, 90, 30);
-  assert.deepEqual(f.written, ["Please inspect the project\r"]);
+  assert.deepEqual(f.written, []);
+  assert.equal(f.calls[1].args.at(-1), "CanvasTTY task:\nPlease inspect the project");
   f.terminals.resize(child.id, 100, 40);
-  assert.deepEqual(f.written, ["Please inspect the project\r"]);
+  assert.deepEqual(f.written, []);
+  assert.equal(f.calls[1].args.at(-1), "CanvasTTY task:\nPlease inspect the project");
   f.terminals.disposeAll();
 });
 

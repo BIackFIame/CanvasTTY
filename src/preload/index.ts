@@ -34,6 +34,22 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 }
 
 const api: CanvasTTYApi = {
+  capsules: {
+    startTest: (id, review, profile) => ipcRenderer.invoke(IPC.capsulesTestStart, id, review, profile),
+    testRuns: () => ipcRenderer.invoke(IPC.capsulesTestList),
+    testResult: id => ipcRenderer.invoke(IPC.capsulesTestResult, id),
+    cancelTest: id => ipcRenderer.invoke(IPC.capsulesTestCancel, id),
+    cleanupTest: id => ipcRenderer.invoke(IPC.capsulesTestCleanup, id),
+    selectFiles: source => ipcRenderer.invoke(IPC.capsulesSelectFiles, source),
+    prepare: request => ipcRenderer.invoke(IPC.capsulesPrepare, request),
+    list: () => ipcRenderer.invoke(IPC.capsulesList),
+    review: id => ipcRenderer.invoke(IPC.capsulesReview, id),
+    exportPatch: (id, reviewId) => ipcRenderer.invoke(IPC.capsulesExport, id, reviewId),
+    apply: (id, reviewId) => ipcRenderer.invoke(IPC.capsulesApply, id, reviewId),
+    recoverApply: (id, reviewId) => ipcRenderer.invoke(IPC.capsulesRecover, id, reviewId),
+    cleanup: id => ipcRenderer.invoke(IPC.capsulesCleanup, id)
+  },
+  accountHomes: { inspect: directory => ipcRenderer.invoke(IPC.accountHomesInspect, directory) },
   evenG2: {
     state: () => ipcRenderer.invoke(IPC.evenG2State),
     command: (command) => ipcRenderer.invoke(IPC.evenG2Command, command),
@@ -44,7 +60,9 @@ const api: CanvasTTYApi = {
   containers: {
     probe: profileId => ipcRenderer.invoke(IPC.containersProbe, profileId),
     list: () => ipcRenderer.invoke(IPC.containersList),
-    cleanup: id => ipcRenderer.invoke(IPC.containersCleanup, id)
+    cleanup: id => ipcRenderer.invoke(IPC.containersCleanup, id),
+    review: id => ipcRenderer.invoke(IPC.containersReview, id),
+    exportPatch: (id, reviewId) => ipcRenderer.invoke(IPC.containersExport, id, reviewId)
   },
   workspaces: {
     list: () => ipcRenderer.invoke(IPC.workspacesList),
@@ -56,6 +74,7 @@ const api: CanvasTTYApi = {
     local: () => ipcRenderer.invoke(IPC.operationalMetricsLocal),
     remote: (hostId: string) => ipcRenderer.invoke(IPC.operationalMetricsRemote, hostId)
   },
+  hosts: { inspect: (hostId: string) => ipcRenderer.invoke(IPC.hostsInspect, hostId) },
   clipboard: {
     readText: () => ipcRenderer.invoke(IPC.clipboardRead),
     writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
@@ -198,6 +217,10 @@ const api: CanvasTTYApi = {
     list: () => ipcRenderer.invoke(IPC.terminalList),
     readBuffer: (id: string) => ipcRenderer.invoke(IPC.terminalReadBuffer, id),
     create: (request: CreateSessionRequest) => ipcRenderer.invoke(IPC.terminalCreate, request),
+    agentPrompt: (id: string, text: string) => ipcRenderer.invoke(IPC.terminalAgentPrompt, id, text),
+    cancelTurn: (id: string) => ipcRenderer.invoke(IPC.terminalCancelTurn, id),
+    acpPermission: (id: string, requestId: string, optionId: string) => ipcRenderer.invoke(IPC.terminalAcpPermission, id, requestId, optionId),
+    acpModel: (id: string, value: string) => ipcRenderer.invoke(IPC.terminalAcpModel, id, value),
     restart: (id: string) => ipcRenderer.invoke(IPC.terminalRestart, id),
     input: (id: string, data: string) => ipcRenderer.send(IPC.terminalInput, id, data),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.send(IPC.terminalResize, id, cols, rows),

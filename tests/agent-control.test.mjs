@@ -48,7 +48,7 @@ function fixture() {
 }
 
 test("spawn creates a subagent next to its parent and delivers the initial prompt", () => {
-  const { terminals, control } = fixture();
+  const { terminals, control, calls } = fixture();
   const parent = terminals.create({
     provider: "codex",
     cwd: process.cwd(),
@@ -69,7 +69,8 @@ test("spawn creates a subagent next to its parent and delivers the initial promp
   assert.ok(child.position.y > parent.position.y);
 
   const sent = [...writes.values()].flat().join("");
-  assert.match(sent, /Fix the failing Button test\r/u);
+  assert.equal(sent, '');
+  assert.equal(calls[1].args.at(-1), 'CanvasTTY task:\nFix the failing Button test');
   terminals.disposeAll();
 });
 

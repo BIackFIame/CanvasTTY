@@ -1,4 +1,9 @@
+import { validatedConnectionsPatch } from "../../shared/connectionsSettings.ts";
+import { copyRemoteApiCredential, validApiProfileCredential, validRemoteApiCredential } from "../../shared/apiProfileCredentials.ts";
+import { assertUnusedHostMutation, sshTargetIdentity } from "../../shared/executionSettings.ts";
+import type { SessionMetadata } from "../../shared/contracts.ts";
 import { normalizeContainerProfiles } from "../../shared/containerProfiles.ts";
+import { normalizeCapsuleTestProfiles } from '../../shared/capsules.ts';
 import { canonicalApiUrl, copyAssessment, isProviderSecretRef, validAccountBinding, validAssessment } from "../../shared/providerAccountPolicy.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -117,6 +122,19 @@ export class SettingsStore {
   private hasPersistedLegacyWheelCapture = false;
   private writeQueue = Promise.resolve();
   private availableProviders: ReadonlySet<AgentProviderId>;
+  private updateQueue = Promise.resolve();
+  private hostSessions: () => readonly Pick<SessionMetadata, "hostId" | "exitCode" | "title">[] = () => [];
+  private readonly changingHosts = new Set<string>();
+
+  configureHostSessions(sessions: () => readonly Pick<SessionMetadata, "hostId" | "exitCode" | "title">[]): void { this.hostSessions = sessions; }
+
+  /** The launch resolver fences registration while an SSH target change or removal is awaiting disk.
+   * get() remains confirmed UI truth throughout the transaction. */
+  hostForLaunch(id: string): RemoteHost | null {
+    if (this.changingHosts.has(id)) throw new Error("This server is being removed or retargeted. Wait for the settings save to finish.");
+    const host = this.value.remoteHosts.find(item => item.id === id);
+    return host ? structuredClone(host) : null;
+  }
 
   constructor(userDataPath: string, systemLocale: string, platform: string = process.platform, availability?: AgentCliAvailability) {
     this.filePath = join(userDataPath, "settings.json");
@@ -243,43 +261,59 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
 
-  async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
-    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
-      this.value = filtered;
-      await this.persist();
-    }
-    return this.get();
+  /** Local CLI detection hides launcher entries for agents that are not installed. */
+  setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
+    const operation = async (): Promise<AppSettings> => {
+      this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (providerSelectionsChanged(this.value, filtered)) {
+        await this.persist(filtered);
+        this.value = filtered;
+      }
+      return this.get();
+    };
+    const result = this.updateQueue.then(operation, operation);
+    this.updateQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
-  async update(patch: Partial<AppSettings>): Promise<AppSettings> {
-    if (patch.canvasWheelCaptureMode !== undefined) this.hasPersistedLegacyWheelCapture = true;
-    const nextPatch = patch.canvasWheelCaptureMode === "key"
-      && patch.canvasWheelOverride === undefined
-      && this.value.canvasWheelOverride === null
-      ? { ...patch, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) }
-      : patch;
-    this.value = filterUnavailableProviders(
-      normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform),
-      this.availableProviders
-    );
-    await this.persist();
-    return this.get();
+  update(patch: Partial<AppSettings>): Promise<AppSettings> {
+    const captured = structuredClone(patch);
+    const operation = async (): Promise<AppSettings> => {
+      const checked = validatedConnectionsPatch(this.value, captured);
+      assertUnusedHostMutation(this.value, checked, this.hostSessions());
+      const hasLegacy = this.hasPersistedLegacyWheelCapture || checked.canvasWheelCaptureMode !== undefined;
+      const nextPatch = checked.canvasWheelCaptureMode === "key"
+        && checked.canvasWheelOverride === undefined && this.value.canvasWheelOverride === null
+        ? { ...checked, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) } : checked;
+      const normalized = normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform);
+      const next = filterUnavailableProviders(normalized, this.availableProviders);
+      const removed = this.value.remoteHosts.filter(host => { const after = next.remoteHosts.find(item => item.id === host.id); return !after || sshTargetIdentity(host) !== sshTargetIdentity(after); });
+      for (const host of removed) this.changingHosts.add(host.id);
+      try {
+        await this.persist(next, hasLegacy);
+        this.value = next;
+        this.hasPersistedLegacyWheelCapture = hasLegacy;
+        return this.get();
+      } finally { for (const host of removed) this.changingHosts.delete(host.id); }
+    };
+    const result = this.updateQueue.then(operation, operation);
+    this.updateQueue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
-  private persist(): Promise<void> {
+  private persist(value = this.value, hasLegacy = this.hasPersistedLegacyWheelCapture): Promise<void> {
     const persistedValue: Partial<AppSettings> & {
       settingsVersion: number;
       zoomOverApplications?: boolean;
     } = {
-      ...this.value,
-      canvasRegions: this.value.persistCanvasRegions ? this.value.canvasRegions : [],
-      stickyNotes: this.value.persistStickyNotes ? this.value.stickyNotes : [],
+      ...value,
+      canvasRegions: value.persistCanvasRegions ? value.canvasRegions : [],
+      stickyNotes: value.persistStickyNotes ? value.stickyNotes : [],
       settingsVersion: SETTINGS_VERSION
     };
-    if (this.hasPersistedLegacyWheelCapture) {
-      persistedValue.zoomOverApplications = this.value.canvasWheelCaptureMode === "always";
+    if (hasLegacy) {
+      persistedValue.zoomOverApplications = value.canvasWheelCaptureMode === "always";
     }
     const snapshot = JSON.stringify(persistedValue, null, 2);
     const temporaryPath = `${this.filePath}.tmp`;
@@ -358,6 +392,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     maxAccountsPerProviderPerHost: 1,
     requiresSandboxProfiles: [],
     containerProfiles: [],
+    capsuleTestProfiles: [],
     homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
     homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
     canvasRegions: [],
@@ -393,6 +428,8 @@ export function normalizeApiProfiles(
       ? record.protocol as ApiProfileProtocol
       : null;
     const secretRef = isProviderSecretRef(record.secretRef) ? record.secretRef : null;
+    if (!validApiProfileCredential(record as unknown as ApiProfile)) continue;
+    const remoteCredential = validRemoteApiCredential(record.remoteCredential) ? copyRemoteApiCredential(record.remoteCredential) : undefined;
     const baseUrl = record.baseUrl === undefined
       ? undefined
       : typeof record.baseUrl === "string" && record.baseUrl.length <= 500
@@ -401,11 +438,11 @@ export function normalizeApiProfiles(
     const defaultModel = typeof record.defaultModel === "string" && record.defaultModel.trim().length > 0 && record.defaultModel.length <= 200
       ? record.defaultModel
       : undefined;
-    if (!id || seen.has(id) || !name || !protocol || !secretRef || baseUrl === "invalid") continue;
+    if (!id || seen.has(id) || !name || !protocol || baseUrl === "invalid") continue;
     if (baseUrl) { try { canonicalApiUrl(baseUrl); } catch { continue; } }
     if (record.hostId !== undefined && (typeof record.hostId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(record.hostId))) continue;
     seen.add(id);
-    profiles.push({ id, name, protocol, ...(baseUrl ? { baseUrl } : {}), secretRef, ...(defaultModel ? { defaultModel } : {}),
+    profiles.push({ id, name, protocol, ...(baseUrl ? { baseUrl } : {}), ...(secretRef ? { secretRef } : { remoteCredential }), ...(defaultModel ? { defaultModel } : {}),
       ...(record.hostId !== undefined ? { hostId: record.hostId as string } : {}), ...normalizedAssessment(record) });
   }
   return profiles;
@@ -754,6 +791,7 @@ export function normalizeSettings(
     acknowledgedDangerousProfiles: [...new Set(acknowledged)],
     defaultDataClass: normalizeDataClass(source.defaultDataClass),
   containerProfiles: normalizeContainerProfiles(source.containerProfiles ?? fallback.containerProfiles),
+  capsuleTestProfiles: normalizeCapsuleTestProfiles(source.capsuleTestProfiles ?? fallback.capsuleTestProfiles),
   requiresSandboxProfiles: Array.isArray(source.requiresSandboxProfiles) ? [...new Set(source.requiresSandboxProfiles.filter((value) => value === "normal" || value === "yolo"))] : fallback.requiresSandboxProfiles ?? [],
   apiProfiles: normalizeApiProfiles(source.apiProfiles, fallback.apiProfiles ?? []),
     remoteHosts: normalizeRemoteHosts(source.remoteHosts, fallback.remoteHosts ?? []),
@@ -1179,6 +1217,6 @@ function isMissingFile(error: unknown): boolean {
 }
 
 function normalizedAssessment(record: Record<string, unknown>): Pick<ProviderAccount, "assessment" | "assessmentInvalid"> {
-  if (record.assessmentInvalid === true || (record.assessment !== undefined && !validAssessment(record.assessment))) return { assessmentInvalid: true };
+  if (record.assessmentInvalid === true || (record.assessment !== undefined && !validAssessment(record.assessment))) return { assessmentInvalid: true, ...(validAssessment(record.assessment) ? { assessment: copyAssessment(record.assessment) } : {}) };
   return validAssessment(record.assessment) ? { assessment: copyAssessment(record.assessment) } : {};
 }

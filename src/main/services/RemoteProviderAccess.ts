@@ -17,6 +17,7 @@ import type { RemoteHostRunner } from "./RemoteHostsService.ts";
  *  `providers` keys are provider ids (only the probed subset appears) and
  *  true means the network path to that provider's endpoint answered. */
 export interface RemoteProviderAccessResult {
+  collectedAt: number;
   hostId: string;
   reachable: boolean;
   providers: Record<string, boolean>;
@@ -36,10 +37,12 @@ const DETAIL_MAX_LENGTH = 300;
 export class RemoteProviderAccess {
   private readonly run: RemoteHostRunner;
   private readonly cache: ProbeCache<RemoteProviderAccessResult>;
+  private readonly now: () => number;
 
   constructor(runner: RemoteHostRunner, options: ProbeCacheOptions = {}) {
     this.cache = new ProbeCache(options);
     this.run = runner;
+    this.now = options.now ?? Date.now;
   }
 
   /** Probes `host` for reachability of every provider API endpoint (or only
@@ -56,11 +59,11 @@ export class RemoteProviderAccess {
       : "unknown";
     const invalidReason = remoteHostInvalidReason(host);
     if (invalidReason !== null) {
-      return { hostId, reachable: false, providers: {}, detail: invalidReason };
+      return { hostId, collectedAt: this.now(), reachable: false, providers: {}, detail: invalidReason };
     }
     const providers = probedProviderIds(probeProviders).sort();
     return this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.probeUncached(host, timeoutMs, providers))
-      .catch((error: unknown) => ({ hostId, reachable: false, providers: {}, detail: excerpt(error instanceof Error ? error.message : String(error)) }));
+      .catch((error: unknown) => ({ hostId, collectedAt: this.now(), reachable: false, providers: {}, detail: excerpt(error instanceof Error ? error.message : String(error)) }));
   }
 
   private async probeUncached(host: RemoteHost, timeoutMs: number, providers: AgentProviderId[]): Promise<RemoteProviderAccessResult> {
@@ -74,6 +77,7 @@ export class RemoteProviderAccess {
       if (code !== 0) {
         return {
           hostId,
+          collectedAt: this.now(),
           reachable: false,
           providers: {},
           detail: excerpt(stderr) || `ssh exited with code ${code === null ? "unknown" : code}`
@@ -84,10 +88,11 @@ export class RemoteProviderAccess {
       for (const provider of providers) {
         reachability[provider] = answered.has(provider);
       }
-      return { hostId, reachable: true, providers: reachability };
+      return { hostId, collectedAt: this.now(), reachable: true, providers: reachability };
     } catch (error) {
       return {
         hostId,
+        collectedAt: this.now(),
         reachable: false,
         providers: {},
         detail: excerpt(error instanceof Error ? error.message : String(error))

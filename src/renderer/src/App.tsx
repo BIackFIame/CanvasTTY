@@ -1,3 +1,4 @@
+import type { SettingsLocation } from "../../shared/settingsLocation";
 import type { AgentLaunchOptions, CreateSessionRequest } from "../../shared/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -118,6 +119,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   maxAccountsPerProviderPerHost: 1,
   requiresSandboxProfiles: [],
   containerProfiles: [],
+  capsuleTestProfiles: [],
   homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
   homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
   canvasRegions: [],
@@ -210,6 +212,10 @@ export function App(): React.JSX.Element {
   const [launchProvider, setLaunchProvider] = useState<AgentProviderId | null>(null);
   const [launchPosition, setLaunchPosition] = useState<Point | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsLocation, setSettingsLocation] = useState<SettingsLocation | null>(null);
+  // A location is a one-shot jump; every close path drops it so reopening never replays it.
+  useEffect(() => { if (!settingsOpen) setSettingsLocation(null); }, [settingsOpen]);
+  const settingsOpener = useRef<HTMLElement | null>(null);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -407,7 +413,7 @@ export function App(): React.JSX.Element {
   ): Promise<void> => {
     await createSession(options, launchPosition ?? undefined);
     setLaunchPosition(null);
-    showToast(`${t(settings.locale, "sessionStarted")}: ${options.provider}`);
+    showToast(`${t(settings.locale, "launchPreparing")}: ${options.provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);
 
   const restartSession = useCallback(async (id: string): Promise<void> => {
@@ -1106,6 +1112,8 @@ export function App(): React.JSX.Element {
 
       <AgentLaunchDialog
         provider={launchProvider}
+        suspended={settingsOpen}
+        onOpenSettings={location => { settingsOpener.current = document.activeElement as HTMLElement | null; setSettingsLocation(location); setSettingsOpen(true); }}
         settings={settings}
         onClose={() => {
           setLaunchProvider(null);
@@ -1133,12 +1141,14 @@ export function App(): React.JSX.Element {
       />
       <SettingsPanel
         open={settingsOpen}
+        location={settingsLocation}
+        sessions={sessions}
         settings={settings}
         agentAvailability={agentAvailability}
         onRecheckAgentClis={recheckAgentClis}
         plugins={plugins}
         browser={browser}
-        onClose={() => setSettingsOpen(false)}
+        onClose={() => { setSettingsOpen(false); setSettingsLocation(null); requestAnimationFrame(() => { settingsOpener.current?.focus(); settingsOpener.current = null; }); }}
         onChange={saveSettings}
         onPersist={persistSettings}
         onPreviewPlugin={previewPlugin}
