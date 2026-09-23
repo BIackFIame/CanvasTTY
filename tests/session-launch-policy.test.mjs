@@ -206,8 +206,9 @@ test("deferred sessions inherit a changed default class at the actual launch", (
   const grok = f.terminals.create(request({ provider: "grok" }));
   f.update({ defaultDataClass: "D2" });
   f.terminals.resize(grok.id, 80, 24);
-  assert.equal(f.calls.length, 0);
-  assert.equal(f.terminals.list()[0].status, "failed");
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.terminals.list()[0].privacyNotice, { cap: "D1", dataClass: "D2" });
+  assert.equal(f.terminals.list()[0].dataClass, "D2");
   f.terminals.disposeAll();
 });
 
@@ -291,7 +292,9 @@ test("legacy restored sessions keep inheriting live default classification", asy
   await f.terminals.restorePersistedSessions();
   f.exits[0]({ exitCode: 0 });
   f.update({ defaultDataClass: "D2" });
-  assert.throws(() => f.terminals.restart("legacy"), /at most D1/u);
+  const restarted = f.terminals.restart("legacy");
+  assert.equal(restarted.dataClass, "D2");
+  assert.deepEqual(restarted.privacyNotice, { cap: "D1", dataClass: "D2" });
   f.terminals.disposeAll();
 });
 

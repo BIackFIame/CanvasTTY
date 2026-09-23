@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { launchOptions, reconcileLaunchDraft, compatibleLaunchAccounts } from '../src/renderer/src/features/launcher/launchDraft.ts';
+import { launchOptions, launchPrivacyNotice, reconcileLaunchDraft, compatibleLaunchAccounts } from '../src/renderer/src/features/launcher/launchDraft.ts';
 import { accountRouteBinding } from '../src/shared/providerAccountPolicy.ts';
 import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts';
 import { TerminalManager } from '../src/main/services/TerminalManager.ts';
@@ -26,7 +26,9 @@ test('settings handoff and a changed last folder preserve the pending launch; a 
 });
 test('an invalid explicit selection never becomes ambient and unsupported route changes retain draft errors',()=>{
  const settings={...defaults,providerAccounts:[account],remoteHosts:[host]};const draft={...reconcileLaunchDraft(null,'codex',settings),accountId:'a'};
- assert.throws(()=>launchOptions({...draft,accountId:''},settings),/Choose.*account/i);
+ // The only compatible account is used without a separate choice; several still require one. Never the CLI login.
+ assert.equal(launchOptions({...draft,accountId:''},settings).accountId,'a');
+ assert.throws(()=>launchOptions({...draft,accountId:''},{...settings,providerAccounts:[account,{...account,id:'b',label:'Second'}]}),/Choose.*account/i);
  assert.throws(()=>launchOptions({...draft,accountId:'gone'},settings),/not configured/i);
  assert.throws(()=>launchOptions({...draft,isolation:'worktree'},settings),/local/i);
  assert.throws(()=>launchOptions({...draft,transport:'acp'},settings),/ACP/i);
@@ -49,7 +51,9 @@ test('ACP and worktree choices retain all typed routing fields',()=>{
 });
 test('ambient local class preview uses the same provider cap as runtime',()=>{
  const settings={...defaults,defaultDataClass:'D2'};
- assert.throws(()=>launchOptions(reconcileLaunchDraft(null,'codex',settings),settings),/at most D1.*D2/);
+ const options=launchOptions(reconcileLaunchDraft(null,'codex',settings),settings);
+ assert.deepEqual(launchPrivacyNotice(options,settings),{cap:'D1',dataClass:'D2'});
+ assert.throws(()=>launchOptions({...reconcileLaunchDraft(null,'codex',settings),dataClass:'D3'},settings),/at most D1.*D3/);
 });
 
 test('selected-file launch uses the prepared class and capsule identity and rejects unprepared drafts', () => {
@@ -123,6 +127,7 @@ test('launcher forwards literal task and scoped context, retains drafts and enfo
  assert.equal(reconcileLaunchDraft(draft,'claude',{...settings,lastDirectory:'/different'}),draft);
  assert.deepEqual(launchOptions({...draft,contextEnabled:false},settings).context,{enabled:false});
  assert.deepEqual(launchOptions(draft,{...settings,contextProfilesEnabled:false}).context,{enabled:false});
- assert.throws(()=>launchOptions({...reconcileLaunchDraft(null,'cursor',defaults),initialPrompt:'task'},defaults),/D2/);
+ const cursorTask=launchOptions({...reconcileLaunchDraft(null,'cursor',defaults),initialPrompt:'task'},defaults);
+ assert.equal(cursorTask.dataClass,'D2'); assert.deepEqual(launchPrivacyNotice(cursorTask,defaults),{cap:'D0',dataClass:'D2'});
  assert.throws(()=>launchOptions({...draft,currentContext:[...current,...current]},settings),/Duplicate/);
 });

@@ -1,3 +1,4 @@
+import { consumeRemoteSecretsPrefix, type RemoteSecretFile } from "./remoteSecretHandoff.ts";
 import type { RemoteHost } from "../../shared/contracts.ts";
 
 export interface RemoteAgentLaunch {
@@ -34,7 +35,7 @@ export function remoteAgentLaunch(
   host: RemoteHost,
   remoteWorkspace: string,
   command: string,
-  options: { args?: string[]; environment?: Record<string, string>; unsetEnvironment?: readonly string[]; absoluteExecutable?: boolean; accountHome?: string } = {}
+  options: { args?: string[]; environment?: Record<string, string>; unsetEnvironment?: readonly string[]; absoluteExecutable?: boolean; accountHome?: string; secretFile?: RemoteSecretFile } = {}
 ): RemoteAgentLaunch {
   if (typeof remoteWorkspace !== "string"
     || remoteWorkspace.length === 0
@@ -46,7 +47,8 @@ export function remoteAgentLaunch(
   }
   const words = options.args ?? [];
   if (words.some((word) => typeof word !== "string" || word.includes("\0"))) throw new Error("Invalid remote provider argument.");
-  const unset = options.unsetEnvironment ?? [];
+  // Forwarded variables are loaded by the prefix below and must survive the account environment reset.
+  const unset = (options.unsetEnvironment ?? []).filter((name) => !options.secretFile?.names.includes(name));
   const environment = Object.entries(options.environment ?? {});
   if ([...unset, ...environment.map(([name]) => name)].some((name) => !/^[A-Z][A-Z0-9_]*$/u.test(name))) throw new Error("Invalid remote environment variable.");
   const environmentArgs = [...unset.flatMap((name) => ["-u", name]), ...environment.map(([name, value]) => `${name}=${value}`)];
@@ -62,7 +64,7 @@ export function remoteAgentLaunch(
       "-tt",
       ...(host.sshPort ? ["-p", String(host.sshPort)] : []),
       ...(host.sshUser ? [`${host.sshUser}@${host.sshHost}`] : [host.sshHost]),
-      `${homeCheck}cd '${remoteWorkspace}' && exec ${invocation}`
+      `${homeCheck}${options.secretFile ? consumeRemoteSecretsPrefix(options.secretFile) : ""}cd '${remoteWorkspace}' && exec ${invocation}`
     ]
   };
 }

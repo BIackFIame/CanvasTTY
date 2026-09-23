@@ -18,6 +18,7 @@ import type {
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
+import { effortLabel } from "../../lib/effort";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
 import {
@@ -526,7 +527,8 @@ export function TerminalCard({
           )}
         </div>
         <div className="terminal-card__actions">
-          {(session.allowSubagents || session.role === 'orchestrator') && <span className="terminal-card__context-status" title={locale === 'ru' ? 'Разрешён запуск дочерних сессий в пределах правил и лимитов' : 'Child sessions permitted within rules and limits'}>{locale === 'ru' ? 'Субагенты' : 'Delegation'}</span>}
+          {session.role === 'subagent' && <span className="terminal-card__context-status terminal-card__role" title={locale === 'ru' ? 'Запущен оркестратором; управляется им в пределах правил и лимитов' : 'Launched by an orchestrator and controlled by it within rules and limits'}>{locale === 'ru' ? 'Субагент' : 'Subagent'}</span>}
+          {session.role !== 'subagent' && (session.allowSubagents || session.role === 'orchestrator') && <span className="terminal-card__context-status terminal-card__role" title={locale === 'ru' ? 'Оркестратор: может запускать дочерние сессии в пределах правил и лимитов' : 'Orchestrator: may launch child sessions within rules and limits'}>{locale === 'ru' ? 'Оркестратор' : 'Orchestrator'}</span>}
           {session.contextSummary && <span className="terminal-card__context-status" title={`${session.contextSummary.highestDisclosedClass}${session.contextSummary.policyModel ? ` · ${session.contextSummary.policyModel}` : ''}`}>
             {session.contextSummary.status === 'delivered' ? (locale === 'ru' ? 'Контекст передан' : 'Context sent') : session.contextSummary.status === 'waiting' ? (locale === 'ru' ? (session.transport === 'acp' ? 'Контекст: ждёт задачи' : 'Контекст: ожидает передачи') : (session.transport === 'acp' ? 'Context: next task' : 'Context pending')) : (locale === 'ru' ? 'Контекст: нет правил' : 'Context: no rules')}
           </span>}
@@ -534,6 +536,8 @@ export function TerminalCard({
             {session.execution.mode === 'container' ? t(locale, 'containers') : session.execution.state === "preparing" ? t(locale, "workspacePreparing") : session.execution.mode === "worktree" ? "Git worktree" : "ⓘ"}
           </span>}
           {session.integrationNote && <span title={session.integrationNote} aria-label={session.integrationNote}>ⓘ</span>}
+          {session.effort && <span className="terminal-card__context-status" title={`${t(locale, "launchEffort")}: ${effortLabel(locale, session.effort)}`}>{session.effort}</span>}
+          {session.privacyNotice && <span className="terminal-card__privacy-notice" role="note" title={t(locale, "sessionPrivacyNotice").replace("{class}", session.privacyNotice.dataClass).replace("{cap}", session.privacyNotice.cap)} aria-label={t(locale, "sessionPrivacyNotice").replace("{class}", session.privacyNotice.dataClass).replace("{cap}", session.privacyNotice.cap)}>{session.privacyNotice.dataClass}↑</span>}
           {session.exitCode !== null && (
             <button
               className="terminal-card__action terminal-card__action--restart"

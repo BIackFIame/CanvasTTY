@@ -1238,6 +1238,8 @@ button { border: 0; }
 .launch-context fieldset { padding: .8em; border: 1px solid color-mix(in srgb, var(--text-dark) 20%, transparent); border-radius: .7em; }
 .launch-context__preview pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 20em; overflow: auto; padding: .8em; border-radius: .7em; background: rgba(255,255,255,.4); font-size: .8em; }
 .terminal-card__context-status { min-width: 0; max-width: 11em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+/* The session role stays readable; the title and secondary statuses shrink first. */
+.terminal-card__role { flex: none; max-width: none; }
 
 /* Respond to the space beside the sidebar, including enlarged text. */
 @container settings-content (max-width: 40em) {
@@ -1273,3 +1275,24 @@ button { border: 0; }
 .canvas-overlay-panel > summary:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .canvas-overlay-panel__body { margin-top: 6px; }
 .canvas-overlay-slot--top-right .canvas-overlay-panel > summary, .canvas-overlay-slot--bottom-right .canvas-overlay-panel > summary { margin-left: auto; }
+
+/* Routing editors stay in document flow, including narrow scaled dialogs. */
+.decision-settings fieldset { min-width: 0; }
+.decision-editor, .launch-decision__result { display: grid; gap: 12px; min-width: 0; padding: 16px; border: 1px solid var(--border-color, #ffffff30); border-radius: 12px; }
+.decision-editor label, .launch-decision label { display: grid; gap: 6px; min-width: 0; }
+.decision-settings select, .decision-settings input, .launch-decision select { min-width: 0; width: 100%; max-width: 100%; box-sizing: border-box; }
+.decision-settings input[type="checkbox"] { width: auto; justify-self: start; }
+.decision-settings p, .launch-decision p, .launch-decision strong { overflow-wrap: anywhere; }
+.launch-decision { margin-block: 16px; padding: 14px; border: 1px solid var(--border-color, #ffffff30); border-radius: 12px; }
+.launch-decision summary { cursor: pointer; font-weight: 650; }
+.launch-decision > * + * { margin-top: 12px; }
+
+/* Ambient CLI privacy warning: visible, non-blocking. */
+.launch-privacy-notice { margin: 8px 0 0; padding: 8px 10px; border-radius: 8px; color: var(--text); background: color-mix(in srgb, #d9a400 16%, transparent); overflow-wrap: anywhere; }
+.terminal-card__privacy-notice { padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 650; color: var(--text); background: color-mix(in srgb, #d9a400 30%, transparent); cursor: help; }
+.decision-effort-group { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.decision-effort-group label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.decision-settings ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+.host-preparation { display: grid; gap: 4px; margin-top: 8px; }
+.host-preparation__log { margin: 0; padding: 8px; max-height: 8em; overflow: auto; border-radius: 8px; background: var(--surface-soft); font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.account-login { display: grid; gap: 6px; margin-top: 8px; justify-items: start; }

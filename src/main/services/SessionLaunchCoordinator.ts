@@ -6,7 +6,8 @@ import type { ContainerExecutionService } from "./ContainerExecutionService.ts";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from 'node:fs/promises';
 import { join, relative } from 'node:path';
-import type { AppSettings, ExecutionWorkspaceSummary, SessionMetadata } from '../../shared/contracts.ts';
+import type { AppSettings, ExecutionWorkspaceSummary, ProviderAccount, SessionMetadata } from '../../shared/contracts.ts';
+import { accountForwardsKey } from '../../shared/providerAccountPolicy.ts';
 import { assertIsolationRequest } from '../../shared/isolation.ts';
 import type { PreparedProviderAccountLaunch, ProviderAccountLaunchCoordinator } from './ProviderAccountLaunchService.ts';
 import type { WorktreeService } from './WorktreeService.ts';
@@ -21,10 +22,10 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
   private readonly capsules?: CapsuleLaunchService;
   private readonly accounts: ProviderAccountLaunchCoordinator;
   private readonly worktrees: WorktreeService;
-  private readonly settings: () => Pick<AppSettings, 'remoteHosts' | 'providerAccounts' | 'requiresSandboxProfiles'>;
+  private readonly settings: () => Pick<AppSettings, 'remoteHosts' | 'providerAccounts' | 'requiresSandboxProfiles'> & { apiProfiles?: AppSettings['apiProfiles'] };
   private readonly placement: Pick<HostPlacementService, 'place' | 'checkShell'>;
   constructor(accounts: ProviderAccountLaunchCoordinator, worktrees: WorktreeService,
-    settings: () => Pick<AppSettings, 'remoteHosts' | 'providerAccounts' | 'requiresSandboxProfiles'>, placement: Pick<HostPlacementService, 'place' | 'checkShell'>, containers?: ContainerExecutionService, capsules?: CapsuleLaunchService) {
+    settings: () => Pick<AppSettings, 'remoteHosts' | 'providerAccounts' | 'requiresSandboxProfiles'> & { apiProfiles?: AppSettings['apiProfiles'] }, placement: Pick<HostPlacementService, 'place' | 'checkShell'>, containers?: ContainerExecutionService, capsules?: CapsuleLaunchService) {
     this.accounts = accounts; this.worktrees = worktrees; this.settings = settings; this.placement = placement; this.containers = containers; this.capsules = capsules;
   }
   async prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; assertRoute?(): void; onStartupDisclosure?(): void; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch> {
@@ -62,7 +63,7 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
     if (metadata.hostId !== undefined) {
       if (!host) throw new Error('Selected remote host is no longer configured.');
       const account = initialSettings.providerAccounts.find(item => item.id === metadata.accountId);
-      if (account?.binding?.kind === 'api-profile' && mode !== 'container') throw new Error('Remote API accounts require a container and a credential provisioned on their fixed server.');
+      if (account?.binding?.kind === 'api-profile' && mode !== 'container' && !accountForwardsKey(account, metadata.provider as ProviderAccount['provider'], initialSettings.apiProfiles ?? [])) throw new Error('This remote API account needs a container and a credential on its server; only OpenCode accounts with a key saved in this app are forwarded directly.');
       // Shells have no provider endpoint or installation, but share bounded resource and capacity checks.
       if (metadata.provider === 'terminal' || mode === 'container') {
         if (mode === 'container') { remoteWorkspace = remotePathForHost(host, metadata.cwd) ?? undefined; if (!remoteWorkspace) throw new Error('Container source workspace is not mapped on the selected host.'); }

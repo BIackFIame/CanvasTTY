@@ -34,6 +34,10 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 }
 
 const api: CanvasTTYApi = {
+  decisions: {
+    recommend: input => ipcRenderer.invoke(IPC.decisionRecommend, input), launch: (id, position) => ipcRenderer.invoke(IPC.decisionLaunch, id, position), cancel: id => ipcRenderer.invoke(IPC.decisionCancel, id), assemble: efforts => ipcRenderer.invoke(IPC.decisionAssemble, efforts),
+    secretStatus: () => ipcRenderer.invoke(IPC.decisionSecretStatus), setSecret: value => ipcRenderer.invoke(IPC.decisionSecretSet, value), removeSecret: () => ipcRenderer.invoke(IPC.decisionSecretRemove)
+  },
   context: {
     source: cwd => ipcRenderer.invoke(IPC.contextSource, cwd),
     previewLaunch: request => ipcRenderer.invoke(IPC.contextLaunchPreview, request),
@@ -95,7 +99,12 @@ const api: CanvasTTYApi = {
     local: () => ipcRenderer.invoke(IPC.operationalMetricsLocal),
     remote: (hostId: string) => ipcRenderer.invoke(IPC.operationalMetricsRemote, hostId)
   },
-  hosts: { inspect: (hostId: string) => ipcRenderer.invoke(IPC.hostsInspect, hostId) },
+  accountLogin: { start: request => ipcRenderer.invoke(IPC.accountLogin, request) },
+  hosts: {
+    inspect: (hostId: string) => ipcRenderer.invoke(IPC.hostsInspect, hostId),
+    prepare: (hostIds: string[]) => ipcRenderer.invoke(IPC.hostsPrepare, hostIds),
+    prepareStatus: (jobIds: string[]) => ipcRenderer.invoke(IPC.hostsPrepareStatus, jobIds)
+  },
   clipboard: {
     readText: () => ipcRenderer.invoke(IPC.clipboardRead),
     writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)

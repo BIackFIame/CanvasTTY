@@ -1,3 +1,5 @@
+import { accountApiProfile, accountSupportsRuntime } from '../../shared/providerAccountPolicy.ts';
+import { providerEffortArguments, providerModelArguments } from './terminalLaunch.ts';
 import { ORCHESTRATION_ENV } from './agent-browser/orchestration-protocol.ts';
 import { assertOrchestrationHelperAvailable } from './agent-browser/ProviderLaunch.ts';
 import type { AgentProvider } from './agent-browser/protocol.ts';
@@ -173,6 +175,26 @@ export class TerminalManager {
 
   configureAcp(options: AcpOptions): void { this.acpOptions = options; }
 
+  private decisionInvalidated: (sessionId?: string) => void = () => {};
+  configureDecisionInvalidation(callback: (sessionId?: string) => void): void { this.decisionInvalidated = callback; }
+
+  /** Cached/static capability check: never prepare credentials or probe a CLI. */
+  assertDecisionRuntime(request: CreateSessionRequest, settings: import('../../shared/contracts.ts').AppSettings, remoteAvailable: (hostId: string, provider: import('../../shared/contracts.ts').AgentProviderId) => boolean): void {
+    const { disclosureClass: _floor, dataClassInherited: _inherited, ...publicRequest } = request as CreateSessionRequest & { disclosureClass?: DataClass; dataClassInherited?: boolean };
+    assertCreateRequest(publicRequest); assertTransport(request); this.assertDelegationAvailable(request);
+    if (!this.launchPolicy || request.provider === 'terminal') throw new Error('Routing requires the ordinary agent launch policy.');
+    const provider = request.provider;
+    const account = settings.providerAccounts.find(a => a.id === request.accountId);
+    if (account && !accountSupportsRuntime(account, provider, settings.apiProfiles)) throw new Error('Unsupported runtime/account tuple.');
+    const profile = account && accountApiProfile(account, settings.apiProfiles);
+    if (request.isolation?.mode === 'container') { if (!profile || !this.providerLaunch?.handlesTerminals) throw new Error('Container routing requires a complete supported API tuple.'); }
+    else if (request.hostId) { if (profile || !remoteAvailable(request.hostId, provider)) throw new Error('A current cached native runtime discovery is required.'); this.requireRemoteWorkspace(this.requireRemoteHost(request.hostId), request.cwd); }
+    else { const cli = this.providerClis.get(provider); if (cli.state !== 'available' || request.transport === 'acp' && cli.launcher !== 'native') throw new Error('Runtime is unavailable.'); }
+    if (request.isolation?.mode === 'worktree' && !this.providerLaunch?.handlesTerminals) throw new Error('Worktree preparation is unavailable.');
+    if (request.transport !== 'acp') { providerModelArguments(provider, profile && provider === 'minimax' ? undefined : request.model); providerEffortArguments(provider, request.effort); startupArguments(provider, { task: request.initialPrompt }); }
+    else if (provider === 'minimax' && !profile && request.model && !request.model.startsWith('m:') && !request.model.includes('/')) throw new Error('MiniMax ACP requires a qualified model.');
+  }
+
   configureLaunchPolicy(policy: SessionLaunchPolicy): void {
     this.launchPolicy = policy;
   }
@@ -286,7 +308,7 @@ export class TerminalManager {
 
   nativePlacementCandidates(request: CreateSessionRequest, launch: OwnedContextLaunch): Array<{ request: CreateSessionRequest; launch: OwnedContextLaunch }> {
     const base = { ...request, ...(launch.parentFloor ? { disclosureClass: launch.parentFloor } : {}) };
-    const candidates = this.launchPolicy?.fixedPlacementRequests(base) ?? [base];
+    const candidates = this.launchPolicy?.fixedPlacementRequests(base, this.listMetadata()) ?? [base];
     const accepted: Array<{ request: CreateSessionRequest; launch: OwnedContextLaunch }> = [];
     for (const candidate of candidates) {
       try { const selected = { ...launch }; accepted.push({ request: this.evaluateContextLaunch(candidate, selected), launch: selected }); } catch { /* An ineligible fixed tuple must never reach host probes. */ }
@@ -297,7 +319,7 @@ export class TerminalManager {
   }
 
   /** Main-only fixed plan selected before probes; no fallback after this call. */
-  createPlanned(request: CreateSessionRequest, launch: OwnedContextLaunch, guard?: () => void): SessionSnapshot { return this.createFixed(request, guard, launch); }
+  createPlanned(request: CreateSessionRequest, launch: OwnedContextLaunch, guard?: (excludeId?: string) => void): SessionSnapshot { return this.createFixed(request, guard, launch); }
 
   configureProviderLaunch(coordinator: ProviderAccountLaunchCoordinator): void { this.providerLaunch = coordinator; }
 
@@ -352,7 +374,7 @@ export class TerminalManager {
   capsuleAuthority(id: string): { generation: string; binding: string; cwd: string; dataClass: DataClass } {
     const session = this.sessions.get(id), metadata = session?.metadata;
     if (!session || !metadata || session.disposing || !this.launchPolicy || metadata.exitCode !== null || (!session.process && !session.acp) || metadata.hostId !== undefined || (metadata.isolation && metadata.isolation.mode !== 'direct') || metadata.provider === 'terminal' || (metadata.role !== 'orchestrator' && metadata.allowSubagents !== true)) throw new Error('Capsule operation is not authorized for this session.');
-    const current = this.launchPolicy.classify(metadata);
+    const current = this.launchPolicy.classify(metadata, false, this.listMetadata());
     if (current.accountId !== metadata.accountId || current.model !== metadata.model || current.dataClass !== metadata.dataClass) throw new Error('Parent launch policy changed; capsule operation is not authorized.');
     session.providerLaunch?.assertCurrent(metadata);
     return { generation: session.delegationGeneration, cwd: metadata.cwd, dataClass: current.dataClass,
@@ -361,7 +383,7 @@ export class TerminalManager {
 
   classifyLaunchRequest<T extends CreateSessionRequest>(request: T, forPlacement = false): T {
     assertTransport(request);
-    return this.launchPolicy?.classify(request, forPlacement) ?? request;
+    return this.launchPolicy?.classify(request, forPlacement, this.listMetadata()) ?? request;
   }
 
   placementAccounts(request: CreateSessionRequest): ProviderAccount[] | undefined {
@@ -414,6 +436,7 @@ export class TerminalManager {
   }
 
   async shutdown(): Promise<void> {
+    this.decisionInvalidated();
     this.shuttingDown = true;
     await this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
@@ -500,6 +523,7 @@ export class TerminalManager {
       ...(contextLaunch.intent?.enabled === false ? { contextDisabled: true } : {}),
       ...((request as CreateSessionRequest & { disclosureClass?: DataClass }).disclosureClass ? { disclosureClass: (request as CreateSessionRequest & { disclosureClass?: DataClass }).disclosureClass } : {}),
       ...(request.initialPrompt?.trim() ? { disclosureClass: maxClass((request as CreateSessionRequest & { disclosureClass?: DataClass }).disclosureClass ?? 'D0', 'D2') } : {}),
+      ...(request.initialPrompt?.trim() ? { taskPromptFloor: true as const } : {}),
       ...(contextLaunch.context ? { contextSummary: { ...contextLaunch.context.ref, digest: contextLaunch.context.digest, status: contextLaunch.context.text ? 'waiting' as const : 'empty' as const, highestDisclosedClass: 'D0' as const, ...(contextLaunch.intent?.categories ? { categories: contextLaunch.intent.categories } : {}), ...(request.model ? { policyModel: request.model } : {}) } } : {}),
       ...(request.transport === "acp" ? { transport: "acp" as const, acp: { phase: "starting" as const, output: "", models: [], permissions: [] } } : {}),
       revision: 0,
@@ -517,7 +541,9 @@ export class TerminalManager {
       ...(request.hostId !== undefined ? { hostId: request.hostId } : {}),
       ...(request.accountId !== undefined ? { accountId: request.accountId } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
+      ...((request as { privacyNotice?: SessionMetadata["privacyNotice"] }).privacyNotice ? { privacyNotice: (request as { privacyNotice?: SessionMetadata["privacyNotice"] }).privacyNotice } : {}),
       ...(role === "subagent" || request.allowSubagents !== undefined ? { allowSubagents: request.allowSubagents ?? false } : {}),
       ...(this.launchPolicy ? { dataClassInherited } : {}),
       status: initialSessionStatus(request.provider),
@@ -591,6 +617,7 @@ export class TerminalManager {
         session.metadata.contextSummary = { ...context.ref, digest: context.digest, status: context.text ? 'waiting' : 'empty', highestDisclosedClass: session.metadata.contextSummary?.highestDisclosedClass ?? 'D0', ...(session.contextLaunch.intent?.categories ? { categories: session.contextLaunch.intent.categories } : {}), ...(session.metadata.model ? { policyModel: session.metadata.model } : {}) };
       }
     } else if (session.metadata.contextSummary) session.metadata.contextSummary.status = 'empty';
+    this.decisionInvalidated(id);
     session.delegationGeneration = randomUUID();
     session.pendingInput = ""; session.initialPrompt = undefined;
     if (session.metadata.transport === "acp" || this.needsPreparedLaunch(session.metadata.provider)) {
@@ -670,7 +697,8 @@ export class TerminalManager {
     tryPtyOperation(() => process.write(data));
   }
 
-  sendAgentPrompt(id: string, text: string, submit = true): void {
+  /** `user` is a person typing into the card; `agent` is programmatic control and keeps provider estimates enforced. */
+  sendAgentPrompt(id: string, text: string, submit = true, origin: "user" | "agent" = "agent"): void {
     const session = this.sessions.get(id);
     if (!session || session.disposing || session.metadata.exitCode !== null) throw new Error("Agent session is unavailable.");
     if (session.metadata.transport === "acp") {
@@ -683,13 +711,14 @@ export class TerminalManager {
       plan?.capture?.assertCurrent(); plan?.assertAuthority?.();
       const parent = session.metadata.parentSessionId ? this.sessions.get(session.metadata.parentSessionId) : undefined;
       const floor = maxClass(session.metadata.disclosureClass ?? 'D0', parent?.metadata.disclosureClass ?? parent?.metadata.dataClass ?? 'D0');
-      const input = { ...session.metadata, disclosureClass: floor, model: session.confirmedPolicyModel, initialPrompt: text };
+      const input = { ...session.metadata, disclosureClass: floor, model: session.confirmedPolicyModel, initialPrompt: text, automated: origin === 'agent' };
       const evaluated = this.launchPolicy?.evaluateFixed(input, this.listMetadata(), id, plan?.capture);
       const context = evaluated?.context;
       const combined = context?.text ? `CanvasTTY context:\n${context.text}\n\nCanvasTTY task:\n${text}` : text;
       assertAcpPrompt(combined);
       if (evaluated) session.metadata.dataClass = evaluated.request.dataClass;
       session.metadata.disclosureClass = maxClass(floor, maxClass('D2', context?.includedDataClass ?? 'D0'));
+      session.metadata.taskPromptFloor = true;
       if (context) {
         session.contextLaunch = { ...plan, context };
         session.metadata.contextSummary = { ...context.ref, digest: context.digest, status: context.text ? 'delivered' : 'empty', highestDisclosedClass: maxClass(session.metadata.contextSummary?.highestDisclosedClass ?? 'D0', context.includedDataClass), ...(plan?.intent?.categories ? { categories: plan.intent.categories } : {}), ...(session.confirmedPolicyModel ? { policyModel: session.confirmedPolicyModel } : {}) };
@@ -702,11 +731,13 @@ export class TerminalManager {
       if (typeof text !== "string" || text.length === 0 || text.length >= MAX_PENDING_INPUT_CHARS) throw new Error("Agent pending input exceeds the limit or is invalid.");
       const parent = session.metadata.parentSessionId ? this.sessions.get(session.metadata.parentSessionId) : undefined;
       const floor = maxClass(session.metadata.disclosureClass ?? 'D0', parent?.metadata.disclosureClass ?? parent?.metadata.dataClass ?? 'D0');
-      const checked = this.launchPolicy?.check({ ...session.metadata, initialPrompt: text, disclosureClass: floor }, this.listMetadata(), id);
+      const checked = this.launchPolicy?.check({ ...session.metadata, initialPrompt: text, disclosureClass: floor, automated: origin === 'agent' }, this.listMetadata(), id);
       session.providerLaunch?.assertCurrent(session.metadata);
       if (checked && (checked.accountId !== session.metadata.accountId || checked.model !== session.metadata.model || checked.hostId !== session.metadata.hostId)) throw new Error('Running agent route changed; start a fresh session before sending a task.');
       if (checked) session.metadata.dataClass = checked.dataClass;
-      session.metadata.disclosureClass = maxClass(floor, 'D2'); this.schedulePersistence();
+      session.metadata.disclosureClass = maxClass(floor, 'D2');
+      session.metadata.taskPromptFloor = true;
+      this.schedulePersistence();
       this.input(id, submit ? `${text}\r` : text);
     }
   }
@@ -816,6 +847,7 @@ export class TerminalManager {
   }
 
   dispose(id: string): void {
+    this.decisionInvalidated(id);
     // Remove descendants first so their processes and capabilities cannot
     // outlive the ownership chain. The visited set also bounds corrupt legacy
     // descriptor cycles instead of recursing forever.
@@ -886,6 +918,7 @@ export class TerminalManager {
       ...(descriptor.hostId !== undefined ? { hostId: descriptor.hostId } : {}),
       ...(descriptor.accountId !== undefined ? { accountId: descriptor.accountId } : {}),
       ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
+      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {}),
       ...(descriptor.launchBinding !== undefined ? { launchBinding: descriptor.launchBinding } : {}),
       ...(descriptor.dataClass !== undefined ? { dataClass: descriptor.dataClass } : {}),
       ...(descriptor.role === "subagent" || descriptor.allowSubagents !== undefined ? { allowSubagents: descriptor.allowSubagents ?? false } : {}),
@@ -1223,6 +1256,7 @@ export class TerminalManager {
       },
       onExit: async () => {
         if (current()) {
+          this.decisionInvalidated(id);
           metadata.exitCode = 1; if (metadata.execution) metadata.execution.state = "retained";
           session.agentOrchestration?.cleanup(); session.agentOrchestration = null;
           this.flushOutput(id, session); this.emitSession(metadata); this.schedulePersistence();
@@ -1328,19 +1362,19 @@ export class TerminalManager {
         const command = prepared?.remoteExecutable ?? PROVIDER_CLI_DEFINITIONS[provider].commands[0];
         const remoteArguments = resolveTerminalLaunch(provider, profile, providerArgs, {
           providerCli: { state: "available", provider, executable: command, launcher: "native", environment: {}, checked: [] },
-          environment: providerEnvironment, model, resumePrevious, startup: startup ?? prepared?.startup
+          environment: providerEnvironment, model, effort: metadata.effort, resumePrevious, startup: startup ?? prepared?.startup
         });
         launch = remoteAgentLaunch(remoteHost, this.requireRemoteWorkspace(remoteHost, cwd), command, {
           args: remoteArguments.args as string[], environment: { ...providerEnvironment, ...remoteArguments.environment },
-          unsetEnvironment: prepared?.unsetEnvironment, absoluteExecutable: !!prepared, accountHome: prepared?.remoteAccountHome
+          unsetEnvironment: prepared?.unsetEnvironment, absoluteExecutable: !!prepared, accountHome: prepared?.remoteAccountHome, secretFile: prepared?.remoteSecretFile
         });
       } else if (remoteHost) {
-        launch = remoteTerminalLaunch(remoteHost, baseEnvironment);
+        launch = remoteTerminalLaunch(remoteHost, remotePathForHost(remoteHost, cwd));
       } else {
         launch = resolveTerminalLaunch(provider, profile, providerArgs, {
           environment: { ...baseEnvironment, ...providerEnvironment },
           ...(providerCli ? { providerCli } : {}),
-          resumePrevious, model, startup: startup ?? prepared?.startup
+          resumePrevious, model, effort: metadata.effort, startup: startup ?? prepared?.startup
         });
       }
       prepared?.assertCurrent(metadata);
@@ -1405,6 +1439,7 @@ export class TerminalManager {
       if (!current || current !== session || current.process !== process) return;
 
       this.flushOutput(id, current);
+      this.decisionInvalidated(id);
       current.metadata.exitCode = exitCode;
       if (current.metadata.execution) current.metadata.execution.state = "retained";
       current.metadata.status = exitCode === 0 ? "done" : "failed";

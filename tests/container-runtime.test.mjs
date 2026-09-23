@@ -347,6 +347,7 @@ original_realpath=os.path.realpath; original_isdir=os.path.isdir; original_stat=
 original_mkstemp=tempfile.mkstemp; original_mkdtemp=tempfile.mkdtemp
 mounts='1 0 0:1 / / ro - overlay overlay ro\n2 1 0:2 / /workspace rw - ext4 workspace rw\n3 1 0:3 / /tmp rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n'
 if mode=='readonly': mounts=mounts.replace('/workspace rw - ext4 workspace rw','/workspace ro - ext4 workspace ro')
+if len(sys.argv)>5: mounts+=sys.argv[5]
 files={'/proc/self/status':'NoNewPrivs:\t1\n'+''.join(k+':\t00000000\n' for k in ['CapInh','CapPrm','CapEff','CapBnd','CapAmb']),'/proc/self/cgroup':'0::/','/proc/self/mountinfo':mounts,'/sys/fs/cgroup/cpu.max':'200000 100000','/sys/fs/cgroup/memory.max':'1073741824','/sys/fs/cgroup/pids.max':'128'}
 def opened(path,*args,**kwargs): return io.StringIO(files[path]) if path in files else original_open(path,*args,**kwargs)
 builtins.open=opened
@@ -384,6 +385,14 @@ assert os.path.exists(os.path.join(workspace,marker['name'])) == readonly
   for (const runtime of ['minimax', 'omp']) {
     for (const mode of ['normal', 'readonly']) assert.doesNotThrow(() => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(mode === 'normal' ? CONTAINER_BOOTSTRAP : ADVISORY_CONTAINER_BOOTSTRAP), root, runtime, mode], { stdio: 'pipe' }));
     assert.throws(() => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(ADVISORY_CONTAINER_BOOTSTRAP), root, runtime, 'masquerading-rw'], { stdio: 'pipe' }));
+  }
+  // Podman adds /run/.containerenv to every container; only its read-only form is accepted, and host mounts stay rejected.
+  const withMount = line => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(CONTAINER_BOOTSTRAP), root, 'omp', 'normal', line], { stdio: 'pipe' });
+  await rm(join(root, 'omp-normal'), { recursive: true, force: true });
+  assert.doesNotThrow(() => withMount('4 1 0:4 /userdata/.containerenv /run/.containerenv ro,nosuid,nodev,noexec - tmpfs tmpfs rw\n'));
+  for (const line of ['4 1 0:4 /userdata/.containerenv /run/.containerenv rw,nosuid,nodev - tmpfs tmpfs rw\n', '4 1 0:4 /home/user /mnt/host ro - ext4 host ro\n']) {
+    await rm(join(root, 'omp-normal'), { recursive: true, force: true });
+    assert.throws(() => withMount(line));
   }
 });
 

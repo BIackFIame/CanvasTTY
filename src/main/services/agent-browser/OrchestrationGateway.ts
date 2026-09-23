@@ -127,6 +127,11 @@ export class OrchestrationGateway {
     });
     await chmod(this.socketEndpoint, 0o600);
     this.running = true;
+  }
+
+  /** The sweep runs only while a lease or connection exists, so an idle gateway has no timer. */
+  private ensureSweep(): void {
+    if (this.heartbeatTimer !== null || !this.running) return;
     this.heartbeatTimer = setInterval(() => this.sweepConnections(), this.heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
   }
@@ -182,6 +187,7 @@ export class OrchestrationGateway {
     });
     authenticated.catch(() => undefined);
     this.leases.set(lease.terminalSessionId, lease);
+    this.ensureSweep();
     return {
       address: this.socketEndpoint,
       connectionId,
@@ -217,6 +223,7 @@ export class OrchestrationGateway {
       closed: false
     };
     this.connections.add(connection);
+    this.ensureSweep();
     socket.on("data", (chunk: Buffer) => {
       if (connection.closed) return;
       try {
@@ -401,6 +408,10 @@ export class OrchestrationGateway {
     }
     for (const lease of [...this.leases.values()]) {
       if (!lease.used && this.now() > lease.expiresAt) this.expireLease(lease);
+    }
+    if (this.connections.size === 0 && this.leases.size === 0 && this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
   }
 }

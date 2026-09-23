@@ -1,22 +1,42 @@
 import { assertDelegationRoute } from '../../shared/delegationLaunch.ts';
+import { accountPrivacyDecision, ambientPrivacyBlockMessage, ambientPrivacyDecision, type AmbientPrivacyNotice } from "../../shared/ambientPrivacy.ts";
 import type { ContextLaunchCapture, ContextLaunchService, PreparedLaunchContext } from './ContextLaunchService.ts';
 import { selectLaunchAccount } from "../../shared/launchAccountPolicy.ts";
 export { selectLaunchAccount } from "../../shared/launchAccountPolicy.ts";
 import { assertContainerProfile } from "../../shared/containerProfiles.ts";
 import { assertIsolationRequest } from "../../shared/isolation.ts";
-import { accountConfiguredForRuntime, accountLaunchModel, accountRouteMaxDataClass } from "../../shared/providerAccountPolicy.ts";
+import { accountConfiguredForRuntime, accountForwardsKey, accountLaunchModel, accountRouteMaxDataClass } from "../../shared/providerAccountPolicy.ts";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import type { ApiProfile, AppSettings, CreateSessionRequest, DataClass, ProviderAccount, SessionMetadata } from "../../shared/contracts.ts";
-import { DATA_CLASSES, DATA_CLASS_RANK, DEFAULT_AGENT_BUDGETS, dataClassForPath, dataClassSatisfies, hostEffectiveMaxDataClass, isValidRemoteHost, providerMaxDataClass, providerPermittedOnHost } from "../../shared/contracts.ts";
+import { DATA_CLASSES, DATA_CLASS_RANK, DEFAULT_AGENT_BUDGETS, REASONING_EFFORTS, reasoningEffortsFor, dataClassForPath, dataClassSatisfies, hostEffectiveMaxDataClass, isValidRemoteHost, providerMaxDataClass, providerPermittedOnHost } from "../../shared/contracts.ts";
 
+type PolicyResult = { dataClass: DataClass; privacyNotice?: AmbientPrivacyNotice };
 type LaunchSettings = Pick<AppSettings, "defaultDataClass" | "pathPolicies" | "providerAccounts" | "remoteHosts" | "agentBudgets" | "maxAccountsPerProviderPerHost"> & { apiProfiles?: ApiProfile[]; requiresSandboxProfiles?: AppSettings["requiresSandboxProfiles"]; containerProfiles?: AppSettings["containerProfiles"] };
-type LaunchRequest = Pick<CreateSessionRequest, "isolation" | "provider" | "cwd" | "profile" | "model" | "accountId" | "dataClass" | "allowSubagents" | "role" | "parentSessionId" | "hostId" | "transport"> & { dataClassInherited?: boolean; initialPrompt?: string; disclosureClass?: DataClass };
+type LaunchRequest = Pick<CreateSessionRequest, "isolation" | "provider" | "cwd" | "profile" | "model" | "effort" | "accountId" | "dataClass" | "allowSubagents" | "role" | "parentSessionId" | "hostId" | "transport"> & { dataClassInherited?: boolean; initialPrompt?: string; taskPromptFloor?: boolean; disclosureClass?: DataClass;
+  /** Software, not a person, chose this route or text (agent control, routing). Policy-internal. */
+  automated?: boolean };
 
 /** Synchronous, live policy check at the actual process-launch boundary.
  * Path classification describes the task's cwd; it does not sandbox file reads.
  */
+/** A delegation chain whose root the person launched as an orchestrator carries that consent: the
+ * default class and the typed-task floor then warn, as for a direct launch. Explicit classes (a chosen
+ * class, path policies, capsules, disclosed context above the floor) and containers stay enforced. */
+function delegationConsented(request: Pick<LaunchRequest, "parentSessionId">, sessions: readonly SessionMetadata[]): boolean {
+  const seen = new Set<string>();
+  let id = request.parentSessionId;
+  while (id !== undefined && !seen.has(id)) {
+    seen.add(id);
+    const session = sessions.find((candidate) => candidate.id === id);
+    if (!session || (session.allowSubagents !== true && session.role !== "orchestrator")) return false;
+    if (session.parentSessionId === undefined) return true;
+    id = session.parentSessionId;
+  }
+  return false;
+}
+
 export class SessionLaunchPolicy {
   private readonly settings: () => LaunchSettings;
   private readonly repositoryRoot: (cwd: string) => string;
@@ -31,7 +51,7 @@ export class SessionLaunchPolicy {
   }
 
   /** Used before async placement as well as immediately before launch. */
-  classify<T extends LaunchRequest>(request: T, forPlacement = false): T & { dataClass: DataClass } {
+  classify<T extends LaunchRequest>(request: T, forPlacement = false, sessions: readonly SessionMetadata[] = []): T & PolicyResult {
     assertLaunchPolicyFields(request);
     assertDelegationRoute(request);
     assertIsolationRequest(request.isolation);
@@ -43,6 +63,10 @@ export class SessionLaunchPolicy {
       assertContainerProfile(profile);
       if (forPlacement || profile.hostId !== (request.hostId ?? "local")) throw new Error("Container launch requires the profile's exact execution host.");
       if (!profile.commands[request.provider]) throw new Error("Container profile has no supported command for this provider.");
+    }
+    if (request.effort !== undefined) {
+      if (!reasoningEffortsFor(request.provider).includes(request.effort)) throw new Error(`Reasoning effort ${String(request.effort)} is not supported by ${request.provider}.`);
+      if (request.transport === "acp" || request.isolation?.mode === "container") throw new Error("Reasoning effort is available only for PTY launches outside containers.");
     }
     if (request.hostId !== undefined && request.isolation?.mode === "worktree") throw new Error("Worktree isolation is supported only on the local computer.");
     if (settings.requiresSandboxProfiles?.includes(request.profile) && (!request.isolation || request.isolation.mode === "direct")) throw new Error("This launch profile requires a worktree or container.");
@@ -64,6 +88,9 @@ export class SessionLaunchPolicy {
     if (request.provider !== "terminal" && request.initialPrompt?.trim() && !(request.isolation?.mode === 'container' && request.isolation.capsuleId)) dataClass = maxClass(dataClass, 'D2');
     if (request.disclosureClass !== undefined) { assertDataClass(request.disclosureClass); dataClass = maxClass(dataClass, request.disclosureClass); }
     if (request.provider === "terminal") return { ...request, dataClass };
+    const privacy = { defaultDataClass: settings.defaultDataClass, initialPrompt: request.initialPrompt, taskPrompt: request.taskPromptFloor === true,
+      delegated: ((request.parentSessionId !== undefined || request.role === "subagent" || request.automated === true) && !delegationConsented(request, sessions))
+        || request.isolation?.mode === "container" };
     let account: ProviderAccount | undefined;
     if (forPlacement) {
       const candidates = this.placementAccounts({ ...request, dataClass });
@@ -71,21 +98,26 @@ export class SessionLaunchPolicy {
     } else {
       account = selectLaunchAccount(settings.providerAccounts, request.provider, request.model, request.accountId, dataClass, {
         hostId: request.hostId, limit: settings.maxAccountsPerProviderPerHost ?? 1
-      }, settings.apiProfiles);
+      }, settings.apiProfiles, privacy);
     }
-    if (!account && (!forPlacement || this.placementAccounts({ ...request, dataClass }) === undefined)) {
-      const providerCap = providerMaxDataClass(request.provider);
-      if (!dataClassSatisfies(dataClass, providerCap)) throw new Error(`Provider ${request.provider} handles at most ${providerCap}; this task is ${dataClass}.`);
+    let privacyNotice: AmbientPrivacyNotice | undefined;
+    if (account && !forPlacement) {
+      const decision = accountPrivacyDecision(account, request.provider, dataClass, privacy, settings.apiProfiles ?? [], request.model);
+      if (decision.kind === "warn") privacyNotice = decision.notice;
+    } else if (!account && (!forPlacement || this.placementAccounts({ ...request, dataClass }) === undefined)) {
+      const decision = ambientPrivacyDecision({ provider: request.provider, dataClass, ...privacy });
+      if (decision.kind === "block") throw new Error(ambientPrivacyBlockMessage(request.provider, decision.notice));
+      if (decision.kind === "warn") privacyNotice = decision.notice;
     }
     assertDelegationRoute(request, account);
     const launchModel = account ? accountLaunchModel(account, request.model, settings.apiProfiles ?? []) : undefined;
-    return { ...request, dataClass, ...(launchModel ? { model: launchModel } : {}), ...(account ? { accountId: account.id } : {}),
-      ...(forPlacement && account ? { hostId: account.hostId === "local" ? undefined : account.hostId } : {}) };
+    return { ...request, dataClass, privacyNotice, ...(launchModel ? { model: launchModel } : {}), ...(account ? { accountId: account.id } : {}),
+      ...(forPlacement && account && !accountForwardsKey(account, request.provider, settings.apiProfiles ?? []) ? { hostId: account.hostId === "local" ? undefined : account.hostId } : {}) };
 
   }
 
   /** One exact account/host route: mandatory payload first, optional context filtered to its actual cap. */
-  evaluateFixed<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[], excludeId?: string, capture?: ContextLaunchCapture): { request: T & { dataClass: DataClass }; context?: PreparedLaunchContext } {
+  evaluateFixed<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[], excludeId?: string, capture?: ContextLaunchCapture): { request: T & PolicyResult; context?: PreparedLaunchContext } {
     const base = this.check(request, sessions, excludeId);
     if (!capture || base.provider === 'terminal') return { request: base };
     if (!this.context) throw new Error('Context launch policy is unavailable.');
@@ -105,11 +137,14 @@ export class SessionLaunchPolicy {
   }
 
   /** Exact eligible native tuples, before network probes. */
-  fixedPlacementRequests<T extends LaunchRequest>(request: T): T[] {
-    const base = this.classify(request, true);
+  fixedPlacementRequests<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[] = []): T[] {
+    const base = this.classify(request, true, sessions);
     const accounts = this.placementAccounts(base);
     const settings = this.settings();
-    return accounts ? accounts.map(a => ({ ...request, accountId: a.id, hostId: a.hostId === 'local' ? undefined : a.hostId }))
+    // A forwarded-key account can run on any saved computer; others stay on their bound host.
+    return accounts ? accounts.flatMap(a => accountForwardsKey(a, request.provider as ProviderAccount['provider'], settings.apiProfiles ?? [])
+        ? [undefined, ...settings.remoteHosts.map(h => h.id)].map(hostId => ({ ...request, accountId: a.id, hostId }))
+        : [{ ...request, accountId: a.id, hostId: a.hostId === 'local' ? undefined : a.hostId }])
       : [undefined, ...settings.remoteHosts.map(h => h.id)].map(hostId => ({ ...request, hostId }));
   }
 
@@ -130,15 +165,17 @@ export class SessionLaunchPolicy {
     return accepted;
   }
 
-  check<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[], excludeId?: string): T & { dataClass: DataClass } {
-    const launch = this.classify(request);
+  check<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[], excludeId?: string): T & PolicyResult {
+    const launch = this.classify(request, false, sessions);
     const settings = this.settings();
     const budgets = settings.agentBudgets ?? DEFAULT_AGENT_BUDGETS;
     for (const [key, value] of Object.entries(budgets)) {
       if (!Number.isInteger(value) || value < 1 || value > (key === "maxDepth" ? 8 : 64)) throw new Error("Invalid agent concurrency budget.");
     }
     const active = sessions.filter((session) => session.id !== excludeId && session.exitCode === null);
-    if (launch.accountId !== undefined && active.some((session) => session.accountId === launch.accountId && session.hostId !== launch.hostId)) {
+    const launchAccount = settings.providerAccounts.find((account) => account.id === launch.accountId);
+    const forwarded = !!launchAccount && launch.provider !== "terminal" && accountForwardsKey(launchAccount, launch.provider, settings.apiProfiles ?? []);
+    if (launch.accountId !== undefined && !forwarded && active.some((session) => session.accountId === launch.accountId && session.hostId !== launch.hostId)) {
       throw new Error(`Account ${launch.accountId} is still running on another host; stop those sessions before moving its binding.`);
     }
     if (launch.hostId !== undefined) {
@@ -184,7 +221,8 @@ export function assertDataClass(value: unknown): asserts value is DataClass {
   if (!DATA_CLASSES.includes(value as DataClass)) throw new Error("Unknown data class; expected D0, D1, D2 or D3.");
 }
 
-export function assertLaunchPolicyFields(request: Pick<LaunchRequest, "model" | "accountId" | "dataClass" | "allowSubagents">): void {
+export function assertLaunchPolicyFields(request: Pick<LaunchRequest, "model" | "effort" | "accountId" | "dataClass" | "allowSubagents">): void {
+  if (request.effort !== undefined && !(REASONING_EFFORTS as readonly unknown[]).includes(request.effort)) throw new Error("Unknown reasoning effort.");
   if (request.dataClass !== undefined) assertDataClass(request.dataClass);
   if (request.model !== undefined && (typeof request.model !== "string" || request.model.trim().length === 0 || request.model.length > 100)) throw new Error("Agent model must be a non-blank string of at most 100 characters.");
   if (request.accountId !== undefined && (typeof request.accountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(request.accountId))) throw new Error("Agent account id must be an account id.");

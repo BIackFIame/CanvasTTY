@@ -30,8 +30,10 @@ def run():
             if mount == '/' and 'ro' not in options: raise ValueError('root is writable')
             if mount == '/tmp' and any(flag not in options for flag in ['rw','nosuid','nodev','noexec']): raise ValueError('temporary mount restrictions')
             if mount == '/workspace' and ('rw' not in options or any(field.startswith('shared:') for field in fields[6:fields.index('-')])): raise ValueError('workspace propagation')
+            # Podman always adds its container metadata file; it carries no host data but must stay read-only.
+            if mount == '/run/.containerenv' and 'ro' not in options: raise ValueError('container metadata is writable')
             if mount in ['/','/tmp','/workspace']: required_mounts.add(mount)
-            if mount in ['/', '/workspace', '/tmp', '/etc/hosts', '/etc/hostname', '/etc/resolv.conf'] or mount == '/proc' or mount.startswith('/proc/') or mount == '/sys' or mount.startswith('/sys/') or mount == '/dev' or mount.startswith('/dev/'): continue
+            if mount in ['/', '/workspace', '/tmp', '/etc/hosts', '/etc/hostname', '/etc/resolv.conf', '/run/.containerenv'] or mount == '/proc' or mount.startswith('/proc/') or mount == '/sys' or mount.startswith('/sys/') or mount == '/dev' or mount.startswith('/dev/'): continue
             raise ValueError('unexpected mount')
     if len(required_mounts) != 3: fail()
     if os.path.realpath('/workspace') != '/workspace' or not os.path.isdir('/workspace'): fail()

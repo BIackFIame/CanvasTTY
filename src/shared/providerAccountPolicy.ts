@@ -12,6 +12,20 @@ export function canonicalApiUrl(value: unknown): string {
   if ((url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "[::1]"].includes(url.hostname))) || url.username || url.password || url.search || url.hash || !url.hostname) throw new Error("API base URL must use HTTPS (or literal loopback HTTP), without credentials, query or fragment.");
   return url.toString().replace(/\/$/u, "");
 }
+/** Subscriptions whose vendor CLI can log in from a CanvasTTY terminal on the account's computer. */
+export const ACCOUNT_LOGIN_PROVIDERS: readonly AgentProviderId[] = Object.freeze(["codex", "claude"]);
+/** Runtimes that read a forwarded key from their environment on a remote server. */
+export const KEY_FORWARDING_RUNTIMES: readonly AgentProviderId[] = Object.freeze(["opencode"]);
+/** An API key kept in this app's vault is forwarded to a saved server per launch and never stored
+ * there, so such an account is not tied to one computer. Subscription logins stay on their host. */
+export function accountForwardsKey(account: ProviderAccount, provider: AgentProviderId, profiles: readonly ApiProfile[] = []): boolean {
+  if ((account.hostId ?? "local") !== "local" || account.binding?.kind !== "api-profile" || !KEY_FORWARDING_RUNTIMES.includes(provider)) return false;
+  const profile = profiles.find((candidate) => candidate.id === (account.binding as { profileId: string }).profileId);
+  return !!profile && (profile.hostId ?? "local") === "local" && isProviderSecretRef(profile.secretRef);
+}
+export function accountRunsOnHost(account: ProviderAccount, provider: AgentProviderId, hostId: string, profiles: readonly ApiProfile[] = []): boolean {
+  return (account.hostId ?? "local") === hostId || accountForwardsKey(account, provider, profiles);
+}
 export function accountApiProfile(account: ProviderAccount, profiles: readonly ApiProfile[]): ApiProfile | undefined {
   if (account.binding?.kind !== "api-profile") return undefined;
   const id = account.binding.profileId;

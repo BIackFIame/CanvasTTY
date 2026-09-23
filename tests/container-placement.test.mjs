@@ -182,8 +182,10 @@ test('delegation eligibility and live account affinity reject before probes', as
   f.sessions[0].allowSubagents = true;
   const selected = await f.service.resolve(request({ role: 'subagent', parentSessionId: 'parent' }));
   f.sessions[0].allowSubagents = false; assert.throws(() => selected.assertCurrent());
+  // A key kept in this app is forwarded per launch, so the same API account may already run on another computer.
+  // Subscription accounts keep strict host affinity (tests/api-key-forwarding.test.mjs).
   f.sessions[0].hostId = 'other';
-  const before = f.calls.inventory.length; assert.equal((await f.service.preview(request())).kind, 'none'); assert.equal(f.calls.inventory.length, before);
+  assert.equal((await f.service.preview(request())).kind, 'selected');
 });
 
 test('canonical project classification raises the class before engine or metrics probes', async () => {

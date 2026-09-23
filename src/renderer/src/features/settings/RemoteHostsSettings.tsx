@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type { AgentProviderId, AppSettings, DataClass, LocalOperationalMetrics, RemoteHost, SavedHostDiagnosticSnapshot, SessionSnapshot } from "../../../../shared/contracts";
+import type { AgentProviderId, AppSettings, DataClass, LocalOperationalMetrics, RemoteHost, SavedHostDiagnosticSnapshot, ServerPreparationJob, SessionSnapshot } from "../../../../shared/contracts";
 import { DATA_CLASSES, remoteHostInvalidReason } from "../../../../shared/contracts";
 import { hostDependents } from "../../../../shared/executionSettings";
 import { validatedConnectionsPatch } from "../../../../shared/connectionsSettings";
@@ -15,6 +15,29 @@ export function RemoteHostsSettings({ settings, active, sessions, recordId, sele
   const [busy, setBusy] = useState(false), [checking, setChecking] = useState(false), [error, setError] = useState(""), [notice, setNotice] = useState("");
   const [diagnostics, setDiagnostics] = useState<Record<string, { identity: string; snapshot: SavedHostDiagnosticSnapshot }>>({});
   const [localMetrics, setLocalMetrics] = useState<LocalOperationalMetrics | null>(null);
+  const [preparation, setPreparation] = useState<Record<string, ServerPreparationJob>>({});
+  const preparing = Object.values(preparation).filter(job => !job.finishedAt).map(job => job.jobId);
+  const preparingKey = preparing.join(",");
+  useEffect(() => {
+    if (!active || !preparingKey) return;
+    const timer = window.setInterval(() => {
+      void window.canvasTTY.hosts.prepareStatus(preparingKey.split(",")).then(jobs => setPreparation(old => ({ ...old, ...Object.fromEntries(jobs.map(job => [job.hostId, job])) }))).catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [active, preparingKey]);
+  const prepare = async (hostIds: string[]): Promise<void> => {
+    const jobIds = await window.canvasTTY.hosts.prepare(hostIds);
+    const jobs = await window.canvasTTY.hosts.prepareStatus(jobIds);
+    setPreparation(old => ({ ...old, ...Object.fromEntries(jobs.map(job => [job.hostId, job])) }));
+  };
+  const skipKey = { "api-blocked": "hostPrepareSkip_apiBlocked", "api-unknown": "hostPrepareSkip_apiUnknown", "host-rule": "hostPrepareSkip_hostRule", "not-installable": "hostPrepareSkip_notInstallable" } as const;
+  const preparationView = (job: ServerPreparationJob): React.JSX.Element => <div className="host-preparation" role="status">
+    <p><strong>{t(locale, `hostPreparePhase_${job.phase}` as TranslationKey)}</strong>{!job.finishedAt && " …"}</p>
+    {job.installed.length > 0 && <p>{t(locale, "hostPrepareInstalled")}: {job.installed.map(provider => PROVIDERS[provider].label).join(", ")}</p>}
+    {job.skipped.length > 0 && <p>{t(locale, "hostPrepareSkipped")}: {job.skipped.map(item => `${PROVIDERS[item.provider].label} (${t(locale, skipKey[item.reason])})`).join(", ")}</p>}
+    {job.error && <p className="agent-settings-error">{job.error}</p>}
+    {job.log.length > 0 && <pre className="host-preparation__log">{job.log.slice(-4).join("\n")}</pre>}
+  </div>;
   const heading = useRef<HTMLHeadingElement>(null), generation = useRef(0);
   useEffect(() => { if (recordId) { setSelectedId(recordId); setQuery(""); } }, [recordId, selectionRequest]);
   const saved = settings.remoteHosts.find(host => host.id === selectedId);
@@ -52,10 +75,10 @@ export function RemoteHostsSettings({ settings, active, sessions, recordId, sele
   const diagnostic = diagnostics[selectedId], snapshot = diagnostic?.snapshot;
   const metric = (value: number | null | undefined): string => value == null ? t(locale, "hostUnknown") : String(value);
   const observed = (at: number): string => `${t(locale, "hostMeasured")}: ${new Date(at).toLocaleString(locale)}`;
-  return <section className="api-profiles remote-hosts"><div className="agent-settings-heading"><h3>{t(locale, "hosts")}</h3><button className="agent-settings-button" type="button" disabled={busy} onClick={add}>{t(locale, "hostAdd")}</button></div>
+  return <section className="api-profiles remote-hosts"><div className="agent-settings-heading"><h3>{t(locale, "hosts")}</h3><div className="agent-settings-actions"><button className="agent-settings-button" type="button" disabled={busy || settings.remoteHosts.length === 0 || settings.remoteHosts.every(host => preparation[host.id] && !preparation[host.id]!.finishedAt)} onClick={() => void run(() => prepare(settings.remoteHosts.map(host => host.id)))}>{t(locale, "hostPrepareAll")}</button><button className="agent-settings-button" type="button" disabled={busy} onClick={add}>{t(locale, "hostAdd")}</button></div></div>
     <div className="api-profiles__workspace"><div className="api-profiles__catalog"><label className="agent-settings-field"><span>{t(locale, "hostSearch")}</span><input value={query} onChange={event => setQuery(event.target.value)} /></label><p className="agent-settings-hint">{filtered.length} / {catalog.length}</p><div className="api-profiles__list">
       <button type="button" className={`api-profiles__item${selectedId === "local" ? " api-profiles__item--active" : ""}`} onClick={() => select("local")}><strong>{t(locale, "accountLocalHost")}</strong></button>
-      {filtered.map(host => <button key={host.id} type="button" className={`api-profiles__item${selectedId === host.id ? " api-profiles__item--active" : ""}`} onClick={() => select(host.id)}><strong>{host.label}</strong><small>{host.sshHost}</small>{drafts[host.id] && <small>{t(locale, "connectionUnsaved")}</small>}</button>)}</div></div>
+      {filtered.map(host => <button key={host.id} type="button" className={`api-profiles__item${selectedId === host.id ? " api-profiles__item--active" : ""}`} onClick={() => select(host.id)}><strong>{host.label}</strong><small>{host.sshHost}</small>{drafts[host.id] && <small>{t(locale, "connectionUnsaved")}</small>}{preparation[host.id] && <small>{t(locale, `hostPreparePhase_${preparation[host.id]!.phase}` as TranslationKey)}</small>}</button>)}</div></div>
     <div className="api-profiles__editor"><h3 ref={heading} tabIndex={-1}>{selectedId === "local" ? t(locale, "accountLocalHost") : selected?.label ?? t(locale, "accountMissingHost")}</h3>
     {selectedId === "local" ? <p className="agent-settings-hint">{t(locale, "hostLocalNote")}</p> : draft && candidate && <>
       {!filtered.some(host => host.id === selectedId) && <p className="agent-settings-hint">{t(locale, "connectionHiddenSelection")} <button className="agent-settings-button" type="button" onClick={() => setQuery("")}>{t(locale, "connectionResetSearch")}</button></p>}
@@ -73,6 +96,9 @@ export function RemoteHostsSettings({ settings, active, sessions, recordId, sele
       <p id="host-form-error" className="agent-settings-error" role={invalid ? "alert" : undefined}>{invalid}</p>
       <div className="agent-settings-actions"><button type="button" className="agent-settings-button agent-settings-button--danger" disabled={busy || dependencies.length > 0} onClick={() => void run(remove)}>{t(locale, "connectionRemove")}</button><button type="button" className="agent-settings-button" disabled={busy || !dirty} onClick={() => draft.origin ? clear(selectedId) : void run(remove)}>{t(locale, "connectionDiscard")}</button><button type="button" className="agent-settings-button agent-settings-button--primary" disabled={busy || !dirty || conflict} onClick={() => void run(save)}>{t(locale, "save")}</button></div>
     </>}
+    {selectedId !== "local" && saved && <div className="connection-assessment"><h4>{t(locale, "hostPrepare")}</h4><p className="agent-settings-hint">{t(locale, "hostPrepareNote")}</p>
+      <button type="button" className="agent-settings-button" disabled={busy || dirty || (!!preparation[selectedId] && !preparation[selectedId]!.finishedAt)} onClick={() => void run(() => prepare([selectedId]))}>{t(locale, "hostPrepare")}</button>
+      {preparation[selectedId] && preparationView(preparation[selectedId]!)}</div>}
     <div className="connection-assessment"><h4>{t(locale, "hostDiagnostics")}</h4>{dirty && <p className="agent-settings-hint">{t(locale, "hostSaveBeforeProbe")}</p>}<button type="button" className="agent-settings-button" disabled={checking || !active || selectedId !== "local" && (!saved || dirty)} onClick={() => void inspect()}>{t(locale, checking ? "hostChecking" : selectedId === "local" ? "hostLocalInspect" : "hostInspect")}</button>
     {selectedId === "local" ? localMetrics ? <dl className="host-metrics"><dt>{t(locale, "hostMeasured")}</dt><dd>{new Date(localMetrics.collectedAt).toLocaleString(locale)}</dd><dt>{t(locale, "hostSessionsMetric")}</dt><dd>{localMetrics.activeSessions}</dd><dt>{t(locale, "hostLoadMetric")}</dt><dd>{metric(localMetrics.load1)}</dd><dt>{t(locale, "hostMemoryMetric")}</dt><dd>{metric(localMetrics.memoryAvailableMb)}</dd><dt>CanvasTTY CPU % / RAM MiB</dt><dd>{metric(localMetrics.cpuPercent)} / {metric(localMetrics.memoryWorkingSetMb)}</dd></dl> : <p>{t(locale, "hostNotChecked")}</p> : <><p className="agent-settings-hint">{t(locale, "hostProbeNote")}</p>{snapshot ? diagnostic?.identity !== savedIdentity || dirty ? <p role="status">{t(locale, "hostStale")}</p> : <>
       <p>{t(locale, snapshot.discovery.reachable ? "hostReachable" : "hostUnreachable")} · {observed(snapshot.discovery.collectedAt)}</p>{snapshot.discovery.detail && <p>{snapshot.discovery.detail}</p>}

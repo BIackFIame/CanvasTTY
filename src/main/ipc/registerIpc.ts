@@ -1,3 +1,8 @@
+import type { AccountLoginService } from '../services/AccountLogin.ts';
+import type { ServerProvisioning } from '../services/ServerProvisioning.ts';
+import type { DecisionCoordinator } from '../services/decision/DecisionCoordinator.ts';
+import type { DecisionSecrets } from '../services/decision/DecisionSecrets.ts';
+import type { DecisionInput } from '../../shared/decisions.ts';
 import type { PreferenceReviewService } from '../services/PreferenceReviewService';
 import type { AdvisoryReviewRequest } from '../../shared/capsules';
 import type { ConventionValidatorService } from '../services/ConventionValidatorService';
@@ -60,12 +65,15 @@ const MEDIA_MIME: Record<string, string> = {
 };
 
 interface Dependencies {
+  decisions: DecisionCoordinator; decisionSecrets: DecisionSecrets;
   contextProfiles: ContextProfileStore;
   conventionValidator: ConventionValidatorService;
   preferenceReview: PreferenceReviewService;
   capsuleTests: CapsuleTestService;
   capsules: CapsuleLaunchService;
   hostDiagnostics: SavedHostDiagnostics;
+  serverProvisioning: ServerProvisioning;
+  accountLogin: AccountLoginService;
   containers: ContainerExecutionService;
   worktrees: WorktreeService;
   localMetrics: LocalOperationalMetricsService;
@@ -94,12 +102,15 @@ interface Dependencies {
 }
 
 export function registerIpc({
+  decisions, decisionSecrets,
   contextProfiles,
   capsuleTests,
   conventionValidator,
   preferenceReview,
   capsules,
   hostDiagnostics,
+  serverProvisioning,
+  accountLogin,
   containers,
   worktrees,
   localMetrics,
@@ -126,6 +137,13 @@ export function registerIpc({
   requestPluginCanvas,
   broadcastPluginStorageChange
 }: Dependencies): void {
+  ipcMain.handle(IPC.decisionRecommend, (event, input: DecisionInput) => { assertMainRenderer(event, getMainWindow); return decisions.recommend(input); });
+  ipcMain.handle(IPC.decisionLaunch, (event, id: string, position: { x: number; y: number }) => { assertMainRenderer(event, getMainWindow); return decisions.launch(id, undefined, position); });
+  ipcMain.handle(IPC.decisionCancel, (event, id: string) => { assertMainRenderer(event, getMainWindow); return decisions.cancel(id); });
+  ipcMain.handle(IPC.decisionAssemble, (event, efforts: unknown) => { assertMainRenderer(event, getMainWindow); return decisions.assemble(efforts); });
+  ipcMain.handle(IPC.decisionSecretStatus, event => { assertMainRenderer(event, getMainWindow); return decisionSecrets.status(); });
+  ipcMain.handle(IPC.decisionSecretSet, (event, value: string) => { assertMainRenderer(event, getMainWindow); return decisionSecrets.set(value); });
+  ipcMain.handle(IPC.decisionSecretRemove, event => { assertMainRenderer(event, getMainWindow); return decisionSecrets.remove(); });
   ipcMain.handle(IPC.contextSource, (event, cwd: string) => {
     assertMainRenderer(event, getMainWindow); contextText(cwd, 4096, 'source path');
     return settings.get().contextProfilesEnabled ? contextProfiles.source(cwd) : { enabled: false, tasks: [] };
@@ -165,6 +183,9 @@ export function registerIpc({
     return localMetrics.collect();
   });
   ipcMain.handle(IPC.hostsInspect, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return hostDiagnostics.inspect(id); });
+  ipcMain.handle(IPC.accountLogin, (event, request: unknown) => { assertMainRenderer(event, getMainWindow); return accountLogin.start(request); });
+  ipcMain.handle(IPC.hostsPrepare, (event, hostIds: unknown) => { assertMainRenderer(event, getMainWindow); return serverProvisioning.start(hostIds); });
+  ipcMain.handle(IPC.hostsPrepareStatus, (event, jobIds: unknown) => { assertMainRenderer(event, getMainWindow); return serverProvisioning.status(jobIds); });
   ipcMain.handle(IPC.operationalMetricsRemote, (event, hostId: unknown) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof hostId !== "string" || hostId.length > 64) throw new Error("A configured remote host id is required.");
@@ -269,6 +290,7 @@ export function registerIpc({
   ipcMain.handle(IPC.settingsUpdate, async (event, patch: Partial<AppSettings>) => {
     assertMainRenderer(event, getMainWindow);
     const next = await settings.update(patch);
+    decisions?.invalidate();
     await applyBrowserSettings(next);
     return next;
   });
@@ -765,7 +787,7 @@ export function registerIpc({
   });
   ipcMain.handle(IPC.terminalCreate, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return request?.containerPlacement !== undefined ? terminals.createWithPlacement(request) : terminals.create(request); });
   ipcMain.handle(IPC.terminalContainerPlacementPreview, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return terminals.previewContainerPlacement(request); });
-  ipcMain.handle(IPC.terminalAgentPrompt, (event, id: string, text: string) => { assertMainRenderer(event, getMainWindow); return terminals.sendAgentPrompt(id, text); });
+  ipcMain.handle(IPC.terminalAgentPrompt, (event, id: string, text: string) => { assertMainRenderer(event, getMainWindow); return terminals.sendAgentPrompt(id, text, true, 'user'); });
   ipcMain.handle(IPC.terminalCancelTurn, (event, id: string) => { assertMainRenderer(event, getMainWindow); return terminals.cancelAgentTurn(id); });
   ipcMain.handle(IPC.terminalAcpPermission, (event, id: string, requestId: string, optionId: string) => { assertMainRenderer(event, getMainWindow); return terminals.decideAcpPermission(id, requestId, optionId); });
   ipcMain.handle(IPC.terminalAcpModel, (event, id: string, value: string) => { assertMainRenderer(event, getMainWindow); return terminals.selectAcpModel(id, value); });

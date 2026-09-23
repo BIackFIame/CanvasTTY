@@ -1,7 +1,7 @@
 import { startupParts, type AgentStartup } from "./AgentStartup.ts";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
-import type { ProviderId } from "../../shared/contracts.ts";
+import { reasoningEffortsFor, type ProviderId, type ReasoningEffort } from "../../shared/contracts.ts";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import {
   providerTerminalBatchCommandLine,
@@ -22,6 +22,7 @@ interface LaunchResolutionOptions {
   providerCli?: ProviderCliResolution;
   resumePrevious?: boolean;
   model?: string;
+  effort?: ReasoningEffort;
 }
 
 const WINDOWS_NATIVE_EXTENSIONS = [".exe", ".com"];
@@ -58,6 +59,7 @@ export function resolveTerminalLaunch(
     ...agentBrowserArgs,
     ...startup.contextArgs,
     ...providerModelArguments(provider, options.model),
+    ...providerEffortArguments(provider, options.effort),
     ...(options.resumePrevious ? RESUME_ARGUMENTS[provider] : []),
     ...startup.taskArgs
   ];
@@ -184,6 +186,16 @@ function findWindowsNativeCommand(
     }
   }
   return null;
+}
+
+/** Verified per-CLI reasoning-effort flags; unsupported agents fail instead of ignoring the request. */
+export function providerEffortArguments(provider: Exclude<ProviderId, "terminal">, effort?: ReasoningEffort): string[] {
+  if (effort === undefined) return [];
+  if (!reasoningEffortsFor(provider).includes(effort)) throw new Error(`Reasoning effort ${String(effort)} is not supported by ${provider}.`);
+  if (provider === "codex") return ["-c", `model_reasoning_effort="${effort}"`];
+  if (provider === "claude") return ["--effort", effort];
+  if (provider === "grok") return ["--reasoning-effort", effort];
+  throw new Error(`Reasoning effort is not supported by ${provider}.`);
 }
 
 export function providerModelArguments(provider: Exclude<ProviderId, "terminal">, model?: string): string[] {

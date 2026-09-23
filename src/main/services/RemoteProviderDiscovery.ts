@@ -40,6 +40,13 @@ const DETAIL_MAX_LENGTH = 300;
 // Inert by design: constructing the service spawns nothing. Each discover()
 // cache miss runs one ssh invocation; concurrent identical reads share it.
 export class RemoteProviderDiscovery {
+  private readonly observed = new Map<string, RemoteDiscoveryResult>();
+  /** Presence facts only, bounded and short-lived. This method never probes. */
+  cachedAvailable(host: RemoteHost, provider: AgentProviderId): boolean {
+    const result = this.observed.get(remoteProbeKey(host, provider));
+    const found = result?.providers.find(p => p.provider === provider);
+    return !!result?.reachable && this.now() - result.collectedAt < 30000 && !!found?.installed && !!found.path?.startsWith('/');
+  }
   private readonly run: RemoteHostRunner;
   private readonly cache: ProbeCache<RemoteDiscoveryResult>;
   private readonly now: () => number;
@@ -59,7 +66,10 @@ export class RemoteProviderDiscovery {
       return { hostId, collectedAt: this.now(), reachable: false, providers: [], detail: invalidReason };
     }
     const providers = PROVIDER_CLI_IDS.filter((provider) => probeProviders.includes(provider));
-    return this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.discoverUncached(host, timeoutMs, providers));
+    const result = await this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.discoverUncached(host, timeoutMs, providers));
+    for (const provider of providers) this.observed.set(remoteProbeKey(host, provider), structuredClone(result));
+    while (this.observed.size > 512) this.observed.delete(this.observed.keys().next().value!);
+    return result;
   }
 
   private async discoverUncached(host: RemoteHost, timeoutMs: number, providers: readonly AgentProviderId[]): Promise<RemoteDiscoveryResult> {

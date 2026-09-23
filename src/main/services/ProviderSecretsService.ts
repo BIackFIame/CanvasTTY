@@ -15,6 +15,9 @@ type OwnerAllowed = (owner: ProviderSecretOwner, pendingCreation: boolean) => bo
 export class ProviderSecretsService {
   private readonly root: string;
   private revision = 0;
+  private readonly changedListeners = new Set<() => void>();
+  onChanged(listener: () => void): () => void { this.changedListeners.add(listener); return () => { this.changedListeners.delete(listener); }; }
+  private changed(): void { this.revision++; for (const listener of this.changedListeners) listener(); }
   get generation(): number { return this.revision; }
   private write: Promise<void> = Promise.resolve();
   private readonly encryption: SecretEncryption;
@@ -87,14 +90,14 @@ export class ProviderSecretsService {
   private async mutate(mutation: (entries: Entries) => void): Promise<void> {
     const operation = async (): Promise<void> => {
       const values = await this.read(); mutation(values); validateEntries(values);
-      if (Object.keys(values).length === 0) { await rm(this.root, { force: true }); this.revision++; return; }
+      if (Object.keys(values).length === 0) { await rm(this.root, { force: true }); this.changed(); return; }
       const plaintext = JSON.stringify({ version: 2, entries: values });
       if (Buffer.byteLength(plaintext) > LIMIT.payloadBytes) throw new Error("Provider secrets exceed the serialized storage quota.");
       const encrypted = this.encryption.encrypt(plaintext);
       if (encrypted.byteLength > LIMIT.encryptedBytes) throw new Error("Encrypted provider secrets exceed the storage quota.");
       const temporary = `${this.root}.${randomUUID()}.tmp`;
       await mkdir(dirname(this.root), { recursive: true });
-      try { await writeFile(temporary, encrypted, { mode: 0o600, flag: "wx" }); await rename(temporary, this.root); this.revision++; }
+      try { await writeFile(temporary, encrypted, { mode: 0o600, flag: "wx" }); await rename(temporary, this.root); this.changed(); }
       finally { await rm(temporary, { force: true }); }
     };
     const next = this.write.then(operation, operation);

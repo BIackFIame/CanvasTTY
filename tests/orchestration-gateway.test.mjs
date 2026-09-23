@@ -380,3 +380,13 @@ test('authenticated cancellation reaches the active operation before it mutates 
   assert.equal(receivedSignal.aborted, true);
   client.socket.destroy(); terminals.disposeAll();
 });
+
+test("an idle gateway keeps no sweep timer until a lease or connection exists", async t => {
+  const { gateway } = await fixture(t);
+  assert.equal(gateway.heartbeatTimer, null);
+  gateway.registerOrchestrator({ terminalSessionId: "idle-check" });
+  assert.notEqual(gateway.heartbeatTimer, null);
+  gateway.revokeTerminalSession("idle-check");
+  gateway.sweepConnections();
+  assert.equal(gateway.heartbeatTimer, null);
+});

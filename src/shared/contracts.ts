@@ -186,6 +186,7 @@ export const DEFAULT_AGENT_BUDGETS: Readonly<AgentBudgets> = Object.freeze({
 });
 
 export interface AppSettings {
+  decisions: import('./decisions.ts').DecisionSettings;
   locale: LocaleId;
   restoreTerminalSessions: boolean;
   /** Manual profiles remain available; runtime delivery is explicitly opt-in. */
@@ -298,10 +299,24 @@ export interface RetainedWorkspace {
 }
 export interface WorkspaceReview { workspaceId: string; reviewId: string; patch: string; limitations: string[]; baseCommit: string; createdAt: number }
 export interface RemoteWorkspaceReview extends WorkspaceReview { generationId: string; hostId: string; digest: string; headCommit: string; untrackedFiles: number; ignoredFiles: number }
-export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "containerPlacement" | "accountId" | "hostId" | "model" | "transport" | "dataClass" | "context" | "initialPrompt" | "allowSubagents">;
+export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "containerPlacement" | "accountId" | "hostId" | "model" | "effort" | "transport" | "dataClass" | "context" | "initialPrompt" | "allowSubagents">;
 
 export type SessionTransport = "pty" | "acp";
 export const ACP_PROVIDERS: readonly ProviderId[] = ["cursor", "minimax", "kimi"];
+/** How hard a reasoning model thinks. More effort usually spends more tokens and time
+ * and can change answer quality, so it is a separate launch and routing dimension. */
+export const REASONING_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ReasoningEffort = typeof REASONING_EFFORTS[number];
+/** Only levels verified against each CLI: `claude --help`, `grok --help` and the Codex
+ * `model_reasoning_effort` config reference. Other agents select effort through the model. */
+export const PROVIDER_REASONING_EFFORTS: Readonly<Partial<Record<AgentProviderId, readonly ReasoningEffort[]>>> = Object.freeze({
+  codex: Object.freeze(["minimal", "low", "medium", "high", "xhigh"] as const),
+  claude: Object.freeze(["low", "medium", "high", "xhigh", "max"] as const),
+  grok: Object.freeze(["low", "medium", "high", "xhigh"] as const)
+});
+export function reasoningEffortsFor(provider: ProviderId): readonly ReasoningEffort[] {
+  return provider === "terminal" ? [] : PROVIDER_REASONING_EFFORTS[provider] ?? [];
+}
 export interface AcpModelOption { value: string; name: string }
 export interface AcpPermission { requestId: string; title: string; options: { optionId: string; name: string; kind: string }[] }
 export interface AcpSessionState {
@@ -337,6 +352,8 @@ export interface CreateSessionRequest {
    *  AppSettings.providerAccounts entry with a fixed host binding. */
   accountId?: string;
   model?: string;
+  /** Explicit reasoning effort; absent keeps the CLI or account default. */
+  effort?: ReasoningEffort;
   dataClass?: DataClass;
   /** Explicit per-launch permission to delegate; false by default. */
   allowSubagents?: boolean;
@@ -347,6 +364,9 @@ export interface SessionMetadata {
   contextDisabled?: boolean;
   /** Conservative conversation floor, independent of live defaults and deleted rules. */
   disclosureClass?: DataClass;
+  /** Main-owned: the conversation floor came from task text, so later checks treat it like a task
+   * (warn where the launch is direct or consented) rather than an explicit classification (block). */
+  taskPromptFloor?: true;
   contextSummary?: import('./contextRuntime.ts').ContextDeliverySummary;
   transport?: SessionTransport;
   acp?: AcpSessionState;
@@ -372,11 +392,14 @@ export interface SessionMetadata {
    *  AppSettings.providerAccounts entry. */
   accountId?: string;
   model?: string;
+  effort?: ReasoningEffort;
   dataClass?: DataClass;
   /** Main-generated nonsecret digest; resume must keep the same account route. */
   launchBinding?: string;
   /** Actual adapter limitations for this session, distinct from provider-wide capabilities. */
   integrationNote?: string;
+  /** Main-computed: a direct launch without an account exceeds the provider's static estimate. Never persisted. */
+  privacyNotice?: import("./ambientPrivacy.ts").AmbientPrivacyNotice;
   /** Re-evaluate the live default for sessions without an explicit class. */
   dataClassInherited?: boolean;
   allowSubagents?: boolean;
@@ -978,7 +1001,7 @@ export const PROVIDER_API_ENDPOINTS: Readonly<Record<AgentProviderId, string>> =
   grok: "api.x.ai",
   omp: "omp.sh",
   pi: "pi.dev",
-  cursor: "api2.cursor.com",
+  cursor: "api2.cursor.sh",
   minimax: "api.minimax.io",
   devin: "api.devin.ai",
   antigravity: "antigravity.google"
@@ -1035,15 +1058,15 @@ export const PROVIDER_CAPABILITIES: Readonly<Record<AgentProviderId, AgentCapabi
   codex: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
   claude: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
   qwen: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
-  kimi: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
+  kimi: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: true }),
   // OpenCode reports status through its structured event plugin.
   opencode: Object.freeze({ send: true, observe: true, lifecycle: "structured", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
   hermes: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "mcp", acp: false }),
   grok: Object.freeze({ send: true, observe: true, lifecycle: "hooks", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
   omp: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
   pi: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
-  cursor: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
-  minimax: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
+  cursor: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: true }),
+  minimax: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: true }),
   devin: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false }),
   antigravity: Object.freeze({ send: true, observe: true, lifecycle: "process", result: "terminal", approvals: "terminal", browser: "none", acp: false })
 });
@@ -1884,6 +1907,19 @@ export interface RemoteHostUtilization {
 }
 
 export interface AccountHomeInspection { canonicalPath: string; }
+/** Progress of one automatic server preparation (packages and agent CLIs over SSH). */
+export interface ServerPreparationJob {
+  jobId: string;
+  hostId: string;
+  phase: "queued" | "checking" | "swap" | "packages" | "agents" | "verifying" | "done" | "failed";
+  log: string[];
+  installed: AgentProviderId[];
+  skipped: Array<{ provider: AgentProviderId; reason: "api-blocked" | "api-unknown" | "host-rule" | "not-installable" }>;
+  error?: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
 export interface SavedHostDiagnosticSnapshot {
   hostId: string;
   discovery: { collectedAt: number; reachable: boolean; providers: Array<{ provider: AgentProviderId; installed: boolean; command?: string; path?: string }>; detail?: string };
@@ -1892,9 +1928,16 @@ export interface SavedHostDiagnosticSnapshot {
 }
 
 export interface CanvasTTYApi {
+  decisions: import('./decisions.ts').DecisionApi;
   context: import('./contextProfiles.ts').ContextApi;
   capsules: import('./capsules.ts').CapsulesApi;
-  hosts: { inspect(hostId: string): Promise<SavedHostDiagnosticSnapshot>; };
+  accountLogin: { start(request: { accountId: string; provider: AgentProviderId; hostId: string; directory: string }): Promise<{ directory: string; sessionId: string }> };
+  hosts: {
+    inspect(hostId: string): Promise<SavedHostDiagnosticSnapshot>;
+    /** Starts background preparation of saved servers; returns one job id per server. */
+    prepare(hostIds: string[]): Promise<string[]>;
+    prepareStatus(jobIds: string[]): Promise<ServerPreparationJob[]>;
+  };
   accountHomes: { inspect(directory: string): Promise<AccountHomeInspection>; };
   evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
@@ -2066,6 +2109,7 @@ export const IPC = {
   contextTask: "context:task",
   contextRule: "context:rule",
   contextRemove: "context:remove",
+  decisionRecommend: "decision:recommend", decisionLaunch: "decision:launch", decisionCancel: "decision:cancel", decisionAssemble: "decision:assemble", decisionSecretStatus: "decision:secret-status", decisionSecretSet: "decision:secret-set", decisionSecretRemove: "decision:secret-remove",
   contextPreview: "context:preview",
   contextFeedbackSessions: "context:feedback-sessions",
   contextLearning: "context:learning",
@@ -2106,6 +2150,9 @@ export const IPC = {
   operationalMetricsLocal: "operational-metrics:local",
   operationalMetricsRemote: "operational-metrics:remote",
   hostsInspect: "hosts:inspect",
+  hostsPrepare: "hosts:prepare",
+  accountLogin: "accounts:login",
+  hostsPrepareStatus: "hosts:prepare-status",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   accountHomesInspect: "account-homes:inspect",
@@ -2201,9 +2248,9 @@ export const IPC = {
   terminalList: "terminal:list",
   terminalReadBuffer: "terminal:read-buffer",
   terminalCreate: "terminal:create",
+  terminalContainerPlacementPreview: "terminal:container-placement-preview",
   agentsAvailability: "agents:availability",
   agentsRecheck: "agents:recheck",
-  terminalContainerPlacementPreview: "terminal:container-placement-preview",
   terminalRestart: "terminal:restart",
   terminalAgentPrompt: "terminal:agent-prompt",
   terminalCancelTurn: "terminal:cancel-turn",

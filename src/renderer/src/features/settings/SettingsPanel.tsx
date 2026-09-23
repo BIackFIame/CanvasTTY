@@ -1,3 +1,5 @@
+import { launchableProviders } from "../../../../shared/agentAvailability";
+import { DecisionSettings } from './DecisionSettings';
 import { useDialogFocus } from "../../lib/useDialogFocus";
 import { ContextSettings } from "./ContextSettings";
 import type { SettingsLocation } from "../../../../shared/settingsLocation";
@@ -89,7 +91,7 @@ import { setCanvasLauncherItemEnabled } from "../launcher/canvasLauncher";
 import { itemLabel } from "../launcher/QuickRadialMenu";
 import { setRadialLauncherItemEnabled } from "../launcher/radialLauncher";
 
-type SettingsSection = "context" | "general" | "appearance" | "agents" | "connections" | "execution" | "controls" | "browser" | "plugins" | "about";
+type SettingsSection = "decisions" | "context" | "general" | "appearance" | "agents" | "connections" | "execution" | "controls" | "browser" | "plugins" | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
@@ -100,7 +102,8 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "agents", icon: "terminal" },
   { id: "connections", icon: "blocks" },
   { id: "execution", icon: "folder" },
-  { id: "context", icon: "blocks" },
+  { id: "context", icon: "sticky-note" },
+  { id: "decisions", icon: "arrow" },
   { id: "controls", icon: "sliders-horizontal" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
@@ -228,6 +231,7 @@ export function SettingsPanel({
     }
   };
 
+  const launchable = launchableProviders(AGENT_PROVIDERS, agentAvailability, settings);
   const missingAgentRow = (provider: AgentProviderId, label = PROVIDERS[provider].label): React.JSX.Element => (
     <div className="agent-launcher-settings__row" key={provider}>
       <span className="agent-launcher-settings__identity">
@@ -427,6 +431,7 @@ export function SettingsPanel({
             role="tabpanel"
             aria-labelledby={`settings-tab-${section}`}
           >
+          {section === "decisions" && <DecisionSettings settings={settings} onPersist={onPersist} />}
           {(contextVisited || section === "context") && <div hidden={section !== "context"} inert={!open || section !== "context"}><ContextSettings settings={settings} active={open && section === "context"} onPersist={onPersist} /></div>}
           {section === "general" && (
             <>
@@ -625,7 +630,7 @@ export function SettingsPanel({
                 <div className="canvas-menu canvas-launcher-settings-menu">
                   <CanvasMenuLabel>{t(locale, "canvasLauncherSettingsLabel")}</CanvasMenuLabel>
                   {CANVAS_LAUNCHER_ITEMS.map((item: CanvasLauncherItemId) => {
-                    if (item !== "terminal" && !agentAvailability?.[item]) return missingAgentRow(item);
+                    if (item !== "terminal" && !launchable.has(item)) return missingAgentRow(item);
                     const enabled = settings.canvasLauncherItems.includes(item);
                     return (
                       <CanvasMenuRow
@@ -666,7 +671,7 @@ export function SettingsPanel({
                 <div className="canvas-menu canvas-launcher-settings-menu">
                   <CanvasMenuLabel>{t(locale, "quickLauncherCount").replace("{count}", String(settings.radialLauncherItems.length))}</CanvasMenuLabel>
                   {RADIAL_LAUNCHER_ITEMS.map((item: RadialLauncherItemId) => {
-                    if (item !== "terminal" && item !== "note" && item !== "browser" && item !== "settings" && !agentAvailability?.[item]) {
+                    if (item !== "terminal" && item !== "note" && item !== "browser" && item !== "settings" && !launchable.has(item)) {
                       return missingAgentRow(item);
                     }
                     const enabled = settings.radialLauncherItems.includes(item);
@@ -703,7 +708,7 @@ export function SettingsPanel({
               >
                 <div className="agent-launcher-settings">
                   {AGENT_PROVIDERS.map((provider) => {
-                    if (!agentAvailability?.[provider]) return missingAgentRow(provider);
+                    if (!launchable.has(provider)) return missingAgentRow(provider);
                     const enabled = homeLauncherProviders.includes(provider);
                     return (
                       <div className="agent-launcher-settings__row" key={provider}>

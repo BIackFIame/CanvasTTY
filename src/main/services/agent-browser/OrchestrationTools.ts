@@ -1,3 +1,5 @@
+import type { DecisionCoordinator } from '../decision/DecisionCoordinator.ts';
+import type { DecisionInput } from '../../../shared/decisions.ts';
 import type { IsolationRequest } from "../../../shared/contracts.ts";
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
@@ -13,6 +15,8 @@ import type { ScopedCapsuleControl } from '../ScopedCapsuleControl.ts';
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
   private capsules?: ScopedCapsuleControl;
+  private decisions?: DecisionCoordinator;
+  configureDecisions(decisions: DecisionCoordinator): void { this.decisions = decisions; }
 
   constructor(control: AgentControlService, capsules?: ScopedCapsuleControl) {
     this.control = control;
@@ -28,6 +32,14 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         case 'preview_capsule_review_agent': case 'launch_capsule_review_agent': case 'list_capsule_test_profiles': case 'test_capsule': case 'validate_capsule_conventions': case 'list_capsule_tests': case 'get_capsule_test_result': case 'cancel_capsule_test':
           if (!this.capsules) throw new Error('Scoped capsule control is unavailable.');
           return await this.capsules.execute(sessionId, request.tool, request.arguments, signal);
+        case 'recommend_agent':
+          if (!this.decisions) throw new Error('Decision routing is unavailable.');
+          return { ...await this.decisions.recommend(this.decisionInput(request.arguments), sessionId, signal) };
+        case 'launch_recommended_agent': {
+          if (!this.decisions) throw new Error('Decision routing is unavailable.');
+          const child = await this.decisions.launch(request.arguments.recommendationId as string, sessionId, undefined, signal);
+          return { sessionId: child.id, provider: child.provider, hostId: child.hostId ?? 'local', ...(child.accountId !== undefined ? { accountId: child.accountId } : {}), ...(child.model !== undefined ? { model: child.model } : {}), status: child.status };
+        }
         case "spawn_agent":
           return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
@@ -56,6 +68,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   // The spawn may await a placement decision (host "auto"), so the whole call
   // stays async even though the local fast path resolves synchronously.
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (args.provider === 'auto') {
+      if (!this.decisions) throw new Error('Decision routing is unavailable.');
+      const recommendation = await this.decisions.recommend(this.decisionInput(args), orchestratorId, signal);
+      const created = await this.decisions.launch(recommendation.id, orchestratorId, undefined, signal);
+      return { sessionId: created.id, provider: created.provider, status: created.status, title: created.title, hostId: created.hostId ?? 'local', ...(created.accountId !== undefined ? { accountId: created.accountId } : {}), ...(created.model !== undefined ? { model: created.model } : {}), decision: recommendation };
+    }
     const auto = args.containerRoute === 'auto';
     if (args.containerRoute !== undefined && !auto) throw new Error('Unsupported container route.');
     if (auto && (args.isolation !== 'container' || args.host !== undefined || args.containerProfileId !== undefined || args.worktreeRef !== undefined)) throw new Error('Container auto-placement requires container isolation without a fixed host, profile or worktree ref.');
@@ -71,6 +89,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.transport !== undefined ? { transport: args.transport as never } : {}),
       cwd: args.cwd as string,
       ...(args.model !== undefined ? { model: args.model as string } : {}),
+      ...(args.effort !== undefined ? { effort: args.effort as never } : {}),
       ...(args.accountId !== undefined ? { accountId: args.accountId as string } : {}),
       ...(args.dataClass !== undefined ? { dataClass: args.dataClass as never } : {}),
       ...(args.profile !== undefined ? { profile: args.profile as never } : {}),
@@ -88,6 +107,19 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(created.accountId !== undefined ? { accountId: created.accountId } : {}),
       ...(created.isolation ? { isolation: created.isolation } : {})
     };
+  }
+
+  private decisionInput(args: Record<string, unknown>): DecisionInput {
+    if (args.containerRoute !== undefined || args.containerProfileIds !== undefined) throw new Error('Agent routing requires a fixed container profile; use an explicit provider for automatic container placement.');
+    if (args.worktreeRef !== undefined && args.isolation !== 'worktree' || args.containerProfileId !== undefined && args.isolation !== 'container') throw new Error('Invalid isolation fields.');
+    return { cwd: args.cwd as string, profile: (args.profile ?? 'normal') as DecisionInput['profile'],
+      ...(args.provider && args.provider !== 'auto' ? { provider: args.provider as DecisionInput['provider'] } : {}),
+      ...(args.category !== undefined ? { category: args.category as DecisionInput['category'] } : {}),
+      ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}), ...(args.title !== undefined ? { title: args.title as string } : {}),
+      ...(args.model !== undefined ? { model: args.model as string } : {}), ...(args.effort !== undefined ? { effort: args.effort as DecisionInput['effort'] } : {}), ...(args.accountId !== undefined ? { accountId: args.accountId as string } : {}),
+      ...(args.dataClass !== undefined ? { dataClass: args.dataClass as DecisionInput['dataClass'] } : {}), ...(args.transport !== undefined ? { transport: args.transport as DecisionInput['transport'] } : {}),
+      ...(args.host !== undefined && args.host !== 'auto' ? { hostId: args.host as string } : {}), ...(args.allowSubagents !== undefined ? { allowSubagents: args.allowSubagents as boolean } : {}),
+      ...(args.isolation ? { isolation: (args.isolation === 'container' ? { mode: 'container', profileId: args.containerProfileId } : { mode: args.isolation, ...(args.worktreeRef !== undefined ? { ref: args.worktreeRef } : {}) }) as IsolationRequest } : {}) };
   }
 
   private send(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {

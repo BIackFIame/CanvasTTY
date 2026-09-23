@@ -1,5 +1,5 @@
 import { assertContextDeliverySummary, type ContextDeliverySummary } from '../../shared/contextRuntime.ts';
-import { DATA_CLASS_RANK } from '../../shared/contracts.ts';
+import { DATA_CLASS_RANK, reasoningEffortsFor, type ReasoningEffort } from '../../shared/contracts.ts';
 import { assertIsolationRequest } from "../../shared/isolation.ts";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -38,6 +38,7 @@ const PROVIDERS = new Set<ProviderId>([
 export interface PersistedTerminalSession {
   contextDisabled?: boolean;
   disclosureClass?: DataClass;
+  taskPromptFloor?: true;
   contextSummary?: ContextDeliverySummary;
   transport?: SessionTransport;
   acpResume?: AcpResumeBinding;
@@ -59,6 +60,7 @@ export interface PersistedTerminalSession {
    *  AppSettings.providerAccounts. Revalidated against its launch digest on restore. */
   accountId?: string;
   model?: string;
+  effort?: ReasoningEffort;
   launchBinding?: string;
   dataClass?: DataClass;
   dataClassInherited?: boolean;
@@ -134,6 +136,7 @@ export function persistedTerminalSession(metadata: SessionMetadata): PersistedTe
     id: metadata.id,
     ...(metadata.contextDisabled ? { contextDisabled: true } : {}),
     ...(metadata.disclosureClass ? { disclosureClass: metadata.disclosureClass } : {}),
+    ...(metadata.taskPromptFloor ? { taskPromptFloor: true as const } : {}),
     ...(metadata.contextSummary ? { contextSummary: structuredClone(metadata.contextSummary) } : {}),
     ...(metadata.transport === "acp" ? { transport: "acp" as const, acpResume: metadata.acpResume } : {}),
     ...(metadata.isolation ? { isolation: structuredClone(metadata.isolation) } : {}),
@@ -154,6 +157,7 @@ export function persistedTerminalSession(metadata: SessionMetadata): PersistedTe
     ...(metadata.hostId !== undefined ? { hostId: metadata.hostId } : {}),
     ...(metadata.accountId !== undefined ? { accountId: metadata.accountId } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+    ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}),
     ...(metadata.launchBinding !== undefined ? { launchBinding: metadata.launchBinding } : {}),
     ...(metadata.dataClass !== undefined ? { dataClass: metadata.dataClass } : {}),
     ...(metadata.dataClassInherited !== undefined ? { dataClassInherited: metadata.dataClassInherited } : {}),
@@ -176,6 +180,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     if (session.contextDisabled !== undefined && typeof session.contextDisabled !== 'boolean') continue;
     try { assertIsolationRequest(session.isolation); if (session.contextSummary !== undefined) assertContextDeliverySummary(session.contextSummary); } catch { continue; }
     if (session.disclosureClass !== undefined && !['D0', 'D1', 'D2', 'D3'].includes(session.disclosureClass)) continue;
+    if (session.taskPromptFloor !== undefined && session.taskPromptFloor !== true) continue;
     if (session.contextSummary && (session.disclosureClass === undefined || DATA_CLASS_RANK[session.contextSummary.highestDisclosedClass] > DATA_CLASS_RANK[session.disclosureClass])) continue;
     if (session.workspaceId !== undefined && (typeof session.workspaceId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(session.workspaceId) || session.isolation?.mode !== "worktree" && session.isolation?.mode !== "container")) continue;
     if ((session.isolation?.mode === "worktree" || session.isolation?.mode === "container") && session.workspaceId === undefined) continue;
@@ -215,6 +220,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       : undefined;
     if (session.accountId !== undefined && accountId === undefined) continue;
     if (session.model !== undefined && (typeof session.model !== "string" || session.model.trim().length === 0 || session.model.length > 100)) continue;
+    if (session.effort !== undefined && (session.provider === "terminal" || !reasoningEffortsFor(session.provider as ProviderId).includes(session.effort))) continue;
     if (session.dataClass !== undefined && !["D0", "D1", "D2", "D3"].includes(session.dataClass)) continue;
     if (session.dataClassInherited !== undefined && typeof session.dataClassInherited !== "boolean") continue;
     if (session.allowSubagents !== undefined && typeof session.allowSubagents !== "boolean") continue;
@@ -224,6 +230,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       id: session.id,
       ...(session.contextDisabled ? { contextDisabled: true } : {}),
       ...(session.disclosureClass ? { disclosureClass: session.disclosureClass } : {}),
+      ...(session.taskPromptFloor ? { taskPromptFloor: true as const } : {}),
       ...(session.contextSummary ? { contextSummary: structuredClone(session.contextSummary) } : {}),
       ...(session.transport === "acp" ? { transport: "acp" as const, ...(acpResume ? { acpResume: structuredClone(acpResume) } : {}) } : {}),
       ...(session.isolation ? { isolation: structuredClone(session.isolation) } : {}),
@@ -243,6 +250,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(hostId !== undefined ? { hostId } : {}),
       ...(accountId !== undefined ? { accountId } : {}),
       ...(session.model !== undefined ? { model: session.model } : {}),
+      ...(session.effort !== undefined ? { effort: session.effort } : {}),
       ...(typeof session.launchBinding === "string" && /^[0-9a-f]{64}$/u.test(session.launchBinding) ? { launchBinding: session.launchBinding } : {}),
       ...(session.dataClass !== undefined ? { dataClass: session.dataClass } : {}),
       ...(session.dataClassInherited !== undefined ? { dataClassInherited: session.dataClassInherited } : {}),

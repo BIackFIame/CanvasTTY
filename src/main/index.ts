@@ -1,3 +1,5 @@
+import { DecisionCoordinator } from './services/decision/DecisionCoordinator';
+import { DecisionSecrets } from './services/decision/DecisionSecrets';
 import { PreferenceReviewService } from './services/PreferenceReviewService';
 import { ConventionValidatorService } from './services/ConventionValidatorService';
 import { ContextLaunchService } from './services/ContextLaunchService';
@@ -42,6 +44,8 @@ import { RemoteProviderDiscovery } from "./services/RemoteProviderDiscovery";
 import { RemoteProviderAccess } from "./services/RemoteProviderAccess";
 import { RemoteHostMetricsService } from "./services/RemoteHostMetrics";
 import { sshRunner } from "./services/RemoteHostsService";
+import { ServerProvisioning } from "./services/ServerProvisioning";
+import { AccountLoginService } from "./services/AccountLogin";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
@@ -134,6 +138,7 @@ let pluginManager: PluginManager | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
+let decisionCoordinator: DecisionCoordinator | null = null;
 let providerSecretsService: ProviderSecretsService | null = null;
 let hermesHudService: HermesHudService | null = null;
 let browserService: BrowserService | null = null;
@@ -441,6 +446,15 @@ async function initializeServices(): Promise<void> {
   const capsuleTests = new CapsuleTestService(capsules, containers, () => settings.get(), { rootDirectory: join(userDataPath, 'capsule-test-runs') });
   capsuleTestsService = capsuleTests;
   await capsuleTests.recover().catch(() => { console.warn('CanvasTTY retained tests could not be verified; their files remain on disk.'); });
+  const decisionSecrets = new DecisionSecrets(userDataPath, { isAvailable: securePluginStorageAvailable, encrypt: value => safeStorage.encryptString(value), decrypt: value => safeStorage.decryptString(value) }, () => decisionCoordinator?.invalidate());
+  const decisions = new DecisionCoordinator({ settings: () => settings.get(), terminals: terminalManager, control: agentControl, secrets: decisionSecrets, providerSecretGeneration: () => providerSecretsService!.generation,
+    remoteAvailable: (id, provider) => { const host = settings.get().remoteHosts.find(h => h.id === id); return !!host && remoteDiscovery.cachedAvailable(host, provider); },
+    localCliAvailable: provider => providerClis!.get(provider).state === 'available',
+    limits: () => limitsService ? limitsService.get() : Promise.resolve(null) });
+  decisionCoordinator = decisions;
+  providerSecretsService.onChanged(() => decisions.invalidate());
+  terminalManager.configureDecisionInvalidation(id => decisions.invalidate(id));
+  orchestrationHandler.configureDecisions(decisions);
   const preferenceReview = new PreferenceReviewService(capsules, terminalManager, agentControl, containers, () => settings.get());
   orchestrationHandler.configureCapsules(new ScopedCapsuleControl(terminalManager, agentControl, capsules, capsuleTests, conventionValidator, preferenceReview));
   terminalManager.configureProviderLaunch(new SessionLaunchCoordinator(
@@ -496,12 +510,15 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   registerIpc({
+    decisions, decisionSecrets,
     contextProfiles,
     capsuleTests,
     conventionValidator,
     preferenceReview,
     capsules,
     hostDiagnostics: new SavedHostDiagnostics(() => settings.get().remoteHosts, remoteDiscovery, remoteAccess, remoteMetrics),
+    accountLogin: new AccountLoginService({ settings: () => settings.get(), terminals: terminalManager, run: sshRunner, userDataPath }),
+    serverProvisioning: new ServerProvisioning({ hosts: () => settings.get().remoteHosts, run: sshRunner, access: remoteAccess, discovery: remoteDiscovery }),
     containers,
     worktrees,
     localMetrics,
@@ -764,11 +781,13 @@ app.on("window-all-closed", () => {
 void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
+  decisionCoordinator?.dispose();
   for (const request of browserRequests.values()) { clearTimeout(request.timer); request.reject(new Error("App closing")); }
   browserRequests.clear();
   await evenG2?.close();
   await capsuleTestsService?.shutdown();
   if (terminalManager) await terminalManager.shutdown();
+  if (orchestrationGateway) await Promise.allSettled([orchestrationGateway.stop()]);
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);

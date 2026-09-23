@@ -24,7 +24,7 @@ export type OrchestrationToolName =
   | 'spawn_capsule_agent' | 'list_capsules' | 'review_capsule' | 'read_capsule_patch' | 'apply_capsule' | 'recover_capsule_apply'
   | 'preview_capsule_review_agent' | 'launch_capsule_review_agent'
   | 'list_capsule_test_profiles' | 'test_capsule' | 'validate_capsule_conventions' | 'list_capsule_tests' | 'get_capsule_test_result' | 'cancel_capsule_test'
-  | "spawn_agent"
+  | "spawn_agent" | "recommend_agent" | "launch_recommended_agent"
   | "send_to_agent"
   | "observe_agent"
   | "get_agent_result"

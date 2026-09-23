@@ -64,29 +64,26 @@ function manager(calls, hostsById = null) {
   return terminal;
 }
 
-test("remoteTerminalLaunch composes ssh with no port and no user", () => {
+test("remoteTerminalLaunch composes ssh with no port and no user and runs the remote login shell", () => {
   assert.deepEqual(
-    remoteTerminalLaunch(HOSTS["gpu-box"], { SHELL: "/bin/zsh" }),
-    { command: "ssh", args: ["-tt", "gpu.internal.example", "/bin/zsh"] }
+    remoteTerminalLaunch(HOSTS["gpu-box"]),
+    { command: "ssh", args: ["-tt", "gpu.internal.example"] }
   );
 });
 
 test("remoteTerminalLaunch adds -p for a port and user@ for a user", () => {
   assert.deepEqual(
-    remoteTerminalLaunch(HOSTS["build-farm"], { SHELL: "/bin/fish" }),
-    { command: "ssh", args: ["-tt", "-p", "2222", "deploy@192.168.1.40", "/bin/fish"] }
+    remoteTerminalLaunch(HOSTS["build-farm"], null),
+    { command: "ssh", args: ["-tt", "-p", "2222", "deploy@192.168.1.40"] }
   );
 });
 
-test("remoteTerminalLaunch falls back to /bin/bash without a usable SHELL", () => {
+test("remoteTerminalLaunch starts inside a mapped folder with the server's own shell, never the local one", () => {
   assert.deepEqual(
-    remoteTerminalLaunch(HOSTS["gpu-box"], {}),
-    { command: "ssh", args: ["-tt", "gpu.internal.example", "/bin/bash"] }
+    remoteTerminalLaunch(HOSTS["gpu-box"], "/srv/it's here"),
+    { command: "ssh", args: ["-tt", "gpu.internal.example", `cd '/srv/it'\\''s here' && exec "\${SHELL:-/bin/sh}" -l`] }
   );
-  assert.deepEqual(
-    remoteTerminalLaunch(HOSTS["gpu-box"], { SHELL: "" }),
-    { command: "ssh", args: ["-tt", "gpu.internal.example", "/bin/bash"] }
-  );
+  assert.throws(() => remoteTerminalLaunch(HOSTS["gpu-box"], "/srv/a\nrm -rf ~"), /quoted/);
 });
 
 test("a terminal session with a valid hostId spawns ssh through the PTY", () => {
@@ -104,7 +101,7 @@ test("a terminal session with a valid hostId spawns ssh through the PTY", () => 
   assert.equal(calls[0].command, "ssh");
   assert.deepEqual(
     calls[0].args,
-    remoteTerminalLaunch(HOSTS["build-farm"], calls[0].options.env).args
+    remoteTerminalLaunch(HOSTS["build-farm"]).args
   );
   // TERM/COLORTERM stay identical to what a local terminal PTY receives.
   assert.equal(calls[0].options.env.TERM, "xterm-256color");
@@ -219,7 +216,7 @@ test("restart re-spawns ssh for a remote terminal session", () => {
   assert.equal(calls[1].command, "ssh");
   assert.deepEqual(
     calls[1].args,
-    remoteTerminalLaunch(HOSTS["gpu-box"], calls[1].options.env).args
+    remoteTerminalLaunch(HOSTS["gpu-box"]).args
   );
   terminal.disposeAll();
 });
@@ -301,7 +298,7 @@ test("remote terminal descriptors persist hostId and restoring re-spawns ssh", a
   assert.equal(restoredCalls[0].command, "ssh");
   assert.deepEqual(
     restoredCalls[0].args,
-    remoteTerminalLaunch(HOSTS["gpu-box"], restoredCalls[0].options.env).args
+    remoteTerminalLaunch(HOSTS["gpu-box"]).args
   );
   const restored = second.list();
   assert.equal(restored.length, 1);

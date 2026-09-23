@@ -475,3 +475,19 @@ test("secret configuration cleanup can retry after a temporary filesystem denial
     await chmod(temporary, 0o700).catch(() => undefined);
   }
 });
+
+test("a signed-in Claude account starts a typed task at the default class with the CLI-login warning", async (t) => {
+  const f = await runtimeFixture(t, { defaultDataClass: "D2" });
+  f.update({ providerAccounts: [{ id: "claude-account", provider: "claude", label: "Claude", hostId: "local", maxDataClass: "D3", binding: { kind: "cli-home", directory: f.directory } }] });
+  const session = f.create({ provider: "claude", accountId: "claude-account", initialPrompt: "Fix the button" });
+  await f.manager.waitForLaunch(session.id);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].options.env.CLAUDE_CONFIG_DIR, f.directory);
+  const metadata = f.manager.listMetadata().find(item => item.id === session.id);
+  assert.equal(metadata.failureDetails, null);
+  assert.deepEqual(metadata.privacyNotice, { cap: "D1", dataClass: "D2" });
+  // The person's own lower limit on the account is enforced before anything starts.
+  f.update({ providerAccounts: [{ id: "claude-account", provider: "claude", label: "Claude", hostId: "local", maxDataClass: "D1", binding: { kind: "cli-home", directory: f.directory } }] });
+  assert.throws(() => f.create({ provider: "claude", accountId: "claude-account", initialPrompt: "Fix the button" }), /Account Claude handles at most D1; this task is D2/);
+  assert.equal(f.calls.length, 1);
+});

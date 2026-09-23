@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { AgentProviderId, AppSettings, DataClass, ProviderAccount } from "../../../../shared/contracts";
 import { DATA_CLASSES } from "../../../../shared/contracts";
 import { accountInvalidReason, validatedConnectionsPatch } from "../../../../shared/connectionsSettings";
-import { ACCOUNT_HOME_ENV, accountRouteMaxDataClass, accountServiceCount, accountSupportsRuntime, validAccountBinding } from "../../../../shared/providerAccountPolicy";
+import { ACCOUNT_HOME_ENV, ACCOUNT_LOGIN_PROVIDERS, accountRouteMaxDataClass, accountServiceCount, accountSupportsRuntime, validAccountBinding } from "../../../../shared/providerAccountPolicy";
 import { AGENT_PROVIDERS, PROVIDERS } from "../../lib/providers";
 import { t } from "../../lib/i18n";
 import { DataHandlingAssessmentEditor } from "./DataHandlingAssessmentEditor";
@@ -57,6 +57,21 @@ export function ProviderAccountsSettings({ settings, active, recordId, selection
     if (newId === next.id) setNewId(null);
     setNotice(t(locale, review ? "assessmentSaved" : "accountSaved"));
   };
+  /** Opens the vendor login on the account's computer and saves the directory it uses. */
+  const login = async (): Promise<void> => {
+    if (!draft || !candidate || conflict) return;
+    const directory = candidate.binding?.kind === "cli-home" ? candidate.binding.directory : "";
+    const result = await window.canvasTTY.accountLogin.start({ accountId: candidate.id, provider: candidate.provider, hostId: candidate.hostId ?? "local", directory });
+    const next: ProviderAccount = { ...draftAccount(draft), binding: { kind: "cli-home", directory: result.directory }, bindingRequired: false };
+    const invalid = accountInvalidReason(next); if (invalid) throw new Error(invalid);
+    const accounts = draft.origin ? settings.providerAccounts.map(a => a.id === next.id ? next : a) : [...settings.providerAccounts, next];
+    const patch = { providerAccounts: accounts };
+    validatedConnectionsPatch(settings, patch);
+    await onPersist(patch);
+    clearDraft(next.id);
+    if (newId === next.id) setNewId(null);
+    setNotice(t(locale, "accountLoginOpened"));
+  };
   const inspect = async (pick = false): Promise<void> => {
     if (!candidate || candidate.binding?.kind !== "cli-home") return;
     const id = candidate.id, previous = candidate.binding.directory;
@@ -85,8 +100,9 @@ export function ProviderAccountsSettings({ settings, active, recordId, selection
     if (!validAccountBinding(a.binding) || a.bindingRequired || a.binding?.kind === "cli-home" && !ACCOUNT_HOME_ENV[a.provider]) return t(locale, "accountNeedsSetup");
     try { if (!accountSupportsRuntime(a, a.provider, settings.apiProfiles)) return t(locale, "accountNeedsSetup"); accountRouteMaxDataClass(a, settings.apiProfiles); return t(locale, "accountConfigured"); } catch { return t(locale, "accountNeedsReview"); }
   };
-  let routeError = "", cap: DataClass | undefined, count: number | undefined;
+  let routeError = "", cap: DataClass | undefined, uncapped: DataClass | undefined, count: number | undefined;
   if (candidate) {
+    try { uncapped = accountRouteMaxDataClass({ ...candidate, maxDataClass: undefined }, settings.apiProfiles); } catch { /* The route summary reports the reason. */ }
     try { cap = accountRouteMaxDataClass(candidate, settings.apiProfiles); if (candidate.binding?.kind === "api-profile" && !accountSupportsRuntime(candidate, candidate.provider, settings.apiProfiles)) routeError = t(locale, "accountNeedsSetup"); }
     catch (cause) { routeError = cause instanceof Error ? cause.message : t(locale, "accountNeedsReview"); }
     try { count = accountServiceCount(candidate, catalog.map(a => a.id === candidate.id ? candidate : a), settings.apiProfiles); } catch { /* Broken rows remain editable. */ }
@@ -110,6 +126,7 @@ export function ProviderAccountsSettings({ settings, active, recordId, selection
         </div>
         {draft.value.binding?.kind === "api-profile" ? <button className="agent-settings-button" type="button" onClick={onOpenApi}>{t(locale, "accountOpenApi")}</button> : <>
           <p className="agent-settings-hint">{t(locale, ACCOUNT_HOME_ENV[candidate.provider] ? "accountHomeNote" : "accountUnsupportedHome")}</p>
+          {ACCOUNT_LOGIN_PROVIDERS.includes(candidate.provider) && <div className="account-login"><button className="agent-settings-button agent-settings-button--primary" type="button" disabled={busy || conflict} onClick={() => void run(login)}>{t(locale, "accountLoginInApp")}</button><p className="agent-settings-hint">{t(locale, "accountLoginNote")}</p></div>}
           {(candidate.hostId ?? "local") === "local" ? <div className="agent-settings-actions agent-settings-actions--start"><button className="agent-settings-button" type="button" disabled={busy} onClick={() => void run(() => inspect(true))}>{t(locale, "accountPickDirectory")}</button><button className="agent-settings-button" type="button" disabled={busy || !(candidate.binding?.kind === "cli-home" && candidate.binding.directory)} onClick={() => void run(() => inspect())}>{t(locale, "accountInspect")}</button></div> : <p className="agent-settings-hint">{t(locale, "accountRemoteHomeNote")}</p>}
         </>}
         <div className="connection-route-summary"><strong>{cap ? t(locale, "accountEffectiveClass").replace("{class}", cap) : t(locale, "accountNeedsReview")}</strong>{routeError && <p className="agent-settings-hint">{routeError}</p>}{candidate.assessmentInvalid && <p className="agent-settings-hint">{t(locale, "assessmentStale")}</p>}<p className="agent-settings-hint">{t(locale, "accountDefaultsNote")}</p>{count !== undefined && <p className="agent-settings-hint">{t(locale, "accountCapacity").replace("{count}", String(count)).replace("{limit}", String(settings.maxAccountsPerProviderPerHost))}</p>}</div>
@@ -117,7 +134,7 @@ export function ProviderAccountsSettings({ settings, active, recordId, selection
           <label className="agent-settings-field"><span>{t(locale, "accountTier")}</span><input maxLength={40} disabled={busy} value={draft.value.tier ?? ""} onChange={e => update({ tier: e.target.value })} /></label>
           <label className="agent-settings-field"><span>{t(locale, "accountModels")}</span><select disabled={busy} value={draft.modelsMode} onChange={e => replaceDraft({ ...draft, modelsMode: e.target.value as AccountDraft["modelsMode"] })}><option value="all">{t(locale, "accountAllModels")}</option><option value="list">{t(locale, "accountListedModels")}</option><option value="disabled">{t(locale, "accountDisabled")}</option></select></label>
           {draft.modelsMode === "list" && <label className="agent-settings-field agent-settings-field--wide"><span>{t(locale, "accountModelsList")}</span><textarea rows={3} disabled={busy} value={draft.modelText} onChange={e => replaceDraft({ ...draft, modelText: e.target.value })} /><small>{t(locale, "accountModelsNote")}</small></label>}
-          <label className="agent-settings-field"><span>{t(locale, "accountClassCap")}</span><select disabled={busy} value={draft.value.maxDataClass ?? ""} onChange={e => update({ maxDataClass: (e.target.value || undefined) as DataClass | undefined })}><option value="">{t(locale, "accountNoCap")}</option>{DATA_CLASSES.map(c => <option key={c} value={c}>{t(locale, `dataClass${c}`)}</option>)}</select></label>
+          <label className="agent-settings-field"><span>{t(locale, "accountClassCap")}</span><select disabled={busy} value={draft.value.maxDataClass ?? ""} onChange={e => update({ maxDataClass: (e.target.value || undefined) as DataClass | undefined })}><option value="">{t(locale, "accountNoCap")}</option>{DATA_CLASSES.map(c => <option key={c} value={c}>{t(locale, `dataClass${c}`)}</option>)}</select>{uncapped && <small>{t(locale, "accountClassCapNote").replace("{class}", uncapped)}</small>}</label>
         </div><label className="agent-settings-check"><input type="checkbox" disabled={busy} checked={draft.value.shared === true} onChange={e => update({ shared: e.target.checked })} /><span>{t(locale, "accountShared")}</span></label><p className="agent-settings-hint">{t(locale, "accountSharedNote")}</p></details>
         <DataHandlingAssessmentEditor locale={locale} value={draft.evidence} disabled={busy || conflict} onChange={evidence => replaceDraft({ ...draft, evidence })} onSave={() => void run(() => save(true))} />
         <p className="agent-settings-hint">{t(locale, "accountRemoveNote")}</p>

@@ -1,6 +1,8 @@
+import { DEFAULT_DECISION_SETTINGS, normalizeDecisionSettings, validateDecisionSettings } from '../../shared/decisions.ts';
 import { validatedConnectionsPatch } from "../../shared/connectionsSettings.ts";
 import { copyRemoteApiCredential, validApiProfileCredential, validRemoteApiCredential } from "../../shared/apiProfileCredentials.ts";
 import { assertUnusedHostMutation, sshTargetIdentity } from "../../shared/executionSettings.ts";
+import { launchableProviders } from "../../shared/agentAvailability.ts";
 import type { SessionMetadata } from "../../shared/contracts.ts";
 import { normalizeContainerProfiles } from "../../shared/containerProfiles.ts";
 import { normalizeCapsuleTestProfiles } from '../../shared/capsules.ts';
@@ -10,10 +12,10 @@ import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   AgentProviderId,
-  AgentCliAvailability,
   AgentBudgets,
   ApiProfile,
   ApiProfileProtocol,
+  AgentCliAvailability,
   AppSettings,
   BrowserCanvasState,
   CanvasLauncherItemId,
@@ -121,7 +123,6 @@ export class SettingsStore {
   private value: AppSettings;
   private hasPersistedLegacyWheelCapture = false;
   private writeQueue = Promise.resolve();
-  private availableProviders: ReadonlySet<AgentProviderId>;
   private updateQueue = Promise.resolve();
   private hostSessions: () => readonly Pick<SessionMetadata, "hostId" | "exitCode" | "title">[] = () => [];
   private readonly changingHosts = new Set<string>();
@@ -135,14 +136,14 @@ export class SettingsStore {
     const host = this.value.remoteHosts.find(item => item.id === id);
     return host ? structuredClone(host) : null;
   }
+  private cliAvailability: AgentCliAvailability | undefined;
 
   constructor(userDataPath: string, systemLocale: string, platform: string = process.platform, availability?: AgentCliAvailability) {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
-    this.availableProviders = new Set(availability
-      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
-      : AGENT_PROVIDERS);
-    this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
+    this.cliAvailability = availability ? { ...availability } : undefined;
+    const defaults = createDefaults(systemLocale, this.platform);
+    this.value = filterUnavailableProviders(defaults, this.availableProviders(defaults));
   }
 
   async load(): Promise<AppSettings> {
@@ -241,7 +242,7 @@ export class SettingsStore {
         ...this.value,
         useScrollWheelToZoom: true
       }, this.platform);
-      this.value = filterUnavailableProviders(normalized, this.availableProviders);
+      this.value = filterUnavailableProviders(normalized, this.availableProviders(normalized));
       const availabilityChanged = providerSelectionsChanged(normalized, this.value);
       if (!this.value.persistCanvasRegions) this.value.canvasRegions = [];
       if (!this.value.persistStickyNotes) this.value.stickyNotes = [];
@@ -261,11 +262,11 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
 
-  /** Local CLI detection hides launcher entries for agents that are not installed. */
+  /** Local CLI detection only hides launcher entries; configured remote/container routes stay visible. */
   setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
     const operation = async (): Promise<AppSettings> => {
-      this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      this.cliAvailability = { ...availability };
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders(this.value));
       if (providerSelectionsChanged(this.value, filtered)) {
         await this.persist(filtered);
         this.value = filtered;
@@ -277,9 +278,14 @@ export class SettingsStore {
     return result;
   }
 
+  private availableProviders(settings: AppSettings): ReadonlySet<AgentProviderId> {
+    return this.cliAvailability ? launchableProviders(AGENT_PROVIDERS, this.cliAvailability, settings) : AGENT_PROVIDERS;
+  }
+
   update(patch: Partial<AppSettings>): Promise<AppSettings> {
     const captured = structuredClone(patch);
     const operation = async (): Promise<AppSettings> => {
+      if (captured.decisions !== undefined) validateDecisionSettings(captured.decisions);
       const checked = validatedConnectionsPatch(this.value, captured);
       assertUnusedHostMutation(this.value, checked, this.hostSessions());
       const hasLegacy = this.hasPersistedLegacyWheelCapture || checked.canvasWheelCaptureMode !== undefined;
@@ -287,7 +293,7 @@ export class SettingsStore {
         && checked.canvasWheelOverride === undefined && this.value.canvasWheelOverride === null
         ? { ...checked, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) } : checked;
       const normalized = normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform);
-      const next = filterUnavailableProviders(normalized, this.availableProviders);
+      const next = filterUnavailableProviders(normalized, this.availableProviders(normalized));
       const removed = this.value.remoteHosts.filter(host => { const after = next.remoteHosts.find(item => item.id === host.id); return !after || sshTargetIdentity(host) !== sshTargetIdentity(after); });
       for (const host of removed) this.changingHosts.add(host.id);
       try {
@@ -345,6 +351,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
   return {
     locale: systemLocale.toLowerCase().startsWith("ru") ? "ru" : "en",
     restoreTerminalSessions: false,
+    decisions: structuredClone(DEFAULT_DECISION_SETTINGS),
     contextProfilesEnabled: false,
     persistCanvasRegions: true,
     persistStickyNotes: true,
@@ -707,6 +714,7 @@ export function normalizeSettings(
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
+    decisions: normalizeDecisionSettings(source.decisions),
     contextProfilesEnabled: source.contextProfilesEnabled === true,
     restoreTerminalSessions: typeof source.restoreTerminalSessions === "boolean"
       ? source.restoreTerminalSessions

@@ -6,6 +6,7 @@ import type {
   IsolationRequest,
   DataClass,
   LaunchProfileId,
+  ReasoningEffort,
   ProviderAccount,
   SessionSnapshot
 } from "../../shared/contracts.ts";
@@ -61,6 +62,8 @@ export interface SpawnAgentRequest {
    *  routing configured it must be covered by the chosen (or some) account
    *  of the provider; absent means no account filtering (v1). */
   model?: string;
+  /** Explicit reasoning effort for agents whose CLI supports it. */
+  effort?: ReasoningEffort;
   /** Explicit provider account (AppSettings.providerAccounts id). Must
    *  exist, belong to request.provider, cover request.model, and be cleared
    *  for the task's data class under the account's own (possibly shared,
@@ -123,14 +126,20 @@ export class AgentControlService {
     return this.spawnOwned(request, signal);
   }
 
+  /** Main-only closed-set routing keeps the exact captured context through ordinary spawn policy. */
+  spawnDecision(request: SpawnAgentRequest, owned: { context: OwnedContextLaunch; assertCurrent(excludeId?: string): void }, signal?: AbortSignal): SessionSnapshot | Promise<SessionSnapshot> {
+    if (request.isolation?.mode === 'container' && request.isolation.capsuleId) throw new Error('Capsule decisions require the scoped capsule operation.');
+    return this.spawnOwned(request, signal, owned);
+  }
+
   /** Main-only caller has captured classified Task.md and registered its parent ownership. */
-  spawnCapsule(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(): void }): SessionSnapshot | Promise<SessionSnapshot> {
+  spawnCapsule(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(excludeId?: string): void }): SessionSnapshot | Promise<SessionSnapshot> {
     if (request.isolation?.mode !== 'container' || !request.isolation.capsuleId || !this.terminals.hasLaunchPolicy()) throw new Error('Registered capsule launch policy is required.');
     signal?.throwIfAborted();
     return this.spawnOwned(request, signal, review);
   }
 
-  private spawnOwned(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(): void }): SessionSnapshot | Promise<SessionSnapshot> {
+  private spawnOwned(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(excludeId?: string): void }): SessionSnapshot | Promise<SessionSnapshot> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
@@ -185,6 +194,7 @@ export class AgentControlService {
       parentSessionId: parent.id, role: 'subagent', allowSubagents: request.allowSubagents ?? false,
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
       ...(model !== undefined ? { model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.accountId !== undefined ? { accountId: request.accountId } : {}),
       ...(host !== undefined && host !== "auto" ? { hostId: host } : {})
     }, host === "auto");
@@ -246,10 +256,11 @@ export class AgentControlService {
     const classified = request.dataClass !== undefined || this.options?.defaultDataClass !== undefined || this.options?.pathClass !== undefined;
     // Legacy callers without a model keep their default CLI unless explicit.
     if (model === undefined && request.accountId === undefined) return undefined;
-    return selectLaunchAccount(accounts, request.provider, model, request.accountId, classified ? effectiveDataClass : undefined);
+    // With a launch policy, the class is decided there, including an orchestrator's consent.
+    return selectLaunchAccount(accounts, request.provider, model, request.accountId, classified && !this.terminals.hasLaunchPolicy() ? effectiveDataClass : undefined);
   }
 
-  private createChild(request: SpawnAgentRequest, hostId?: string, accountId?: string, signal?: AbortSignal, selected?: { request: CreateSessionRequest; launch: OwnedContextLaunch }, assertReview?: () => void): SessionSnapshot | Promise<SessionSnapshot> {
+  private createChild(request: SpawnAgentRequest, hostId?: string, accountId?: string, signal?: AbortSignal, selected?: { request: CreateSessionRequest; launch: OwnedContextLaunch }, assertReview?: (excludeId?: string) => void): SessionSnapshot | Promise<SessionSnapshot> {
     const parent = this.requireSession(request.parentSessionId);
     if (parent.role === "subagent" && parent.allowSubagents !== true) throw new Error("Agent delegation is disabled for this parent.");
     const cascade = this.children(parent.id).length;
@@ -274,11 +285,12 @@ export class AgentControlService {
       ...(hostId !== undefined ? { hostId } : {}),
       ...((accountId ?? request.accountId) !== undefined ? { accountId: accountId ?? request.accountId } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
       allowSubagents: request.allowSubagents ?? false
     };
     if (request.containerPlacement !== undefined) return this.terminals.createWithPlacement(launch, signal);
-    return selected ? this.terminals.createPlanned({ ...launch, model: selected.request.model, dataClass: selected.request.dataClass }, selected.launch, () => { signal?.throwIfAborted(); assertReview?.(); }) : this.terminals.create(launch);
+    return selected ? this.terminals.createPlanned({ ...launch, model: selected.request.model, dataClass: selected.request.dataClass }, selected.launch, excludeId => { signal?.throwIfAborted(); assertReview?.(excludeId); }) : this.terminals.create(launch);
   }
 
   send(sessionId: string, text: string, submit = true): void {

@@ -1,3 +1,4 @@
+import { DEFAULT_DECISION_SETTINGS } from '../../shared/decisions';
 import type { SettingsLocation } from "../../shared/settingsLocation";
 import type { AgentLaunchOptions, CreateSessionRequest } from "../../shared/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -49,7 +50,8 @@ import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
-import { AGENT_PROVIDERS } from "./lib/providers";
+import { AGENT_PROVIDERS, PROVIDERS } from "./lib/providers";
+import { launchableProviders } from "../../shared/agentAvailability";
 import {
   mergeSessionSnapshots,
   upsertSession,
@@ -72,6 +74,7 @@ interface HomeEditDraft {
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
   restoreTerminalSessions: false,
+  decisions: structuredClone(DEFAULT_DECISION_SETTINGS),
   contextProfilesEnabled: false,
   persistCanvasRegions: true,
   persistStickyNotes: true,
@@ -395,13 +398,13 @@ export function App(): React.JSX.Element {
   }, [createSession, settings.lastDirectory, settings.locale, showToast]);
 
   const openAgent = useCallback((provider: AgentProviderId, position?: Point): void => {
-    if (!agentAvailability?.[provider]) {
-      showToast(t(settings.locale, "agentCliNotFound"));
+    if (!launchableProviders([provider], agentAvailability, settings).has(provider)) {
+      showToast(t(settings.locale, "agentCliNotFoundHint").replace("{agent}", PROVIDERS[provider].label));
       return;
     }
     setLaunchPosition(position ?? null);
     setLaunchProvider(provider);
-  }, [agentAvailability, settings.locale, showToast]);
+  }, [agentAvailability, settings, showToast]);
 
   useEffect(() => window.canvasTTY.plugins.onOpenLauncher(({ provider }) => {
     if (provider === "terminal") void openTerminal();
@@ -1030,12 +1033,13 @@ export function App(): React.JSX.Element {
     [appearance.homeAccentColors, appearance.homeAccentPreset, settings.uiScale]
   );
   const workspaceSettings = useMemo(() => {
-    const available = new Set(AGENT_PROVIDERS.filter((provider) => agentAvailability?.[provider]));
+    const available = launchableProviders(AGENT_PROVIDERS, agentAvailability, settings);
+    const cliFound = new Set(AGENT_PROVIDERS.filter((provider) => agentAvailability?.[provider]));
     return {
       ...settings,
       ...(homeEditDraft ? { homeGridSize: homeEditDraft.homeGridSize, homeLayout: homeEditDraft.homeLayout } : {}),
       homeLauncherProviders: settings.homeLauncherProviders.filter((provider) => available.has(provider)),
-      homeLimitProviders: settings.homeLimitProviders.filter((provider) => available.has(provider)),
+      homeLimitProviders: settings.homeLimitProviders.filter((provider) => cliFound.has(provider)),
       canvasLauncherItems: settings.canvasLauncherItems.filter((provider) => provider === "terminal" || available.has(provider)),
       radialLauncherItems: settings.radialLauncherItems.filter((provider) => (
         provider === "terminal" || provider === "note" || provider === "browser" || provider === "settings" || available.has(provider)
@@ -1127,6 +1131,14 @@ export function App(): React.JSX.Element {
           setLaunchPosition(null);
         }}
         onAcknowledge={acknowledgeDanger}
+        onLaunchRecommended={async id => {
+          const position = launchPosition ? centeredWindowPosition(launchPosition, { width: 700, height: 430 }) : nextSessionPosition(sessions.length, settings.homeGridSize);
+          const session = await window.canvasTTY.decisions.launch(id, position);
+          setSessions(current => upsertSnapshot(current, session)); setActiveSessionId(session.id); setLaunchPosition(null);
+          isHomeCamera.current = false; setCamera(focusCamera(position, session.size));
+          await saveSettings({ lastDirectory: session.cwd });
+          showToast(`${t(settings.locale, 'launchPreparing')}: ${session.provider}`);
+        }}
         onLaunch={launchAgent}
       />
       <TerminalLinkDialog

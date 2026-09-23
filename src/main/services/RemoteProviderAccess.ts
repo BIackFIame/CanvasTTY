@@ -83,10 +83,12 @@ export class RemoteProviderAccess {
           detail: excerpt(stderr) || `ssh exited with code ${code === null ? "unknown" : code}`
         };
       }
-      const answered = parseAnsweredProviders(stdout);
+      const answers = parseProviderAnswers(stdout);
       const reachability: Record<string, boolean> = {};
       for (const provider of providers) {
-        reachability[provider] = answered.has(provider);
+        const answer = answers.get(provider);
+        // A silent block (killed subshell) stays blocked; only an explicit `?` is unknown.
+        if (answer !== null) reachability[provider] = answer === true;
       }
       return { hostId, collectedAt: this.now(), reachable: true, providers: reachability };
     } catch (error) {
@@ -121,44 +123,48 @@ function probedProviderIds(probeProviders: AgentProviderId[] | undefined): Agent
 
 // The POSIX sh probe body. Every provider endpoint is probed in a background
 // subshell (`&` + `wait`). Placement narrows this to its single requested provider.
-// curl is preferred: 403/451 are conservatively blocked, and 000 means transport
-// failure. Other HTTP replies establish endpoint reachability only: 401 does
-// not authenticate an account, and no reply proves subscription entitlement. When curl is
-// absent, wget stands in and exit status 0 counts as reachable. Each block
-// degrades alone behind 2>/dev/null and || true, and the script always exits
-// 0: only ssh-level failures make the host unreachable, never a blocked
-// endpoint. Double quotes throughout — the whole script is wrapped in single
-// quotes, so a single quote anywhere would terminate that quoting on the
-// remote side.
+// curl is preferred; wget stands in with its reported status line (a 4xx exits
+// non-zero but still proves the network path). Both share one verdict:
+// 000/403/451 are conservatively blocked (=0); other HTTP replies establish
+// endpoint reachability only (=1) — 401 does not authenticate an account, and
+// no reply proves subscription entitlement. A host with neither tool reports
+// =? so placement treats the provider as unknown instead of blocked. Each block
+// degrades alone behind 2>/dev/null, and the script always exits 0: only
+// ssh-level failures make the host unreachable. Double quotes throughout — the
+// whole script is wrapped in single quotes, so a single quote anywhere would
+// terminate that quoting on the remote side.
 function providerProbeScript(providers: readonly AgentProviderId[]): string {
   const blocks = providers.map((provider) => [
     "(",
     "  if command -v curl >/dev/null 2>&1; then",
     `    code=$(curl -s -o /dev/null -m 6 -w "%{http_code}" "${providerApiUrl(provider)}" 2>/dev/null) || code=000`,
-    '    case "$code" in',
-    "      000|403|451) : ;;",
-    `      [0-9][0-9][0-9]) printf "${provider}=1\\n" ;;`,
-    "    esac",
     "  elif command -v wget >/dev/null 2>&1; then",
-    `    wget -q -T 6 -O /dev/null "${providerApiUrl(provider)}" >/dev/null 2>&1 && printf "${provider}=1\\n"`,
+    `    code=$(wget -S -T 6 -O /dev/null "${providerApiUrl(provider)}" 2>&1 | sed -n "s/^ *HTTP\\/[0-9.]* \\([0-9][0-9][0-9]\\).*/\\1/p" | tail -n 1)`,
+    "  else",
+    `    printf "${provider}=?\n"; exit 0`,
     "  fi",
+    '  case "$code" in',
+    `    000|403|451) printf "${provider}=0\n" ;;`,
+    `    [0-9][0-9][0-9]) printf "${provider}=1\n" ;;`,
+    `    *) printf "${provider}=0\n" ;;`,
+    "  esac",
     ") &"
   ].join("\n"));
   return `${blocks.join("\n")}\nwait\nexit 0`;
 }
 
-// Parses `provider=1` lines; anything else (login banners, profile noise, a
-// provider that stayed silent) is ignored, and only ids the script actually
-// probed are turned into claims by the caller.
-function parseAnsweredProviders(stdout: string): Set<string> {
-  const answered = new Set<string>();
+// Parses `provider=1|0|?` lines; anything else (login banners, profile noise)
+// is ignored. `?` means the host had no probe tool: the provider stays unknown.
+function parseProviderAnswers(stdout: string): Map<string, boolean | null> {
+  const answers = new Map<string, boolean | null>();
   for (const line of stdout.split(/\r?\n/)) {
     const separator = line.indexOf("=");
     if (separator <= 0) continue;
-    if (line.slice(separator + 1) !== "1") continue;
-    answered.add(line.slice(0, separator));
+    const value = line.slice(separator + 1);
+    if (value !== "1" && value !== "0" && value !== "?") continue;
+    answers.set(line.slice(0, separator), value === "?" ? null : value === "1");
   }
-  return answered;
+  return answers;
 }
 
 function excerpt(value: string): string {

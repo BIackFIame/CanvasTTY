@@ -32,7 +32,8 @@ async function addRules(f) {
 }
 test('common policy rejects freeform task and retained history before low-clearance routing', t => {
   const f = fixture(t);
-  assert.throws(() => f.policy.check(request(f.cwd, { provider: 'codex', dataClass: 'D0', initialPrompt: 'private task' }), []), /D2/);
+  assert.deepEqual(f.policy.check(request(f.cwd, { provider: 'codex', dataClass: 'D0', initialPrompt: 'private task' }), []).privacyNotice, { cap: 'D1', dataClass: 'D2' });
+  assert.throws(() => f.policy.check(request(f.cwd, { provider: 'codex', dataClass: 'D0', initialPrompt: 'private task', automated: true }), []), /D2/);
   assert.throws(() => f.policy.check({ ...request(f.cwd, { provider: 'codex' }), dataClassInherited: true, disclosureClass: 'D2' }, []), /D2/);
 });
 test('disabled runtime has zero context store/source I/O and no metadata text', t => {

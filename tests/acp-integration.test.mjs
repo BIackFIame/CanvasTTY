@@ -361,12 +361,13 @@ test('an ACP parent being disposed loses capsule authority before its process ex
 });
 
 
-test('actual manager/coordinator passes adversarial startup on assessed routes and rejects consumers without D2 bindings', async t => {
+test('actual manager/coordinator passes adversarial startup on assessed routes and warns direct consumer launches without D2 bindings', async t => {
   const text = '! command\n/command @file -x `code` $(code) Русский';
   for (const provider of ['codex', 'claude', 'qwen', 'opencode', 'hermes', 'grok', 'omp', 'pi', 'cursor', 'minimax', 'devin', 'antigravity']) {
     const f = fixture(); t.after(() => f.terminals.disposeAll());
     if (['qwen', 'opencode', 'cursor'].includes(provider)) {
-      assert.throws(() => f.terminals.create(request({ provider, initialPrompt: text })), /at most|D2/); assert.equal(f.ptys.length, 0); continue;
+      const warned = f.terminals.create(request({ provider, initialPrompt: text })); assert.equal(warned.privacyNotice?.dataClass, 'D2');
+      assert.throws(() => f.terminals.create(request({ provider, initialPrompt: text, dataClass: 'D3' })), /at most|D3/); continue;
     }
     const session = f.terminals.create(request({ provider, initialPrompt: text }));
     if (provider === 'grok') { assert.equal(f.ptys.length, 0); f.terminals.resize(session.id, 90, 30); }

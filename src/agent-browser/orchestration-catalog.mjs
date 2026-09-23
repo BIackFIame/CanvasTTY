@@ -28,14 +28,16 @@ function tool(name, description, properties = {}, required = []) {
 export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   tool(
     "spawn_agent",
-    "Launch another provider's agent as a CanvasTTY subagent and optionally deliver a first prompt. Returns session id and selected host/account/isolation. Native host placement uses host:\"auto\" (may fall back to local) or an exact host id. For containers, isolation:\"container\" plus containerRoute:\"auto\" selects an eligible saved profile, its fixed host and an API account; no eligible route fails without a host fallback. Optional containerProfileIds restrict that selection. Auto container routes cannot include host, containerProfileId or worktreeRef. The provider always runs as requested.",
+    "Launch another provider's agent as a CanvasTTY subagent and optionally deliver a first prompt. Returns session id and selected host/account/isolation. Native host placement uses host:\"auto\" (may fall back to local) or an exact host id. For containers, isolation:\"container\" plus containerRoute:\"auto\" selects an eligible saved profile, its fixed host and an API account; no eligible route fails without a host fallback. Optional containerProfileIds restrict that selection. Auto container routes cannot include host, containerProfileId or worktreeRef. A concrete provider always runs as requested with no evaluator call. provider:auto uses opt-in configured decision routes and never changes account/host constraints. Automatic agent and automatic container selection cannot be combined.",
     {
       provider: string({ minLength: 1, maxLength: 32 }),
+      category: string({ enum: ["general", "code", "review", "research", "writing"] }),
       cwd: string({ minLength: 1, maxLength: 4_096 }),
       prompt,
       title,
       host: string({ minLength: 1, maxLength: 128 }),
       model: string({ minLength: 1, maxLength: 100 }),
+      effort: string({ enum: ["minimal", "low", "medium", "high", "xhigh", "max"] }),
       accountId: string({ minLength: 1, maxLength: 64 }),
       dataClass: string({ enum: ["D0", "D1", "D2", "D3"] }),
       transport: string({ enum: ["pty", "acp"] }),
@@ -49,6 +51,14 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
     },
     ["provider", "cwd"]
   ),
+  tool('recommend_agent', 'Explicitly review an eligible exact agent/account/model/host tuple without launching. Requires opt-in decision settings. No raw task/path is sent to the optional metadata evaluator. Use launch_recommended_agent to consume its short-lived, caller-owned handle.', {
+    cwd: string({ minLength: 1, maxLength: 4096 }), provider: string({ minLength: 1, maxLength: 32 }), prompt, title,
+    category: string({ enum: ['general', 'code', 'review', 'research', 'writing'] }), host: string({ minLength: 1, maxLength: 64 }), accountId: string({ minLength: 1, maxLength: 64 }), model: string({ minLength: 1, maxLength: 100 }), effort: string({ enum: ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] }),
+    difficulty: string({ enum: ['simple', 'normal', 'hard'] }),
+    dataClass: string({ enum: ['D0', 'D1', 'D2', 'D3'] }), profile: string({ enum: ['normal', 'yolo'] }), transport: string({ enum: ['pty', 'acp'] }), allowSubagents: boolean(),
+    isolation: string({ enum: ['direct', 'worktree', 'container'] }), worktreeRef: string({ maxLength: 256 }), containerProfileId: string({ maxLength: 64 })
+  }, ['cwd']),
+  tool('launch_recommended_agent', 'Launch the exact reviewed recommendation. Expired, revoked or retargeted recommendations fail; request a fresh recommendation. Cannot change the original task or route.', { recommendationId: string({ minLength: 1, maxLength: 64 }) }, ['recommendationId']),
   tool(
     "send_to_agent",
     "Write a prompt into one of this session's subagents. Plain terminal sessions are not agents.",

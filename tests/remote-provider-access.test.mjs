@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
@@ -30,7 +31,7 @@ const EXPECTED_ENDPOINTS = {
   grok: "api.x.ai",
   omp: "omp.sh",
   pi: "pi.dev",
-  cursor: "api2.cursor.com",
+  cursor: "api2.cursor.sh",
   minimax: "api.minimax.io",
   devin: "api.devin.ai",
   antigravity: "antigravity.google"
@@ -105,34 +106,42 @@ test("HTTP answers establish reachability except transport errors and explicit a
     antigravity: false
   });
 
-  // The script itself refuses to promote 000 even though it is three digits.
-  const script = scriptFromCommand(calls[0].command);
-  assert.ok(script.includes("000|403|451) : ;;"));
-  assert.ok(script.includes("[0-9][0-9][0-9]) printf"));
+  assert.equal(calls.length, 1);
 });
 
-test("the script carries a wget fallback for hosts without curl, per provider", async () => {
+// Executes the real probe script locally against fake curl/wget binaries: no network.
+async function runProbeScript(t, tools) {
+  const providers = ["codex", "claude", "kimi"];
   const { calls, runner } = fakeRunner({ code: 0, stdout: "", stderr: "" });
-  await new RemoteProviderAccess(runner).probe(validHost);
-
+  await new RemoteProviderAccess(runner).probe(validHost, 15_000, providers);
   const script = scriptFromCommand(calls[0].command);
-  assert.ok(script.includes("if command -v curl >/dev/null 2>&1; then"));
-  assert.ok(script.includes("elif command -v wget >/dev/null 2>&1; then"));
-  for (const [provider, hostname] of Object.entries(EXPECTED_ENDPOINTS)) {
-    assert.ok(
-      script.includes(`wget -q -T 6 -O /dev/null "https://${hostname}/" >/dev/null 2>&1 && printf "${provider}=1\\n"`),
-      `${provider} needs the wget fallback arm`
-    );
-  }
+  const bin = await mkdtemp(join(tmpdir(), "canvastty-probe-bin-"));
+  t.after(() => rm(bin, { recursive: true, force: true }));
+  for (const tool of ["sed", "tail"]) await symlink(execFileSync("/bin/sh", ["-c", `command -v ${tool}`], { encoding: "utf8" }).trim(), join(bin, tool));
+  for (const [name, body] of Object.entries(tools)) await writeFile(join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  const stdout = execFileSync("/bin/sh", ["-c", script], { encoding: "utf8", env: { PATH: bin } });
+  const parsed = await new RemoteProviderAccess(async () => ({ code: 0, stdout, stderr: "" })).probe(validHost, 15_000, providers);
+  return { stdout, providers: parsed.providers };
+}
+
+test("curl verdicts: HTTP replies are reachable, 000/403/451 are blocked", async t => {
+  const { providers } = await runProbeScript(t, {
+    curl: 'case "$*" in *openai*) printf 401 ;; *anthropic*) printf 451 ;; *) printf 000; exit 7 ;; esac'
+  });
+  assert.deepEqual(providers, { codex: true, claude: false, kimi: false });
 });
 
-test("each probe block degrades individually and the reachability answer rides =1 lines", async () => {
-  const { calls, runner } = fakeRunner({ code: 0, stdout: "", stderr: "" });
-  await new RemoteProviderAccess(runner).probe(validHost);
+test("the wget fallback reads the status line, so a 4xx still proves the network path", async t => {
+  const { providers } = await runProbeScript(t, {
+    wget: 'case "$*" in *openai*) echo "  HTTP/1.1 401 Unauthorized" >&2; exit 8 ;; *anthropic*) echo "  HTTP/1.1 403 Forbidden" >&2; exit 8 ;; *) echo "failed: Connection timed out." >&2; exit 4 ;; esac'
+  });
+  assert.deepEqual(providers, { codex: true, claude: false, kimi: false });
+});
 
-  const script = scriptFromCommand(calls[0].command);
-  assert.ok(script.includes("2>/dev/null) || code=000"));
-  assert.ok(script.includes("printf \"codex=1\\n\""));
+test("a host without curl or wget leaves providers unknown instead of blocking them", async t => {
+  const { stdout, providers } = await runProbeScript(t, {});
+  assert.match(stdout, /codex=\?/u);
+  assert.deepEqual(providers, {});
 });
 
 test("a provider subset limits the script and the reported providers", async () => {
@@ -321,4 +330,3 @@ test("a provider access rule survives the settings store round-trip", async (t) 
     { mode: "allowlist", providers: ["qwen", "minimax", "kimi"] }
   );
 });
-

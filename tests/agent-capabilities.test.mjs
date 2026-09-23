@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { PROVIDER_CAPABILITIES } from "../src/shared/contracts.ts";
+import { ACP_PROVIDERS, PROVIDER_CAPABILITIES } from "../src/shared/contracts.ts";
 
 // The expected agent roster at the time of this test; a provider added to the
 // union without a capability descriptor must update this list and fail here.
@@ -47,8 +47,8 @@ test("browser bridging matches the TerminalManager exclusion list", () => {
   }
 });
 
-test("no provider claims ACP before the adapter exists", () => {
+test("the ACP capability matches the providers the ACP adapter supports", () => {
   for (const [provider, capabilities] of Object.entries(PROVIDER_CAPABILITIES)) {
-    assert.equal(capabilities.acp, false, provider);
+    assert.equal(capabilities.acp, ACP_PROVIDERS.includes(provider), provider);
   }
 });

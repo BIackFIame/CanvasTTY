@@ -1,8 +1,9 @@
 import { assertDelegationRoute } from '../../../../shared/delegationLaunch.ts';
 import type { AgentLaunchOptions, AgentProviderId, AppSettings, DataClass, LaunchProfileId, ProviderAccount } from "../../../../shared/contracts.ts";
-import { ACP_PROVIDERS, DATA_CLASSES, dataClassSatisfies, hostEffectiveMaxDataClass, providerPermittedOnHost, providerMaxDataClass, remotePathForHost } from "../../../../shared/contracts.ts";
-import { ACCOUNT_HOME_ENV, accountConfiguredForRuntime, accountSupportsRuntime, validAccountBinding } from "../../../../shared/providerAccountPolicy.ts";
+import { ACP_PROVIDERS, DATA_CLASSES, dataClassSatisfies, hostEffectiveMaxDataClass, providerPermittedOnHost, reasoningEffortsFor, remotePathForHost, type ReasoningEffort } from "../../../../shared/contracts.ts";
+import { ACCOUNT_HOME_ENV, accountConfiguredForRuntime, accountForwardsKey, accountSupportsRuntime, validAccountBinding } from "../../../../shared/providerAccountPolicy.ts";
 import { selectLaunchAccount } from "../../../../shared/launchAccountPolicy.ts";
+import { accountPrivacyDecision, ambientPrivacyBlockMessage, ambientPrivacyDecision, type AmbientPrivacyNotice } from "../../../../shared/ambientPrivacy.ts";
 import type { CapsuleSummary } from '../../../../shared/capsules.ts';
 import { assertContextLaunchSelection, type CurrentContextInput } from '../../../../shared/contextRuntime.ts';
 import type { ContextCategory } from '../../../../shared/contextProfiles.ts';
@@ -10,6 +11,10 @@ import type { ContextCategory } from '../../../../shared/contextProfiles.ts';
 export interface LaunchDraft {
   provider: AgentProviderId; cwd: string; transport: "pty" | "acp"; profile: LaunchProfileId;
   isolation: "direct" | "worktree" | "container"; containerProfileId: string; accountId: string; model: string;
+  /** Empty keeps the CLI/account default reasoning effort. */
+  effort?: ReasoningEffort | "";
+  /** Chosen computer for an account whose key is forwarded; other accounts stay on their bound host. */
+  hostId?: string;
   containerRoute: 'fixed' | 'auto';
   allowSubagents?: boolean;
   ref: string; dataClass: DataClass | "";
@@ -22,6 +27,14 @@ export function reconcileLaunchDraft(current: LaunchDraft | null, provider: Agen
   if (!provider) return null;
   if (current?.provider === provider) return current;
   return { provider, allowSubagents: false, cwd: settings.lastDirectory, transport: "pty", profile: "normal", isolation: settings.requiresSandboxProfiles?.includes("normal") ? "worktree" : "direct", containerRoute: 'fixed', containerProfileId: "", accountId: "", model: "", ref: "HEAD", dataClass: "" };
+}
+/** A configured account replaces the CLI login, so for a fixed route the only compatible account is
+ * the only valid choice. Derived for the current route, never stored, so it cannot outlive a mode change. */
+export function launchAccountId(draft: LaunchDraft, settings: AppSettings): string {
+  if (draft.accountId || (draft.isolation === "container" && draft.containerRoute === "auto")) return draft.accountId;
+  if (!settings.providerAccounts.some(account => accountConfiguredForRuntime(account, draft.provider))) return "";
+  const accounts = compatibleLaunchAccounts(draft, settings);
+  return accounts.length === 1 ? accounts[0].id : "";
 }
 export function compatibleLaunchAccounts(draft: LaunchDraft, settings: AppSettings): ProviderAccount[] {
   return settings.providerAccounts.filter(account => {
@@ -41,13 +54,22 @@ export function compatibleLaunchAccounts(draft: LaunchDraft, settings: AppSettin
     } catch { return false; }
   });
 }
+/** The computer a launch runs on: a forwarded-key account may pick any saved server. */
+export function launchHostId(draft: LaunchDraft, settings: AppSettings): string {
+  const account = settings.providerAccounts.find(a => a.id === draft.accountId);
+  if (account && accountForwardsKey(account, draft.provider, settings.apiProfiles)) {
+    return draft.hostId && (draft.hostId === "local" || settings.remoteHosts.some(host => host.id === draft.hostId)) ? draft.hostId : "local";
+  }
+  return account?.hostId ?? "local";
+}
 /** Serialize explicit UI choices, using the same account eligibility function as main.
  * Main still applies canonical path classification, resource budgets and adapter checks at launch. */
-export function launchOptions(draft: LaunchDraft, settings: AppSettings): AgentLaunchOptions {
+export function launchOptions(input: LaunchDraft, settings: AppSettings): AgentLaunchOptions {
+  const draft = { ...input, accountId: launchAccountId(input, settings) };
   const { provider, cwd, profile, transport } = draft;
   const selectedAccount = settings.providerAccounts.find(a => a.id === draft.accountId);
   assertDelegationRoute({ provider, transport, allowSubagents: draft.allowSubagents,
-    hostId: selectedAccount?.hostId === 'local' ? undefined : selectedAccount?.hostId,
+    hostId: launchHostId(draft, settings) === 'local' ? undefined : launchHostId(draft, settings),
     isolation: draft.isolation === 'container' ? { mode: 'container', profileId: draft.containerProfileId } : { mode: draft.isolation }
   }, selectedAccount);
   const capsule = draft.isolation === 'container' ? draft.capsule : undefined;
@@ -76,15 +98,23 @@ export function launchOptions(draft: LaunchDraft, settings: AppSettings): AgentL
   const dataClass = capsule?.prepared?.dataClass ?? taskClass;
   if (dataClass && !DATA_CLASSES.includes(dataClass)) throw new Error("Task class must be D0-D3.");
   if (transport === "acp" && !ACP_PROVIDERS.includes(provider)) throw new Error("ACP is not supported by this agent.");
+  // The effort control is hidden for ACP and containers, so a stale choice is dropped there.
+  const effort = draft.effort && transport === "pty" && draft.isolation !== "container" ? draft.effort : undefined;
+  if (effort && !reasoningEffortsFor(provider).includes(effort)) throw new Error("This agent does not support the selected reasoning effort.");
   if (!draft.accountId && settings.providerAccounts.some(account => accountConfiguredForRuntime(account, provider))) throw new Error("Choose a configured account, or repair its settings.");
   const account = draft.accountId ? selectedAccount : undefined;
-  const hostId = account?.hostId && account.hostId !== "local" ? account.hostId : undefined;
+  const chosenHost = launchHostId(draft, settings), forwarded = !!account && accountForwardsKey(account, provider, settings.apiProfiles);
+  const hostId = chosenHost !== "local" ? chosenHost : undefined;
   if (capsule && hostId) throw new Error('Selected-file capsules currently require a local container.');
-  selectLaunchAccount(settings.providerAccounts, provider, model, draft.accountId || undefined, dataClass ?? settings.defaultDataClass, { hostId, limit: settings.maxAccountsPerProviderPerHost }, settings.apiProfiles);
-  if (!account && !dataClassSatisfies(dataClass ?? settings.defaultDataClass, providerMaxDataClass(provider))) throw new Error(`Provider ${provider} handles at most ${providerMaxDataClass(provider)}; this task is ${dataClass ?? settings.defaultDataClass}.`);
+  selectLaunchAccount(settings.providerAccounts, provider, model, draft.accountId || undefined, dataClass ?? settings.defaultDataClass, { hostId, limit: settings.maxAccountsPerProviderPerHost }, settings.apiProfiles,
+    draft.isolation === "container" ? undefined : { defaultDataClass: settings.defaultDataClass, initialPrompt, delegated: false });
+  if (!account) {
+    const privacy = ambientPrivacyDecision({ provider, dataClass: dataClass ?? settings.defaultDataClass, defaultDataClass: settings.defaultDataClass, initialPrompt, delegated: false });
+    if (privacy.kind === "block") throw new Error(ambientPrivacyBlockMessage(provider, privacy.notice));
+  }
   if (account && (!validAccountBinding(account.binding) || account.bindingRequired)) throw new Error("Selected account needs a supported authentication binding. Repair it in settings.");
   if (account?.binding?.kind === "cli-home" && !ACCOUNT_HOME_ENV[provider]) throw new Error("This agent has no verified account-home adapter. Choose a supported API account or another agent.");
-  if (hostId && account?.binding?.kind === "api-profile" && draft.isolation !== "container") throw new Error("Remote API accounts require a container on their fixed server.");
+  if (hostId && !forwarded && account?.binding?.kind === "api-profile" && draft.isolation !== "container") throw new Error("Remote API accounts require a container on their fixed server.");
   if (transport === "acp" && (hostId || draft.isolation === "container")) throw new Error("ACP requires local direct or worktree execution.");
   if (draft.isolation === "worktree" && hostId) throw new Error("Worktree execution is available only on the local computer.");
   if (settings.requiresSandboxProfiles?.includes(profile) && draft.isolation === "direct") throw new Error("This launch profile requires a worktree or container.");
@@ -100,6 +130,17 @@ export function launchOptions(draft: LaunchDraft, settings: AppSettings): AgentL
     if (!container || !container.commands[provider]) throw new Error("Choose a compatible container profile.");
     if (account?.binding?.kind !== "api-profile" || (account.hostId ?? "local") !== container.hostId) throw new Error("Choose an API account bound to the container server.");
   }
-  return { provider, cwd, profile, transport, ...taskFields, ...(draft.accountId ? { accountId: draft.accountId } : {}), ...(hostId ? { hostId } : {}), ...(model ? { model } : {}), ...(dataClass ? { dataClass } : {}),
+  return { provider, cwd, profile, transport, ...taskFields, ...(draft.accountId ? { accountId: draft.accountId } : {}), ...(hostId ? { hostId } : {}), ...(model ? { model } : {}), ...(effort ? { effort } : {}), ...(dataClass ? { dataClass } : {}),
     isolation: draft.isolation === "container" ? { mode: "container", profileId: draft.containerProfileId, ...(capsule?.prepared ? { capsuleId: capsule.prepared.id } : {}) } : draft.isolation === "worktree" ? { mode: "worktree", ref: draft.ref.trim() || "HEAD" } : { mode: "direct" } };
+}
+
+/** Non-blocking notice for a direct launch through the CLI login or an account with only its estimate; null when nothing exceeds it. */
+export function launchPrivacyNotice(options: AgentLaunchOptions | null, settings: AppSettings): AmbientPrivacyNotice | null {
+  if (!options || options.provider === "terminal") return null;
+  const dataClass = options.dataClass ?? settings.defaultDataClass;
+  const input = { defaultDataClass: settings.defaultDataClass, initialPrompt: options.initialPrompt, delegated: false };
+  const account = options.accountId ? settings.providerAccounts.find(a => a.id === options.accountId) : undefined;
+  if (options.accountId && !account) return null;
+  const privacy = account ? accountPrivacyDecision(account, options.provider, dataClass, input, settings.apiProfiles, options.model) : ambientPrivacyDecision({ provider: options.provider, dataClass, ...input });
+  return privacy.kind === "warn" ? privacy.notice : null;
 }
