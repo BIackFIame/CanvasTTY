@@ -246,10 +246,10 @@ export class SettingsStore {
       const availabilityChanged = providerSelectionsChanged(normalized, this.value);
       if (!this.value.persistCanvasRegions) this.value.canvasRegions = [];
       if (!this.value.persistStickyNotes) this.value.stickyNotes = [];
-      if (needsMigration || availabilityChanged) await this.persist();
+      if (needsMigration || availabilityChanged) await this.queuedPersist();
     } catch (error) {
       if (isMissingFile(error)) {
-        await this.persist();
+        await this.queuedPersist();
       } else {
         console.warn("CanvasTTY settings could not be loaded; defaults are used.", error);
       }
@@ -308,6 +308,14 @@ export class SettingsStore {
     return result;
   }
 
+  /** Load-time writes join the same queue as updates, so every settings write is ordered. */
+  private queuedPersist(): Promise<void> {
+    const operation = () => this.persist();
+    const result = this.updateQueue.then(operation, operation);
+    this.updateQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
   private persist(value = this.value, hasLegacy = this.hasPersistedLegacyWheelCapture): Promise<void> {
     const persistedValue: Partial<AppSettings> & {
       settingsVersion: number;
@@ -324,14 +332,11 @@ export class SettingsStore {
     const snapshot = JSON.stringify(persistedValue, null, 2);
     const temporaryPath = `${this.filePath}.tmp`;
 
-    const write = this.writeQueue.catch(() => undefined).then(async () => {
+    return (async () => {
       await mkdir(dirname(this.filePath), { recursive: true });
       await writeFile(temporaryPath, snapshot, "utf8");
       await rename(temporaryPath, this.filePath);
-    });
-    this.writeQueue = write;
-
-    return write;
+    })();
   }
 }
 
