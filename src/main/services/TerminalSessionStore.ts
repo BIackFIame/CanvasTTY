@@ -20,7 +20,11 @@ const PROVIDERS = new Set<ProviderId>([
   "hermes",
   "grok",
   "omp",
-  "pi"
+  "pi",
+  "cursor",
+  "minimax",
+  "devin",
+  "antigravity"
 ]);
 
 export interface PersistedTerminalSession {
