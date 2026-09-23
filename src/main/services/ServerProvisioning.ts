@@ -79,6 +79,9 @@ export class ServerProvisioning {
     return ids;
   }
 
+  /** True while any server is being prepared; installing an app update then would cut apt/npm off. */
+  get busy(): boolean { return this.activeHosts.size > 0; }
+
   status(jobIds: unknown): ProvisionJob[] {
     if (!Array.isArray(jobIds) || jobIds.length > 64) throw new Error("Invalid provisioning job list.");
     return jobIds.flatMap(id => { const job = typeof id === "string" ? this.jobs.get(id) : undefined; return job ? [structuredClone(job)] : []; });

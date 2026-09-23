@@ -6,7 +6,8 @@ import type { UpdateController } from "../services/updates/UpdateController";
 import { terminalShutdownMessage } from "../services/updates/updateMessages";
 
 export function registerUpdateIpc(update: UpdateController, settings: SettingsStore,
-  terminals: TerminalManager, getMainWindow: () => BrowserWindow | null): void {
+  terminals: TerminalManager, getMainWindow: () => BrowserWindow | null,
+  busy: () => Promise<string | null> = async () => null): void {
   let installRequested = false;
   const trusted = (event: Electron.IpcMainInvokeEvent): void => {
     const window = getMainWindow();
@@ -29,6 +30,9 @@ export function registerUpdateIpc(update: UpdateController, settings: SettingsSt
     if (update.status().type !== "ready") throw new Error("No downloaded update");
     installRequested = true;
     try {
+      // Long background work (server preparation, capsule tests) would be cut off mid-way.
+      const blocked = await busy();
+      if (blocked) throw new Error(blocked);
       const live = terminals.list().filter(session => session.exitCode === null).length;
       if (live > 0) {
         const locale = settings.get().locale;

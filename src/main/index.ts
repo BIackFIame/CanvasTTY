@@ -169,6 +169,7 @@ let updateInterval: ReturnType<typeof setInterval> | null = null;
 let startupRunning = false;
 let shutdownRunning = false;
 let shutdownComplete = false;
+let serverProvisioningService: ServerProvisioning | null = null;
 let observeMainWindowState: ((window: BrowserWindow | null) => void) | null = null;
 // Set the instant the shell window's close is requested — before the window is
 // destroyed — and cleared when a new one is created. Electron aborts the
@@ -552,6 +553,8 @@ async function initializeServices(): Promise<void> {
   await pluginSecretsService.load();
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
+  const serverProvisioning = new ServerProvisioning({ hosts: () => settings.get().remoteHosts, run: sshRunner, access: remoteAccess, discovery: remoteDiscovery });
+  serverProvisioningService = serverProvisioning;
   observeMainWindowState = registerIpc({
     decisions, decisionSecrets,
     contextProfiles,
@@ -561,7 +564,7 @@ async function initializeServices(): Promise<void> {
     capsules,
     hostDiagnostics: new SavedHostDiagnostics(() => settings.get().remoteHosts, remoteDiscovery, remoteAccess, remoteMetrics),
     accountLogin: new AccountLoginService({ settings: () => settings.get(), terminals: terminalManager, run: sshRunner, userDataPath }),
-    serverProvisioning: new ServerProvisioning({ hosts: () => settings.get().remoteHosts, run: sshRunner, access: remoteAccess, discovery: remoteDiscovery }),
+    serverProvisioning,
     containers,
     worktrees,
     localMetrics,
@@ -625,7 +628,13 @@ async function initializeServices(): Promise<void> {
     updateAdapter = new ElectronUpdaterAdapter();
   }
   const update = new UpdateController(updateAdapter, app.getVersion());
-  registerUpdateIpc(update, settings, terminalManager, () => mainWindow);
+  registerUpdateIpc(update, settings, terminalManager, () => mainWindow, async () => {
+    const ru = settings.get().locale === "ru";
+    if (serverProvisioningService?.busy) return ru ? "Идёт подготовка сервера. Дождитесь её окончания и установите обновление." : "A server is being prepared. Wait for it to finish, then install the update.";
+    const tests = capsuleTestsService ? await capsuleTestsService.list().catch(() => []) : [];
+    if (tests.some((run) => run.state === "preparing" || run.state === "running")) return ru ? "Идёт проверка в капсуле. Дождитесь её окончания и установите обновление." : "A capsule test is running. Wait for it to finish, then install the update.";
+    return null;
+  });
   if (process.platform === "darwin") {
     checkUpdatesFromMenu = () => {
       const window = mainWindow;

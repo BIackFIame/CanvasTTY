@@ -101,6 +101,8 @@ interface ManagedSession {
   acp: ACPAdapter | null;
   disposing?: boolean;
   initialPrompt?: string;
+  /** Even G2 answer-capture grant for this session's first start only; a restart never inherits it. */
+  answerCaptureGrantExpiresAt?: number;
   cols: number;
   rows: number;
   bufferChunks: string[];
@@ -134,6 +136,14 @@ type Emit = (
   channel: typeof IPC.terminalData | typeof IPC.terminalSession | typeof IPC.terminalRemoved,
   payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent
 ) => void;
+
+/** A subagent whose owning session is gone restores as nothing: its parent's runtime state no longer
+ * exists to collect its result. */
+function restorableDescriptors<T extends { id: string; role?: string; parentSessionId?: string }>(persisted: readonly T[], isOpen: (id: string) => boolean): T[] {
+  return persisted.filter((descriptor) => descriptor.role !== "subagent"
+    || persisted.some((candidate) => candidate.id === descriptor.parentSessionId)
+    || isOpen(descriptor.parentSessionId ?? ""));
+}
 
 export class TerminalManager {
   private readonly sessions = new Map<string, ManagedSession>();
@@ -418,12 +428,7 @@ export class TerminalManager {
 
     // A subagent whose owning session is gone restores as nothing: its
     // parent's runtime state no longer exists to collect its result.
-    const restorable = persisted.filter((descriptor) => (
-      descriptor.role !== "subagent"
-      || persisted.some((candidate) => candidate.id === descriptor.parentSessionId)
-      || this.sessions.has(descriptor.parentSessionId ?? "")
-    ));
-    for (const descriptor of restorable) this.restorePersistedSession(descriptor);
+    for (const descriptor of restorableDescriptors(persisted, (id) => this.sessions.has(id))) this.restorePersistedSession(descriptor);
     await this.persistSessions();
   }
 
@@ -451,14 +456,15 @@ export class TerminalManager {
   }
 
   async shutdownForUpdate(): Promise<() => Promise<void>> {
-    const sessions = [...this.sessions.values()].map(session => persistedTerminalSession(session.metadata));
+    const sessions = [...this.sessions.values()].filter(session => !session.disposing).map(session => persistedTerminalSession(session.metadata));
     await this.shutdown();
     let restored = false;
     return async () => {
       if (restored) return;
       restored = true;
+      this.shuttingDown = false;
       this.suppressPersistence = false;
-      for (const descriptor of sessions) this.restorePersistedSession(descriptor);
+      for (const descriptor of restorableDescriptors(sessions, (id) => this.sessions.has(id))) this.restorePersistedSession(descriptor);
       await this.persistSessions();
     };
   }
@@ -580,6 +586,7 @@ export class TerminalManager {
       metadata,
       process: launched.process,
       acp: null, initialPrompt: request.transport === "acp" || awaitMeasuredGrid || this.needsPreparedLaunch(request.provider) ? request.initialPrompt : undefined,
+      ...(answerCaptureGrantExpiresAt !== undefined && request.transport !== "acp" && (awaitMeasuredGrid || this.needsPreparedLaunch(request.provider)) ? { answerCaptureGrantExpiresAt } : {}),
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
       bufferChunks: [],
@@ -632,7 +639,7 @@ export class TerminalManager {
     } else if (session.metadata.contextSummary) session.metadata.contextSummary.status = 'empty';
     this.decisionInvalidated(id);
     session.delegationGeneration = randomUUID();
-    session.pendingInput = ""; session.initialPrompt = undefined;
+    session.pendingInput = ""; session.initialPrompt = undefined; session.answerCaptureGrantExpiresAt = undefined;
     if (session.metadata.transport === "acp" || this.needsPreparedLaunch(session.metadata.provider)) {
       session.launchGeneration++; session.acp?.dispose(); session.acp = null;
       this.releaseProviderLaunch(session);
@@ -886,7 +893,7 @@ export class TerminalManager {
     const awaitAcpExit = !!session.acp && session.metadata.exitCode === null;
     if (!awaitAcpExit) this.sessions.delete(id);
     session.launchGeneration++;
-    session.initialPrompt = undefined; session.contextLaunch = undefined; session.contextStartupActive = false; session.acp?.dispose();
+    session.initialPrompt = undefined; session.answerCaptureGrantExpiresAt = undefined; session.contextLaunch = undefined; session.contextStartupActive = false; session.acp?.dispose();
     if (!awaitAcpExit) this.releaseProviderLaunch(session);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
@@ -1046,7 +1053,8 @@ export class TerminalManager {
     try {
       this.assertLaunchCurrent(session);
       const startup = { task: session.initialPrompt, context: session.contextLaunch?.context?.text || undefined }; session.initialPrompt = undefined;
-      const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, undefined, startup);
+      const grant = session.answerCaptureGrantExpiresAt; session.answerCaptureGrantExpiresAt = undefined;
+      const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, undefined, startup, grant);
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
       session.agentRuntime = launched.agentRuntime;
@@ -1164,7 +1172,8 @@ export class TerminalManager {
           return;
         }
         this.assertLaunchCurrent(session);
-        const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, prepared);
+        const grant = session.answerCaptureGrantExpiresAt; session.answerCaptureGrantExpiresAt = undefined;
+        const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, prepared, undefined, grant);
         session.process = launched.process; session.agentBrowser = launched.agentBrowser;
         session.agentRuntime = launched.agentRuntime; session.agentOrchestration = launched.agentOrchestration;
         if (launched.failure) { applyLaunchFailure(session.metadata, launched.failure); if (session.metadata.execution) session.metadata.execution.state = "failed"; this.releaseProviderLaunch(session); }

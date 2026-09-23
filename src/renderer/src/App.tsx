@@ -223,7 +223,6 @@ export function App(): React.JSX.Element {
   const [settingsLocation, setSettingsLocation] = useState<SettingsLocation | null>(null);
   // A location is a one-shot jump; every close path drops it so reopening never replays it.
   useEffect(() => { if (!settingsOpen) setSettingsLocation(null); }, [settingsOpen]);
-  const [openUpdatesRequest, setOpenUpdatesRequest] = useState(0);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -244,8 +243,8 @@ export function App(): React.JSX.Element {
   const showToast = useCallback((message: string): void => setToast(message), []);
 
   const openUpdates = useCallback((): void => {
+    setSettingsLocation({ section: "about" });
     setSettingsOpen(true);
-    setOpenUpdatesRequest(request => request + 1);
   }, []);
 
   const runUpdateNoticeAction = useCallback((action: UpdateNoticeAction): void => {
@@ -1211,7 +1210,6 @@ export function App(): React.JSX.Element {
         open={settingsOpen}
         location={settingsLocation}
         sessions={sessions}
-        openUpdatesRequest={openUpdatesRequest}
         settings={settings}
         agentAvailability={agentAvailability}
         onRecheckAgentClis={recheckAgentClis}
