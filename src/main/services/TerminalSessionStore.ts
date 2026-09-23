@@ -2,6 +2,7 @@ import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
+  SessionRole,
   Point,
   ProviderId,
   SessionMetadata,
@@ -36,6 +37,8 @@ export interface PersistedTerminalSession {
   cwd: string;
   position: Point;
   size: Size;
+  role?: SessionRole;
+  parentSessionId?: string;
 }
 
 interface PersistedTerminalSessionState {
@@ -111,7 +114,13 @@ export function persistedTerminalSession(metadata: SessionMetadata): PersistedTe
     titleCustomized: metadata.titleCustomized,
     cwd: metadata.cwd,
     position: { ...metadata.position },
-    size: { ...metadata.size }
+    size: { ...metadata.size },
+    ...(metadata.role !== "interactive" || metadata.parentSessionId !== undefined
+      ? {
+        role: metadata.role,
+        ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {})
+      }
+      : {})
   };
 }
 
@@ -134,6 +143,17 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     if (typeof session.titleCustomized !== "boolean") continue;
     if (typeof session.cwd !== "string" || session.cwd.length === 0 || session.cwd.length > 4_096) continue;
     if (!isFinitePoint(session.position) || !isFiniteSize(session.size)) continue;
+    const roleKnown = session.role === undefined
+      || session.role === "interactive"
+      || session.role === "orchestrator"
+      || session.role === "subagent";
+    if (!roleKnown) continue;
+    const role = session.role;
+    const parentSessionId = typeof session.parentSessionId === "string"
+      ? session.parentSessionId
+      : undefined;
+    if (session.parentSessionId !== undefined && parentSessionId === undefined) continue;
+    if (role === "subagent" && parentSessionId === undefined) continue;
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -145,7 +165,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       size: {
         width: clamp(session.size.width, 420, 1_600),
         height: clamp(session.size.height, 260, 1_100)
-      }
+      },
+      ...(role !== undefined ? { role } : {}),
+      ...(parentSessionId !== undefined ? { parentSessionId } : {})
     });
     ids.add(session.id);
   }
