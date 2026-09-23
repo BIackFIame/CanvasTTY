@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
+import { constants, closeSync, fstatSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, open, opendir, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
@@ -34,6 +34,7 @@ export interface CreateTaskCapsule {
   classifyFile: (relativePath: string) => CapsuleDataClass | Promise<CapsuleDataClass>;
 }
 export interface TaskCapsule {
+  kind?: 'source' | 'advisory-review';
   id: string;
   directory: string;
   sourceDirectory: string;
@@ -52,6 +53,7 @@ interface CapsuleManifest {
   review?: { id: string; digest: string; blobHash: string };
   applied?: CapsuleApplyResult;
   journalHash?: string;
+  payload?: { patch: string };
   task: string; files: { path: string; data: string; mode: number; dev: number; ino: number }[];
 }
 interface CapsuleState { capsule: TaskCapsule; baseline: Map<string, Snapshot>; manifest?: CapsuleManifest; diskDigest?: string; unavailable?: string }
@@ -63,7 +65,7 @@ function validClass(value: unknown): value is CapsuleDataClass {
 
 export function assertSafeCapsulePath(path: string): void {
   if (typeof path !== 'string' || path.length > 1024 || isAbsolute(path) ||
-    !/^[a-zA-Z0-9._@+ /-]+$/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..') ||
+    !/^[\p{L}\p{N}\p{M}._@+ /-]+$/u.test(path) || path.split('/').some((part) => !part || part === '.' || part === '..') ||
     path.split('/').length > 20) {
     throw new Error(`Unsafe capsule path: ${String(path)}`);
   }
@@ -215,7 +217,7 @@ export class TaskCapsuleService {
         if (registryBytes > 128 * 1024 * 1024) throw new Error('Capsule registry storage budget exceeded.');
         const raw = await this.privateFile(join(this.rootDirectory, id, 'manifest.json'), MAX_MANIFEST_BYTES);
         const manifest: CapsuleManifest = JSON.parse(raw), capsule = manifest.capsule;
-        if (manifest.version !== 1 || manifest.installation !== this.installation || !UUID.test(manifest.token) || capsule?.id !== id || capsule.directory !== directory || typeof capsule.sourceDirectory !== 'string' || !isAbsolute(capsule.sourceDirectory) || !validClass(capsule.dataClass) || !Array.isArray(capsule.files) || !Array.isArray(manifest.files) || !manifest.files.length || manifest.files.length > MAX_FILES || manifest.files.length !== capsule.files.length || !['retained', 'reserved', 'running', 'uncertain', 'applying', 'apply-recovery-needed'].includes(manifest.phase) || ['reserved', 'running', 'uncertain'].includes(manifest.phase) && !UUID.test(manifest.leaseId ?? '') || ['retained', 'applying', 'apply-recovery-needed'].includes(manifest.phase) && manifest.leaseId !== undefined || typeof manifest.task !== 'string' || Buffer.byteLength(manifest.task) > MAX_TASK_BYTES || ![manifest.sourceDev, manifest.sourceIno, manifest.workspaceDev, manifest.workspaceIno, manifest.createdAt].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('Invalid capsule manifest.');
+        if (manifest.version !== 1 || manifest.installation !== this.installation || !UUID.test(manifest.token) || capsule?.id !== id || capsule.directory !== directory || typeof capsule.sourceDirectory !== 'string' || !isAbsolute(capsule.sourceDirectory) || !validClass(capsule.dataClass) || !Array.isArray(capsule.files) || !Array.isArray(manifest.files) || (capsule.kind === 'advisory-review' ? manifest.files.length !== 0 || JSON.stringify(capsule.files) !== JSON.stringify(['Review.patch']) || !manifest.payload || Object.keys(manifest.payload).length !== 1 || typeof manifest.payload.patch !== 'string' || Buffer.byteLength(manifest.payload.patch) > MAX_FILE_BYTES || !!manifest.review || !!manifest.applied || !!manifest.journalHash || ['applying', 'apply-recovery-needed'].includes(manifest.phase) : ![undefined, 'source'].includes(capsule.kind) || manifest.payload !== undefined || !manifest.files.length || manifest.files.length > MAX_FILES || manifest.files.length !== capsule.files.length) || !['retained', 'reserved', 'running', 'uncertain', 'applying', 'apply-recovery-needed'].includes(manifest.phase) || ['reserved', 'running', 'uncertain'].includes(manifest.phase) && !UUID.test(manifest.leaseId ?? '') || ['retained', 'applying', 'apply-recovery-needed'].includes(manifest.phase) && manifest.leaseId !== undefined || typeof manifest.task !== 'string' || Buffer.byteLength(manifest.task) > MAX_TASK_BYTES || ![manifest.sourceDev, manifest.sourceIno, manifest.workspaceDev, manifest.workspaceIno, manifest.createdAt].every(value => Number.isSafeInteger(value) && value >= 0)) throw new Error('Invalid capsule manifest.');
         let total = Buffer.byteLength(manifest.task); const paths = new Set<string>();
         for (const [index, file] of manifest.files.entries()) {
           assertSafeCapsulePath(file.path);
@@ -224,6 +226,7 @@ export class TaskCapsuleService {
           if (contents.toString('base64') !== file.data || contents.length > MAX_FILE_BYTES || total > MAX_TOTAL_BYTES) throw new Error('Capsule baseline exceeds its bound.');
           state.baseline.set(file.path, { contents, mode: file.mode, dev: file.dev, ino: file.ino });
         }
+        if (capsule.kind === 'advisory-review') state.baseline.set('Review.patch', { contents: Buffer.from(manifest.payload!.patch), mode: 0o400 });
         state.manifest = manifest; state.capsule = capsule; state.diskDigest = hash(raw);
         if (capsule.provenance !== undefined && !validCapsuleSourceProof(capsule.provenance)) throw new Error('Invalid capsule source provenance.');
         if (!validOwner(capsule.owner)) throw new Error('Invalid capsule ownership.');
@@ -308,7 +311,16 @@ export class TaskCapsuleService {
     const operation = this.creationQueue.catch(() => undefined).then(async () => { result = await this.createOwned(input); });
     this.creationQueue = operation; await operation; return result;
   }
-  private async createOwned(input: CreateTaskCapsule): Promise<TaskCapsule> {
+  /** Main-only derived bytes; never interpreted as a source baseline. */
+  async createAdvisory(input: { sourceDirectory: string; patch: string; task: string; dataClass: CapsuleDataClass; provenance: CapsuleSourceProof; owner: CapsuleOwner }): Promise<TaskCapsule> {
+    if (!this.rootDirectory) throw new Error('Advisory review requires durable owned capsule storage.');
+    if (typeof input.patch !== 'string' || !input.patch || Buffer.byteLength(input.patch) > MAX_FILE_BYTES || !validCapsuleSourceProof(input.provenance) || !input.owner) throw new Error('Invalid bounded advisory payload.');
+    const captured = structuredClone(input);
+    let result!: TaskCapsule;
+    const operation = this.creationQueue.catch(() => undefined).then(async () => { result = await this.createOwned({ ...captured, files: ['Review.patch'], classifyFile: () => captured.dataClass }, captured.patch); });
+    this.creationQueue = operation; await operation; return result;
+  }
+  private async createOwned(input: CreateTaskCapsule, derivedPatch?: string): Promise<TaskCapsule> {
     await this.recover();
     if (!validOwner(input.owner)) throw new Error('Invalid capsule ownership.');
     if (!validClass(input.dataClass) || typeof input.classifyFile !== 'function') throw new Error('A valid capsule data classification is required.');
@@ -328,7 +340,7 @@ export class TaskCapsuleService {
       const classification = await input.classifyFile(path);
       if (!validClass(classification)) throw new Error(`Missing or invalid file classification: ${path}`);
       if (classification > input.dataClass) throw new Error(`File ${path} is ${classification}, above capsule class ${input.dataClass}.`);
-      const snapshot = await snapshotFile(sourceDirectory, path);
+      const snapshot: Snapshot = derivedPatch === undefined ? await snapshotFile(sourceDirectory, path) : { contents: Buffer.from(derivedPatch), mode: 0o400 };
       total += snapshot.contents.length;
       if (total > MAX_TOTAL_BYTES) throw new Error('Capsule exceeds its total byte limit.');
       baseline.set(path, snapshot);
@@ -348,11 +360,11 @@ export class TaskCapsuleService {
       for (const [path, snapshot] of baseline) await writeSnapshot(directory, path, snapshot);
       await writeFile(join(directory, 'Task.md'), input.task, { mode: 0o600 });
       if (input.provenance !== undefined && !validCapsuleSourceProof(input.provenance)) throw new Error('Invalid capsule source provenance.');
-      const capsule: TaskCapsule = { id, directory, sourceDirectory, files: [...baseline.keys()], dataClass: input.dataClass, ...(input.provenance ? { provenance: structuredClone(input.provenance) } : {}), ...(input.owner ? { owner: structuredClone(input.owner) } : {}) };
+      const capsule: TaskCapsule = { ...(derivedPatch !== undefined ? { kind: 'advisory-review' as const } : {}), id, directory, sourceDirectory, files: [...baseline.keys()], dataClass: input.dataClass, ...(input.provenance ? { provenance: structuredClone(input.provenance) } : {}), ...(input.owner ? { owner: structuredClone(input.owner) } : {}) };
       const state: CapsuleState = { capsule, baseline };
       if (this.rootDirectory) {
         const source = await lstat(sourceDirectory), workspace = await lstat(directory);
-        state.manifest = { version: 1, installation: this.installation!, token: randomUUID(), capsule, sourceDev: source.dev, sourceIno: source.ino, workspaceDev: workspace.dev, workspaceIno: workspace.ino, createdAt: Date.now(), phase: 'retained', task: input.task, files: [...baseline].map(([path, snapshot]) => ({ path, data: snapshot.contents.toString('base64'), mode: snapshot.mode, dev: snapshot.dev!, ino: snapshot.ino! })) };
+        state.manifest = { version: 1, installation: this.installation!, token: randomUUID(), capsule, sourceDev: source.dev, sourceIno: source.ino, workspaceDev: workspace.dev, workspaceIno: workspace.ino, createdAt: Date.now(), phase: 'retained', task: input.task, ...(derivedPatch !== undefined ? { payload: { patch: derivedPatch } } : {}), files: [...(derivedPatch === undefined ? baseline : new Map<string, Snapshot>())].map(([path, snapshot]) => ({ path, data: snapshot.contents.toString('base64'), mode: snapshot.mode, dev: snapshot.dev!, ino: snapshot.ino! })) };
         await writeFile(join(this.rootDirectory, id, 'owner'), state.manifest.token, { flag: 'wx', mode: 0o600 }); await this.persist(state);
       }
       this.capsules.set(capsule.id, state);
@@ -366,6 +378,7 @@ export class TaskCapsuleService {
 
   async review(id: string, policyDigest?: string): Promise<CapsuleReview> {
     return this.exclusive(id, async state => {
+      this.sourceOnly(state);
       const output = await this.snapshotOutput(state);
       const result = await this.reviewOwned(state, output.current), outputDigest = this.outputDigest(output);
       if (outputDigest !== this.outputDigest(await this.snapshotOutput(state))) throw new Error('Capsule output changed; review again.');
@@ -383,7 +396,9 @@ export class TaskCapsuleService {
   private outputDigest(output: { current: Map<string, Snapshot>; task: Snapshot }): string {
     return hash(JSON.stringify([[...output.current].sort(([a], [b]) => a.localeCompare(b)), output.task]));
   }
+  private sourceOnly(state: CapsuleState): void { if (state.capsule.kind === 'advisory-review') throw new Error('Advisory artifacts have no source capsule review or apply authority.'); }
   private async storedReview(state: CapsuleState, reviewId: string): Promise<StoredReview> {
+    this.sourceOnly(state);
     if (!UUID.test(reviewId) || state.manifest?.review?.id !== reviewId) throw new Error('Capsule review expired. Review again.');
     const raw = await this.privateFile(join(this.rootDirectory!, state.capsule.id, 'review.json'), 16 * 1024 * 1024);
     if (hash(raw) !== state.manifest.review.blobHash) throw new Error('Stored capsule review changed; output retained.');
@@ -399,6 +414,22 @@ export class TaskCapsuleService {
       const stored = await this.storedReview(state, reviewId);
       if (stored.outputDigest !== this.outputDigest(await this.snapshotOutput(state))) throw new Error('Capsule output changed. Review again.');
       return { review: structuredClone(stored.review), files: stored.files.map(file => ({ path: file.path, contents: Buffer.from(file.data, 'base64'), mode: file.mode })) };
+    });
+  }
+  /** Main-only baseline and reviewed bytes. Paths never come from patch headers. */
+  async frozenConventionFiles(id: string, reviewId: string): Promise<{ review: CapsuleReview; files: { path: string; before: Buffer; after?: Buffer }[] }> {
+    return this.exclusive(id, async state => {
+      this.idle(state); const stored = await this.storedReview(state, reviewId);
+      if (stored.outputDigest !== this.outputDigest(await this.snapshotOutput(state))) throw new Error('Capsule output changed. Review again.');
+      const after = new Map(stored.files.map(f => [f.path, f]));
+      const files = [];
+      for (const [path, before] of state.baseline) { if (!before) throw new Error('Unselected convention source.');
+        const current = await snapshotFile(state.capsule.sourceDirectory, path);
+        if (!before.contents.equals(current.contents) || before.mode !== current.mode || before.dev !== current.dev || before.ino !== current.ino) throw new Error('Convention source changed since capsule capture.');
+        if (!stored.review.changedFiles.includes(path)) continue;
+        const next = after.get(path); files.push({ path, before: Buffer.from(before.contents), ...(next ? { after: Buffer.from(next.data, 'base64') } : {}) });
+      }
+      return { review: structuredClone(stored.review), files };
     });
   }
   async apply(id: string, reviewId: string, assertCurrent: () => void = () => {}): Promise<CapsuleApplyResult> {
@@ -488,7 +519,7 @@ export class TaskCapsuleService {
   /** Explicit rollback only where source still equals either the baseline or the exact reviewed write. */
   async recoverApply(id: string, reviewId: string, assertCurrent: () => void = () => {}): Promise<void> {
     await this.exclusive(id, async state => {
-      assertCurrent();
+      this.sourceOnly(state); assertCurrent();
       const manifest = state.manifest;
       if (!manifest || manifest.phase !== 'apply-recovery-needed' || !manifest.journalHash) throw new Error('Capsule has no recoverable apply journal.');
       const stored = await this.storedReview(state, reviewId), parent = join(this.rootDirectory!, id);
@@ -546,6 +577,7 @@ export class TaskCapsuleService {
       if (launch.marker && (!/^\.canvastty-container-[a-f0-9-]{36}$/u.test(launch.marker.name) || !UUID.test(launch.marker.token))) throw new Error('Invalid capsule launch marker.');
     } else this.idle(state);
     const output = await snapshotCapsuleDirectory(state.capsule.directory, state.baseline.keys(), launch?.marker);
+    if (state.capsule.kind === 'advisory-review' && (output.current.size !== 1 || !output.current.get('Review.patch')?.contents.equals(state.baseline.get('Review.patch')!.contents) || output.current.get('Review.patch')!.mode !== 0o400 || !output.task?.contents.equals(Buffer.from(state.manifest?.task ?? '')))) throw new Error('Advisory payload changed; retained.');
     return { current: output.current, task: output.task! };
   }
   private async reviewOwned(state: CapsuleState, current: Map<string, Snapshot>): Promise<Pick<CapsuleReview, 'patch' | 'changedFiles'>> {
@@ -595,6 +627,63 @@ export class TaskCapsuleService {
       await rm(this.rootDirectory ? join(this.rootDirectory, id) : state.capsule.directory, { recursive: true, force: false });
       this.capsules.delete(id);
     });
+  }
+
+
+  /** Main-only synchronous seal used immediately before credential disclosure. Never cached across calls. */
+  freshnessGuard(id: string, sourceFiles = false, allowedMarker?: () => CapsuleLaunchMarker | undefined): () => void {
+    const state = this.require(id), capsule = state.capsule;
+    const metadata = new Map<string, string>();
+    let sealed = false;
+    const snapshot = (): string => {
+      this.require(id);
+      let totalBytes = 0;
+      const roots = [capsule.sourceDirectory, capsule.directory, ...(this.rootDirectory ? [this.rootDirectory, join(this.rootDirectory, id)] : []), ...(capsule.provenance ? [capsule.provenance.sourceRoot, capsule.provenance.commonDirectory] : [])];
+      const identities = roots.map(path => { const info = lstatSync(path); if (!info.isDirectory() || realpathSync(path) !== path) throw new Error('Advisory source identity changed.'); return [path, info.dev, info.ino]; });
+      const files: unknown[] = [];
+      const read = (path: string, limit = MAX_FILE_BYTES, record = true): Buffer => {
+        const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+        try {
+          const info = fstatSync(fd), identity = JSON.stringify([info.dev, info.ino, info.mode, info.size, info.ctimeMs, info.mtimeMs]);
+          if (!info.isFile() || info.nlink !== 1 || info.size > limit || realpathSync(path) !== path || sealed && record && metadata.get(path) !== identity) throw new Error('Advisory file identity changed.');
+          totalBytes += info.size;
+          if (totalBytes > 64 * 1024 * 1024) throw new Error('Advisory seal byte limit exceeded.');
+          const bytes = Buffer.alloc(info.size + 1); let length = 0;
+          while (length < bytes.length) { const n = readSync(fd, bytes, length, bytes.length - length, length); if (!n) break; length += n; }
+          const after = fstatSync(fd), target = lstatSync(path);
+          if (length !== info.size || after.ctimeMs !== info.ctimeMs || after.mtimeMs !== info.mtimeMs || target.dev !== info.dev || target.ino !== info.ino || target.nlink !== 1) throw new Error('Advisory file changed while reading.');
+          const contents = bytes.subarray(0, length);
+          if (record) { metadata.set(path, identity); files.push([path, identity, hash(contents)]); }
+          return contents;
+        } finally { closeSync(fd); }
+      };
+      let entries = 0;
+      const walk = (root: string, prefix = ''): void => {
+        for (const entry of readdirSync(join(root, prefix), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+          if (++entries > MAX_FILES * 21 + 2) throw new Error('Advisory entry bound exceeded.');
+          const path = prefix + entry.name;
+          const marker = allowedMarker?.();
+          if (marker?.name === path) { if (read(join(root, path), 128, false).toString('utf8') !== marker.token) throw new Error('Advisory marker changed.'); continue; }
+          if (entry.isDirectory()) { if (![...state.baseline.keys()].some(file => file.startsWith(path + '/'))) throw new Error('Advisory output changed.'); walk(root, path + '/'); }
+          else { if (path !== 'Task.md' && !state.baseline.has(path)) throw new Error('Advisory output changed.'); read(join(root, path), path === 'Task.md' ? MAX_TASK_BYTES : MAX_FILE_BYTES); }
+        }
+      };
+      if (this.rootDirectory) {
+        for (const path of [this.rootDirectory, join(this.rootDirectory, id), capsule.directory]) { const info = lstatSync(path); if (info.mode & 0o077 || process.getuid && info.uid !== process.getuid()) throw new Error('Advisory ownership changed.'); }
+        if (read(join(this.rootDirectory, 'owner'), 128, false).toString('utf8').trim() !== this.installation || read(join(this.rootDirectory, id, 'owner'), 128, false).toString('utf8').trim() !== state.manifest?.token) throw new Error('Advisory ownership changed.');
+        if (!sourceFiles && hash(read(join(this.rootDirectory, id, 'manifest.json'), MAX_MANIFEST_BYTES, false)) !== state.diskDigest) throw new Error('Advisory manifest changed.');
+      }
+      if (this.rootDirectory && sourceFiles) for (const name of ['manifest.json', 'review.json', 'owner']) read(join(this.rootDirectory, id, name), name === 'review.json' ? 16 * 1024 * 1024 : name === 'manifest.json' ? MAX_MANIFEST_BYTES : 128);
+      walk(capsule.directory);
+      if (sourceFiles) for (const path of capsule.files) read(join(capsule.sourceDirectory, path));
+      if (capsule.provenance) {
+        const pointer = join(capsule.provenance.sourceRoot, '.git'), info = lstatSync(pointer);
+        if (info.isFile()) read(pointer, 4096); else if (info.isDirectory() && realpathSync(pointer) === pointer) identities.push([pointer, info.dev, info.ino]); else throw new Error('Advisory repository pointer changed.');
+      }
+      return hash(JSON.stringify([identities, files]));
+    };
+    const captured = snapshot(); sealed = true;
+    return () => { try { if (snapshot() !== captured) throw new Error(); } catch { throw new Error('Advisory source, reviewed output or payload changed. Review again.'); } };
   }
 
   async dispose(): Promise<void> {

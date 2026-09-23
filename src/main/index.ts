@@ -1,4 +1,9 @@
+import { PreferenceReviewService } from './services/PreferenceReviewService';
+import { ConventionValidatorService } from './services/ConventionValidatorService';
+import { ContextLaunchService } from './services/ContextLaunchService';
+import { ContextProfileStore } from "./services/ContextProfileStore";
 import { ContainerExecutionService } from "./services/ContainerExecutionService";
+import { ContainerPlacementService } from './services/ContainerPlacement';
 import { WorktreeService } from "./services/WorktreeService";
 import { SessionLaunchCoordinator } from "./services/SessionLaunchCoordinator";
 import { TaskCapsuleService } from "./services/TaskCapsuleService";
@@ -362,7 +367,7 @@ async function initializeServices(): Promise<void> {
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().restoreTerminalSessions);
 
-  // The orchestration bridge exists only for sessions explicitly launched with
+  // The local gateway socket/timer is resident; capabilities and MCP config exist only for sessions explicitly launched with
   // the orchestrator role; interactive sessions never receive capabilities.
   const remoteMetrics = new RemoteHostMetricsService(sshRunner);
   const remoteDiscovery = new RemoteProviderDiscovery(sshRunner);
@@ -426,14 +431,30 @@ async function initializeServices(): Promise<void> {
   const capsuleStorage = new TaskCapsuleService({ rootDirectory: join(userDataPath, 'task-capsules') });
   await capsuleStorage.recover().catch(() => { console.warn('CanvasTTY retained capsules could not be verified; they remain on disk.'); });
   const capsules = new CapsuleLaunchService(capsuleStorage, () => settings.get());
-  terminalManager.configureLaunchPolicy(new SessionLaunchPolicy(() => settings.get(), { capsulePolicy: request => capsules.classify(request) }));
-  const containers = new ContainerExecutionService(() => settings.get(), { rootDirectory: join(userDataPath, "container-generations"), onWorkspaceStopped: (id, lease, kind) => kind === 'capsule-test' ? capsuleTests.confirmStopped(id, lease) : kind === 'capsule' ? capsuleStorage.confirmContainerStopped(id, lease) : worktrees.confirmContainerStopped(id, lease) });
+  const contextProfiles = new ContextProfileStore(join(userDataPath, "context-profiles"), () => settings.get().pathPolicies);
+  const contextLaunch = new ContextLaunchService(contextProfiles);
+  const conventionValidator = new ConventionValidatorService(capsules, contextProfiles);
+  terminalManager.configureContextLaunch(contextLaunch, () => settings.get().contextProfilesEnabled);
+  const launchPolicy = new SessionLaunchPolicy(() => settings.get(), { context: contextLaunch, capsulePolicy: request => capsules.classify(request) });
+  terminalManager.configureLaunchPolicy(launchPolicy);
+  const containers = new ContainerExecutionService(() => settings.get(), { rootDirectory: join(userDataPath, "container-generations"), onWorkspaceStopped: (id, lease, kind) => kind === 'capsule-test' ? capsuleTests.confirmStopped(id, lease) : (kind === 'capsule' || kind === 'advisory-review') ? capsuleStorage.confirmContainerStopped(id, lease) : worktrees.confirmContainerStopped(id, lease) });
   const capsuleTests = new CapsuleTestService(capsules, containers, () => settings.get(), { rootDirectory: join(userDataPath, 'capsule-test-runs') });
   capsuleTestsService = capsuleTests;
   await capsuleTests.recover().catch(() => { console.warn('CanvasTTY retained tests could not be verified; their files remain on disk.'); });
-  orchestrationHandler.configureCapsules(new ScopedCapsuleControl(terminalManager, agentControl, capsules, capsuleTests));
+  const preferenceReview = new PreferenceReviewService(capsules, terminalManager, agentControl, containers, () => settings.get());
+  orchestrationHandler.configureCapsules(new ScopedCapsuleControl(terminalManager, agentControl, capsules, capsuleTests, conventionValidator, preferenceReview));
   terminalManager.configureProviderLaunch(new SessionLaunchCoordinator(
     new ProviderAccountLaunchService(() => settings.get(), providerSecretsService, { discovery: remoteDiscovery }), worktrees, () => settings.get(), hostPlacement, containers, capsules));
+  terminalManager.configureContainerPlacement(new ContainerPlacementService({
+    settings: () => settings.get(), sessions: () => terminalManager!.listMetadata(), policy: launchPolicy,
+    inventory: ids => containers.inventory(ids),
+    metrics: async host => {
+      if (host) return remoteMetrics.collect(host);
+      const local = localMetrics.collect();
+      return { hostId: 'local', reachable: true, collectedAt: local.collectedAt, load1: local.load1, cores: local.cores,
+        memoryTotalMb: local.memoryTotalMb, memoryAvailableMb: local.memoryAvailableMb, gpuVramTotalMb: null, gpuVramUsedMb: null };
+    }
+  }));
 
   await terminalManager.restorePersistedSessions();
   limitsService = new LimitsService(providerClis, app.getVersion());
@@ -475,7 +496,10 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   registerIpc({
+    contextProfiles,
     capsuleTests,
+    conventionValidator,
+    preferenceReview,
     capsules,
     hostDiagnostics: new SavedHostDiagnostics(() => settings.get().remoteHosts, remoteDiscovery, remoteAccess, remoteMetrics),
     containers,

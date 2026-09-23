@@ -9,7 +9,7 @@ import { OrchestrationClient } from "../src/agent-browser/orchestration-helper.m
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
 import { HostPlacementService } from "../src/main/services/HostPlacement.ts";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
-import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { TerminalManager } from "./helpers/delegation-test-manager.mjs";
 import { OrchestrationGateway } from "../src/main/services/agent-browser/OrchestrationGateway.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
 import { ORCHESTRATION_BRIDGE_PROTOCOL_VERSION } from "../src/main/services/agent-browser/orchestration-protocol.ts";

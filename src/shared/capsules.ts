@@ -1,4 +1,4 @@
-import type { DataClass } from './contracts.ts';
+import type { AgentProviderId, DataClass, ProviderId, SessionSnapshot } from './contracts.ts';
 
 export interface CapsuleTestProfile {
   id: string; label: string; containerProfileId: string; command: string; args: string[]; timeoutMs: number; outputBytes: number;
@@ -36,6 +36,7 @@ export function normalizeCapsuleTestProfiles(value: unknown): CapsuleTestProfile
 
 export interface PrepareCapsuleRequest { sourceCwd: string; files: string[]; task: { text: string; dataClass: DataClass } }
 export interface CapsuleSummary {
+  kind?: 'source' | 'advisory-review';
   id: string; sourceDirectory: string; directory: string; files: string[]; dataClass: DataClass; capturedBytes: number;
   state: 'retained' | 'running' | 'uncertain' | 'unavailable' | 'applied' | 'apply-recovery-needed';
   createdAt: number; reason?: string; recoveryReviewId?: string;
@@ -44,7 +45,17 @@ export interface CapsuleReview {
   workspaceId: string; reviewId: string; digest: string; createdAt: number; patch: string; changedFiles: string[]; policyDigest?: string;
 }
 export interface CapsuleApplyResult { workspaceId: string; reviewId: string; digest: string; appliedAt: number }
+export interface AdvisoryReviewRequest { capsuleId: string; reviewId: string; parentSessionId: string; accountId: string; model: string; containerProfileId: string }
+export interface AdvisoryReviewRoute { accountId: string; accountLabel: string; provider: AgentProviderId; model: string; containerProfileId: string; containerLabel: string; hostId: 'local' }
+export interface AdvisoryReviewChoices { parents: { id: string; title: string; provider: ProviderId }[]; routes: AdvisoryReviewRoute[]; unavailable?: 'ownerless' | 'owner-unavailable' | 'advisory-source' | 'unchanged' }
+export interface AdvisoryReviewPreview { previewId: string; route: AdvisoryReviewRoute; dataClass: DataClass; reviewDigest: string; text: string; contextDataClass: DataClass; contextBytes: number }
 export interface CapsulesApi {
+  reviewAgentChoices(id: string, reviewId: string): Promise<AdvisoryReviewChoices>;
+  previewReviewAgent(input: AdvisoryReviewRequest): Promise<AdvisoryReviewPreview>;
+  launchReviewAgent(previewId: string): Promise<SessionSnapshot>;
+  cancelReviewAgent(previewId: string): Promise<void>;
+  validateConventions(id: string, reviewId: string, maxDataClass: DataClass): Promise<import('./conventions.ts').ConventionReport>;
+  currentConventions(id: string): Promise<import('./conventions.ts').ConventionReport>;
   startTest(id: string, reviewId: string, testProfileId: string): Promise<CapsuleTestSummary>;
   testRuns(): Promise<CapsuleTestSummary[]>;
   testResult(id: string): Promise<CapsuleTestRun>;

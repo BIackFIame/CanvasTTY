@@ -25,3 +25,43 @@ test('actual POSIX serialization preserves one multiline task without expansion 
   const decoded = JSON.parse(execFileSync('/bin/sh', ['-c', launch.args.at(-1)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } }));
   assert.deepEqual(decoded, args);
 });
+
+const context = 'Keep "quoted" preferences literal.\nРусский \\ path `literal` $(literal)';
+test('passive context flags precede model/resume and do not duplicate context in the initial task', () => {
+  for (const [provider, flag] of Object.entries({ codex: '-c', claude: '--append-system-prompt', grok: '--rules', omp: '--append-system-prompt', pi: '--append-system-prompt' })) {
+    const launch = resolveTerminalLaunch(provider, 'normal', ['--fixture'], { providerCli: cli(provider), model: 'fixture-model', resumePrevious: true, startup: { task, context } });
+    const args = launch.args, index = args.indexOf(flag);
+    assert.ok(index > 0 && index < args.indexOf('--model'), provider);
+    if (provider === 'codex') assert.equal(JSON.parse(args[index + 1].slice('developer_instructions='.length)), context);
+    else assert.equal(args[index + 1], context);
+    assert.equal(args.at(-1), `CanvasTTY task:\n${task}`);
+    const passive = resolveTerminalLaunch(provider, 'normal', [], { providerCli: cli(provider), startup: { context } });
+    assert.equal(passive.args.length, 2);
+  }
+});
+test('prompt-only adapters require a real task and carry context in the one final literal message', () => {
+  for (const provider of ['qwen', 'opencode', 'hermes', 'cursor', 'minimax', 'devin', 'antigravity']) {
+    assert.throws(() => resolveTerminalLaunch(provider, 'normal', [], { providerCli: cli(provider), startup: { context } }), /task|passive/);
+    for (const emptyTask of ['', ' ', '\n\t', '\u00a0']) assert.throws(() => resolveTerminalLaunch(provider, 'normal', [], { providerCli: cli(provider), startup: { context, task: emptyTask } }), /task|passive/);
+    const launch = resolveTerminalLaunch(provider, 'normal', [], { providerCli: cli(provider), startup: { context, task } });
+    assert.equal(launch.args.filter(arg => arg.includes(context)).length, 1);
+    assert.ok(launch.args.at(-1).startsWith('CanvasTTY context:\n'));
+    assert.ok(launch.args.at(-1).endsWith(`CanvasTTY task:\n${task}`));
+  }
+  for (const provider of ['terminal', 'kimi']) assert.throws(() => resolveTerminalLaunch(provider, 'normal', [], { providerCli: cli(provider), startup: { context } }));
+});
+test('complete startup payload is bounded in UTF-8 and refuses NUL or unverified batch context', () => {
+  const taskAtLimit = 'x'.repeat(60 * 1024);
+  assert.equal(resolveTerminalLaunch('codex', 'normal', [], { providerCli: cli('codex'), startup: { task: taskAtLimit } }).args.at(-1), `CanvasTTY task:\n${taskAtLimit}`);
+  assert.throws(() => resolveTerminalLaunch('codex', 'normal', [], { providerCli: cli('codex'), startup: { task: taskAtLimit + 'x' } }), /limit/);
+  for (const startup of [{ task: 'я'.repeat(16000), context: 'я'.repeat(16000) }, { context: 'bad\0text' }, { context: '\ud800' }]) assert.throws(() => resolveTerminalLaunch('codex', 'normal', [], { providerCli: cli('codex'), startup }), /limit|literal|UTF|Unicode/);
+  assert.throws(() => resolveTerminalLaunch('claude', 'normal', [], { providerCli: { ...cli('claude'), launcher: 'batch', commandPrompt: 'cmd.exe' }, startup: { context } }), /batch|verified/);
+  const literal = resolveTerminalLaunch('codex', 'normal', [], { providerCli: cli('codex'), startup: { context: 'control\u007fcharacter' } }).args[1];
+  assert.ok(!literal.includes('\u007f')); assert.equal(JSON.parse(literal.slice('developer_instructions='.length)), 'control\u007fcharacter');
+});
+test('remote composition preserves passive context and task as distinct literal arguments', () => {
+  const args = resolveTerminalLaunch('codex', 'normal', [], { providerCli: cli('codex'), startup: { task, context } }).args;
+  const launch = remoteAgentLaunch({ sshHost: 'unused.invalid' }, process.cwd(), process.execPath, { absoluteExecutable: true, args: ['-e', 'process.stdout.write(JSON.stringify(process.argv.slice(1)))', '--', ...args] });
+  assert.deepEqual(JSON.parse(execFileSync('/bin/sh', ['-c', launch.args.at(-1)], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } })), args);
+  assert.equal(JSON.parse(args[1].slice('developer_instructions='.length)), context);
+});

@@ -1,4 +1,4 @@
-import { dataClassSatisfies, hostEffectiveMaxDataClass, providerPermittedOnHost, remotePathForHost, remoteHostInvalidReason } from "../../shared/contracts.ts";
+import { DATA_CLASSES, dataClassSatisfies, hostEffectiveMaxDataClass, providerPermittedOnHost, remotePathForHost, remoteHostInvalidReason } from "../../shared/contracts.ts";
 import type { AgentProviderId, DataClass, RemoteHost } from "../../shared/contracts";
 import type { RemoteHostMetrics } from "./RemoteHostMetrics.ts";
 import type { RemoteDiscoveryResult } from "./RemoteProviderDiscovery.ts";
@@ -11,6 +11,8 @@ export interface PlacementRequest {
   excludeSessionId?: string;
   localWorkspace: string;
   dataClass?: DataClass;
+  /** Main-only effective floor for already projected exact candidates on each host. */
+  hostDataClasses?: Readonly<Record<string, DataClass>>;
   /** Fixed account bindings, already filtered by model/privacy. No rebinding. */
   eligibleHostIds?: readonly string[];
 }
@@ -96,7 +98,9 @@ export class HostPlacementService {
     if (remoteHostInvalidReason(host) !== null) return { stage: 0, reason: "no valid configured host" };
     if (request.eligibleHostIds && !request.eligibleHostIds.includes(host.id)) return { stage: 0, reason: "no eligible account is bound to this host" };
     if (!providerPermittedOnHost(host, request.provider)) return { stage: 2, reason: `provider ${request.provider} is not permitted or reachable on any eligible host` };
-    if (request.dataClass !== undefined && !dataClassSatisfies(request.dataClass, hostEffectiveMaxDataClass(host))) return { stage: 3, reason: `no eligible host handles data class ${request.dataClass}` };
+    const dataClass = request.hostDataClasses === undefined ? request.dataClass : request.hostDataClasses[host.id];
+    if (request.hostDataClasses !== undefined && !DATA_CLASSES.includes(dataClass as DataClass)) return { stage: 0, reason: 'host has no valid projected data class' };
+    if (dataClass !== undefined && !dataClassSatisfies(dataClass, hostEffectiveMaxDataClass(host))) return { stage: 3, reason: `no eligible host handles data class ${dataClass}` };
     if (remotePathForHost(host, request.localWorkspace) === null) return { stage: 4, reason: "workspace not mapped on any eligible host" };
     if ((activeSessions ?? this.sessionCount(capacity, host.id)) >= (host.maxSessions ?? DEFAULT_MAX_SESSIONS) || !this.agentCapacity(capacity, host.id)) return { stage: 5, reason: "all eligible hosts full" };
     return null;
@@ -211,7 +215,7 @@ function providerInstalled(discovery: RemoteDiscoveryResult | null, provider: Ag
 // Runs one source call, falling back to `fallback` when it throws — including
 // when it throws synchronously before producing a promise. Placement treats a
 // broken source as missing data about one host, never as a failed decision.
-async function degrade<T>(probe: () => Promise<T> | T, fallback: T): Promise<T> {
+export async function degrade<T>(probe: () => Promise<T> | T, fallback: T): Promise<T> {
   try {
     return await probe();
   } catch {

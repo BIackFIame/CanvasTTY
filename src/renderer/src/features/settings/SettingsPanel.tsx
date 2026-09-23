@@ -1,3 +1,5 @@
+import { useDialogFocus } from "../../lib/useDialogFocus";
+import { ContextSettings } from "./ContextSettings";
 import type { SettingsLocation } from "../../../../shared/settingsLocation";
 import type { SessionSnapshot } from "../../../../shared/contracts";
 import { RemoteHostsSettings } from "./RemoteHostsSettings";
@@ -5,7 +7,7 @@ import { AgentBudgetsSettings } from "./ExecutionPolicySettings";
 import { ContainerProfilesSettings } from "./ContainerProfilesSettings";
 import { RetainedWorkspacesSettings } from "./RetainedWorkspacesSettings";
 import { EvenG2Controls } from "./EvenG2Controls";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   AppSettings,
   AgentCliAvailability,
@@ -87,7 +89,7 @@ import { setCanvasLauncherItemEnabled } from "../launcher/canvasLauncher";
 import { itemLabel } from "../launcher/QuickRadialMenu";
 import { setRadialLauncherItemEnabled } from "../launcher/radialLauncher";
 
-type SettingsSection = "general" | "appearance" | "agents" | "connections" | "execution" | "controls" | "browser" | "plugins" | "about";
+type SettingsSection = "context" | "general" | "appearance" | "agents" | "connections" | "execution" | "controls" | "browser" | "plugins" | "about";
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
@@ -98,6 +100,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "agents", icon: "terminal" },
   { id: "connections", icon: "blocks" },
   { id: "execution", icon: "folder" },
+  { id: "context", icon: "blocks" },
   { id: "controls", icon: "sliders-horizontal" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
@@ -118,6 +121,7 @@ const CANVAS_COLOR_PREVIEWS: Record<CanvasColorId, string> = {
 
 interface SettingsPanelProps {
   location?: SettingsLocation | null;
+  onRevealSession?(id: string): void;
   sessions: SessionSnapshot[];
   open: boolean;
   settings: AppSettings;
@@ -148,6 +152,7 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({
+  onRevealSession,
   location,
   sessions,
   open,
@@ -176,14 +181,18 @@ export function SettingsPanel({
   onEditHome,
   onOpenBrowser,
 }: SettingsPanelProps): React.JSX.Element {
+  const panel = useRef<HTMLElement>(null);
+  useDialogFocus(panel, open, { onEscape: onClose });
   const locale = settings.locale;
   const appearance = resolveAppearanceSettings(settings);
   const homeLauncherProviders = resolveHomeLauncherProviders(settings);
   const homeLimitProviders = resolveHomeLimitProviders(settings);
+  const [contextVisited, setContextVisited] = useState(false);
   const [section, setSection] = useState<SettingsSection>("general");
   const [connectionsVisited, setConnectionsVisited] = useState(false);
   const [agentView, setAgentView] = useState<"launch" | "status">("launch");
   const [executionView, setExecutionView] = useState<"hosts" | "workspaces" | "containers" | "limits">("hosts");
+  useEffect(() => { if (section === "context") setContextVisited(true); }, [section]);
   const [executionVisited, setExecutionVisited] = useState(false);
   const [containersVisited, setContainersVisited] = useState(false);
   const [workspacesVisited, setWorkspacesVisited] = useState(false);
@@ -357,6 +366,7 @@ export function SettingsPanel({
       if (event.target === event.currentTarget) onClose();
     }}>
       <aside
+        ref={panel}
         className={`settings-panel ${open ? "settings-panel--open" : ""}`}
         role="dialog"
         aria-modal="true"
@@ -417,6 +427,7 @@ export function SettingsPanel({
             role="tabpanel"
             aria-labelledby={`settings-tab-${section}`}
           >
+          {(contextVisited || section === "context") && <div hidden={section !== "context"} inert={!open || section !== "context"}><ContextSettings settings={settings} active={open && section === "context"} onPersist={onPersist} /></div>}
           {section === "general" && (
             <>
               <SettingGroup label={t(locale, "language")}>
@@ -755,8 +766,8 @@ export function SettingsPanel({
             <SettingsViewSelector<"hosts" | "workspaces" | "containers" | "limits"> name="execution" locale={locale} value={executionView} onChange={setExecutionView} options={[["hosts", "hosts"], ["workspaces", "retainedWorkspaces"], ["containers", "containers"], ["limits", "agentLimits"]]} />
             <div id="settings-view-execution-hosts" role="tabpanel" aria-label={t(locale, "hosts")} hidden={executionView !== "hosts"} inert={!open || section !== "execution" || executionView !== "hosts"}><RemoteHostsSettings settings={settings} sessions={sessions} active={open && section === "execution" && executionView === "hosts"} recordId={location?.section === "execution" && location.view === "hosts" ? location.recordId : undefined} selectionRequest={location} onPersist={onPersist} /></div>
             <div id="settings-view-execution-limits" role="tabpanel" aria-label={t(locale, "agentLimits")} hidden={executionView !== "limits"} inert={!open || section !== "execution" || executionView !== "limits"}><AgentBudgetsSettings settings={settings} onPersist={onPersist} /></div>
-            {(workspacesVisited || executionView === 'workspaces') && <div id="settings-view-execution-workspaces" role="tabpanel" aria-label={t(locale, "retainedWorkspaces")} hidden={executionView !== 'workspaces'} inert={!open || section !== 'execution' || executionView !== 'workspaces'}><RetainedWorkspacesSettings settings={settings} onChange={onPersist} active={open && section === 'execution' && executionView === 'workspaces'} /></div>}
-            {(containersVisited || executionView === "containers") && <div id="settings-view-execution-containers" role="tabpanel" aria-label={t(locale, "containers")} hidden={executionView !== "containers"} inert={!open || section !== "execution" || executionView !== "containers"}><ContainerProfilesSettings settings={settings} recordId={location?.section === "execution" && location.view === "containers" ? location.recordId : undefined} selectionRequest={location} onPersist={onPersist} /></div>}
+            {(workspacesVisited || executionView === 'workspaces') && <div id="settings-view-execution-workspaces" role="tabpanel" aria-label={t(locale, "retainedWorkspaces")} hidden={executionView !== 'workspaces'} inert={!open || section !== 'execution' || executionView !== 'workspaces'}><RetainedWorkspacesSettings onRevealSession={onRevealSession} settings={settings} onChange={onPersist} active={open && section === 'execution' && executionView === 'workspaces'} /></div>}
+            {(containersVisited || executionView === "containers") && <div id="settings-view-execution-containers" role="tabpanel" aria-label={t(locale, "containers")} hidden={executionView !== "containers"} inert={!open || section !== "execution" || executionView !== "containers"}><ContainerProfilesSettings settings={settings} active={open && section === "execution" && executionView === "containers"} recordId={location?.section === "execution" && location.view === "containers" ? location.recordId : undefined} selectionRequest={location} onPersist={onPersist} /></div>}
           </div>}
 
           {section === "controls" && (

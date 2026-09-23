@@ -72,6 +72,7 @@ interface HomeEditDraft {
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
   restoreTerminalSessions: false,
+  contextProfilesEnabled: false,
   persistCanvasRegions: true,
   persistStickyNotes: true,
   palette: "sage",
@@ -190,6 +191,7 @@ function contrastRatio(left: number, right: number): number {
 
 export function App(): React.JSX.Element {
   const [settings, setSettings] = useState(FALLBACK_SETTINGS);
+  useEffect(() => { document.documentElement.lang = settings.locale; }, [settings.locale]);
   const [sessions, setSessions] = useState<SessionSnapshot[]>([]);
   const [limits, setLimits] = useState<LimitsSnapshot | null>(null);
   const [limitsLoadState, setLimitsLoadState] = useState<LimitsLoadState>("loading");
@@ -215,7 +217,6 @@ export function App(): React.JSX.Element {
   const [settingsLocation, setSettingsLocation] = useState<SettingsLocation | null>(null);
   // A location is a one-shot jump; every close path drops it so reopening never replays it.
   useEffect(() => { if (!settingsOpen) setSettingsLocation(null); }, [settingsOpen]);
-  const settingsOpener = useRef<HTMLElement | null>(null);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -411,10 +412,16 @@ export function App(): React.JSX.Element {
   const launchAgent = useCallback(async (
     options: AgentLaunchOptions
   ): Promise<void> => {
-    await createSession(options, launchPosition ?? undefined);
+    const created = await createSession(options, launchPosition ?? undefined);
     setLaunchPosition(null);
-    showToast(`${t(settings.locale, "launchPreparing")}: ${options.provider}`);
-  }, [createSession, launchPosition, settings.locale, showToast]);
+    const isolation = created.isolation;
+    const route = isolation?.mode === 'container' ? [
+      created.hostId ? settings.remoteHosts.find(h => h.id === created.hostId)?.label ?? created.hostId : t(settings.locale, 'accountLocalHost'),
+      settings.providerAccounts.find(a => a.id === created.accountId)?.label ?? created.accountId,
+      settings.containerProfiles.find(p => p.id === isolation.profileId)?.label ?? isolation.profileId
+    ].filter(Boolean).join(' · ') : '';
+    showToast(`${t(settings.locale, "launchPreparing")}: ${created.provider}${route ? ` · ${route}` : ''}`);
+  }, [createSession, launchPosition, settings.locale, settings.remoteHosts, settings.providerAccounts, settings.containerProfiles, showToast]);
 
   const restartSession = useCallback(async (id: string): Promise<void> => {
     try {
@@ -1113,7 +1120,7 @@ export function App(): React.JSX.Element {
       <AgentLaunchDialog
         provider={launchProvider}
         suspended={settingsOpen}
-        onOpenSettings={location => { settingsOpener.current = document.activeElement as HTMLElement | null; setSettingsLocation(location); setSettingsOpen(true); }}
+        onOpenSettings={location => { setSettingsLocation(location); setSettingsOpen(true); }}
         settings={settings}
         onClose={() => {
           setLaunchProvider(null);
@@ -1140,6 +1147,7 @@ export function App(): React.JSX.Element {
         }}
       />
       <SettingsPanel
+        onRevealSession={id => { const session = sessions.find(s => s.id === id); if (session) { setSettingsOpen(false); focusSession(session); } }}
         open={settingsOpen}
         location={settingsLocation}
         sessions={sessions}
@@ -1148,7 +1156,7 @@ export function App(): React.JSX.Element {
         onRecheckAgentClis={recheckAgentClis}
         plugins={plugins}
         browser={browser}
-        onClose={() => { setSettingsOpen(false); setSettingsLocation(null); requestAnimationFrame(() => { settingsOpener.current?.focus(); settingsOpener.current = null; }); }}
+        onClose={() => { setSettingsOpen(false); setSettingsLocation(null); }}
         onChange={saveSettings}
         onPersist={persistSettings}
         onPreviewPlugin={previewPlugin}
@@ -1211,10 +1219,25 @@ function focusCamera(
   zoom = DEFAULT_FOCUS_ZOOM
 ): CameraState {
   const { width: viewportWidth, height: viewportHeight } = canvasViewportSize();
+  const initialZoom = Math.max(0.2, Math.min(zoom, (viewportWidth - 48) / size.width, (viewportHeight - 72) / size.height));
+  let top = 24, bottom = 24;
+  const viewport = document.querySelector<HTMLElement>(".app__content")?.getBoundingClientRect();
+  if (viewport) {
+    const left = viewport.left + (viewportWidth - size.width * initialZoom) / 2;
+    const right = left + size.width * initialZoom;
+    for (const slot of document.querySelectorAll<HTMLElement>(".canvas-overlay-slot")) {
+      if (!slot.children.length) continue;
+      const bounds = slot.getBoundingClientRect();
+      if (bounds.right <= left || bounds.left >= right) continue;
+      if (slot.className.includes("--top-")) top = Math.max(top, bounds.bottom - viewport.top + 12);
+      else bottom = Math.max(bottom, viewport.bottom - bounds.top + 12);
+    }
+  }
+  const fittedZoom = Math.max(0.2, Math.min(initialZoom, (viewportHeight - top - bottom) / size.height));
   return {
-    zoom,
-    x: viewportWidth / 2 - (position.x + size.width / 2) * zoom,
-    y: viewportHeight / 2 - (position.y + size.height / 2) * zoom
+    zoom: fittedZoom,
+    x: viewportWidth / 2 - (position.x + size.width / 2) * fittedZoom,
+    y: top + (viewportHeight - top - bottom) / 2 - (position.y + size.height / 2) * fittedZoom
   };
 }
 

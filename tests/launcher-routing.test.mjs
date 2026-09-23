@@ -42,7 +42,7 @@ test('ACP and worktree choices retain all typed routing fields',()=>{
  const settings={...defaults,providerAccounts:[local]};
  const draft={...reconcileLaunchDraft(null,'kimi',settings),accountId:'a',transport:'acp',isolation:'worktree',ref:'base',profile:'yolo',model:'kimi-model',dataClass:'D1'};
  const options=launchOptions(draft,settings);
- assert.deepEqual(options,{provider:'kimi',cwd:process.cwd(),profile:'yolo',transport:'acp',accountId:'a',model:'kimi-model',dataClass:'D1',isolation:{mode:'worktree',ref:'base'}});
+ assert.deepEqual(options,{provider:'kimi',cwd:process.cwd(),profile:'yolo',transport:'acp',accountId:'a',model:'kimi-model',dataClass:'D1',isolation:{mode:'worktree',ref:'base'},context:{enabled:false}});
  const changed={...settings,providerAccounts:[{...local,models:[]}]};
  assert.throws(()=>launchOptions(draft,changed),/model/);
  assert.equal(draft.accountId,'a');assert.equal(draft.model,'kimi-model');
@@ -75,4 +75,54 @@ test('remote API account appears only for its own configured container host', ()
  const draft = { ...reconcileLaunchDraft(null, 'opencode', settings), isolation: 'container', containerProfileId: 'image' };
  assert.equal(compatibleLaunchAccounts(draft, settings)[0]?.id, 'api');
  assert.equal(compatibleLaunchAccounts({ ...draft, isolation: 'direct' }, settings).length, 0);
+});
+
+function autoSettings() {
+ const profiles = [{id:'local-image',hostId:'local',commands:{opencode:'/usr/bin/opencode'}},{id:'remote-image',hostId:'server',commands:{opencode:'/usr/bin/opencode'}}];
+ const apis = ['local','server'].map(hostId=>({id:`api-${hostId}`,hostId,protocol:'openai-compatible',baseUrl:'https://fixture.invalid/v1',defaultModel:'fixture',...(hostId==='local'?{secretRef:'OPENAI_API_KEY'}:{remoteCredential:{kind:'environment',name:'FIXTURE_API_KEY'}})}));
+ const accounts = apis.map(a=>({id:`account-${a.hostId}`,label:a.hostId,provider:'opencode',hostId:a.hostId,binding:{kind:'api-profile',profileId:a.id}}));
+ return {...defaults,containerProfiles:profiles,apiProfiles:apis,providerAccounts:accounts,remoteHosts:[host]};
+}
+test('container auto draft considers fixed API accounts across hosts without choosing an arbitrary first account',()=>{
+ const settings=autoSettings(),base=reconcileLaunchDraft(null,'opencode',settings);
+ assert.equal(base.containerRoute,'fixed');
+ const draft={...base,isolation:'container',containerRoute:'auto'};
+ assert.deepEqual(compatibleLaunchAccounts(draft,settings).map(a=>a.id),['account-local','account-server']);
+ const options=launchOptions(draft,settings);
+ assert.deepEqual(options.containerPlacement,{});assert.equal(options.accountId,undefined);assert.equal(options.hostId,undefined);assert.equal(options.isolation,undefined);
+ const restricted=launchOptions({...draft,accountId:'account-server',model:'chosen'},settings);
+ assert.equal(restricted.accountId,'account-server');assert.equal(restricted.model,'chosen');assert.equal(restricted.hostId,undefined);
+});
+test('auto container draft rejects incompatible explicit constraints, capsules and ACP without silently switching',()=>{
+ const settings=autoSettings(),draft={...reconcileLaunchDraft(null,'opencode',settings),isolation:'container',containerRoute:'auto'};
+ assert.throws(()=>launchOptions({...draft,accountId:'removed'},settings),/account/i);
+ assert.throws(()=>launchOptions({...draft,transport:'acp'},settings),/PTY|ACP/i);
+ assert.throws(()=>launchOptions({...draft,capsule:{files:[],task:'fixture'}},settings),/capsule|selected/i);
+ assert.throws(()=>launchOptions({...draft,containerRoute:'unknown'},settings),/route/i);
+ assert.equal(launchOptions(draft,{...settings,containerProfiles:[]}).containerPlacement!==undefined,true,'main preview reports no eligible route; settings-only UI never claims engine availability');
+});
+test('fixed auto transitions and settings handoffs preserve explicit draft choices',()=>{
+ const settings=autoSettings(),draft={...reconcileLaunchDraft(null,'opencode',settings),isolation:'container',containerRoute:'auto',containerProfileId:'remote-image',accountId:'account-server'};
+ assert.equal(reconcileLaunchDraft(draft,'opencode',{...settings,lastDirectory:'/changed'}),draft);
+ const fixed=launchOptions({...draft,containerRoute:'fixed'},settings);
+ assert.deepEqual(fixed.isolation,{mode:'container',profileId:'remote-image'});assert.equal(fixed.hostId,'server');assert.equal(fixed.containerPlacement,undefined);
+ const local=launchOptions({...draft,isolation:'direct',accountId:'account-local'},settings);
+ assert.deepEqual(local.isolation,{mode:'direct'});assert.equal(local.containerPlacement,undefined);
+});
+
+test('launcher forwards literal task and scoped context, retains drafts and enforces mandatory D2', () => {
+ const a = { id:'private', label:'Private', provider:'claude', binding:{kind:'cli-home',directory:process.cwd()} };
+ a.assessment = {profile:{training:'none',retention:'bounded',thirdPartyProcessing:'no',contractualMode:'business'},evidence:{kind:'user-attested',reviewedAt:new Date().toISOString().slice(0,10),sources:[],note:'Fixture account assessment',binding:accountRouteBinding(a),models:'*'}};
+ const settings = {...defaults,contextProfilesEnabled:true,providerAccounts:[a]};
+ const task = '  ! /command $(literal)\nРусский  ';
+ const current = [{category:'design',key:'button.text',value:'Белый',dataClass:'D2'}];
+ const draft = {...reconcileLaunchDraft(null,'claude',settings),accountId:a.id,initialPrompt:task,contextTaskId:'task-a',contextCategories:['design'],currentContext:current};
+ const options = launchOptions(draft,settings);
+ assert.equal(options.initialPrompt,task); assert.equal(options.dataClass,'D2');
+ assert.deepEqual(options.context,{enabled:true,taskId:'task-a',categories:['design'],current});
+ assert.equal(reconcileLaunchDraft(draft,'claude',{...settings,lastDirectory:'/different'}),draft);
+ assert.deepEqual(launchOptions({...draft,contextEnabled:false},settings).context,{enabled:false});
+ assert.deepEqual(launchOptions(draft,{...settings,contextProfilesEnabled:false}).context,{enabled:false});
+ assert.throws(()=>launchOptions({...reconcileLaunchDraft(null,'cursor',defaults),initialPrompt:'task'},defaults),/D2/);
+ assert.throws(()=>launchOptions({...draft,currentContext:[...current,...current]},settings),/Duplicate/);
 });

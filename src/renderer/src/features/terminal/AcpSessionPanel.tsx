@@ -9,16 +9,23 @@ export function AcpSessionPanel({ session, locale }: { session: SessionSnapshot;
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const log = useRef<HTMLPreElement>(null);
+  const followOutput = useRef(true);
+  const [unread, setUnread] = useState(false);
   const ru = locale === 'ru';
   const state = session.acp;
   const phaseLabels = ru ? { starting: 'Подключение', idle: 'Готов', running: 'Работает', done: 'Ответ завершён', failed: 'Ошибка' } : { starting: 'Connecting', idle: 'Ready', running: 'Working', done: 'Response complete', failed: 'Failed' };
   const stopLabels: Record<string, string> = ru ? { end_turn: 'Готово', max_tokens: 'Лимит ответа', max_turn_requests: 'Лимит действий', refusal: 'Запрос отклонён', cancelled: 'Остановлен' } : { end_turn: 'Complete', max_tokens: 'Response limit', max_turn_requests: 'Action limit', refusal: 'Request declined', cancelled: 'Cancelled' };
   const ready = session.exitCode === null && (state?.phase === 'idle' || state?.phase === 'done');
   useEffect(() => {
+    followOutput.current = true; setUnread(false);
     setTranscript('');
     return attachTerminalOutput(window.canvasTTY.terminal, session.id, text => setTranscript(current => (current + text).slice(-240_000)), reason => setError(String(reason)));
   }, [session.id]);
-  useEffect(() => { const element = log.current; if (element) element.scrollTop = element.scrollHeight; }, [transcript]);
+  useEffect(() => {
+    const element = log.current;
+    if (element && followOutput.current) element.scrollTop = element.scrollHeight;
+    else if (transcript) setUnread(true);
+  }, [transcript]);
   const run = async (action: () => Promise<void>): Promise<void> => {
     setBusy(true); setError(null);
     try { await action(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
@@ -34,7 +41,12 @@ export function AcpSessionPanel({ session, locale }: { session: SessionSnapshot;
       </select></label>
       <button type="button" disabled={busy || state?.phase !== 'running'} onClick={() => void run(() => window.canvasTTY.terminal.cancelTurn(session.id))}>{ru ? 'Остановить' : 'Cancel turn'}</button>
     </div>
-    <pre ref={log} className="acp-panel__transcript" aria-label={ru ? 'История диалога' : 'Transcript'}>{transcript || (ru ? 'Ответ появится здесь.' : 'The response will appear here.')}</pre>
+    <pre ref={log} className="acp-panel__transcript" tabIndex={0} aria-label={ru ? 'История диалога' : 'Transcript'} onScroll={event => {
+      const element = event.currentTarget;
+      followOutput.current = element.scrollHeight - element.clientHeight - element.scrollTop < 32;
+      if (followOutput.current) setUnread(false);
+    }}>{transcript || (ru ? 'Ответ появится здесь.' : 'The response will appear here.')}</pre>
+    {unread && <button className="acp-panel__new-output" type="button" onClick={() => { followOutput.current = true; setUnread(false); const element = log.current; if (element) element.scrollTop = element.scrollHeight; }}>{ru ? 'Новые сообщения ↓' : 'New output ↓'}</button>}
     {state?.activity && <div className="acp-panel__activity" role="status">{state.activity}</div>}
     {!!state?.permissions.length && <div className="acp-panel__permissions">{state.permissions.map(permission => <fieldset key={permission.requestId}>
       <legend>{permission.title}</legend><div>{permission.options.map(option => <button key={option.optionId} type="button" disabled={busy} onClick={() => void run(() => window.canvasTTY.terminal.acpPermission(session.id, permission.requestId, option.optionId))}>{option.name}</button>)}</div>

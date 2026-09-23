@@ -1,4 +1,4 @@
-import { startupArguments, type AgentStartup } from "./AgentStartup.ts";
+import { startupParts, type AgentStartup } from "./AgentStartup.ts";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import type { ProviderId } from "../../shared/contracts.ts";
@@ -32,7 +32,7 @@ export function resolveTerminalLaunch(
   agentBrowserArgs: string[] = [],
   options: LaunchResolutionOptions = {}
 ): TerminalLaunch {
-  const startup = startupArguments(provider, options.startup);
+  const startup = startupParts(provider, options.startup);
   const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
   const fileExists = options.fileExists ?? existsSync;
@@ -56,9 +56,10 @@ export function resolveTerminalLaunch(
     ...(provider === "hermes" ? ["chat"] : []),
     ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
     ...agentBrowserArgs,
+    ...startup.contextArgs,
     ...providerModelArguments(provider, options.model),
     ...(options.resumePrevious ? RESUME_ARGUMENTS[provider] : []),
-    ...startup
+    ...startup.taskArgs
   ];
   const combinedEnvironment = {
     ...providerCli.environment,
@@ -71,7 +72,7 @@ export function resolveTerminalLaunch(
       environment: combinedEnvironment
     };
   }
-  if (startup.length) throw new Error("Literal startup tasks through Windows batch launchers are unverified; use a native executable or ACP.");
+  if (startup.contextArgs.length || startup.taskArgs.length) throw new Error("Literal startup tasks through Windows batch launchers are unverified; use a native executable or ACP.");
   if (!providerCli.commandPrompt) throw new Error("A Windows batch provider requires cmd.exe.");
   return {
     command: providerCli.commandPrompt,

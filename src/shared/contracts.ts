@@ -1,4 +1,5 @@
 import { accountRouteMaxDataClass } from "./providerAccountPolicy.ts";
+import type { ContainerPlacementPreview, ContainerPlacementRequest } from './containerPlacement.ts';
 import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
 export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS };
 export type { CanvasLauncherItemId, ProviderId };
@@ -187,6 +188,8 @@ export const DEFAULT_AGENT_BUDGETS: Readonly<AgentBudgets> = Object.freeze({
 export interface AppSettings {
   locale: LocaleId;
   restoreTerminalSessions: boolean;
+  /** Manual profiles remain available; runtime delivery is explicitly opt-in. */
+  contextProfilesEnabled: boolean;
   persistCanvasRegions: boolean;
   persistStickyNotes: boolean;
   palette: PaletteId;
@@ -263,6 +266,18 @@ export interface ContainerProfile {
   network: "none" | "bridge"; cpus: number; memoryMb: number; pids: number; user: string;
 }
 export interface ContainerAvailability { available: boolean; runtime: "docker" | "podman"; rootless?: boolean; imageId?: string; reason?: string }
+export interface ContainerInventoryRow {
+  id: string; name: string; image: string; state: string; status: string;
+  /** Informational registry match only; never permission to mutate a container. */
+  managed: boolean;
+}
+export interface ContainerInventorySnapshot {
+  hostId: string; runtime: "docker" | "podman"; checkedAt: number; available: boolean;
+  engineName?: string; rootless?: boolean;
+  profiles: Array<{ profileId: string; imageAvailable: boolean; imageId?: string }>;
+  containers: ContainerInventoryRow[]; truncated: boolean;
+  reasonCode?: "unavailable" | "configuration-changed";
+}
 export interface RetainedContainer { id: string; profileId: string; hostId: string; workspaceId: string; containerId?: string; state: "preparing" | "created" | "cleanup-needed" | "workspace-retained"; reason?: string; hostWorkspace?: string }
 /** Main validates isolation; the renderer never supplies an execution directory. */
 export type IsolationRequest = { mode: "direct" } | { mode: "worktree"; ref?: string } | { mode: "container"; profileId: string; capsuleId?: string };
@@ -283,7 +298,7 @@ export interface RetainedWorkspace {
 }
 export interface WorkspaceReview { workspaceId: string; reviewId: string; patch: string; limitations: string[]; baseCommit: string; createdAt: number }
 export interface RemoteWorkspaceReview extends WorkspaceReview { generationId: string; hostId: string; digest: string; headCommit: string; untrackedFiles: number; ignoredFiles: number }
-export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "accountId" | "hostId" | "model" | "transport" | "dataClass">;
+export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "containerPlacement" | "accountId" | "hostId" | "model" | "transport" | "dataClass" | "context" | "initialPrompt" | "allowSubagents">;
 
 export type SessionTransport = "pty" | "acp";
 export const ACP_PROVIDERS: readonly ProviderId[] = ["cursor", "minimax", "kimi"];
@@ -297,6 +312,9 @@ export interface AcpSessionState {
 export interface AcpResumeBinding { sessionId: string; binding: string }
 
 export interface CreateSessionRequest {
+  context?: import('./contextRuntime.ts').ContextLaunchSelection;
+  /** Transient selection intent; saved sessions contain only the resolved fixed route. */
+  containerPlacement?: ContainerPlacementRequest;
   transport?: SessionTransport;
   /** Transient, main-owned delivery; never persisted or replayed. */
   initialPrompt?: string;
@@ -320,11 +338,16 @@ export interface CreateSessionRequest {
   accountId?: string;
   model?: string;
   dataClass?: DataClass;
-  /** Explicit permission for a child to delegate; false by default. */
+  /** Explicit per-launch permission to delegate; false by default. */
   allowSubagents?: boolean;
 }
 
 export interface SessionMetadata {
+  /** Main-owned per-session opt-out, retained across restart and restore. */
+  contextDisabled?: boolean;
+  /** Conservative conversation floor, independent of live defaults and deleted rules. */
+  disclosureClass?: DataClass;
+  contextSummary?: import('./contextRuntime.ts').ContextDeliverySummary;
   transport?: SessionTransport;
   acp?: AcpSessionState;
   /** Only the main process may create a restore binding. */
@@ -1869,6 +1892,7 @@ export interface SavedHostDiagnosticSnapshot {
 }
 
 export interface CanvasTTYApi {
+  context: import('./contextProfiles.ts').ContextApi;
   capsules: import('./capsules.ts').CapsulesApi;
   hosts: { inspect(hostId: string): Promise<SavedHostDiagnosticSnapshot>; };
   accountHomes: { inspect(directory: string): Promise<AccountHomeInspection>; };
@@ -1876,6 +1900,7 @@ export interface CanvasTTYApi {
   appVersion(): Promise<string>;
   containers: {
     probe(profileId: string): Promise<ContainerAvailability>;
+    inventory(profileIds?: string[], force?: boolean): Promise<ContainerInventorySnapshot[]>;
     list(): Promise<RetainedContainer[]>;
     cleanup(id: string): Promise<void>;
     review(id: string): Promise<RemoteWorkspaceReview>;
@@ -2008,6 +2033,7 @@ export interface CanvasTTYApi {
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
     create(request: CreateSessionRequest): Promise<SessionSnapshot>;
+    previewContainerPlacement(request: CreateSessionRequest): Promise<ContainerPlacementPreview>;
     restart(id: string): Promise<SessionSnapshot>;
     agentPrompt(id: string, text: string): Promise<void>;
     cancelTurn(id: string): Promise<void>;
@@ -2033,10 +2059,23 @@ export interface CanvasTTYApi {
 }
 
 export const IPC = {
+  contextSource: 'context:source',
+  contextLaunchPreview: 'context:launch-preview',
+  contextGet: "context:get",
+  contextProject: "context:project",
+  contextTask: "context:task",
+  contextRule: "context:rule",
+  contextRemove: "context:remove",
+  contextPreview: "context:preview",
+  contextFeedbackSessions: "context:feedback-sessions",
+  contextLearning: "context:learning",
+  contextFeedback: "context:feedback",
+  contextFeedbackAction: "context:feedback-action",
   clipboardRead: "clipboard:read",
   clipboardWrite: "clipboard:write",
   externalOpenUrl: "external:open-url",
   containersProbe: "containers:probe",
+  containersInventory: "containers:inventory",
   capsulesSelectFiles: 'capsules:select-files',
   capsulesTestStart: 'capsules:test-start',
   capsulesTestList: 'capsules:test-list',
@@ -2046,6 +2085,12 @@ export const IPC = {
   capsulesPrepare: 'capsules:prepare',
   capsulesList: 'capsules:list',
   capsulesReview: 'capsules:review',
+  capsulesReviewAgentChoices: 'capsules:review-agent-choices',
+  capsulesReviewAgentPreview: 'capsules:review-agent-preview',
+  capsulesReviewAgentLaunch: 'capsules:review-agent-launch',
+  capsulesReviewAgentCancel: 'capsules:review-agent-cancel',
+  capsulesConventions: 'capsules:conventions',
+  capsulesConventionsCurrent: 'capsules:conventions-current',
   capsulesExport: 'capsules:export',
   capsulesApply: 'capsules:apply',
   capsulesRecover: 'capsules:recover',
@@ -2158,6 +2203,7 @@ export const IPC = {
   terminalCreate: "terminal:create",
   agentsAvailability: "agents:availability",
   agentsRecheck: "agents:recheck",
+  terminalContainerPlacementPreview: "terminal:container-placement-preview",
   terminalRestart: "terminal:restart",
   terminalAgentPrompt: "terminal:agent-prompt",
   terminalCancelTurn: "terminal:cancel-turn",

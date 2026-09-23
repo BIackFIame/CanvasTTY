@@ -34,7 +34,27 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 }
 
 const api: CanvasTTYApi = {
+  context: {
+    source: cwd => ipcRenderer.invoke(IPC.contextSource, cwd),
+    previewLaunch: request => ipcRenderer.invoke(IPC.contextLaunchPreview, request),
+    get: () => ipcRenderer.invoke(IPC.contextGet),
+    saveProject: (project, revision) => ipcRenderer.invoke(IPC.contextProject, project, revision),
+    saveTask: (task, revision) => ipcRenderer.invoke(IPC.contextTask, task, revision),
+    saveRule: (rule, revision) => ipcRenderer.invoke(IPC.contextRule, rule, revision),
+    remove: (kind, id, revision) => ipcRenderer.invoke(IPC.contextRemove, kind, id, revision),
+    feedbackSessions: projectId => ipcRenderer.invoke(IPC.contextFeedbackSessions, projectId),
+    saveLearning: (projectId, settings, revision) => ipcRenderer.invoke(IPC.contextLearning, projectId, settings, revision),
+    captureFeedback: (input, revision) => ipcRenderer.invoke(IPC.contextFeedback, input, revision),
+    feedbackAction: (action, revision) => ipcRenderer.invoke(IPC.contextFeedbackAction, action, revision),
+    preview: selection => ipcRenderer.invoke(IPC.contextPreview, selection)
+  },
   capsules: {
+    reviewAgentChoices: (id, review) => ipcRenderer.invoke(IPC.capsulesReviewAgentChoices, id, review),
+    previewReviewAgent: input => ipcRenderer.invoke(IPC.capsulesReviewAgentPreview, input),
+    launchReviewAgent: id => ipcRenderer.invoke(IPC.capsulesReviewAgentLaunch, id),
+    cancelReviewAgent: id => ipcRenderer.invoke(IPC.capsulesReviewAgentCancel, id),
+    validateConventions: (id, reviewId, maxDataClass) => ipcRenderer.invoke(IPC.capsulesConventions, id, reviewId, maxDataClass),
+    currentConventions: id => ipcRenderer.invoke(IPC.capsulesConventionsCurrent, id),
     startTest: (id, review, profile) => ipcRenderer.invoke(IPC.capsulesTestStart, id, review, profile),
     testRuns: () => ipcRenderer.invoke(IPC.capsulesTestList),
     testResult: id => ipcRenderer.invoke(IPC.capsulesTestResult, id),
@@ -59,6 +79,7 @@ const api: CanvasTTYApi = {
   appVersion: () => ipcRenderer.invoke(IPC.appVersion),
   containers: {
     probe: profileId => ipcRenderer.invoke(IPC.containersProbe, profileId),
+    inventory: (profileIds, force) => ipcRenderer.invoke(IPC.containersInventory, profileIds, force),
     list: () => ipcRenderer.invoke(IPC.containersList),
     cleanup: id => ipcRenderer.invoke(IPC.containersCleanup, id),
     review: id => ipcRenderer.invoke(IPC.containersReview, id),
@@ -217,6 +238,7 @@ const api: CanvasTTYApi = {
     list: () => ipcRenderer.invoke(IPC.terminalList),
     readBuffer: (id: string) => ipcRenderer.invoke(IPC.terminalReadBuffer, id),
     create: (request: CreateSessionRequest) => ipcRenderer.invoke(IPC.terminalCreate, request),
+    previewContainerPlacement: (request) => ipcRenderer.invoke(IPC.terminalContainerPlacementPreview, request),
     agentPrompt: (id: string, text: string) => ipcRenderer.invoke(IPC.terminalAgentPrompt, id, text),
     cancelTurn: (id: string) => ipcRenderer.invoke(IPC.terminalCancelTurn, id),
     acpPermission: (id: string, requestId: string, optionId: string) => ipcRenderer.invoke(IPC.terminalAcpPermission, id, requestId, optionId),

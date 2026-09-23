@@ -45,6 +45,7 @@ async function fixture(t) {
   const calls = [];
   const browserInputs = [];
   const agentBrowser = {
+    assertOrchestrationAvailable() {},
     prepareLaunch(input) {
       browserInputs.push(input);
       return { agentId: "agent", connectionId: "conn", args: [], environment: {}, cleanup() {} };

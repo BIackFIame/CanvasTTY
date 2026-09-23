@@ -86,6 +86,7 @@ const ru = {
   executionSaved: "Настройки сохранены",
   hostRemoveBlocked: "Сначала измените связанные записи или завершите активные сессии.",
 
+  context: "Контекст",
   connections: "Подключения",
   execution: "Исполнение",
   settingsView: "Раздел",
@@ -765,6 +766,7 @@ const en: Record<keyof typeof ru, string> = {
   executionSaved: "Settings saved",
   hostRemoveBlocked: "Repair dependent records or finish active sessions first.",
 
+  context: "Context",
   connections: "Connections",
   execution: "Execution",
   settingsView: "View",

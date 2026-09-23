@@ -1,6 +1,8 @@
 import { assertIsolationRequest } from "../../shared/isolation.ts";
+import type { ContainerPlacementRequest } from '../../shared/containerPlacement.ts';
 import type {
   AgentProviderId,
+  CreateSessionRequest,
   IsolationRequest,
   DataClass,
   LaunchProfileId,
@@ -15,7 +17,7 @@ import {
   providerMaxDataClass
 } from "../../shared/contracts.ts";
 import { assertLaunchPolicyFields, selectLaunchAccount } from "./SessionLaunchPolicy.ts";
-import type { TerminalManager } from "./TerminalManager.ts";
+import type { OwnedContextLaunch, TerminalManager } from "./TerminalManager.ts";
 import type { PlacementDecision, PlacementRequest } from "./HostPlacement.ts";
 
 // Compatibility backstop for embedders without a configured launch policy.
@@ -36,6 +38,7 @@ const AGENT_PROVIDERS: readonly AgentProviderId[] = CANVAS_LAUNCHER_ITEMS.filter
 );
 
 export interface SpawnAgentRequest {
+  containerPlacement?: ContainerPlacementRequest;
   transport?: "pty" | "acp";
   isolation?: IsolationRequest;
   parentSessionId: string;
@@ -43,7 +46,7 @@ export interface SpawnAgentRequest {
   cwd: string;
   profile?: LaunchProfileId;
   title?: string;
-  /** Prompt queued until the new agent's PTY is ready. */
+  /** Initial task delivered through the provider's literal startup arguments. */
   initialPrompt?: string;
   /** WHERE the agent should run — never WHICH agent: "auto" asks the
    *  placement coordinator to pick a configured host, a host id names one
@@ -114,23 +117,27 @@ export class AgentControlService {
 
   // Local launches remain synchronous. Remote placement (automatic or explicit)
   // uses async preflight when configured; callers may always await the result.
-  spawn(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
+  spawn(request: SpawnAgentRequest, signal?: AbortSignal): SessionSnapshot | Promise<SessionSnapshot> {
+    signal?.throwIfAborted();
     if (request?.isolation?.mode === 'container' && request.isolation.capsuleId) throw new Error('Use the scoped capsule task operation to launch a capsule.');
-    return this.spawnOwned(request);
+    return this.spawnOwned(request, signal);
   }
 
   /** Main-only caller has captured classified Task.md and registered its parent ownership. */
-  spawnCapsule(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
+  spawnCapsule(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(): void }): SessionSnapshot | Promise<SessionSnapshot> {
     if (request.isolation?.mode !== 'container' || !request.isolation.capsuleId || !this.terminals.hasLaunchPolicy()) throw new Error('Registered capsule launch policy is required.');
-    return this.spawnOwned(request);
+    signal?.throwIfAborted();
+    return this.spawnOwned(request, signal, review);
   }
 
-  private spawnOwned(request: SpawnAgentRequest): SessionSnapshot | Promise<SessionSnapshot> {
+  private spawnOwned(request: SpawnAgentRequest, signal?: AbortSignal, review?: { context: OwnedContextLaunch; assertCurrent(): void }): SessionSnapshot | Promise<SessionSnapshot> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
+    if (['contextDisabled', 'context', 'contextSummary', 'disclosureClass', 'dataClassInherited', 'contextDigest', 'sourceCwd', 'projectId', 'taskId', 'historyClass', 'ownerGeneration', 'contextText'].some(key => key in request)) throw new Error('Child context authority is inherited from the owning session.');
     if (request.initialPrompt !== undefined && (typeof request.initialPrompt !== "string" || request.initialPrompt.length >= 131_072)) throw new Error("Initial agent prompt exceeds the input limit or is invalid.");
     if (request.transport === "acp" && request.host !== undefined && request.host !== "local") throw new Error("ACP supports local direct/worktree launches only.");
+    request = { ...request, cwd: this.terminals.resolveOwnedChildCwd(request.cwd, request.parentSessionId) };
     const parent = this.requireSession(request.parentSessionId);
     if (parent.role === "subagent" && parent.allowSubagents !== true) throw new Error("Agent delegation is disabled for this parent.");
     assertLaunchPolicyFields(request);
@@ -140,6 +147,13 @@ export class AgentControlService {
     const capabilities = PROVIDER_CAPABILITIES[request.provider];
     if (!capabilities) throw new Error("Unknown agent provider.");
     if (!capabilities.send) throw new Error(`${request.provider} cannot receive prompts.`);
+
+    // The complete container tuple is selected at the same boundary used by
+    // the launcher, before a native account or a host-only route is chosen.
+    if (request.containerPlacement !== undefined) {
+      if (request.host !== undefined || request.isolation !== undefined) throw new Error('Container auto-placement cannot include a fixed host or isolation request.');
+      return this.createChild(request, undefined, undefined, signal);
+    }
 
     // Preserve policy checks for legacy embedders; production is checked again
     // by TerminalManager immediately before launching.
@@ -166,7 +180,7 @@ export class AgentControlService {
     const account = this.resolveAccount(request, model, effectiveDataClass);
 
     const classifiedLaunch = this.terminals.classifyLaunchRequest({
-      transport: request.transport, isolation: request.isolation, provider: request.provider, cwd: request.cwd, profile: request.profile ?? "normal",
+      initialPrompt: request.initialPrompt, transport: request.transport, isolation: request.isolation, provider: request.provider, cwd: request.cwd, profile: request.profile ?? "normal",
       position: { x: 0, y: 0 },
       parentSessionId: parent.id, role: 'subagent', allowSubagents: request.allowSubagents ?? false,
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
@@ -175,38 +189,45 @@ export class AgentControlService {
       ...(host !== undefined && host !== "auto" ? { hostId: host } : {})
     }, host === "auto");
     const classified = policyConfigured || pathClass !== null || classifiedLaunch.dataClass !== undefined;
+    review?.assertCurrent();
+    const contextLaunch = review?.context ?? this.terminals.prepareContextLaunch(classifiedLaunch);
+    contextLaunch.dataClassInherited = request.dataClass === undefined;
+    const create = (selected: { request: CreateSessionRequest; launch: OwnedContextLaunch }): SessionSnapshot | Promise<SessionSnapshot> => {
+      signal?.throwIfAborted(); selected.launch.assertAuthority?.(); selected.launch.capture?.assertCurrent();
+      return this.createChild(request, selected.request.hostId, selected.request.accountId, signal, selected, review?.assertCurrent);
+    };
     if (host === "auto") {
-      const eligibleAccounts = this.terminals.placementAccounts(classifiedLaunch)
-        ?? (account ? [account] : undefined);
-      const hostIds = eligibleAccounts ? [...new Set(eligibleAccounts.map((candidate) => candidate.hostId ?? "local"))] : undefined;
-      const localAccount = eligibleAccounts?.find((candidate) => (candidate.hostId ?? "local") === "local");
-      if (hostIds?.every((id) => id === "local")) return this.createChild(request, undefined, localAccount?.id);
-      if (!this.placement) {
-        if (eligibleAccounts && !localAccount) throw new Error("Bound account host is unavailable: no placement coordinator.");
-        return this.createChild(request, undefined, localAccount?.id);
+      const candidates = this.terminals.nativePlacementCandidates(classifiedLaunch, contextLaunch);
+      const local = candidates.find(c => c.request.hostId === undefined);
+      if (!this.placement || classifiedLaunch.accountId !== undefined && candidates.every(c => c.request.hostId === undefined)) {
+        if (!local) throw new Error('Bound account host is unavailable: no placement coordinator.');
+        return create(local);
       }
-      return this.placement.place({
-        provider: request.provider, localWorkspace: request.cwd,
-        ...(classified ? { dataClass: classifiedLaunch.dataClass ?? effectiveDataClass } : {}),
-        ...(hostIds ? { eligibleHostIds: hostIds.filter((id) => id !== "local") } : {})
-      }).then((decision) => {
-        const hostId = decision.kind === "remote" ? decision.host.id : "local";
-        const selected = eligibleAccounts?.find((candidate) => (candidate.hostId ?? "local") === hostId);
-        if (eligibleAccounts && !selected) throw new Error(`Bound account host is unavailable: ${decision.kind === "local" ? decision.reason : "placement selected an unbound host"}.`);
-        return this.createChild(request, hostId === "local" ? undefined : hostId, selected?.id);
-      });
-    }
-    // Explicit MCP hosts use the same dynamic preflight, restricted to exactly
-    // that host. The synchronous terminal boundary still rechecks live policy.
-    if (host !== undefined && this.placement && request.isolation?.mode !== "container") {
+      const hostDataClasses: Record<string, DataClass> = {};
+      for (const candidate of candidates) {
+        const id = candidate.request.hostId ?? 'local', value = candidate.request.dataClass ?? effectiveDataClass;
+        if (!hostDataClasses[id] || DATA_CLASS_RANK[value] > DATA_CLASS_RANK[hostDataClasses[id]]) hostDataClasses[id] = value;
+      }
       return this.placement.place({ provider: request.provider, localWorkspace: request.cwd,
-        ...(classified ? { dataClass: classifiedLaunch.dataClass ?? effectiveDataClass } : {}), eligibleHostIds: [host]
-      }).then((decision) => {
-        if (decision.kind !== "remote" || decision.host.id !== host) throw new Error(`Requested host ${host} is unavailable: ${decision.kind === "local" ? decision.reason : "host mismatch"}.`);
-        return this.createChild(request, host, classifiedLaunch.accountId ?? account?.id);
+        ...(classified ? { dataClass: classifiedLaunch.dataClass ?? effectiveDataClass } : {}),
+        eligibleHostIds: candidates.flatMap(c => c.request.hostId ? [c.request.hostId] : []), hostDataClasses
+      }).then(decision => {
+        const selected = candidates.find(c => c.request.hostId === (decision.kind === 'remote' ? decision.host.id : undefined));
+        if (!selected) throw new Error(`Bound account host is unavailable: ${decision.kind === 'local' ? decision.reason : 'unbound selected host'}.`);
+        return create(selected);
       });
     }
-    return this.createChild(request, host, classifiedLaunch.accountId ?? account?.id);
+    const selected = { request: this.terminals.evaluateContextLaunch(classifiedLaunch, contextLaunch), launch: contextLaunch };
+    if (host !== undefined && this.placement && request.isolation?.mode !== "container") {
+      contextLaunch.capture?.assertCurrent();
+      return this.placement.place({ provider: request.provider, localWorkspace: request.cwd,
+        ...(classified ? { dataClass: selected.request.dataClass ?? effectiveDataClass } : {}), eligibleHostIds: [host]
+      }).then(decision => {
+        if (decision.kind !== 'remote' || decision.host.id !== host) throw new Error(`Requested host ${host} is unavailable: ${decision.kind === 'local' ? decision.reason : 'host mismatch'}.`);
+        return create(selected);
+      });
+    }
+    return create({ ...selected, request: { ...selected.request, accountId: selected.request.accountId ?? account?.id } });
   }
 
   /** Account selection for one spawn. Returns the account to record on the
@@ -228,14 +249,15 @@ export class AgentControlService {
     return selectLaunchAccount(accounts, request.provider, model, request.accountId, classified ? effectiveDataClass : undefined);
   }
 
-  private createChild(request: SpawnAgentRequest, hostId?: string, accountId?: string): SessionSnapshot {
+  private createChild(request: SpawnAgentRequest, hostId?: string, accountId?: string, signal?: AbortSignal, selected?: { request: CreateSessionRequest; launch: OwnedContextLaunch }, assertReview?: () => void): SessionSnapshot | Promise<SessionSnapshot> {
     const parent = this.requireSession(request.parentSessionId);
     if (parent.role === "subagent" && parent.allowSubagents !== true) throw new Error("Agent delegation is disabled for this parent.");
     const cascade = this.children(parent.id).length;
     if (!this.terminals.hasLaunchPolicy() && this.children(parent.id).filter((child) => child.exitCode === null).length >= MAX_CHILDREN_PER_PARENT) {
       throw new Error(`Session ${parent.id} already has ${MAX_CHILDREN_PER_PARENT} subagents.`);
     }
-    const created = this.terminals.create({
+    const launch: CreateSessionRequest = {
+      ...(request.containerPlacement !== undefined ? { containerPlacement: request.containerPlacement } : {}),
       ...(request.isolation ? { isolation: request.isolation } : {}),
       transport: request.transport,
       initialPrompt: request.initialPrompt,
@@ -254,8 +276,9 @@ export class AgentControlService {
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
       allowSubagents: request.allowSubagents ?? false
-    });
-    return created;
+    };
+    if (request.containerPlacement !== undefined) return this.terminals.createWithPlacement(launch, signal);
+    return selected ? this.terminals.createPlanned({ ...launch, model: selected.request.model, dataClass: selected.request.dataClass }, selected.launch, () => { signal?.throwIfAborted(); assertReview?.(); }) : this.terminals.create(launch);
   }
 
   send(sessionId: string, text: string, submit = true): void {

@@ -1,3 +1,5 @@
+import { assertContextDeliverySummary, type ContextDeliverySummary } from '../../shared/contextRuntime.ts';
+import { DATA_CLASS_RANK } from '../../shared/contracts.ts';
 import { assertIsolationRequest } from "../../shared/isolation.ts";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -34,6 +36,9 @@ const PROVIDERS = new Set<ProviderId>([
 ]);
 
 export interface PersistedTerminalSession {
+  contextDisabled?: boolean;
+  disclosureClass?: DataClass;
+  contextSummary?: ContextDeliverySummary;
   transport?: SessionTransport;
   acpResume?: AcpResumeBinding;
   isolation?: IsolationRequest;
@@ -127,6 +132,9 @@ export class TerminalSessionStore {
 export function persistedTerminalSession(metadata: SessionMetadata): PersistedTerminalSession {
   return {
     id: metadata.id,
+    ...(metadata.contextDisabled ? { contextDisabled: true } : {}),
+    ...(metadata.disclosureClass ? { disclosureClass: metadata.disclosureClass } : {}),
+    ...(metadata.contextSummary ? { contextSummary: structuredClone(metadata.contextSummary) } : {}),
     ...(metadata.transport === "acp" ? { transport: "acp" as const, acpResume: metadata.acpResume } : {}),
     ...(metadata.isolation ? { isolation: structuredClone(metadata.isolation) } : {}),
     ...(metadata.execution?.workspaceId ? { workspaceId: metadata.execution.workspaceId } : {}),
@@ -165,7 +173,10 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
   for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS)) {
     if (!value || typeof value !== "object") continue;
     const session = value as Partial<PersistedTerminalSession>;
-    try { assertIsolationRequest(session.isolation); } catch { continue; }
+    if (session.contextDisabled !== undefined && typeof session.contextDisabled !== 'boolean') continue;
+    try { assertIsolationRequest(session.isolation); if (session.contextSummary !== undefined) assertContextDeliverySummary(session.contextSummary); } catch { continue; }
+    if (session.disclosureClass !== undefined && !['D0', 'D1', 'D2', 'D3'].includes(session.disclosureClass)) continue;
+    if (session.contextSummary && (session.disclosureClass === undefined || DATA_CLASS_RANK[session.contextSummary.highestDisclosedClass] > DATA_CLASS_RANK[session.disclosureClass])) continue;
     if (session.workspaceId !== undefined && (typeof session.workspaceId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(session.workspaceId) || session.isolation?.mode !== "worktree" && session.isolation?.mode !== "container")) continue;
     if ((session.isolation?.mode === "worktree" || session.isolation?.mode === "container") && session.workspaceId === undefined) continue;
     if (session.isolation?.mode === 'container' && session.isolation.capsuleId && session.isolation.capsuleId !== session.workspaceId) continue;
@@ -211,6 +222,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     const acpResume = session.acpResume && typeof session.acpResume === "object" && typeof session.acpResume.sessionId === "string" && session.acpResume.sessionId.length > 0 && session.acpResume.sessionId.length <= 512 && typeof session.acpResume.binding === "string" && /^[0-9a-f]{64}$/u.test(session.acpResume.binding) ? session.acpResume : undefined;
     sessions.push({
       id: session.id,
+      ...(session.contextDisabled ? { contextDisabled: true } : {}),
+      ...(session.disclosureClass ? { disclosureClass: session.disclosureClass } : {}),
+      ...(session.contextSummary ? { contextSummary: structuredClone(session.contextSummary) } : {}),
       ...(session.transport === "acp" ? { transport: "acp" as const, ...(acpResume ? { acpResume: structuredClone(acpResume) } : {}) } : {}),
       ...(session.isolation ? { isolation: structuredClone(session.isolation) } : {}),
       ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),

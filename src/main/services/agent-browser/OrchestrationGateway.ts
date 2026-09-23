@@ -82,6 +82,8 @@ export class OrchestrationGateway {
     this.server = createServer((socket) => this.accept(socket));
   }
 
+  get isRunning(): boolean { return this.running && this.server.listening; }
+
   get address(): string | null {
     return this.socketEndpoint;
   }
@@ -154,7 +156,7 @@ export class OrchestrationGateway {
 
   /** Called at orchestrator PTY launch; the token is one-use with a short TTL. */
   registerOrchestrator(input: { terminalSessionId: string }): OrchestrationCapability {
-    if (!this.enabled || !this.running || this.socketEndpoint === null) {
+    if (!this.enabled || !this.isRunning || this.socketEndpoint === null) {
       throw new Error("The orchestration bridge is not running.");
     }
     if (typeof input.terminalSessionId !== "string" || input.terminalSessionId.length === 0) {

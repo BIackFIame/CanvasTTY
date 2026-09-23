@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { WorktreeService } from '../src/main/services/WorktreeService.ts';
 import { SessionLaunchCoordinator } from '../src/main/services/SessionLaunchCoordinator.ts';
-import { TerminalManager } from '../src/main/services/TerminalManager.ts';
+import { TerminalManager } from './helpers/delegation-test-manager.mjs';
 import { TerminalSessionStore, persistedTerminalSession } from '../src/main/services/TerminalSessionStore.ts';
 import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts';
 import { HostPlacementService } from '../src/main/services/HostPlacement.ts';
@@ -25,7 +25,7 @@ async function fixture(t, options = {}) {
   let accountCalls = 0, probes = 0;
   const accounts = { prepare: async () => { accountCalls++; await options.accountGate?.promise; return { remoteExecutable: '/fake/codex', args: [], environment: {}, unsetEnvironment: [], bindingDigest: '', skipBridges: false, assertCurrent() {}, cleanup: async () => { await options.cleanupGate?.promise; } }; } };
   const manager = new TerminalManager(() => {}, { get: provider => ({ state: 'available', provider, executable: `/fake/${provider}`, launcher: 'native', environment: {}, checked: [] }) },
-    { prepareLaunch: input => { bridges.push(input.cwd); return null; } }, undefined, false,
+    { assertOrchestrationAvailable() {}, prepareLaunch: input => { bridges.push(input.cwd); return input.includeOrchestration ? { agentId: 'fixture', connectionId: 'fixture', args: [], environment: {}, cleanup() {} } : null; } }, undefined, false,
     (command, args, input) => { calls.push({ command, args, ...input }); let exit; return { onData() {}, onExit: callback => { exit = callback; exits.push(callback); }, write() {}, resize() {}, kill: () => { if (options.confirmKill !== false) exit?.({ exitCode: 0 }); } }; });
   const capacity = excludeId => {
     const sessions = manager.listMetadata().filter(session => session.id !== excludeId && session.exitCode === null);

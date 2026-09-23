@@ -49,6 +49,7 @@ export interface HermesStdioHelperLaunch {
 interface HermesTemporaryConfigurationOptions {
   homeDirectory: string;
   helper: HermesStdioHelperLaunch;
+  browser?: boolean;
   /** Optional second MCP server (canvastty_agents) written next to the browser one. */
   orchestrationHelper?: HermesStdioHelperLaunch;
 }
@@ -57,6 +58,7 @@ interface HermesRecoveryJournal {
   version: 1;
   ownershipId: string;
   entryHash: string;
+  browserEntry?: boolean;
   /** Absent in journals written before orchestration support; never undefined when set. */
   orchestrationEntryHash?: string;
   configOriginalHash: string | null;
@@ -88,6 +90,7 @@ interface ExistingConfigurationLock {
 
 export class HermesTemporaryConfiguration {
   readonly hasOrchestrationEntry: boolean;
+  readonly hasBrowserEntry: boolean;
   private readonly paths: ReturnType<typeof hermesPaths>;
   private readonly journal: HermesRecoveryJournal;
   private cleaned = false;
@@ -98,6 +101,7 @@ export class HermesTemporaryConfiguration {
   ) {
     this.paths = paths;
     this.journal = journal;
+    this.hasBrowserEntry = journal.browserEntry !== false;
     this.hasOrchestrationEntry = journal.orchestrationEntryHash !== undefined;
   }
 
@@ -110,7 +114,7 @@ export class HermesTemporaryConfiguration {
     try {
       this.recoverLocked(paths);
       const ownershipId = randomUUID();
-      const entry = hermesMcpEntry(options.helper);
+      const entry = options.browser !== false ? hermesMcpEntry(options.helper) : null;
       const orchestrationEntry = options.orchestrationHelper
         ? hermesOrchestrationEntry(options.orchestrationHelper)
         : null;
@@ -118,13 +122,13 @@ export class HermesTemporaryConfiguration {
       const { document, value } = parseHermesDocument(configOriginal ?? "", paths.config);
       const mcpServersOriginallyPresent = Object.hasOwn(value, "mcp_servers");
       const servers = mcpServers(value, paths.config);
-      if (MCP_SERVER_NAME in servers) {
+      if (entry && MCP_SERVER_NAME in servers) {
         throw new Error(`Hermes MCP server name ${MCP_SERVER_NAME} is already configured.`);
       }
       if (orchestrationEntry && ORCHESTRATION_MCP_SERVER_NAME in servers) {
         throw new Error(`Hermes MCP server name ${ORCHESTRATION_MCP_SERVER_NAME} is already configured.`);
       }
-      document.setIn(["mcp_servers", MCP_SERVER_NAME], entry);
+      if (entry) document.setIn(["mcp_servers", MCP_SERVER_NAME], entry);
       if (orchestrationEntry) {
         document.setIn(["mcp_servers", ORCHESTRATION_MCP_SERVER_NAME], orchestrationEntry);
       }
@@ -138,6 +142,7 @@ export class HermesTemporaryConfiguration {
         version: 1,
         ownershipId,
         entryHash: hashCanonical(entry),
+        ...(options.browser === false ? { browserEntry: false } : {}),
         ...(orchestrationEntry ? { orchestrationEntryHash: hashCanonical(orchestrationEntry) } : {}),
         configOriginalHash: configOriginal === null ? null : hashText(configOriginal),
         configMutatedHash: hashText(configMutated),
@@ -285,7 +290,7 @@ function cleanupOwnedConfiguration(
     if (before === null) return;
     const { document, value } = parseHermesDocument(before, paths.config);
     const servers = mcpServers(value, paths.config);
-    const ownedEntries: Array<[string, string]> = [[MCP_SERVER_NAME, journal.entryHash]];
+    const ownedEntries: Array<[string, string]> = journal.browserEntry === false ? [] : [[MCP_SERVER_NAME, journal.entryHash]];
     if (journal.orchestrationEntryHash) {
       ownedEntries.push([ORCHESTRATION_MCP_SERVER_NAME, journal.orchestrationEntryHash]);
     }
@@ -351,6 +356,7 @@ function parseJournal(
     || value.version !== 1
     || typeof value.ownershipId !== "string"
     || typeof value.entryHash !== "string"
+    || (value.browserEntry !== undefined && typeof value.browserEntry !== "boolean")
     || (value.orchestrationEntryHash !== undefined && typeof value.orchestrationEntryHash !== "string")
     || (value.configOriginalHash !== null && typeof value.configOriginalHash !== "string")
     || typeof value.configMutatedHash !== "string"

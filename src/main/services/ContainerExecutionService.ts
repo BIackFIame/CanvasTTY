@@ -1,4 +1,5 @@
-import { ProbeLimiter } from "./RemoteProbeCache.ts";
+import { ProbeCache, ProbeLimiter } from "./RemoteProbeCache.ts";
+import { CONTAINER_INVENTORY_ARGUMENTS, CONTAINER_INVENTORY_RESPONSE_BYTES, parseContainerInventory, parseRemoteContainerInventory, type EngineContainerInventory } from './ContainerInventory.ts';
 import { remoteEngineHelperArguments } from "./RemoteContainerEngine.ts";
 import { REMOTE_WORKSPACE_REVIEW } from "./RemoteWorkspaceReview.ts";
 import { validRemoteApiCredential } from "../../shared/apiProfileCredentials.ts";
@@ -8,9 +9,9 @@ import { createHash, randomUUID } from 'node:crypto';
 import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import type { AppSettings, ContainerAvailability, ContainerProfile, RemoteWorkspaceReview, RetainedContainer, SessionMetadata } from '../../shared/contracts.ts';
+import type { AppSettings, ContainerAvailability, ContainerInventorySnapshot, ContainerProfile, RemoteWorkspaceReview, RetainedContainer, SessionMetadata } from '../../shared/contracts.ts';
 import { assertContainerProfile } from '../../shared/containerProfiles.ts';
-import { CONTAINER_BOOTSTRAP } from './ContainerBootstrap.ts';
+import { ADVISORY_CONTAINER_BOOTSTRAP, CONTAINER_BOOTSTRAP } from './ContainerBootstrap.ts';
 import { resolveTerminalLaunch } from './terminalLaunch.ts';
 import type { PreparedProviderAccountLaunch } from './ProviderAccountLaunchService.ts';
 import type { IsolatedWorktree } from './WorktreeService.ts';
@@ -27,7 +28,7 @@ const imageId = (value: unknown): string => { if (typeof value !== 'string' || !
 interface Endpoint { hostFingerprint?: string; configDirectory?: string; home?: string; executable: string; socket?: string; executableIdentity: string }
 interface Engine { identity: string; rootless: boolean; name: string }
 interface Image { id: string; environmentNames: string[] }
-export type ContainerWorkspace = (IsolatedWorktree & { kind?: 'worktree'; uid?: number; gid?: number }) | { kind: 'capsule' | 'capsule-test'; id: string; directory: string; sourceDirectory: string; commit?: never; uid?: never; gid?: never };
+export type ContainerWorkspace = (IsolatedWorktree & { kind?: 'worktree'; uid?: number; gid?: number }) | { kind: 'capsule' | 'capsule-test' | 'advisory-review'; id: string; directory: string; sourceDirectory: string; commit?: never; uid?: never; gid?: never };
 type PreparedContainer = Pick<PreparedProviderAccountLaunch, 'process' | 'cleanup' | 'assertCurrent' | 'beforeSpawn'> & { generationId: string; imageId: string };
 type ContainerLaunch = Pick<SessionMetadata, 'id' | 'provider' | 'profile' | 'cwd' | 'hostId' | 'isolation'>;
 type ContainerSettings = Pick<AppSettings, 'containerProfiles' | 'remoteHosts'> & Partial<Pick<AppSettings, 'capsuleTestProfiles'>>;
@@ -41,7 +42,7 @@ interface RecordEntry extends RetainedContainer {
   createRequested?: boolean;
 }
 export type ContainerRunner = (command: string, args: string[], environment: Record<string, string>) => Promise<{ stdout: string }>;
-interface Options { rootDirectory: string; runner?: ContainerRunner; resolveEndpoint?: (profile: ContainerProfile) => Promise<Endpoint>; onWorkspaceStopped?: (workspaceId: string, leaseId: string, kind?: 'worktree' | 'capsule' | 'capsule-test') => Promise<void> }
+interface Options { rootDirectory: string; runner?: ContainerRunner; resolveEndpoint?: (profile: ContainerProfile) => Promise<Endpoint>; onWorkspaceStopped?: (workspaceId: string, leaseId: string, kind?: 'worktree' | 'capsule' | 'capsule-test' | 'advisory-review') => Promise<void> }
 function object(value: unknown): Record<string, any> { if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid engine response.'); return value as Record<string, any>; }
 function engineJson(raw: string): unknown { try { return JSON.parse(raw); } catch { throw new Error("Container engine returned invalid JSON; response content is withheld."); } }
 function one(raw: string): Record<string, any> { const value = engineJson(raw); if (!Array.isArray(value) || value.length !== 1) throw new Error('Expected exactly one owned engine object.'); return object(value[0]); }
@@ -77,20 +78,20 @@ function parseImage(raw: string): Image {
 }
 export function buildContainerCreateArguments(record: RecordEntry, environmentNames: string[]): string[] {
   const p = record.profile;
-  const mount = `type=bind,src=${record.workspace.directory},dst=/workspace,readonly=false,${p.runtime === 'docker' ? 'bind-recursive=disabled' : 'bind-nonrecursive'},bind-propagation=rprivate`;
+  const mount = `type=bind,src=${record.workspace.directory},dst=/workspace,readonly=${record.workspace.kind === 'advisory-review' ? 'true' : 'false'},${p.runtime === 'docker' ? 'bind-recursive=disabled' : 'bind-nonrecursive'},bind-propagation=rprivate`;
   return ['container', 'create', '--name', record.name, ...Object.entries(record.labels).flatMap(([key, value]) => ['--label', `${key}=${value}`]),
     ...(record.purpose === 'test' ? [] : ['--interactive', '--tty']), '--pull=never', '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges', `--network=${record.purpose === 'test' ? 'none' : p.network}`,
     `--cpus=${p.cpus}`, `--memory=${p.memoryMb}m`, `--pids-limit=${p.pids}`, '--cgroupns=private', '--restart=no', '--stop-signal=SIGTERM', '--log-driver=none',
     `--tmpfs=/tmp:rw,nosuid,nodev,noexec,size=256m,mode=1777${p.runtime === 'podman' ? ',notmpcopyup' : ''}`, '--workdir=/workspace', `--mount=${mount}`, '--entrypoint', p.python,
     ...(p.runtime === 'docker' ? ['--no-healthcheck', ...record.image.environmentNames.filter(name => !environmentNames.includes(name)).map(name => `--env=${name}`)] : ['--health-cmd=none', '--image-volume=ignore', '--http-proxy=false', '--unsetenv-all', '--read-only-tmpfs=false', '--systemd=false', '--sdnotify=ignore']),
-    ...(record.user === 'keep-id' ? ['--userns=keep-id'] : [`--user=${record.user}`]), ...environmentNames.map(name => `--env=${name}`), '--env=HOME=/tmp', '--env=PATH=/usr/local/bin:/usr/bin:/bin', '--env=TERM=xterm-256color', '--env=LANG=C.UTF-8', record.image.id, '-I', '-S', '-c', CONTAINER_BOOTSTRAP];
+    ...(record.user === 'keep-id' ? ['--userns=keep-id'] : [`--user=${record.user}`]), ...environmentNames.map(name => `--env=${name}`), '--env=HOME=/tmp', '--env=PATH=/usr/local/bin:/usr/bin:/bin', '--env=TERM=xterm-256color', '--env=LANG=C.UTF-8', record.image.id, '-I', '-S', '-c', record.bootstrap];
 }
 export function verifyContainerInspection(record: RecordEntry, input: unknown): { running: boolean } {
   const v = object(input), c = object(v.Config), h = object(v.HostConfig), state = object(v.State);
   const p = record.profile;
   if (v.Id !== record.containerId || String(v.Name).replace(/^\//u, '') !== record.name || imageId(v.Image) !== record.image.id ||
     Object.entries(record.labels).some(([key, value]) => c.Labels?.[key] !== value) || c.WorkingDir !== '/workspace' ||
-    (record.user !== 'keep-id' && c.User !== record.user) || v.Path !== p.python || JSON.stringify(v.Args) !== JSON.stringify(['-I', '-S', '-c', CONTAINER_BOOTSTRAP]) || c.Tty !== (record.purpose !== 'test') || c.OpenStdin !== (record.purpose !== 'test')) throw new Error('Owned container identity or entrypoint changed; retained without cleanup permission.');
+    (record.user !== 'keep-id' && c.User !== record.user) || v.Path !== p.python || JSON.stringify(v.Args) !== JSON.stringify(['-I', '-S', '-c', record.bootstrap]) || c.Tty !== (record.purpose !== 'test') || c.OpenStdin !== (record.purpose !== 'test')) throw new Error('Owned container identity or entrypoint changed; retained without cleanup permission.');
   const processEnvironment = c.Env;
   const allowedEnvironment = new Set(['HOME', 'PATH', 'TERM', 'LANG', 'CANVASTTY_CONTAINER_RECIPE', 'CANVASTTY_PROFILE_API_KEY', 'OPENCODE_CONFIG_CONTENT', 'OPENCODE_PERMISSION', 'HOSTNAME', 'container']);
   if (!Array.isArray(processEnvironment) || processEnvironment.length > 16 || processEnvironment.some((entry: unknown) => typeof entry !== 'string' || !allowedEnvironment.has(entry.split('=', 1)[0]!)) || hash(processEnvironment.filter((entry: string) => !entry.startsWith('HOSTNAME=') && !entry.startsWith('container=')).sort()) !== record.environmentDigest) throw new Error('Container environment differs from its scoped launch recipe.');
@@ -99,7 +100,7 @@ export function verifyContainerInspection(record: RecordEntry, input: unknown): 
   if (!Array.isArray(v.Mounts)) throw new Error('Container mount inspection is unavailable.');
   if (v.Mounts.some((m: any) => m.Type === 'tmpfs' && m.Destination !== '/tmp')) throw new Error('Container contains an unexpected temporary mount.');
   const binds = v.Mounts.filter((m: any) => m.Type !== 'tmpfs');
-  if (binds.length !== 1 || binds[0].Type !== 'bind' || binds[0].Source !== record.workspace.directory || binds[0].Destination !== '/workspace' || binds[0].RW !== true || binds[0].Propagation !== 'rprivate') throw new Error('Container workspace mount differs from its owned workspace.');
+  if (binds.length !== 1 || binds[0].Type !== 'bind' || binds[0].Source !== record.workspace.directory || binds[0].Destination !== '/workspace' || binds[0].RW !== (record.workspace.kind !== 'advisory-review') || binds[0].Propagation !== 'rprivate') throw new Error('Container workspace mount differs from its owned workspace.');
   if (p.runtime === 'docker' && (!Array.isArray(h.Mounts) || h.Mounts.length !== 1 || h.Mounts[0]?.BindOptions?.NonRecursive !== true)) throw new Error('Nonrecursive workspace bind was not enforced.');
   const cpus = typeof h.NanoCpus === 'number' && h.NanoCpus > 0 ? h.NanoCpus / 1e9 : typeof h.CpuQuota === 'number' && typeof h.CpuPeriod === 'number' && h.CpuPeriod > 0 ? h.CpuQuota / h.CpuPeriod : NaN;
   const empty = (value: unknown): boolean => value === undefined || value === null || value === '' || Array.isArray(value) && value.length === 0;
@@ -124,6 +125,8 @@ export class ContainerExecutionService {
   private readonly runner: ContainerRunner;
   private initialized?: Promise<void>;
   private readonly limiter = new ProbeLimiter();
+  private readonly inventoryCache = new ProbeCache<{ endpoint: Endpoint; engine: Engine; inventory: EngineContainerInventory; checkedAt: number } | null>({ maxEntries: 64 });
+  private readonly inventoryImages = new ProbeCache<string | null>({ maxEntries: 128 });
   private installation = '';
   private records = new Map<string, RecordEntry>();
   private readonly remoteReservations = new Map<string, string>();
@@ -186,7 +189,41 @@ export class ContainerExecutionService {
     try { await this.initialize(); const endpoint = await this.endpoint(p); const engine = await this.engine(p, endpoint); const image = await this.image(p, endpoint); return { available: true, runtime: p.runtime, rootless: engine.rootless, imageId: image.id }; }
     catch (error) { return { available: false, runtime: p.runtime, reason: error instanceof Error ? error.message : 'Container profile unavailable.' }; }
   }
-  async prepare(metadata: SessionMetadata, workspace: ContainerWorkspace, account: Pick<PreparedProviderAccountLaunch, 'args' | 'environment' | 'model' | 'containerRecipe' | 'remoteCredential' | 'startup'>, active: () => void = () => {}, leaseId = randomUUID(), executionCwd = '/workspace', verifyWorkspace?: (marker: CapsuleLaunchMarker) => Promise<void>): Promise<PreparedContainer> {
+  async inventory(profileIds?: string[], force = false): Promise<ContainerInventorySnapshot[]> {
+    if (typeof force !== 'boolean' || profileIds !== undefined && (!Array.isArray(profileIds) || profileIds.length > 64 || new Set(profileIds).size !== profileIds.length || profileIds.some(id => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(id)))) throw new Error('Invalid container inventory selection.');
+    const profiles = (profileIds ?? this.settings().containerProfiles.map(p => p.id)).map(id => this.profile(id));
+    if (!profiles.length) return [];
+    if (profiles.length > 64) throw new Error('Too many container profiles.');
+    await this.initialize();
+    const routeKey = (p: ContainerProfile): string => hash([p.hostId, p.runtime, p.executable, p.endpoint, p.hostPython, p.hostId === 'local' ? null : this.settings().remoteHosts.find(host => host.id === p.hostId)]);
+    const groups = new Map<string, ContainerProfile[]>();
+    for (const p of profiles) { const key = routeKey(p); groups.set(key, [...(groups.get(key) ?? []), p]); }
+    return Promise.all([...groups].map(async ([key, selected]) => {
+      const p = selected[0]!;
+      const result: ContainerInventorySnapshot = { hostId: p.hostId, runtime: p.runtime, checkedAt: Date.now(), available: false, profiles: selected.map(item => ({ profileId: item.id, imageAvailable: false })), containers: [], truncated: false };
+      const current = (): boolean => selected.every(saved => { try { const latest = this.profile(saved.id); return hash(latest) === hash(saved) && routeKey(latest) === key; } catch { return false; } });
+      try {
+        const facts = await this.inventoryCache.read(key, async () => {
+          try {
+            const endpoint = await this.endpoint(p), engine = await this.engine(p, endpoint);
+            const inventory = p.hostId === 'local' ? parseContainerInventory(await this.run(p, endpoint, CONTAINER_INVENTORY_ARGUMENTS)) : parseRemoteContainerInventory(await this.remoteEngine(p, { action: 'inventory', profile: p, endpoint, engineIdentity: engine.identity }));
+            if (hash(await this.endpoint(p)) !== hash(endpoint) || p.hostId === 'local' && (await this.engine(p, endpoint)).identity !== engine.identity) throw new Error('Engine changed during inventory.');
+            return { endpoint, engine, inventory, checkedAt: Date.now() };
+          } catch { return null; }
+        }, force);
+        if (facts) {
+          const images = await Promise.all(selected.map(saved => this.inventoryImages.read(hash([key, saved, facts.endpoint, facts.engine.identity]), async () => { try { return (await this.image(saved, facts.endpoint)).id; } catch { return null; } }, force)));
+          result.available = true; result.checkedAt = facts.checkedAt; result.engineName = facts.engine.name; result.rootless = facts.engine.rootless;
+          result.profiles = selected.map((saved, i) => ({ profileId: saved.id, imageAvailable: images[i] !== null, ...(images[i] ? { imageId: images[i]! } : {}) }));
+          result.truncated = facts.inventory.truncated;
+          result.containers = facts.inventory.rows.map(row => ({ ...row, managed: [...this.records.values()].some(record => record.containerId === row.id && selected.some(saved => saved.id === record.profileId && hash(saved) === hash(record.profile)) && record.hostId === p.hostId && record.profile.runtime === p.runtime && record.installation === this.installation && hash(record.endpoint) === hash(facts.endpoint) && record.engine.identity === facts.engine.identity) }));
+        } else result.reasonCode = 'unavailable';
+      } catch { result.reasonCode = 'unavailable'; }
+      if (!current()) return { ...result, available: false, engineName: undefined, rootless: undefined, profiles: selected.map(item => ({ profileId: item.id, imageAvailable: false })), containers: [], truncated: false, reasonCode: 'configuration-changed' as const };
+      return result;
+    }));
+  }
+  async prepare(metadata: SessionMetadata, workspace: ContainerWorkspace, account: Pick<PreparedProviderAccountLaunch, 'args' | 'environment' | 'model' | 'containerRecipe' | 'remoteCredential' | 'startup' | 'onStartupDisclosure'>, active: () => void = () => {}, leaseId = randomUUID(), executionCwd = '/workspace', verifyWorkspace?: (marker: CapsuleLaunchMarker) => Promise<void>): Promise<PreparedContainer> {
     return this.prepareOwned(metadata, workspace, account, active, leaseId, executionCwd, verifyWorkspace);
   }
   async prepareTest(testProfileId: string, workspace: ContainerWorkspace, active: () => void = () => {}, leaseId: string = randomUUID(), verifyWorkspace?: (marker: CapsuleLaunchMarker) => Promise<void>): Promise<PreparedContainer> {
@@ -196,11 +233,11 @@ export class ContainerExecutionService {
     const current = (): void => { active(); const actual = this.settings().capsuleTestProfiles?.find(profile => profile.id === testProfileId); if (!actual || hash(actual) !== hash(saved)) throw new Error('Saved test profile changed before launch.'); };
     return this.prepareOwned({ id: workspace.id, provider: 'terminal', profile: 'normal', cwd: workspace.directory, isolation: { mode: 'container', profileId: saved.containerProfileId } }, workspace, { args: [], environment: {} }, current, leaseId, '/workspace', verifyWorkspace, saved);
   }
-  private async prepareOwned(metadata: ContainerLaunch, workspace: ContainerWorkspace, account: Pick<PreparedProviderAccountLaunch, 'args' | 'environment' | 'model' | 'containerRecipe' | 'remoteCredential' | 'startup'>, active: () => void, leaseId: string, executionCwd: string, verifyWorkspace?: (marker: CapsuleLaunchMarker) => Promise<void>, test?: CapsuleTestProfile): Promise<PreparedContainer> {
+  private async prepareOwned(metadata: ContainerLaunch, workspace: ContainerWorkspace, account: Pick<PreparedProviderAccountLaunch, 'args' | 'environment' | 'model' | 'containerRecipe' | 'remoteCredential' | 'startup' | 'onStartupDisclosure'>, active: () => void, leaseId: string, executionCwd: string, verifyWorkspace?: (marker: CapsuleLaunchMarker) => Promise<void>, test?: CapsuleTestProfile): Promise<PreparedContainer> {
     if (metadata.isolation?.mode !== 'container') throw new Error('Container profile is required.');
     if ((workspace.kind === 'capsule-test') !== !!test) throw new Error('Test snapshots require a saved fixed test command.');
     const p = this.profile(metadata.isolation.profileId);
-    if (workspace.kind === 'capsule' ? p.hostId !== 'local' || metadata.isolation.capsuleId !== workspace.id || !verifyWorkspace : metadata.isolation.capsuleId !== undefined) throw new Error('Capsule requires its exact registered local workspace and launch verifier.');
+    if ((workspace.kind === 'capsule' || workspace.kind === 'advisory-review') ? p.hostId !== 'local' || metadata.isolation.capsuleId !== workspace.id || !verifyWorkspace : metadata.isolation.capsuleId !== undefined) throw new Error('Capsule requires its exact registered local workspace and launch verifier.');
     if (p.hostId !== (metadata.hostId ?? 'local')) throw new Error('Container profile belongs to another execution host.');
     if (p.hostId !== 'local' && this.remoteReservations.get(workspace.id) !== leaseId) throw new Error('Remote workspace reservation is missing or changed.');
     if (p.hostId !== 'local' && (account.environment.CANVASTTY_PROFILE_API_KEY !== undefined || metadata.provider !== 'terminal' && (!account.remoteCredential || account.remoteCredential.hostId !== p.hostId || !validRemoteApiCredential(account.remoteCredential.reference)))) throw new Error('Remote API containers require a credential reference on their fixed server; local keys are never forwarded.');
@@ -222,12 +259,13 @@ export class ContainerExecutionService {
     if (p.runtime === 'podman' && p.user !== 'keep-id') throw new Error('Podman workspace execution requires explicit keep-id mapping.');
     const image = await this.image(p, endpoint); active();
     const id = randomUUID();
-    const record: RecordEntry = { version: p.hostId === 'local' ? 1 : 2, installation: this.installation, id, profileId: p.id, hostId: p.hostId, workspaceId: workspace.id, workspace, profile: p, endpoint, engine, image, name: `canvastty-${id}`, labels: { 'io.canvastty.installation': this.installation, 'io.canvastty.session': metadata.id, 'io.canvastty.generation': id, 'io.canvastty.workspace': workspace.id }, sessionId: metadata.id, createdAt: Date.now(), state: 'preparing', leaseId, markerToken: randomUUID(), environmentDigest: '', ...(p.hostId !== 'local' ? { hostFingerprint: hash(this.host(p)) } : {}), user: p.user, bootstrap: CONTAINER_BOOTSTRAP };
+    const record: RecordEntry = { version: p.hostId === 'local' ? 1 : 2, installation: this.installation, id, profileId: p.id, hostId: p.hostId, workspaceId: workspace.id, workspace, profile: p, endpoint, engine, image, name: `canvastty-${id}`, labels: { 'io.canvastty.installation': this.installation, 'io.canvastty.session': metadata.id, 'io.canvastty.generation': id, 'io.canvastty.workspace': workspace.id }, sessionId: metadata.id, createdAt: Date.now(), state: 'preparing', leaseId, markerToken: randomUUID(), environmentDigest: '', ...(p.hostId !== 'local' ? { hostFingerprint: hash(this.host(p)) } : {}), user: p.user, bootstrap: workspace.kind === 'advisory-review' ? ADVISORY_CONTAINER_BOOTSTRAP : CONTAINER_BOOTSTRAP };
     if (test) record.purpose = 'test';
-    const resolved = metadata.provider === 'terminal' ? { args: test ? [...test.args] : [] as string[], environment: {} } : resolveTerminalLaunch(metadata.provider, metadata.profile, account.args, { platform: 'linux', environment: account.environment, model: account.model, startup: workspace.kind === 'capsule' ? { task: 'Read /workspace/Task.md and perform the task using only the selected files in /workspace.' } : account.startup, providerCli: { provider: metadata.provider, state: 'available', executable: command, launcher: 'native', environment: {}, checked: [] } });
+    const resolved = metadata.provider === 'terminal' ? { args: test ? [...test.args] : [] as string[], environment: {} } : resolveTerminalLaunch(metadata.provider, metadata.profile, account.args, { platform: 'linux', environment: account.environment, model: account.model, startup: (workspace.kind === 'capsule' || workspace.kind === 'advisory-review') ? { context: account.startup?.context, task: workspace.kind === 'advisory-review' ? 'Read /workspace/Task.md and review only the immutable /workspace/Review.patch. Return an advisory report.' : 'Read /workspace/Task.md and perform the task using only the selected files in /workspace.' } : account.startup, providerCli: { provider: metadata.provider, state: 'available', executable: command, launcher: 'native', environment: {}, checked: [] } });
     if (!Array.isArray(resolved.args)) throw new Error('Container command requires bounded argv.');
 
-    const environment: Record<string, string> = { ...account.environment, ...resolved.environment, CANVASTTY_CONTAINER_RECIPE: JSON.stringify({ command, args: resolved.args, cwd: executionCwd, marker: { name: `.canvastty-container-${id}`, token: record.markerToken }, limits: { cpus: p.cpus, memoryMb: p.memoryMb, pids: p.pids }, api: account.containerRecipe }) };
+    const environment: Record<string, string> = { ...account.environment, ...resolved.environment, CANVASTTY_CONTAINER_RECIPE: JSON.stringify({ ...(workspace.kind === 'advisory-review' ? { workspaceMode: 'advisory-readonly' } : {}), command, args: resolved.args, cwd: executionCwd, marker: { name: `.canvastty-container-${id}`, token: record.markerToken }, limits: { cpus: p.cpus, memoryMb: p.memoryMb, pids: p.pids }, api: account.containerRecipe }) };
+    if (Buffer.byteLength(environment.CANVASTTY_CONTAINER_RECIPE!) > 65536 || resolved.args.length > 256) throw new Error('Container launch recipe exceeds its bootstrap bound.');
     const allowed = new Set(['CANVASTTY_PROFILE_API_KEY', 'OPENCODE_CONFIG_CONTENT', 'OPENCODE_PERMISSION', 'CANVASTTY_CONTAINER_RECIPE']);
     if (Object.keys(environment).some(name => !allowed.has(name))) throw new Error('Container launch includes an unsupported host credential or configuration path.');
     if (Buffer.byteLength(JSON.stringify(environment)) > 128 * 1024) throw new Error('Container launch recipe exceeds its bound.');
@@ -247,10 +285,10 @@ export class ContainerExecutionService {
     const checkWorkspace = async (): Promise<void> => { currentGeneration(); await verifyWorkspace?.({ name: `.canvastty-container-${id}`, token: record.markerToken }); currentGeneration(); };
     try {
       await this.persist(record);
-      currentGeneration(); await this.marker(record, 'write'); currentGeneration(); await this.verifyEngine(record); currentGeneration();
+      currentGeneration(); await checkWorkspace(); await this.marker(record, 'write'); currentGeneration(); await this.verifyEngine(record); currentGeneration();
       await checkWorkspace();
       record.createRequested = true; await this.persist(record);
-      const dispatch = (): void => { currentGeneration(); createDispatched = true; };
+      const dispatch = (): void => { currentGeneration(); account.onStartupDisclosure?.(); createDispatched = true; };
       const created = p.hostId === 'local'
         ? (await this.run(p, endpoint, buildContainerCreateArguments(record, Object.keys(environment)), environment, dispatch)).trim()
         : (await this.remoteOwned(record, 'create-owned', { environment, ...(account.remoteCredential ? { credential: account.remoteCredential.reference } : {}) }, dispatch)).containerId as string;
@@ -401,7 +439,7 @@ export class ContainerExecutionService {
     if (Buffer.byteLength(launch.args.at(-1)!) > 120_000) throw new Error('Remote container launch recipe exceeds its transport bound.');
     try {
       const result = await this.limiter.run(() => { active(); if (hash(this.host(p)) !== identity) throw new Error(); return this.runner(launch.command, launch.args, safeEnvironment()); });
-      if (hash(this.host(p)) !== identity || Buffer.byteLength(result.stdout) > 16_384) throw new Error();
+      if (hash(this.host(p)) !== identity || Buffer.byteLength(result.stdout) > (request.action === 'inventory' ? CONTAINER_INVENTORY_RESPONSE_BYTES : 16_384)) throw new Error();
       return object(JSON.parse(result.stdout));
     } catch { throw new Error('Remote container engine verification failed or timed out. Diagnostic output is withheld; owned output is retained.'); }
   }
@@ -457,9 +495,9 @@ export class ContainerExecutionService {
     for (const name of entries.filter(name => UUID.test(name.replace(/\.json$/u, '')) && name.endsWith('.json'))) {
       const r: RecordEntry = JSON.parse(await privateRead(join(root, name), 64 * 1024));
       assertContainerProfile(r.profile);
-      if (!r.workspace || ![undefined, 'worktree', 'capsule', 'capsule-test'].includes(r.workspace.kind) || (r.workspace.kind === 'capsule' || r.workspace.kind === 'capsule-test') && (r.hostId !== 'local' || r.workspace.commit !== undefined) || (r.workspace.kind === 'capsule-test' ? r.purpose !== 'test' : r.purpose !== undefined)) throw new Error('Invalid container workspace kind.');
+      if (!r.workspace || ![undefined, 'worktree', 'capsule', 'capsule-test', 'advisory-review'].includes(r.workspace.kind) || (r.workspace.kind === 'capsule' || r.workspace.kind === 'capsule-test' || r.workspace.kind === 'advisory-review') && (r.hostId !== 'local' || r.workspace.commit !== undefined) || (r.workspace.kind === 'capsule-test' ? r.purpose !== 'test' : r.purpose !== undefined)) throw new Error('Invalid container workspace kind.');
       if (r.createRequested !== undefined && typeof r.createRequested !== 'boolean') throw new Error('Container creation recovery state is invalid.');
-      if (!(r.version === 1 ? typeof r.environmentDigest === 'string' && HEX.test(r.environmentDigest) && r.remoteVerification === undefined : r.version === 2 && r.hostId !== 'local' && r.environmentDigest === undefined && r.remoteVerification?.version === 1 && r.remoteVerification.planDigest === canonicalHash(this.remotePlan(r))) || !UUID.test(r.markerToken) || !UUID.test(r.leaseId) || r.installation !== this.installation || `${r.id}.json` !== name || r.profileId !== r.profile.id || r.hostId !== r.profile.hostId || !UUID.test(r.workspaceId) || r.workspace.id !== r.workspaceId || r.containerId !== undefined && !HEX.test(r.containerId) || r.name !== `canvastty-${r.id}` || r.bootstrap !== CONTAINER_BOOTSTRAP || r.labels['io.canvastty.installation'] !== this.installation || r.labels['io.canvastty.generation'] !== r.id || r.labels['io.canvastty.workspace'] !== r.workspaceId || r.labels['io.canvastty.session'] !== r.sessionId) throw new Error('Container recovery identity is invalid; records are retained without cleanup.');
+      if (!(r.version === 1 ? typeof r.environmentDigest === 'string' && HEX.test(r.environmentDigest) && r.remoteVerification === undefined : r.version === 2 && r.hostId !== 'local' && r.environmentDigest === undefined && r.remoteVerification?.version === 1 && r.remoteVerification.planDigest === canonicalHash(this.remotePlan(r))) || !UUID.test(r.markerToken) || !UUID.test(r.leaseId) || r.installation !== this.installation || `${r.id}.json` !== name || r.profileId !== r.profile.id || r.hostId !== r.profile.hostId || !UUID.test(r.workspaceId) || r.workspace.id !== r.workspaceId || r.containerId !== undefined && !HEX.test(r.containerId) || r.name !== `canvastty-${r.id}` || r.bootstrap !== (r.workspace.kind === 'advisory-review' ? ADVISORY_CONTAINER_BOOTSTRAP : CONTAINER_BOOTSTRAP) || r.labels['io.canvastty.installation'] !== this.installation || r.labels['io.canvastty.generation'] !== r.id || r.labels['io.canvastty.workspace'] !== r.workspaceId || r.labels['io.canvastty.session'] !== r.sessionId) throw new Error('Container recovery identity is invalid; records are retained without cleanup.');
       if (r.state !== 'workspace-retained') { r.state = 'cleanup-needed'; r.reason = 'Recovered generation: inspect and clean its exact owned container before workspace reuse.'; } this.records.set(r.id, r);
     }
     const config = join(root, 'engine-config'); await mkdir(config, { mode: 0o700, recursive: true });

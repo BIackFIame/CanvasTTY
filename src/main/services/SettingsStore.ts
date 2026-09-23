@@ -345,6 +345,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
   return {
     locale: systemLocale.toLowerCase().startsWith("ru") ? "ru" : "en",
     restoreTerminalSessions: false,
+    contextProfilesEnabled: false,
     persistCanvasRegions: true,
     persistStickyNotes: true,
     palette: "sage",
@@ -706,6 +707,7 @@ export function normalizeSettings(
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
+    contextProfilesEnabled: source.contextProfilesEnabled === true,
     restoreTerminalSessions: typeof source.restoreTerminalSessions === "boolean"
       ? source.restoreTerminalSessions
       : fallback.restoreTerminalSessions ?? false,

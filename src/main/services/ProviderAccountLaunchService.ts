@@ -1,3 +1,4 @@
+import { assertDelegationRoute } from '../../shared/delegationLaunch.ts';
 import type { AgentStartup } from "./AgentStartup.ts";
 import { miniMaxModelValue } from "./ACPAdapter.ts";
 import { createHash, randomUUID } from "node:crypto";
@@ -15,6 +16,7 @@ import { providerModelArguments } from "./terminalLaunch.ts";
 type LaunchSettings = Pick<AppSettings, "providerAccounts" | "apiProfiles" | "remoteHosts">;
 export interface PreparedProviderAccountLaunch {
   startup?: AgentStartup;
+  onStartupDisclosure?(): void;
   execution?: ExecutionWorkspaceSummary;
   /** Main-owned container process bypasses host CLI/bridge resolution. Environment is complete. */
   process?: { command: string; args: string[]; cwd: string; environment: Record<string, string> };
@@ -42,7 +44,7 @@ export interface PreparedProviderAccountLaunch {
 }
 export interface ProviderAccountLaunchCoordinator {
   readonly handlesTerminals?: boolean;
-  prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; target?: "container"; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch>;
+  prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; assertRoute?(): void; onStartupDisclosure?(): void; target?: "container"; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch>;
 }
 const KEY_ENV = "CANVASTTY_PROFILE_API_KEY";
 // Selected account homes must not inherit another account's API billing route.
@@ -69,12 +71,15 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
   constructor(settings: () => LaunchSettings, secrets: Pick<ProviderSecretsService, "get" | "generation">,
     options: { temporaryRoot?: string; discovery?: Pick<RemoteProviderDiscovery, "discover"> } = {}) { this.settings = settings; this.secrets = secrets; this.options = options; }
 
-  async prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { target?: "container" }): Promise<PreparedProviderAccountLaunch> {
+  async prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { target?: "container"; isCurrent?(): boolean; assertRoute?(): void }): Promise<PreparedProviderAccountLaunch> {
+    const active = (): void => { if (control?.isCurrent && !control.isCurrent()) throw new Error('Launch cancelled.'); control?.assertRoute?.(); };
+    active();
     if (metadata.provider === "terminal") throw new Error("A shell does not use a provider account adapter.");
     const targetContainer = control?.target === "container";
     const settings = this.settings();
     const frozen = this.fingerprint(metadata, settings);
     const account = metadata.accountId === undefined ? undefined : settings.providerAccounts.find((a) => a.id === metadata.accountId);
+    assertDelegationRoute(metadata, account);
     if (metadata.accountId !== undefined && !account) throw new Error("Selected provider account is missing.");
     if (account) assertAccountAliases(settings.providerAccounts, settings.apiProfiles, new Set([account.id]));
     if (account && (!validAccountBinding(account.binding) || account.bindingRequired)) throw new Error("Selected account needs an explicit supported authentication binding; ambient credentials are disabled.");
@@ -116,6 +121,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
           if (canonical !== home) throw new Error("Account home must be its canonical real path; save the resolved directory before assessing this account.");
           home = canonical;
           if (!(await stat(home)).isDirectory()) throw new Error("Account directory does not exist.");
+          active();
           // A symlink alias must not create a second account/capacity identity.
           for (const other of settings.providerAccounts) {
             if (other.id === account.id || other.provider !== account.provider || (other.hostId ?? "local") !== "local" || other.binding?.kind !== "cli-home") continue;
@@ -124,6 +130,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
             if (otherHome === home) throw new Error("Two account identities resolve to the same account directory.");
           }
         } else if (!home.startsWith("/")) throw new Error("Remote account directory must be an absolute POSIX path.");
+        active();
         environment = { [variable]: home };
         // The Python and TypeScript Kimi CLIs share a command name but use different home selectors.
         if (metadata.provider === "kimi") environment.KIMI_SHARE_DIR = home;
@@ -140,8 +147,10 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         if (metadata.hostId !== undefined) {
           remoteCredential = { hostId: metadata.hostId, apiProfileId: profile.id, reference: copyRemoteApiCredential(profile.remoteCredential!), routeBinding: accountRouteBinding(account!, settings.apiProfiles) };
         } else {
+          active();
           secretGeneration = this.secrets.generation;
           key = (await this.secrets.get(profile.secretRef!, { profileId: profile.id, hostId: "local" }).catch(() => { throw new Error("API profile credential could not be read from secure storage for this owner."); })) ?? undefined;
+          active();
           if (!key || !key.trim()) throw new Error("API profile key is not configured in secure storage.");
           if (this.secrets.generation !== secretGeneration) throw new Error("Provider credentials changed while preparing the launch; retry.");
         }
@@ -162,7 +171,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
           const root = this.options.temporaryRoot ?? tmpdir();
           await mkdir(root, { recursive: true, mode: 0o700 });
           directory = await mkdtemp(join(root, "canvastty-api-"));
-          await chmod(directory, 0o700);
+          await chmod(directory, 0o700); active();
           if (metadata.provider === "minimax") {
             // JSON is valid YAML, avoiding interpolation and YAML scalar surprises.
             await writeFile(join(directory, "config.yaml"), JSON.stringify({ defaultModel: `custom_provider:${provider}/${model}`, custom_provider: { [provider]: { name: "CanvasTTY", api, options: { baseURL: baseUrl, apiKey: key }, models: { [model]: {} } } } }), { mode: 0o600, flag: "wx" });
@@ -188,6 +197,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         const host = settings.remoteHosts.find((h) => h.id === metadata.hostId);
         if (!host || !this.options.discovery) throw new Error("Remote provider discovery is unavailable.");
         const discovery = await this.options.discovery.discover(host, undefined, [metadata.provider]);
+        active();
         const found = discovery.providers.find((p) => p.provider === metadata.provider && p.installed);
         if (!discovery.reachable || !found?.path?.startsWith("/") || /[\u0000-\u001f\u007f]/u.test(found.path)) throw new Error("Remote provider did not resolve to a verified absolute executable path.");
         remoteExecutable = found.path;
@@ -197,6 +207,7 @@ export class ProviderAccountLaunchService implements ProviderAccountLaunchCoordi
         // Legacy adapters mutate the default home. A custom home deliberately keeps PTY/process integration only.
         skipBridges: targetContainer || account?.binding?.kind === "cli-home" && ["kimi", "hermes", "grok"].includes(metadata.provider), bindingDigest,
         assertCurrent: (current) => {
+          active();
           if (cleaned || this.fingerprint(current, this.settings()) !== frozen || (secretGeneration !== undefined && this.secrets.generation !== secretGeneration)) throw new Error("Provider launch binding changed during preparation; start again with the current settings.");
         }, cleanup };
       prepared.assertCurrent(metadata);

@@ -16,12 +16,14 @@ export const MAX_INFLIGHT_ORCHESTRATION_COMMANDS = 4;
 export const ORCHESTRATION_ENV = Object.freeze({
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
   capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID",
   terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID"
 });
 
 export type OrchestrationToolName =
   | 'spawn_capsule_agent' | 'list_capsules' | 'review_capsule' | 'read_capsule_patch' | 'apply_capsule' | 'recover_capsule_apply'
-  | 'list_capsule_test_profiles' | 'test_capsule' | 'list_capsule_tests' | 'get_capsule_test_result' | 'cancel_capsule_test'
+  | 'preview_capsule_review_agent' | 'launch_capsule_review_agent'
+  | 'list_capsule_test_profiles' | 'test_capsule' | 'validate_capsule_conventions' | 'list_capsule_tests' | 'get_capsule_test_result' | 'cancel_capsule_test'
   | "spawn_agent"
   | "send_to_agent"
   | "observe_agent"

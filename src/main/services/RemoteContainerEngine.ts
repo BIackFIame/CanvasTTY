@@ -2,6 +2,7 @@ import type { ContainerProfile } from '../../shared/contracts.ts';
 import { REMOTE_PROCESS_CAPTURE } from './RemoteProcessCapture.ts';
 import { CONTAINER_BOOTSTRAP } from './ContainerBootstrap.ts';
 import { REMOTE_CONTAINER_HOST_LIBRARY } from './RemoteContainerHost.ts';
+import { CONTAINER_INVENTORY_ARGUMENTS, CONTAINER_INVENTORY_RESPONSE_BYTES } from './ContainerInventory.ts';
 
 /** Fixed host-only operations. Raw engine responses and environment verification material never cross SSH. */
 export const REMOTE_CONTAINER_ENGINE = REMOTE_CONTAINER_HOST_LIBRARY + REMOTE_PROCESS_CAPTURE + '\nBOOTSTRAP = ' + JSON.stringify(CONTAINER_BOOTSTRAP) + String.raw`
@@ -75,6 +76,25 @@ def image_info(p, endpoint):
         name=entry.split('=',1)[0]
         if name not in names: names.append(name)
     return {'id':image_identity(value['Id']), 'environmentNames':names}
+
+def container_inventory(p, endpoint):
+    raw=engine_run(p,endpoint,${JSON.stringify(CONTAINER_INVENTORY_ARGUMENTS)})
+    require(len(raw.encode())<=2*1024*1024)
+    lines=raw.strip().split('\n') if raw.strip() else []
+    require(len(lines)<=65); rows=[]; seen=set()
+    for line in lines:
+        row=json.loads(line)
+        require(isinstance(row,dict) and set(row)=={'id','name','image','state','status'})
+        require(isinstance(row['id'],str) and re.fullmatch('[a-f0-9]{64}',row['id']) and row['id'] not in seen); seen.add(row['id'])
+        if isinstance(row['name'],list):
+            require(len(row['name'])<=16 and all(isinstance(name,str) for name in row['name']))
+            row['name']=', '.join(row['name'])
+        for key,limit in [('name',128),('image',512),('state',32),('status',128)]:
+            require(isinstance(row[key],str) and len(row[key].encode())<=limit and not re.search(r'[\x00-\x1f\x7f-\x9f]',row[key]))
+        rows.append(row)
+    result={'rows':rows[:64],'truncated':len(rows)>64}
+    require(len(json.dumps(result,separators=(',',':')).encode())<=${CONTAINER_INVENTORY_RESPONSE_BYTES})
+    return result
 
 def private_read(path, limit):
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
@@ -297,10 +317,16 @@ def owned(request):
 def engine_main():
     require(len(sys.argv)==2 and len(sys.argv[1].encode())<=65536 and sys.platform=='linux')
     request=json.loads(sys.argv[1]); action=request.get('action'); require(request.get('version')==1)
-    if action in ['engine','image']:
-        require(set(request)=={'version','action','profile','endpoint'})
+    if action in ['engine','image','inventory']:
+        require(set(request)==({'version','action','profile','endpoint','engineIdentity'} if action=='inventory' else {'version','action','profile','endpoint'}))
         endpoint=host_call({'action':'endpoint','profile':request['profile']})
         require({k:v for k,v in endpoint.items() if v is not None}=={k:v for k,v in request['endpoint'].items() if k!='hostFingerprint' and v is not None})
+        if action=='inventory':
+            require(isinstance(request['engineIdentity'],str) and re.fullmatch('[a-f0-9]{64}',request['engineIdentity']))
+            require(engine_info(request['profile'],endpoint)['identity']==request['engineIdentity'])
+            result=container_inventory(request['profile'],endpoint)
+            require(engine_info(request['profile'],endpoint)['identity']==request['engineIdentity'])
+            return result
         return engine_info(request['profile'],endpoint) if action=='engine' else image_info(request['profile'],endpoint)
     require(action in ['create-owned','inspect-owned','cleanup-owned','start-owned'])
     require(set(request)<= {'version','action','plan','planDigest','containerId','environment','credential'})

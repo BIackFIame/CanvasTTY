@@ -1,3 +1,10 @@
+import type { PreferenceReviewService } from '../services/PreferenceReviewService';
+import type { AdvisoryReviewRequest } from '../../shared/capsules';
+import type { ConventionValidatorService } from '../services/ConventionValidatorService';
+import type { ContextFeedbackAction, ContextFeedbackInput, ContextLearning } from '../../shared/contextFeedback';
+import type { ContextProfileStore } from "../services/ContextProfileStore";
+import type { ContextProject, ContextTask, ContextRuleInput, ContextSelection } from "../../shared/contextProfiles";
+import { contextText } from '../../shared/contextProfiles';
 import { isProviderSecretRef } from "../../shared/providerAccountPolicy";
 import { mutateProviderCredential } from "../services/ProviderCredentialSettings";
 import { inspectAccountHome } from "../services/AccountHomeInspection";
@@ -53,6 +60,9 @@ const MEDIA_MIME: Record<string, string> = {
 };
 
 interface Dependencies {
+  contextProfiles: ContextProfileStore;
+  conventionValidator: ConventionValidatorService;
+  preferenceReview: PreferenceReviewService;
   capsuleTests: CapsuleTestService;
   capsules: CapsuleLaunchService;
   hostDiagnostics: SavedHostDiagnostics;
@@ -84,7 +94,10 @@ interface Dependencies {
 }
 
 export function registerIpc({
+  contextProfiles,
   capsuleTests,
+  conventionValidator,
+  preferenceReview,
   capsules,
   hostDiagnostics,
   containers,
@@ -113,6 +126,21 @@ export function registerIpc({
   requestPluginCanvas,
   broadcastPluginStorageChange
 }: Dependencies): void {
+  ipcMain.handle(IPC.contextSource, (event, cwd: string) => {
+    assertMainRenderer(event, getMainWindow); contextText(cwd, 4096, 'source path');
+    return settings.get().contextProfilesEnabled ? contextProfiles.source(cwd) : { enabled: false, tasks: [] };
+  });
+  ipcMain.handle(IPC.contextLaunchPreview, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return terminals.previewContextLaunch(request); });
+  ipcMain.handle(IPC.contextGet, event => { assertMainRenderer(event, getMainWindow); return contextProfiles.get(); });
+  ipcMain.handle(IPC.contextProject, (event, input: Omit<ContextProject, 'id'> & { id?: string }, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.saveProject(input, revision); });
+  ipcMain.handle(IPC.contextTask, (event, input: Omit<ContextTask, 'id'> & { id?: string }, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.saveTask(input, revision); });
+  ipcMain.handle(IPC.contextRule, (event, input: ContextRuleInput, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.saveRule(input, revision); });
+  ipcMain.handle(IPC.contextRemove, (event, kind: 'project' | 'task' | 'rule', id: string, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.remove(kind, id, revision); });
+  ipcMain.handle(IPC.contextFeedbackSessions, (event, projectId: string) => { assertMainRenderer(event, getMainWindow); return contextProfiles.feedbackSessions(projectId, () => terminals.listMetadata(), id => terminals.contextFeedbackEvidence(id)); });
+  ipcMain.handle(IPC.contextLearning, (event, projectId: string, input: ContextLearning, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.saveLearning(projectId, input, revision); });
+  ipcMain.handle(IPC.contextFeedback, (event, input: ContextFeedbackInput, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.captureFeedback(input, revision, () => terminals.contextFeedbackEvidence(input.sessionId!)); });
+  ipcMain.handle(IPC.contextFeedbackAction, (event, action: ContextFeedbackAction, revision: number) => { assertMainRenderer(event, getMainWindow); return contextProfiles.feedbackAction(action, revision); });
+  ipcMain.handle(IPC.contextPreview, (event, selection: ContextSelection) => { assertMainRenderer(event, getMainWindow); return contextProfiles.preview(selection); });
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
   const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
     plugins.assertPermission(pluginId, "browser:open");
@@ -154,6 +182,11 @@ export function registerIpc({
     return containers.probe(id);
   });
   ipcMain.handle(IPC.containersList, event => { assertMainRenderer(event, getMainWindow); return containers.list(); });
+  ipcMain.handle(IPC.containersInventory, (event, ids: unknown, force: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (ids !== undefined && (!Array.isArray(ids) || ids.length > 64 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(id))) || force !== undefined && typeof force !== 'boolean') throw new Error('Invalid container inventory selection.');
+    return containers.inventory(ids as string[] | undefined, force as boolean | undefined);
+  });
   ipcMain.handle(IPC.containersCleanup, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return containers.cleanup(workspaceId(id)); });
   ipcMain.handle(IPC.containersReview, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return containers.review(workspaceId(id)); });
   ipcMain.handle(IPC.containersExport, async (event, id: unknown, reviewId: unknown) => {
@@ -187,6 +220,16 @@ export function registerIpc({
   ipcMain.handle(IPC.capsulesTestResult, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return capsuleTests.get(workspaceId(id)); });
   ipcMain.handle(IPC.capsulesTestCancel, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return capsuleTests.cancel(workspaceId(id)); });
   ipcMain.handle(IPC.capsulesTestCleanup, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return capsuleTests.cleanup(workspaceId(id)); });
+  ipcMain.handle(IPC.capsulesReviewAgentChoices, (event, id: unknown, review: unknown) => { assertMainRenderer(event, getMainWindow); return preferenceReview.choices(workspaceId(id), workspaceId(review)); });
+  ipcMain.handle(IPC.capsulesReviewAgentPreview, (event, input: AdvisoryReviewRequest) => { assertMainRenderer(event, getMainWindow); return preferenceReview.preview(input); });
+  ipcMain.handle(IPC.capsulesReviewAgentLaunch, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return preferenceReview.launch(workspaceId(id)); });
+  ipcMain.handle(IPC.capsulesReviewAgentCancel, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); preferenceReview.cancel(workspaceId(id)); });
+  ipcMain.handle(IPC.capsulesConventions, (event, id: unknown, review: unknown, clearance: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof clearance !== 'string' || !/^D[0-3]$/u.test(clearance)) throw new Error('Invalid convention report clearance.');
+    return conventionValidator.run(workspaceId(id), workspaceId(review), clearance as 'D0' | 'D1' | 'D2' | 'D3');
+  });
+  ipcMain.handle(IPC.capsulesConventionsCurrent, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return conventionValidator.current(workspaceId(id)); });
   ipcMain.handle(IPC.capsulesReview, (event, id: unknown) => { assertMainRenderer(event, getMainWindow); return capsules.review(workspaceId(id)); });
   ipcMain.handle(IPC.capsulesApply, (event, id: unknown, review: unknown) => { assertMainRenderer(event, getMainWindow); return capsules.apply(workspaceId(id), workspaceId(review)); });
   ipcMain.handle(IPC.capsulesRecover, (event, id: unknown, review: unknown) => { assertMainRenderer(event, getMainWindow); return capsules.recoverApply(workspaceId(id), workspaceId(review)); });
@@ -720,7 +763,8 @@ export function registerIpc({
     if (typeof id !== "string") throw new Error("Terminal session ID is required.");
     return terminals.readBuffer(id);
   });
-  ipcMain.handle(IPC.terminalCreate, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return terminals.create(request); });
+  ipcMain.handle(IPC.terminalCreate, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return request?.containerPlacement !== undefined ? terminals.createWithPlacement(request) : terminals.create(request); });
+  ipcMain.handle(IPC.terminalContainerPlacementPreview, (event, request: CreateSessionRequest) => { assertMainRenderer(event, getMainWindow); return terminals.previewContainerPlacement(request); });
   ipcMain.handle(IPC.terminalAgentPrompt, (event, id: string, text: string) => { assertMainRenderer(event, getMainWindow); return terminals.sendAgentPrompt(id, text); });
   ipcMain.handle(IPC.terminalCancelTurn, (event, id: string) => { assertMainRenderer(event, getMainWindow); return terminals.cancelAgentTurn(id); });
   ipcMain.handle(IPC.terminalAcpPermission, (event, id: string, requestId: string, optionId: string) => { assertMainRenderer(event, getMainWindow); return terminals.decideAcpPermission(id, requestId, optionId); });

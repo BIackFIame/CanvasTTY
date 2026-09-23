@@ -68,6 +68,11 @@ elif args[:2]==['container','create']:
     json.dump(state,open(state_path,'w'))
     if controls.get('lostCreate'): sys.stdout.write(${JSON.stringify(sentinel)}); sys.exit(1)
     print(state['Id'])
+elif args[:2]==['container','ls'] and '--last' in args:
+    rows=controls.get('inventory',[])
+    if isinstance(rows,str): print(rows)
+    else:
+        for row in rows: print(json.dumps(row))
 elif args[:2]==['container','ls']:
     selected=args[args.index('--filter')+1]
     matches=state and (selected=='id='+state['Id'] or selected=='name=^'+state['Name'].removeprefix('/')+'$')
@@ -171,6 +176,11 @@ test('real account/coordinator/container chain uses only the fixed remote helper
     const result = f.run(request, remoteKey, code); if (result.status !== 0) throw new Error(result.stderr); return { stdout: result.stdout };
   } };
   const containers = new ContainerExecutionService(() => settings, options);
+  const inventoryRow = { id: containerId, name: 'outside', image: 'fixture:existing', state: 'running', status: 'Up' };
+  await writeFile(f.controlsFile, JSON.stringify({ inventory: [inventoryRow] }));
+  const snapshot = (await containers.inventory())[0];
+  assert.equal(snapshot.available, true); assert.equal(snapshot.profiles[0].imageAvailable, true); assert.deepEqual(snapshot.containers, [{ ...inventoryRow, managed: false }]);
+  assert.equal(vaultReads, 0); assert.equal(discovery, 0);
   const accounts = new ProviderAccountLaunchService(() => settings, { get generation() { vaultReads++; throw Error('local vault touched'); }, get() { vaultReads++; throw Error('local vault touched'); } }, { discovery: { discover() { discovery++; throw Error('host CLI discovery touched'); } } });
   const coordinator = new SessionLaunchCoordinator(accounts, {}, () => settings, { checkShell: async () => {}, place() { discovery++; throw Error('host CLI discovery touched'); } }, containers);
   const metadata = { id: 'remote-api-session', provider: 'opencode', cwd: '/fixture/project', hostId: 'server-one', accountId: account.id, profile: 'normal', model: 'fixture-model', dataClass: 'D0', isolation: { mode: 'container', profileId: f.profile.id } };
@@ -384,4 +394,26 @@ test('cleanup can retry after its successful response was lost without keeping H
   const f = await fixture(t); assert.equal(f.create().status, 0);
   assert.equal(f.run({ ...f.request('cleanup-owned'), containerId }, '').status, 0);
   const retried = f.run({ ...f.request('cleanup-owned'), containerId }, ''); assert.equal(retried.status, 0, retried.stderr); assert.equal(JSON.parse(retried.stdout).removed, true);
+});
+
+for (const runtime of ['docker', 'podman']) test(`actual ${runtime} remote helper projects only bounded inventory and cannot mutate unknown containers`, async t => {
+  const f = await fixture(t, runtime);
+  const row = { id: containerId, name: runtime === 'podman' ? ['outside'] : 'outside', image: 'fixture:existing', state: 'running', status: 'Up 1 minute' };
+  await writeFile(f.controlsFile, JSON.stringify({ inventory: [row] }));
+  const request = { version: 1, action: 'inventory', profile: f.profile, endpoint: f.endpoint, engineIdentity: f.plan.engine.identity };
+  let result = f.run(request); assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { rows: [{ ...row, name: 'outside' }], truncated: false });
+  let calls = (await readFile(f.logFile, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.length, 3); assert.deepEqual(calls[1].args.slice(0, 7), ['container', 'ls', '--all', '--no-trunc', '--last', '65', '--format']);
+  assert.equal(calls[0].hasKey, false); assert.equal(calls[0].environmentNames.includes('FIXTURE_REMOTE_KEY'), false);
+  for (const bad of [{ ...row, command: sentinel }, { ...row, id: 'short' }, { ...row, status: '\u001b[0m' }, { ...row, image: 'x'.repeat(513) }]) {
+    await writeFile(f.controlsFile, JSON.stringify({ inventory: [bad] })); result = f.run(request); assert.equal(result.status, 78); assert.equal(result.stdout, '');
+  }
+  await writeFile(f.controlsFile, JSON.stringify({ inventory: Array.from({ length: 65 }, (_, i) => ({ ...row, id: i.toString(16).padStart(64, '0') })) }));
+  result = f.run(request); assert.equal(result.status, 0, result.stderr); assert.equal(JSON.parse(result.stdout).rows.length, 64); assert.equal(JSON.parse(result.stdout).truncated, true);
+  assert.equal(f.run({ ...request, engineIdentity: 'f'.repeat(64) }).status, 78);
+  assert.equal(f.run({ ...request, credential: { kind: 'environment', name: 'FIXTURE_REMOTE_KEY' } }).status, 78);
+  assert.equal(f.run({ ...request, endpoint: { ...f.endpoint, executableIdentity: 'changed' } }).status, 78);
+  calls = (await readFile(f.logFile, 'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.every(call => call.args[0] === 'info' || call.args[0] === 'container' && call.args[1] === 'ls'), true);
 });

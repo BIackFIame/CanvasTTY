@@ -122,7 +122,7 @@ export class ACPAdapter {
     }
     this.controls(session);
     const expected = this.launch.expectedModel;
-    if (expected !== undefined && this.state.effectiveModel !== expected) await this.setModelInternal(expected);
+    if (expected !== undefined && this.state.effectiveModel !== expected) { this.launch.checkModel(expected); await this.setModelInternal(expected); }
     if (expected !== undefined && this.state.effectiveModel !== expected) throw new Error('ACP did not confirm the requested model.');
     if (this.launch.requireModel && !this.state.effectiveModel) throw new Error('ACP did not confirm the account model.');
     this.launch.checkModel(this.state.effectiveModel);
@@ -348,7 +348,7 @@ export class ACPAdapter {
 
 }
 export function assertAcpPrompt(text: unknown): asserts text is string {
-  if (typeof text !== 'string' || !text.length || text.length > MAX_PROMPT) throw new Error('ACP prompt must contain 1–65536 characters.');
+  if (typeof text !== 'string' || !text.trim() || text.length > MAX_PROMPT) throw new Error('ACP prompt must contain 1–65536 characters.');
 }
 function record(value: unknown): Json | undefined { return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Json : undefined; }
 function validString(value: unknown, limit: number): value is string { return typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f]/u.test(value); }

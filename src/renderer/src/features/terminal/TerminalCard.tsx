@@ -526,8 +526,12 @@ export function TerminalCard({
           )}
         </div>
         <div className="terminal-card__actions">
-          {session.execution && <span className="terminal-card__workspace-status" title={[t(locale, "workspaceSource") + ": " + session.cwd, t(locale, "workspaceExecution") + ": " + (session.execution.executionCwd ?? t(locale, "workspacePreparing")), session.execution.baseCommit, session.failureDetails].filter(Boolean).join("\n")}>
-            {session.execution.state === "preparing" ? t(locale, "workspacePreparing") : session.execution.mode === "worktree" ? "Git worktree" : "ⓘ"}
+          {(session.allowSubagents || session.role === 'orchestrator') && <span className="terminal-card__context-status" title={locale === 'ru' ? 'Разрешён запуск дочерних сессий в пределах правил и лимитов' : 'Child sessions permitted within rules and limits'}>{locale === 'ru' ? 'Субагенты' : 'Delegation'}</span>}
+          {session.contextSummary && <span className="terminal-card__context-status" title={`${session.contextSummary.highestDisclosedClass}${session.contextSummary.policyModel ? ` · ${session.contextSummary.policyModel}` : ''}`}>
+            {session.contextSummary.status === 'delivered' ? (locale === 'ru' ? 'Контекст передан' : 'Context sent') : session.contextSummary.status === 'waiting' ? (locale === 'ru' ? (session.transport === 'acp' ? 'Контекст: ждёт задачи' : 'Контекст: ожидает передачи') : (session.transport === 'acp' ? 'Context: next task' : 'Context pending')) : (locale === 'ru' ? 'Контекст: нет правил' : 'Context: no rules')}
+          </span>}
+          {session.execution && <span className="terminal-card__workspace-status" title={[t(locale, "workspaceSource") + ": " + session.cwd, t(locale, "workspaceExecution") + ": " + (session.execution.executionCwd ?? t(locale, "workspacePreparing")), session.isolation?.mode === 'container' ? [t(locale, 'launchHost') + ': ' + (session.hostId ?? 'local'), t(locale, 'launchAccount') + ': ' + (session.accountId ?? '—'), t(locale, 'containers') + ': ' + session.isolation.profileId].join('\n') : undefined, session.execution.baseCommit, session.failureDetails].filter(Boolean).join("\n")}>
+            {session.execution.mode === 'container' ? t(locale, 'containers') : session.execution.state === "preparing" ? t(locale, "workspacePreparing") : session.execution.mode === "worktree" ? "Git worktree" : "ⓘ"}
           </span>}
           {session.integrationNote && <span title={session.integrationNote} aria-label={session.integrationNote}>ⓘ</span>}
           {session.exitCode !== null && (

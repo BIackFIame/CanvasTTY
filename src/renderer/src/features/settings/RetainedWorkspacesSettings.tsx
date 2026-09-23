@@ -4,7 +4,7 @@ import { t } from '../../lib/i18n';
 import { RetainedCapsulesSettings } from './RetainedCapsulesSettings';
 
 /** Retained after first visit to preserve saved-command drafts; hidden tests do not poll. */
-export function RetainedWorkspacesSettings({ settings, onChange, active = true }: { settings: AppSettings; active?: boolean; onChange(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
+export function RetainedWorkspacesSettings({ settings, onChange, active = true, onRevealSession }: { settings: AppSettings; active?: boolean; onRevealSession?(id: string): void; onChange(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
   const locale = settings.locale;
   const ru = locale === 'ru';
   const [items, setItems] = useState<RetainedWorkspace[]>([]);
@@ -55,6 +55,6 @@ export function RetainedWorkspacesSettings({ settings, onChange, active = true }
     </section>}
     {error && <p className="agent-settings-error" role="alert">{error}</p>}
     <p className="agent-settings-notice" role="status">{busy ? t(locale, 'workspaceBusy') : notice}</p>
-    <RetainedCapsulesSettings settings={settings} active={active} onPersist={onChange} />
+    <RetainedCapsulesSettings onRevealSession={onRevealSession} settings={settings} active={active} onPersist={onChange} />
   </section>;
 }

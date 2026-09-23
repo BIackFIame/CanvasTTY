@@ -1,3 +1,4 @@
+import { assertDelegationRoute } from '../../shared/delegationLaunch.ts';
 import type { AgentStartup } from "./AgentStartup.ts";
 import { DATA_CLASS_RANK, remotePathForHost } from "../../shared/contracts.ts";
 import type { IsolatedWorktree } from "./WorktreeService.ts";
@@ -26,8 +27,9 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
     settings: () => Pick<AppSettings, 'remoteHosts' | 'providerAccounts' | 'requiresSandboxProfiles'>, placement: Pick<HostPlacementService, 'place' | 'checkShell'>, containers?: ContainerExecutionService, capsules?: CapsuleLaunchService) {
     this.accounts = accounts; this.worktrees = worktrees; this.settings = settings; this.placement = placement; this.containers = containers; this.capsules = capsules;
   }
-  async prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch> {
+  async prepare(metadata: SessionMetadata, resumePrevious: boolean, control?: { isCurrent(): boolean; assertRoute?(): void; onStartupDisclosure?(): void; startup?: AgentStartup }): Promise<PreparedProviderAccountLaunch> {
     const initialSettings = this.settings();
+    assertDelegationRoute(metadata, initialSettings.providerAccounts.find(a => a.id === metadata.accountId));
     const host = metadata.hostId === undefined ? undefined : initialSettings.remoteHosts.find(item => item.id === metadata.hostId);
     const hostIdentity = JSON.stringify(host);
     const capsuleId = metadata.isolation?.mode === 'container' ? metadata.isolation.capsuleId : undefined;
@@ -39,6 +41,7 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
     };
     const active = (snapshot = metadata.hostId === undefined ? initialSettings : this.settings()): void => {
       if (control && !control.isCurrent()) throw new Error('Launch cancelled.');
+      control?.assertRoute?.();
       if (JSON.stringify(snapshot.remoteHosts.find(item => item.id === metadata.hostId)) !== hostIdentity) throw new Error('Remote host changed during launch preparation.');
       checkCapsule();
     };
@@ -93,7 +96,7 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
       // Reject a stale account, incompatible protocol/model or missing remote
       // credential reference before creating an owned checkout on its server.
       if (mode === 'container' && metadata.provider !== 'terminal') {
-        accountLaunch = await this.accounts.prepare(metadata, resumePrevious, { isCurrent: () => !control || control.isCurrent(), target: 'container' });
+        accountLaunch = await this.accounts.prepare(metadata, resumePrevious, { isCurrent: () => !control || control.isCurrent(), assertRoute: () => active(), target: 'container' });
         active(); accountLaunch.assertCurrent(metadata);
       }
       if (capsule) {
@@ -119,11 +122,11 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
       active();
       accountLaunch ??= metadata.provider === 'terminal'
         ? { args: [], environment: {}, unsetEnvironment: [], skipBridges: false, bindingDigest: '', assertCurrent() {}, async cleanup() {} }
-        : await this.accounts.prepare(metadata, resumePrevious, { isCurrent: () => !control || control.isCurrent(), ...(mode === 'container' ? { target: 'container' } : {}) });
+        : await this.accounts.prepare(metadata, resumePrevious, { isCurrent: () => !control || control.isCurrent(), assertRoute: () => active(), ...(mode === 'container' ? { target: 'container' } : {}) });
       active();
       if (mode === 'container') {
-        const workspace = capsule ? { kind: 'capsule' as const, id: capsule.id, directory: capsule.directory, sourceDirectory: capsule.sourceDirectory } : remoteOwnedWorkspace ?? await this.worktrees.reuse(workspaceId!, metadata.cwd);
-        containerLaunch = await this.containers!.prepare(metadata, workspace, { ...accountLaunch, startup: control?.startup }, () => { active(); accountLaunch!.assertCurrent(metadata); }, leaseId, execution.executionCwd, capsule ? marker => this.capsules!.verifyLaunch(capsuleId!, leaseId, capsuleDigest!, marker) : undefined);
+        const workspace = capsule ? { kind: capsule.kind === 'advisory-review' ? 'advisory-review' as const : 'capsule' as const, id: capsule.id, directory: capsule.directory, sourceDirectory: capsule.sourceDirectory } : remoteOwnedWorkspace ?? await this.worktrees.reuse(workspaceId!, metadata.cwd);
+        containerLaunch = await this.containers!.prepare(metadata, workspace, { ...accountLaunch, startup: control?.startup, onStartupDisclosure: control?.onStartupDisclosure }, () => { active(); accountLaunch!.assertCurrent(metadata); }, leaseId, execution.executionCwd, capsule ? marker => this.capsules!.verifyLaunch(capsuleId!, leaseId, capsuleDigest!, marker) : undefined);
       }
       if (capsule) await this.capsules!.storage.setRunning(capsule.id, leaseId);
       else if (workspaceId && !remoteOwnedWorkspace) await this.worktrees.setRunning(workspaceId, leaseId);
@@ -137,7 +140,7 @@ export class SessionLaunchCoordinator implements ProviderAccountLaunchCoordinato
         else if (workspaceId && !remoteOwnedWorkspace) await this.worktrees.retain(workspaceId, !!containerLaunch || !started || exited, leaseId);
       })().catch(error => { cleanupTask = undefined; throw error; });
       return { ...preparedAccount, ...containerLaunch, execution, startup: control?.startup,
-        ...(containerLaunch ? { skipBridges: true, integrationNote: capsule ? 'Container receives only the selected files and Task.md. Output is retained for review; host bridges are unavailable.' : 'Container uses its image CLI and full detached workspace. Host runtime/browser bridges are unavailable. Linked-worktree Git metadata is outside the mount.' } : {}),
+        ...(containerLaunch ? { skipBridges: true, integrationNote: capsule?.kind === 'advisory-review' ? 'Advisory review receives only a read-only Review.patch and Task.md plus filtered context. The original project is not mounted; source apply and delegation are unavailable.' : capsule ? 'Container receives only the selected files and Task.md. Output is retained for review; host bridges are unavailable.' : 'Container uses its image CLI and full detached workspace. Host runtime/browser bridges are unavailable. Linked-worktree Git metadata is outside the mount.' } : {}),
         assertCurrent: current => {
           const liveSettings = this.settings();
           active(liveSettings); preparedAccount.assertCurrent(current); containerLaunch?.assertCurrent(current);

@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { remoteAgentLaunch } from "../src/main/services/remoteAgentLaunch.ts";
-import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { TerminalManager } from "./helpers/delegation-test-manager.mjs";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
 import { validateOrchestrationArguments } from "../src/agent-browser/orchestration-catalog.mjs";
+import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts';
 
 const localWorkspace = process.cwd();
 
@@ -63,6 +64,7 @@ function controlFixture({ hosts, placement } = {}) {
   const { calls, terminals } = terminalsFixture(hosts);
   const control = new AgentControlService(terminals, placement);
   const parent = terminals.create({
+    role: "orchestrator",
     provider: "claude",
     cwd: localWorkspace,
     profile: "normal",
@@ -167,6 +169,7 @@ test("host \"auto\" with a remote placement decision launches over ssh on the ch
     }
   };
   const { calls, terminals, control, parent } = controlFixture({ placement });
+  terminals.configureLaunchPolicy(new SessionLaunchPolicy(() => ({ defaultDataClass:'D0', pathPolicies:[], providerAccounts:[], remoteHosts:[remoteHost()] })));
   const child = await control.spawn({
     parentSessionId: parent.id,
     provider: "codex",
@@ -174,7 +177,7 @@ test("host \"auto\" with a remote placement decision launches over ssh on the ch
     host: "auto"
   });
 
-  assert.deepEqual(placed, [{ provider: "codex", localWorkspace }]);
+  assert.deepEqual(placed, [{ provider: "codex", localWorkspace, dataClass:'D0', eligibleHostIds:['build-1'], hostDataClasses:{local:'D0','build-1':'D0'} }]);
   assert.equal(child.hostId, "build-1");
   assert.equal(child.provider, "codex");
   const spawn = calls[calls.length - 1];

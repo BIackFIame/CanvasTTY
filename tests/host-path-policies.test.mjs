@@ -461,7 +461,7 @@ test("the raised class rides into the placement request; without classification 
     cwd: restricted,
     host: "auto"
   });
-  assert.deepEqual(placed, [{ provider: "devin", localWorkspace: restricted, dataClass: "D2" }]);
+  assert.deepEqual(placed, [{ provider: "devin", localWorkspace: restricted, dataClass: "D2", eligibleHostIds: [], hostDataClasses: { local: 'D2' } }]);
   withPolicy.terminals.disposeAll();
 
   const bare = fixture(undefined, placement);
@@ -472,7 +472,7 @@ test("the raised class rides into the placement request; without classification 
     cwd: restricted,
     host: "auto"
   });
-  assert.deepEqual(placed[1], { provider: "devin", localWorkspace: restricted });
-  assert.equal("dataClass" in placed[1], false, "a spawn with no classification keeps the legacy request shape");
+  assert.deepEqual(placed[1], { provider: "devin", localWorkspace: restricted, eligibleHostIds: [], hostDataClasses: { local: 'D2' } });
+  assert.equal("dataClass" in placed[1], false, "a spawn with no classification does not claim an explicit task class");
   bare.terminals.disposeAll();
 });

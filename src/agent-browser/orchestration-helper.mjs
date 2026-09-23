@@ -17,6 +17,7 @@ const DEFAULT_MCP_PROTOCOL_VERSION = "2025-06-18";
 const ENV = {
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
   capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID",
   terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID"
 };
 
@@ -257,15 +258,16 @@ function errorResponse(id, error) {
   };
 }
 
-function readIdentity() {
-  const address = requiredEnvironment(ENV.address);
-  const capabilityToken = requiredEnvironment(ENV.capabilityToken);
-  const terminalSessionId = requiredEnvironment(ENV.terminalSessionId);
-  return { address, capabilityToken, terminalSessionId, connectionId: `helper-${randomUUID()}` };
+export function readOrchestrationIdentity(environment = process.env) {
+  const address = requiredEnvironment(ENV.address, environment);
+  const capabilityToken = requiredEnvironment(ENV.capabilityToken, environment);
+  const terminalSessionId = requiredEnvironment(ENV.terminalSessionId, environment);
+  const connectionId = requiredEnvironment(ENV.connectionId, environment);
+  return { address, capabilityToken, terminalSessionId, connectionId };
 }
 
-function requiredEnvironment(key) {
-  const value = process.env[key];
+function requiredEnvironment(key, environment) {
+  const value = environment[key];
   if (typeof value !== "string" || value.length === 0 || value.length > 8_192) {
     throw new Error(`Missing ${key}.`);
   }
@@ -275,7 +277,7 @@ function requiredEnvironment(key) {
 async function run() {
   let identity;
   try {
-    identity = readIdentity();
+    identity = readOrchestrationIdentity();
   } catch {
     process.exitCode = 1;
     return;

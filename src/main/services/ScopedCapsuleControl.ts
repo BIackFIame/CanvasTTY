@@ -1,3 +1,5 @@
+import type { PreferenceReviewService } from './PreferenceReviewService.ts';
+import type { ConventionValidatorService } from './ConventionValidatorService.ts';
 import type { AgentProviderId } from '../../shared/contracts.ts';
 import type { CapsuleReview } from '../../shared/capsules.ts';
 import type { TerminalManager } from './TerminalManager.ts';
@@ -14,9 +16,11 @@ export class ScopedCapsuleControl {
   private readonly control: AgentControlService;
   private readonly capsules: CapsuleLaunchService;
   private readonly tests?: CapsuleTestService;
-  constructor(terminals: TerminalManager, control: AgentControlService, capsules: CapsuleLaunchService, tests?: CapsuleTestService) {
+  private readonly conventions?: ConventionValidatorService;
+  private readonly reviews?: PreferenceReviewService;
+  constructor(terminals: TerminalManager, control: AgentControlService, capsules: CapsuleLaunchService, tests?: CapsuleTestService, conventions?: ConventionValidatorService, reviews?: PreferenceReviewService) {
     this.terminals = terminals; this.control = control; this.capsules = capsules;
-    this.tests = tests;
+    this.tests = tests; this.conventions = conventions; this.reviews = reviews;
     capsules.configureParentAuthority(id => terminals.capsuleAuthority(id));
   }
 
@@ -25,6 +29,11 @@ export class ScopedCapsuleControl {
     const validation = validateOrchestrationArguments(tool, args);
     if (!validation.ok) throw new Error(validation.error);
     args = validation.value;
+    if (tool === 'launch_capsule_review_agent') {
+      if (!this.reviews) throw new Error('Advisory review unavailable.');
+      const child = await this.reviews.launch(args.previewId as string, parent, signal);
+      return { sessionId: child.id, provider: child.provider, dataClass: child.dataClass, status: child.status };
+    }
     if (tool === 'list_capsule_test_profiles') { this.terminals.capsuleAuthority(parent); return { profiles: this.requireTests().profiles() }; }
     if (tool === 'get_capsule_test_result' || tool === 'cancel_capsule_test') return this.testResult(parent, tool, args, signal);
     if (tool === 'spawn_capsule_agent') return this.spawn(parent, args, signal);
@@ -34,6 +43,17 @@ export class ScopedCapsuleControl {
     const id = args.capsuleId as string;
     const assertCurrent = (): void => { signal?.throwIfAborted(); this.capsules.assertParent(id, parent); };
     assertCurrent();
+    if (tool === 'preview_capsule_review_agent') {
+      if (!this.reviews) throw new Error('Advisory review unavailable.');
+      const { text: _text, ...preview } = await this.reviews.preview({ capsuleId: id, reviewId: args.reviewId as string, parentSessionId: parent, accountId: args.accountId as string, model: args.model as string, containerProfileId: args.containerProfileId as string }, signal);
+      assertCurrent(); return { ...preview }; // Do not return route-filtered preference text to a lower-clearance parent.
+    }
+    if (tool === 'validate_capsule_conventions') {
+      if (!this.conventions) throw new Error('Convention checks are unavailable.');
+      const ceiling = this.terminals.capsuleAuthority(parent).dataClass;
+      const report = await this.conventions.run(id, args.reviewId as string, ceiling, assertCurrent); assertCurrent();
+      return { ...report };
+    }
     if (tool === 'test_capsule') {
       const { output: _output, ...result } = await this.requireTests().start(id, args.reviewId as string, args.testProfileId as string, assertCurrent);
       return { runId: result.id, capsuleId: id, state: result.state, reviewDigest: result.reviewDigest };
@@ -86,7 +106,7 @@ export class ScopedCapsuleControl {
       ...(args.accountId !== undefined ? { accountId: args.accountId as string } : {}),
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.title !== undefined ? { title: args.title as string } : {})
-    });
+    }, signal);
     return { capsuleId: capsule.id, sessionId: child.id, provider: child.provider, dataClass: child.dataClass, status: child.status };
   }
 

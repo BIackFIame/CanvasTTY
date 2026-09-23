@@ -1,3 +1,4 @@
+import { ACCOUNT_HOME_ENV, accountRouteBinding } from '../src/shared/providerAccountPolicy.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
@@ -7,7 +8,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { TerminalSessionStore, persistedTerminalSession } from '../src/main/services/TerminalSessionStore.ts';
 import { PassThrough } from 'node:stream';
-import { TerminalManager } from '../src/main/services/TerminalManager.ts';
+import { TerminalManager, fixtureOrchestrationCommand } from './helpers/delegation-test-manager.mjs';
 import { AgentControlService } from '../src/main/services/AgentControlService.ts';
 import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts';
 import { SessionLaunchCoordinator } from '../src/main/services/SessionLaunchCoordinator.ts';
@@ -41,6 +42,10 @@ function fakeAgent(options = {}) {
 }
 function fixture(options = {}) {
   let settings = { defaultDataClass: 'D0', providerAccounts: [], apiProfiles: [], pathPolicies: [], remoteHosts: [], agentBudgets: { maxLocalAgents: 4, maxRemoteAgentsPerHost: 4, maxChildren: 4, maxDepth: 2 }, ...options.settings };
+  // Freeform tasks have a mandatory D2 floor. Protocol fixtures use explicitly
+  // assessed, bound test homes; unsupported ambient consumers are tested as refusals.
+  if (!options.settings?.providerAccounts) settings.providerAccounts = Object.keys(ACCOUNT_HOME_ENV).map(provider => ({ id: `test-${provider}`, label: `Test ${provider}`, provider, binding: { kind: 'cli-home', directory: process.cwd() } }));
+  for (const account of settings.providerAccounts) account.assessment ??= { profile: { training: 'none', retention: 'bounded', thirdPartyProcessing: 'no', contractualMode: 'business' }, evidence: { kind: 'user-attested', reviewedAt: new Date().toISOString().slice(0, 10), sources: [], note: 'Explicit private fixture route', binding: accountRouteBinding(account, settings.apiProfiles), models: '*' } };
   const children = [], ptys = [], writes = [], exits = [];
   const registry = { get: provider => ({ state: 'available', provider, executable: `/fixture/${provider}`, launcher: 'native', environment: {}, checked: [] }) };
   const terminals = new TerminalManager(() => {}, registry, undefined, undefined, true, (...args) => { ptys.push(args); return { write: text => writes.push(text), resize() {}, kill() {}, onData() {}, onExit(callback) { exits.push(callback); } }; });
@@ -51,13 +56,13 @@ function fixture(options = {}) {
   const control = new AgentControlService(terminals);
   return { terminals, control, children, ptys, writes, exits, settings, update: patch => { settings = { ...settings, ...patch }; } };
 }
-const request = extra => ({ provider: 'cursor', cwd: process.cwd(), profile: 'normal', position: { x: 0, y: 0 }, ...extra });
+const request = extra => ({ provider: 'kimi', cwd: process.cwd(), profile: 'normal', position: { x: 0, y: 0 }, ...extra });
 
 test('real policy/coordinator/control chain admits one ACP initial prompt, observes and completes without exiting', async t => {
   const f = fixture(); t.after(() => f.terminals.disposeAll());
-  const parent = f.terminals.create(request({ provider: 'terminal', role: 'orchestrator' })); await f.terminals.waitForLaunch(parent.id);
+  const parent = f.terminals.create(request({ provider: 'claude', role: 'orchestrator' })); await f.terminals.waitForLaunch(parent.id);
   const scope = new ScopedOrchestrationHandler(f.control);
-  const { sessionId } = await scope.execute(parent.id, { tool: 'spawn_agent', arguments: { provider: 'cursor', cwd: process.cwd(), transport: 'acp', prompt: 'Do once' } });
+  const { sessionId } = await scope.execute(parent.id, { tool: 'spawn_agent', arguments: { provider: 'kimi', cwd: process.cwd(), transport: 'acp', prompt: 'Do once' } });
   await f.terminals.waitForLaunch(sessionId); await tick();
   assert.equal(f.ptys.length, 1); assert.equal(f.children.length, 1);
   const child = f.children[0].child;
@@ -72,7 +77,7 @@ test('real policy/coordinator/control chain admits one ACP initial prompt, obser
 
 test('default PTY starts no ACP and passes its initial task once as literal argv', async t => {
   const f = fixture(); t.after(() => f.terminals.disposeAll());
-  const session = f.terminals.create(request({ initialPrompt: 'Only once' })); await f.terminals.waitForLaunch(session.id);
+  const session = f.terminals.create(request({ provider: 'codex', initialPrompt: 'Only once' })); await f.terminals.waitForLaunch(session.id);
   assert.equal(f.children.length, 0); assert.deepEqual(f.writes, []);
   assert.equal(f.ptys[0][1].at(-1), 'CanvasTTY task:\nOnly once');
   f.exits[0]({ exitCode: 0 });
@@ -97,9 +102,9 @@ test('all three providers share configOptions-only model negotiation without log
       if (frame.method === 'session/new') { child.reply(frame.id, { sessionId: 'fixture-session', configOptions: [{ id: 'catalog-model', type: 'select', category: 'model', currentValue: 'other', options: [{ value: 'other', name: 'Other' }, { value: model, name: 'Requested' }] }] }); return true; }
       if (frame.method === 'session/set_config_option') { assert.equal(frame.params.value, model); child.reply(frame.id, { configOptions: [{ id: 'catalog-model', type: 'select', category: 'model', currentValue: model, options: [{ value: model, name: 'Requested' }] }] }); return true; }
     } }); t.after(() => f.terminals.disposeAll());
-    const session = f.terminals.create(request({ provider, transport: 'acp', model: provider === 'minimax' ? 'minimax/MODEL' : model, initialPrompt: 'Go' }));
+    const session = f.terminals.create(request({ provider, transport: 'acp', model: provider === 'minimax' ? 'minimax/MODEL' : model, ...(provider === 'cursor' ? {} : { initialPrompt: 'Go' }) }));
     await f.terminals.waitForLaunch(session.id); await tick();
-    assert.equal(f.control.result(session.id).state, 'done', f.control.status(session.id).failureDetails);
+    assert.equal(f.control.result(session.id).state, provider === 'cursor' ? 'running' : 'done', f.control.status(session.id).failureDetails);
     assert.equal(f.control.status(session.id).acp.effectiveModel, model);
     assert.deepEqual(f.children[0].args, ['acp']); assert.equal(f.children[0].child.frames.some(f => f.method === 'authenticate'), false);
   }
@@ -108,7 +113,7 @@ test('all three providers share configOptions-only model negotiation without log
 test('MiniMax API keeps private data roots and confirms provider-qualified values even with slash/Unicode model names', async t => {
   const root = await mkdtemp(join(tmpdir(), 'canvastty-acp-test-')); t.after(() => rm(root, { recursive: true, force: true }));
   const model = 'MODEL/variant:✓%'; let privateRoot;
-  const f = fixture({ temporaryRoot: root, fakeSecret: async () => 'fixture-only-value', settings: {
+  const f = await contextFixture(t, { temporaryRoot: root, fakeSecret: async () => 'fixture-only-value', settings: {
     providerAccounts: [{ id: 'mini', provider: 'minimax', label: 'Mini', models: [model], binding: { kind: 'api-profile', profileId: 'api' } }],
     apiProfiles: [{ id: 'api', name: 'Fixture', protocol: 'openai-compatible', baseUrl: 'https://api.example/v1', secretRef: 'MINIMAX_API_KEY', defaultModel: model }]
   }, onFrame(frame, child) {
@@ -124,6 +129,8 @@ test('MiniMax API keeps private data roots and confirms provider-qualified value
   await f.terminals.waitForLaunch(session.id); await tick();
   assert.equal(f.control.result(session.id).state, 'done', f.control.status(session.id).failureDetails);
   assert.deepEqual(f.children[0].args, ['acp']);
+  assert.equal(f.control.status(session.id).contextSummary.policyModel, model);
+  assert.match(f.children[0].child.frames.find(frame => frame.method === 'session/prompt').params.prompt[0].text, /PRIVATE_STANDING/);
   await assert.rejects(f.terminals.selectAcpModel(session.id, `m:other:${encodeURIComponent(model)}:u`), /different MiniMax provider/);
   await f.terminals.shutdown(); assert.equal(existsSync(privateRoot), false);
 });
@@ -132,7 +139,7 @@ test('permissions require exact offered option and owning session; cancellation 
   const f = fixture({ hold: true }); t.after(() => f.terminals.disposeAll());
   const one = f.terminals.create(request({ transport: 'acp' })); const two = f.terminals.create(request({ transport: 'acp' }));
   await Promise.all([f.terminals.waitForLaunch(one.id), f.terminals.waitForLaunch(two.id)]);
-  f.control.send(one.id, 'Wait'); await tick(); const child = f.children[0].child;
+  f.control.send(one.id, 'Wait'); await tick(); const child = f.children.find(entry => entry.child.prompt).child;
   const permission = id => child.frame({ id, method: 'session/request_permission', params: { sessionId: 'fixture-session', toolCall: { title: 'Write selected file', rawInput: { secret: 'DO_NOT_SHOW' } }, options: [{ optionId: 'vendor-allow-exact', name: 'Allow once', kind: 'allow_once' }, { optionId: 'deny', name: 'Reject', kind: 'reject_once' }] } });
   permission(0); const token = f.control.status(one.id).acp.permissions[0].requestId;
   assert.equal(child.frames.some(frame => frame.id === 0), false);
@@ -161,7 +168,7 @@ test('foreign permission requests, Cursor extensions and privileged inbound comm
 
 test('overlap and terminal keystrokes cannot submit ACP prompts; scoped control rejects siblings', async t => {
   const f = fixture({ hold: true }); t.after(() => f.terminals.disposeAll());
-  const parent = f.terminals.create(request({ provider: 'terminal', role: 'orchestrator' })); await f.terminals.waitForLaunch(parent.id);
+  const parent = f.terminals.create(request({ provider: 'claude', role: 'orchestrator' })); await f.terminals.waitForLaunch(parent.id);
   const child = f.control.spawn({ parentSessionId: parent.id, provider: 'kimi', cwd: process.cwd(), transport: 'acp' }); await f.terminals.waitForLaunch(child.id);
   const sibling = f.terminals.create(request({ transport: 'acp' })); await f.terminals.waitForLaunch(sibling.id);
   f.terminals.input(child.id, 'raw\r'); assert.throws(() => f.control.send(child.id, 'draft', false), /complete submitted/);
@@ -305,12 +312,12 @@ test('worktree ACP uses execution cwd while policy keeps source cwd and cleanup 
 test('ACP supplies scoped orchestration only to an authorized owner and revokes it on failure', async t => {
   const f = fixture(); t.after(() => f.terminals.disposeAll()); let prepared = 0, revoked = 0;
   f.terminals.configureOrchestration({ isEnabled: true, prepareLaunch({ terminalSessionId }) { prepared++; return { environment: { CANVASTTY_TERMINAL_SESSION_ID: terminalSessionId, FIXTURE_SCOPE: `scope-${terminalSessionId}` }, cleanup() { revoked++; } }; } });
-  f.terminals.configureAcp({ spawn(command, args, config) { const child = fakeAgent(); f.children.push({ child, command, args, config }); return child; }, orchestrationCommand: { command: '/fixture/node', args: ['/fixture/scoped-helper.mjs'], environment: { ELECTRON_RUN_AS_NODE: '1' } } });
+  f.terminals.configureAcp({ spawn(command, args, config) { const child = fakeAgent(); f.children.push({ child, command, args, config }); return child; }, orchestrationCommand: fixtureOrchestrationCommand });
   const interactive = f.terminals.create(request({ transport: 'acp' })); await f.terminals.waitForLaunch(interactive.id);
   assert.deepEqual(f.children[0].child.frames.find(frame => frame.method === 'session/new').params.mcpServers, []);
   const owner = f.terminals.create(request({ transport: 'acp', role: 'orchestrator' })); await f.terminals.waitForLaunch(owner.id);
   const server = f.children[1].child.frames.find(frame => frame.method === 'session/new').params.mcpServers[0];
-  assert.equal(server.type, undefined); assert.deepEqual(server.args, ['/fixture/scoped-helper.mjs']); assert.ok(server.env.some(entry => entry.name === 'CANVASTTY_TERMINAL_SESSION_ID' && entry.value === owner.id));
+  assert.equal(server.type, undefined); assert.deepEqual(server.args, fixtureOrchestrationCommand.args); assert.ok(server.env.some(entry => entry.name === 'CANVASTTY_TERMINAL_SESSION_ID' && entry.value === owner.id));
   assert.equal(prepared, 1); f.children[1].child.emit('error', Error('fixture failure')); await tick(); assert.equal(revoked, 1);
 });
 
@@ -330,7 +337,7 @@ test('Cursor authenticates only its advertised existing-login RPC and refuses a 
     if (frame.method === 'initialize') { child.reply(frame.id, { protocolVersion: 1, agentCapabilities: {}, authMethods: [{ id: 'cursor_login' }] }); return true; }
     if (frame.method === 'authenticate') { assert.equal(frame.params.methodId, 'cursor_login'); child.frame({ id: frame.id, error: { code: -32000, message: 'not logged in' } }); return true; }
   } }); t.after(() => f.terminals.disposeAll());
-  const session = f.terminals.create(request({ transport: 'acp' })); await f.terminals.waitForLaunch(session.id); await tick();
+  const session = f.terminals.create(request({ provider: 'cursor', transport: 'acp' })); await f.terminals.waitForLaunch(session.id); await tick();
   assert.equal(f.control.result(session.id).state, 'failed'); assert.equal(f.children[0].child.frames.some(frame => frame.method === 'session/new'), false); assert.deepEqual(f.children[0].args, ['acp']);
 });
 
@@ -354,14 +361,124 @@ test('an ACP parent being disposed loses capsule authority before its process ex
 });
 
 
-test('actual manager/coordinator passes adversarial startup literally for every supported native agent', async t => {
+test('actual manager/coordinator passes adversarial startup on assessed routes and rejects consumers without D2 bindings', async t => {
   const text = '! command\n/command @file -x `code` $(code) Русский';
   for (const provider of ['codex', 'claude', 'qwen', 'opencode', 'hermes', 'grok', 'omp', 'pi', 'cursor', 'minimax', 'devin', 'antigravity']) {
     const f = fixture(); t.after(() => f.terminals.disposeAll());
+    if (['qwen', 'opencode', 'cursor'].includes(provider)) {
+      assert.throws(() => f.terminals.create(request({ provider, initialPrompt: text })), /at most|D2/); assert.equal(f.ptys.length, 0); continue;
+    }
     const session = f.terminals.create(request({ provider, initialPrompt: text }));
     if (provider === 'grok') { assert.equal(f.ptys.length, 0); f.terminals.resize(session.id, 90, 30); }
     await f.terminals.waitForLaunch(session.id);
     assert.equal(f.ptys.length, 1, `${provider}: ${f.terminals.list()[0].failureDetails}`);
     assert.equal(f.ptys[0][1].at(-1), `CanvasTTY task:\n${text}`, provider); assert.deepEqual(f.writes, []);
   }
+});
+
+import { ContextProfileStore } from '../src/main/services/ContextProfileStore.ts';
+import { ContextLaunchService } from '../src/main/services/ContextLaunchService.ts';
+async function contextFixture(t, options = {}) {
+  const { realpath } = await import('node:fs/promises');
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'canvastty-context-acp-'))); t.after(() => rm(root, { recursive: true, force: true }));
+  const f = fixture(options); t.after(() => f.terminals.disposeAll());
+  const store = new ContextProfileStore(join(root, 'profiles'));
+  let state = await store.saveProject({ label: 'Test', root: process.cwd() }, 0);
+  state = await store.saveRule({ scope: 'project', ownerId: state.projects[0].id, category: 'design', key: 'standing', value: 'PRIVATE_STANDING', tags: [], enabled: true, dataClass: 'D2' }, state.revision);
+  const context = new ContextLaunchService(store); f.settings.contextProfilesEnabled = true;
+  f.terminals.configureLaunchPolicy(new SessionLaunchPolicy(() => f.settings, { context }));
+  f.terminals.configureContextLaunch(context, () => f.settings.contextProfilesEnabled);
+  return { ...f, store, context, root };
+}
+test('ACP sends one combined task with confirmed policy model, then refreshes rules on next explicit task', async t => {
+  const f = await contextFixture(t);
+  const session = f.terminals.create(request({ transport: 'acp', initialPrompt: 'INITIAL_TASK', context: { enabled: true } }));
+  await f.terminals.waitForLaunch(session.id); await tick();
+  const child = f.children[0].child;
+  let prompts = child.frames.filter(frame => frame.method === 'session/prompt');
+  assert.equal(prompts.length, 1); assert.equal(prompts[0].params.prompt[0].text.match(/PRIVATE_STANDING/g).length, 1); assert.match(prompts[0].params.prompt[0].text, /INITIAL_TASK/);
+  assert.equal(f.control.status(session.id).contextSummary.policyModel, 'model-a'); assert.equal(f.control.status(session.id).disclosureClass, 'D2');
+  const rule = f.store.get().rules[0]; await f.store.saveRule({ ...rule, value: 'FRESH_STANDING' }, f.store.get().revision);
+  f.control.send(session.id, 'NEXT_TASK'); await tick();
+  prompts = child.frames.filter(frame => frame.method === 'session/prompt'); assert.equal(prompts.length, 2); assert.match(prompts[1].params.prompt[0].text, /FRESH_STANDING/); assert.doesNotMatch(prompts[1].params.prompt[0].text, /PRIVATE_STANDING|INITIAL_TASK/);
+  const saved = persistedTerminalSession(f.control.status(session.id)); assert.doesNotMatch(JSON.stringify(saved), /STANDING|INITIAL_TASK|NEXT_TASK/);
+  f.settings.contextProfilesEnabled = false; await f.store.remove('rule', rule.id, f.store.get().revision);
+  f.control.send(session.id, 'NO_CONTEXT_NOW'); await tick();
+  assert.equal(child.frames.filter(frame => frame.method === 'session/prompt').at(-1).params.prompt[0].text, 'NO_CONTEXT_NOW'); assert.equal(f.control.status(session.id).disclosureClass, 'D2');
+});
+test('ACP standing intent without initial task waits and cannot downgrade disclosed history at model transition', async t => {
+  const f = await contextFixture(t);
+  const account = f.settings.providerAccounts.find(a => a.provider === 'kimi'); account.assessment.evidence.models = ['model-a'];
+  const session = f.terminals.create(request({ transport: 'acp', model: 'model-a', context: { enabled: true, current: [{ key: 'current', category: 'testing', value: 'CURRENT_PRIVATE' }] } }));
+  await f.terminals.waitForLaunch(session.id); await tick();
+  const child = f.children[0].child;
+  assert.equal(child.frames.some(frame => frame.method === 'session/prompt'), false); assert.equal(f.control.status(session.id).contextSummary.status, 'waiting');
+  f.control.send(session.id, 'EXPLICIT_TASK'); await tick();
+  assert.match(child.frames.find(frame => frame.method === 'session/prompt').params.prompt[0].text, /CURRENT_PRIVATE/);
+  await assert.rejects(f.terminals.selectAcpModel(session.id, 'model-b'), /cover|policy|D2/);
+  assert.equal(child.frames.some(frame => frame.method === 'session/set_config_option'), false);
+  assert.equal(f.control.status(session.id).contextSummary.policyModel, 'model-a');
+});
+test('context-bearing exact ACP restore binds confirmed model and sends no task/current replay', async t => {
+  const f = await contextFixture(t);
+  const session = f.terminals.create(request({ transport: 'acp', context: { enabled: true, current: [{ key: 'current', category: 'design', value: 'TRANSIENT_CURRENT' }] }, initialPrompt: 'ONE_TIME_TASK' }));
+  await f.terminals.waitForLaunch(session.id); await tick();
+  const saved = persistedTerminalSession(f.control.status(session.id)); await f.terminals.shutdown();
+  const sessions = new TerminalSessionStore(f.root); await sessions.replace([saved]);
+  const restored = fixture(); t.after(() => restored.terminals.disposeAll());
+  const service = new ContextLaunchService(new ContextProfileStore(join(f.root, 'profiles')));
+  restored.terminals.configureContextLaunch(service, () => true); restored.terminals.configureLaunchPolicy(new SessionLaunchPolicy(() => restored.settings, { context: service }));
+  restored.terminals.configureSessionPersistence(sessions, true); await restored.terminals.restorePersistedSessions(); await restored.terminals.waitForLaunch(session.id); await tick();
+  assert.equal(restored.children.length, 1, restored.control.status(session.id).failureDetails);
+  const frames = restored.children[0].child.frames;
+  assert.equal(frames.filter(frame => frame.method === 'session/load').length, 1); assert.equal(frames.some(frame => frame.method === 'session/new' || frame.method === 'session/prompt'), false);
+  restored.control.send(session.id, 'AFTER_RESTORE'); await tick();
+  const prompt = frames.find(frame => frame.method === 'session/prompt').params.prompt[0].text;
+  assert.match(prompt, /PRIVATE_STANDING/); assert.doesNotMatch(prompt, /ONE_TIME_TASK|TRANSIENT_CURRENT/);
+  await restored.terminals.shutdown(); await sessions.flush();
+});
+test('running ambient native route cannot borrow a newly configured assessed account for a task', async t => {
+  const f = fixture({ settings: { providerAccounts: [] } }); t.after(() => f.terminals.disposeAll());
+  const session = f.terminals.create(request({ provider: 'codex' })); await f.terminals.waitForLaunch(session.id);
+  const account = { id: 'new', label: 'New', provider: 'codex', binding: { kind: 'cli-home', directory: process.cwd() } };
+  account.assessment = { profile: { training: 'none', retention: 'bounded', thirdPartyProcessing: 'no', contractualMode: 'business' }, evidence: { kind: 'user-attested', reviewedAt: new Date().toISOString().slice(0, 10), sources: [], note: 'Explicit private fixture route', binding: accountRouteBinding(account), models: '*' } };
+  f.settings.providerAccounts.push(account);
+  assert.throws(() => f.control.send(session.id, 'PRIVATE_NEW_TASK'), /route changed|binding changed/);
+  assert.deepEqual(f.writes, []);
+});
+
+test('explicit context opt-out survives exact ACP restore without store reads or task replay', async t => {
+  const f=await contextFixture(t);
+  const session=f.terminals.create(request({transport:'acp',context:{enabled:false},initialPrompt:'INITIAL_ONLY'}));
+  await f.terminals.waitForLaunch(session.id); await tick();
+  const saved=persistedTerminalSession(f.control.status(session.id)); await f.terminals.shutdown();
+  const sessions=new TerminalSessionStore(f.root);await sessions.replace([saved]);await sessions.load();
+  const restored=fixture();t.after(()=>restored.terminals.disposeAll());
+  const service=new ContextLaunchService({capture(){throw Error('Disabled context was read');}});
+  restored.terminals.configureContextLaunch(service,()=>true);restored.terminals.configureLaunchPolicy(new SessionLaunchPolicy(()=>restored.settings,{context:service}));
+  restored.terminals.configureSessionPersistence(sessions,true);await restored.terminals.restorePersistedSessions();await restored.terminals.waitForLaunch(session.id);await tick();
+  assert.equal(restored.children.length,1,restored.control.status(session.id).failureDetails);
+  restored.control.send(session.id,'AFTER_RESTORE');await tick();
+  const frames=restored.children[0].child.frames.filter(frame=>frame.method==='session/prompt');
+  assert.equal(frames.length,1);assert.equal(frames[0].params.prompt[0].text,'AFTER_RESTORE');
+  await restored.terminals.shutdown();
+});
+
+test('ACP refresh applies learned candidates once and drops rejected preferences without lowering history', async t => {
+  const f = await contextFixture(t); let state = f.store.get(), projectId = state.projects[0].id;
+  state = await f.store.remove('rule', state.rules[0].id, state.revision);
+  state = await f.store.saveLearning(projectId, { enabled: true, autoApply: true, threshold: .7, advisoryThreshold: .6 }, state.revision);
+  for (const eventId of ['first', 'second']) state = await f.store.captureFeedback({ projectId, eventId, kind: 'correction', category: 'design', key: 'learned', value: 'LEARNED_ACP' }, state.revision);
+  const session = f.terminals.create(request({ transport: 'acp', initialPrompt: 'FIRST_TASK' }));
+  await f.terminals.waitForLaunch(session.id); await tick();
+  const child = f.children[0].child, prompts = () => child.frames.filter(frame => frame.method === 'session/prompt');
+  assert.equal(prompts().length, 1); assert.equal(prompts()[0].params.prompt[0].text.match(/LEARNED_ACP/g).length, 1);
+  const proof = f.terminals.contextFeedbackEvidence(session.id); proof.assertCurrent(); assert.equal(proof.dataClass, 'D2');
+  state = await f.store.feedbackAction({ kind: 'reject', id: state.feedback.candidates[0].id }, state.revision);
+  f.control.send(session.id, 'AFTER_REJECTION'); await tick();
+  assert.equal(prompts().length, 2); assert.doesNotMatch(prompts()[1].params.prompt[0].text, /LEARNED_ACP/); assert.equal(f.control.status(session.id).disclosureClass, 'D2');
+  await f.store.feedbackAction({ kind: 'accept', id: state.feedback.candidates[0].id }, state.revision);
+  f.control.send(session.id, 'AFTER_ACCEPTANCE'); await tick(); assert.match(prompts()[2].params.prompt[0].text, /LEARNED_ACP/);
+  await f.store.saveLearning(projectId, { enabled: false, autoApply: true, threshold: .7, advisoryThreshold: .6 }, f.store.get().revision);
+  f.control.send(session.id, 'LEARNING_OFF'); await tick(); assert.doesNotMatch(prompts()[3].params.prompt[0].text, /LEARNED_ACP/); assert.equal(f.control.status(session.id).disclosureClass, 'D2');
 });

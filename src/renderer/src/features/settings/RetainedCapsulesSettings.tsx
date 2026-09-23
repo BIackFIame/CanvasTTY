@@ -1,9 +1,11 @@
+import { CapsuleAdvisorySettings } from './CapsuleAdvisorySettings';
+import { CapsuleConventionsSettings } from './CapsuleConventionsSettings';
 import { useEffect, useState } from 'react';
 import type { CapsuleReview, CapsuleSummary } from '../../../../shared/capsules';
 import type { AppSettings } from '../../../../shared/contracts';
 import { CapsuleTestsSettings } from './CapsuleTestsSettings';
 
-export function RetainedCapsulesSettings({ settings, active, onPersist }: { settings: AppSettings; active: boolean; onPersist(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
+export function RetainedCapsulesSettings({ settings, active, onPersist, onRevealSession }: { settings: AppSettings; active: boolean; onRevealSession?(id: string): void; onPersist(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
   const ru = settings.locale === 'ru';
   const [items, setItems] = useState<CapsuleSummary[]>([]), [review, setReview] = useState<CapsuleReview | null>(null);
   const [busy, setBusy] = useState(true), [error, setError] = useState(''), [notice, setNotice] = useState('');
@@ -22,14 +24,14 @@ export function RetainedCapsulesSettings({ settings, active, onPersist }: { sett
     <p className="agent-settings-hint">{ru ? 'Здесь сохраняется результат работы с выбранными файлами. Применяется только показанный снимок и только если исходные файлы не изменились.' : 'Selected-file output is retained here. Only the shown snapshot can be applied, and only if the original files are unchanged.'}</p>
     {!busy && !items.length && <p className="agent-settings-empty">{ru ? 'Выберите режим «Только выбранные файлы» при запуске агента в локальном контейнере.' : 'Choose Selected files only when launching an agent in a local container.'}</p>}
     <div className="retained-workspaces__list">{items.map(item => <details className="retained-workspaces__card" key={item.id}>
-      <summary><span className="retained-workspaces__identity"><strong>{item.sourceDirectory.split(/[/\\]/).filter(Boolean).pop() || item.id} · {item.files.length} {ru ? 'файлов' : 'files'}</strong><small>{new Date(item.createdAt).toLocaleString()} · {item.dataClass} · {(item.capturedBytes / 1024).toFixed(1)} KiB</small></span><span className={`retained-workspaces__status retained-workspaces__status--${item.state}`}>{labels[item.state]}</span></summary>
+      <summary><span className="retained-workspaces__identity"><strong>{item.kind === 'advisory-review' ? (ru ? 'Рецензия · ' : 'Review · ') : ''}{item.sourceDirectory.split(/[/\\]/).filter(Boolean).pop() || item.id} · {item.files.length} {ru ? 'файлов' : 'files'}</strong><small>{new Date(item.createdAt).toLocaleString()} · {item.dataClass} · {(item.capturedBytes / 1024).toFixed(1)} KiB</small></span><span className={`retained-workspaces__status retained-workspaces__status--${item.state}`}>{labels[item.state]}</span></summary>
       <div className="retained-workspaces__detail"><dl><dt>{ru ? 'Исходный проект' : 'Source project'}</dt><dd>{item.sourceDirectory}</dd><dt>{ru ? 'Сохранённый результат' : 'Retained output'}</dt><dd>{item.directory}</dd></dl>
         <ul className="capsule-file-list">{item.files.map(file => <li key={file}>{file}</li>)}</ul>
         {item.reason && <p className="agent-settings-error">{item.reason}</p>}
         {(item.state === 'running' || item.state === 'uncertain') && <p className="agent-settings-hint">{ru ? 'Остановите агент. Если остановка не подтверждена, используйте очистку его сохранённого поколения в разделе «Контейнеры».' : 'Stop the agent. If termination is unconfirmed, clean its saved generation under Containers.'}</p>}
         <div className="agent-settings-actions agent-settings-actions--start">
-          <button className="agent-settings-button" type="button" disabled={busy || !['retained', 'applied'].includes(item.state)} onClick={() => void run(async () => { setReview(await window.canvasTTY.capsules.review(item.id)); }, true)}>{ru ? 'Просмотреть изменения' : 'Review changes'}</button>
-          <button className="agent-settings-button agent-settings-button--danger" type="button" disabled={busy || item.state !== 'retained'} onClick={() => void run(async () => { await window.canvasTTY.capsules.cleanup(item.id); if (review?.workspaceId === item.id) setReview(null); await refresh(); })}>{ru ? 'Удалить неизменённую копию' : 'Remove unchanged copy'}</button>
+          <button className="agent-settings-button" type="button" disabled={busy || item.kind === 'advisory-review' || !['retained', 'applied'].includes(item.state)} onClick={() => void run(async () => { setReview(await window.canvasTTY.capsules.review(item.id)); }, true)}>{ru ? 'Просмотреть изменения' : 'Review changes'}</button>
+          <button className="agent-settings-button agent-settings-button--danger" type="button" disabled={busy || item.state !== 'retained'} onClick={() => void run(async () => { await window.canvasTTY.capsules.cleanup(item.id); if (review?.workspaceId === item.id) setReview(null); await refresh(); })}>{item.kind === 'advisory-review' ? (ru ? 'Удалить файлы рецензии' : 'Remove review files') : (ru ? 'Удалить неизменённую копию' : 'Remove unchanged copy')}</button>
           {item.state === 'apply-recovery-needed' && item.recoveryReviewId && <button className="agent-settings-button" type="button" disabled={busy} onClick={() => void run(async () => { await window.canvasTTY.capsules.recoverApply(item.id, item.recoveryReviewId!); await refresh(); setNotice(ru ? 'Незавершённое применение отменено. Результат сохранён.' : 'Incomplete apply rolled back. Output retained.'); }, true)}>{ru ? 'Восстановить после сбоя' : 'Recover incomplete apply'}</button>}
         </div>
       </div>
@@ -43,6 +45,8 @@ export function RetainedCapsulesSettings({ settings, active, onPersist }: { sett
         <button type="button" className="agent-settings-button agent-settings-button--primary" disabled={busy || !review.changedFiles.length || reviewedCapsule?.state !== 'retained'} onClick={() => void run(async () => { await window.canvasTTY.capsules.apply(review.workspaceId, review.reviewId); setReview(null); await refresh(); setNotice(ru ? 'Показанные изменения применены к исходному проекту.' : 'Shown changes applied to the source project.'); }, true)}>{reviewedCapsule?.state === 'applied' ? (ru ? 'Уже применено' : 'Already applied') : (ru ? 'Применить показанные изменения' : 'Apply shown changes')}</button>
       </div>
     </section>}
+    {review && <CapsuleAdvisorySettings key={review.reviewId} settings={settings} review={review} active={active} onRevealSession={onRevealSession} />}
+    <CapsuleConventionsSettings settings={settings} review={review} active={active} />
     <CapsuleTestsSettings settings={settings} review={review} active={active} onPersist={onPersist} />
     {error && <p className="agent-settings-error" role="alert">{error}</p>}
     <p className="agent-settings-notice" role="status">{busy ? (ru ? 'Выполняется…' : 'Working…') : notice}</p>

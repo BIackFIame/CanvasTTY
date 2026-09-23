@@ -1,10 +1,11 @@
+import { accountRouteBinding } from '../src/shared/providerAccountPolicy.ts';
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { TerminalManager } from "./helpers/delegation-test-manager.mjs";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
@@ -119,7 +120,10 @@ test("nested delegation is opt-in and enforces depth without changing ownership"
 });
 
 test("Grok initial task waits for its deferred launch and enters argv exactly once", () => {
-  const f = fixture();
+  // Freeform tasks now require D2 independently of the default/request class.
+  const account = { id: 'grok-private', label: 'Private Grok', provider: 'grok' };
+  account.assessment = { profile: { training: 'none', retention: 'bounded', thirdPartyProcessing: 'no', contractualMode: 'business' }, evidence: { kind: 'user-attested', reviewedAt: new Date().toISOString().slice(0, 10), sources: [], note: 'Explicit private route fixture', binding: accountRouteBinding(account), models: '*' } };
+  const f = fixture({ providerAccounts: [account] });
   const parent = f.terminals.create(request({ role: "orchestrator" }));
   const child = f.control.spawn({ parentSessionId: parent.id, provider: "grok", cwd: process.cwd(), initialPrompt: "Please inspect the project" });
   assert.deepEqual(f.written, []);

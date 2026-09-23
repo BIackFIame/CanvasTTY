@@ -1,8 +1,10 @@
+import { assertDelegationRoute } from '../../shared/delegationLaunch.ts';
+import type { ContextLaunchCapture, ContextLaunchService, PreparedLaunchContext } from './ContextLaunchService.ts';
 import { selectLaunchAccount } from "../../shared/launchAccountPolicy.ts";
 export { selectLaunchAccount } from "../../shared/launchAccountPolicy.ts";
 import { assertContainerProfile } from "../../shared/containerProfiles.ts";
 import { assertIsolationRequest } from "../../shared/isolation.ts";
-import { accountConfiguredForRuntime, accountLaunchModel } from "../../shared/providerAccountPolicy.ts";
+import { accountConfiguredForRuntime, accountLaunchModel, accountRouteMaxDataClass } from "../../shared/providerAccountPolicy.ts";
 import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
@@ -10,7 +12,7 @@ import type { ApiProfile, AppSettings, CreateSessionRequest, DataClass, Provider
 import { DATA_CLASSES, DATA_CLASS_RANK, DEFAULT_AGENT_BUDGETS, dataClassForPath, dataClassSatisfies, hostEffectiveMaxDataClass, isValidRemoteHost, providerMaxDataClass, providerPermittedOnHost } from "../../shared/contracts.ts";
 
 type LaunchSettings = Pick<AppSettings, "defaultDataClass" | "pathPolicies" | "providerAccounts" | "remoteHosts" | "agentBudgets" | "maxAccountsPerProviderPerHost"> & { apiProfiles?: ApiProfile[]; requiresSandboxProfiles?: AppSettings["requiresSandboxProfiles"]; containerProfiles?: AppSettings["containerProfiles"] };
-type LaunchRequest = Pick<CreateSessionRequest, "isolation" | "provider" | "cwd" | "profile" | "model" | "accountId" | "dataClass" | "allowSubagents" | "role" | "parentSessionId" | "hostId"> & { dataClassInherited?: boolean };
+type LaunchRequest = Pick<CreateSessionRequest, "isolation" | "provider" | "cwd" | "profile" | "model" | "accountId" | "dataClass" | "allowSubagents" | "role" | "parentSessionId" | "hostId" | "transport"> & { dataClassInherited?: boolean; initialPrompt?: string; disclosureClass?: DataClass };
 
 /** Synchronous, live policy check at the actual process-launch boundary.
  * Path classification describes the task's cwd; it does not sandbox file reads.
@@ -18,10 +20,12 @@ type LaunchRequest = Pick<CreateSessionRequest, "isolation" | "provider" | "cwd"
 export class SessionLaunchPolicy {
   private readonly settings: () => LaunchSettings;
   private readonly repositoryRoot: (cwd: string) => string;
+  private readonly context?: ContextLaunchService;
   private readonly capsulePolicy?: (request: LaunchRequest) => DataClass;
 
-  constructor(settings: () => LaunchSettings, options: { repositoryRoot?: (cwd: string) => string; capsulePolicy?: (request: LaunchRequest) => DataClass } = {}) {
+  constructor(settings: () => LaunchSettings, options: { context?: ContextLaunchService; repositoryRoot?: (cwd: string) => string; capsulePolicy?: (request: LaunchRequest) => DataClass } = {}) {
     this.settings = settings;
+    this.context = options.context;
     this.repositoryRoot = options.repositoryRoot ?? resolveRepositoryRoot;
     this.capsulePolicy = options.capsulePolicy;
   }
@@ -29,6 +33,7 @@ export class SessionLaunchPolicy {
   /** Used before async placement as well as immediately before launch. */
   classify<T extends LaunchRequest>(request: T, forPlacement = false): T & { dataClass: DataClass } {
     assertLaunchPolicyFields(request);
+    assertDelegationRoute(request);
     assertIsolationRequest(request.isolation);
     const settings = this.settings();
     if (request.isolation?.mode === "container") {
@@ -56,6 +61,8 @@ export class SessionLaunchPolicy {
       const pathClass = dataClassForPath(settings.pathPolicies, policyCwd, dataClass, root);
       if (DATA_CLASS_RANK[pathClass] > DATA_CLASS_RANK[dataClass]) dataClass = pathClass;
     }
+    if (request.provider !== "terminal" && request.initialPrompt?.trim() && !(request.isolation?.mode === 'container' && request.isolation.capsuleId)) dataClass = maxClass(dataClass, 'D2');
+    if (request.disclosureClass !== undefined) { assertDataClass(request.disclosureClass); dataClass = maxClass(dataClass, request.disclosureClass); }
     if (request.provider === "terminal") return { ...request, dataClass };
     let account: ProviderAccount | undefined;
     if (forPlacement) {
@@ -70,10 +77,40 @@ export class SessionLaunchPolicy {
       const providerCap = providerMaxDataClass(request.provider);
       if (!dataClassSatisfies(dataClass, providerCap)) throw new Error(`Provider ${request.provider} handles at most ${providerCap}; this task is ${dataClass}.`);
     }
+    assertDelegationRoute(request, account);
     const launchModel = account ? accountLaunchModel(account, request.model, settings.apiProfiles ?? []) : undefined;
     return { ...request, dataClass, ...(launchModel ? { model: launchModel } : {}), ...(account ? { accountId: account.id } : {}),
       ...(forPlacement && account ? { hostId: account.hostId === "local" ? undefined : account.hostId } : {}) };
 
+  }
+
+  /** One exact account/host route: mandatory payload first, optional context filtered to its actual cap. */
+  evaluateFixed<T extends LaunchRequest>(request: T, sessions: readonly SessionMetadata[], excludeId?: string, capture?: ContextLaunchCapture): { request: T & { dataClass: DataClass }; context?: PreparedLaunchContext } {
+    const base = this.check(request, sessions, excludeId);
+    if (!capture || base.provider === 'terminal') return { request: base };
+    if (!this.context) throw new Error('Context launch policy is unavailable.');
+    const settings = this.settings();
+    const account = settings.providerAccounts.find(a => a.id === base.accountId);
+    let cap = account ? accountRouteMaxDataClass(account, settings.apiProfiles, base.model) : providerMaxDataClass(base.provider);
+    if (base.hostId !== undefined) {
+      const host = settings.remoteHosts.find(h => h.id === base.hostId);
+      if (!host) throw new Error('Context route host is unavailable.');
+      const hostCap = hostEffectiveMaxDataClass(host); if (DATA_CLASS_RANK[hostCap] < DATA_CLASS_RANK[cap]) cap = hostCap;
+    }
+    const context = this.context.project(capture, { provider: base.provider, accountId: base.accountId, hostId: base.hostId, policyModel: base.model, maxDataClass: cap });
+    const floor = maxClass(base.disclosureClass ?? 'D0', context?.includedDataClass ?? 'D0');
+    const final = this.check({ ...base, disclosureClass: floor }, sessions, excludeId);
+    if (final.accountId !== base.accountId || final.model !== base.model || final.hostId !== base.hostId) throw new Error('Context evaluation changed its fixed route.');
+    return { request: final, context };
+  }
+
+  /** Exact eligible native tuples, before network probes. */
+  fixedPlacementRequests<T extends LaunchRequest>(request: T): T[] {
+    const base = this.classify(request, true);
+    const accounts = this.placementAccounts(base);
+    const settings = this.settings();
+    return accounts ? accounts.map(a => ({ ...request, accountId: a.id, hostId: a.hostId === 'local' ? undefined : a.hostId }))
+      : [undefined, ...settings.remoteHosts.map(h => h.id)].map(hostId => ({ ...request, hostId }));
   }
 
   /** Eligible fixed bindings for async placement. Configuration validation is
@@ -171,3 +208,5 @@ export function resolveRepositoryRoot(cwd: string): string {
     throw new Error("Cannot resolve repository root for launch policy.");
   }
 }
+
+export function maxClass(a: DataClass, b: DataClass): DataClass { return DATA_CLASS_RANK[a] >= DATA_CLASS_RANK[b] ? a : b; }

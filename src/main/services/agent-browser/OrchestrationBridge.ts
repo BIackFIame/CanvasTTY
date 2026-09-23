@@ -25,16 +25,17 @@ export class OrchestrationBridge implements OrchestrationLaunchCoordinator {
   }
 
   get isEnabled(): boolean {
-    return this.gateway.isEnabled;
+    return this.gateway.isEnabled && this.gateway.isRunning;
   }
 
   prepareLaunch(input: PrepareOrchestrationLaunchInput): PreparedOrchestrationPtyLaunch | null {
-    if (!this.gateway.isEnabled) return null;
+    if (!this.isEnabled) return null;
     const capability = this.gateway.registerOrchestrator({ terminalSessionId: input.terminalSessionId });
     let cleaned = false;
     return {
       environment: {
         [ORCHESTRATION_ENV.address]: capability.address,
+        [ORCHESTRATION_ENV.connectionId]: capability.connectionId,
         [ORCHESTRATION_ENV.capabilityToken]: capability.capabilityToken,
         [ORCHESTRATION_ENV.terminalSessionId]: capability.terminalSessionId
       },

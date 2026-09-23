@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { TaskCapsuleService } from '../src/main/services/TaskCapsuleService.ts';
 import { CapsuleLaunchService } from '../src/main/services/CapsuleLaunchService.ts';
 import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts';
-import { TerminalManager } from '../src/main/services/TerminalManager.ts';
+import { TerminalManager } from './helpers/delegation-test-manager.mjs';
 import { AgentControlService } from '../src/main/services/AgentControlService.ts';
 import { ScopedOrchestrationHandler } from '../src/main/services/agent-browser/OrchestrationTools.ts';
 import { validateOrchestrationArguments } from '../src/agent-browser/orchestration-catalog.mjs';
@@ -38,7 +38,10 @@ async function fixture(t, hooks = {}) {
   let tests;
   const containers = new ContainerExecutionService(() => settings, { rootDirectory: join(root, 'containers'), runner: engine.runner, resolveEndpoint: engine.resolveEndpoint, onWorkspaceStopped: (id, lease, kind) => kind === 'capsule-test' ? tests.confirmStopped(id, lease) : kind === 'capsule' ? storage.confirmContainerStopped(id, lease) : worktrees.confirmContainerStopped(id, lease) });
   const accounts = new ProviderAccountLaunchService(() => settings, { generation: 0, get: async () => { await hooks.account?.(); return 'fixture'; } });
-  manager.configureProviderLaunch(new SessionLaunchCoordinator(accounts, worktrees, () => settings, undefined, containers, capsules));
+  const coordinator = new SessionLaunchCoordinator(accounts, worktrees, () => settings, undefined, containers, capsules), prepared = new Map();
+  manager.configureProviderLaunch({ handlesTerminals: true, async prepare(...args) {
+    const launch = await coordinator.prepare(...args); prepared.set(args[0].id, launch); return launch;
+  } });
   settings.capsuleTestProfiles = [{ id: 'unit', label: 'Unit', containerProfileId: 'image', command: '/usr/bin/node', args: ['--test'], timeoutMs: 1000, outputBytes: 32768 }];
   tests = new CapsuleTestService(capsules, containers, () => settings, { rootDirectory: join(root, 'test-runs'), runner: async () => { engine.state.started = true; engine.state.exitCode = 0; return { output: 'x'.repeat(20000), exitCode: 0, truncated: false }; } });
   const control = new AgentControlService(manager), scope = new ScopedCapsuleControl(manager, control, capsules, tests);
@@ -47,11 +50,10 @@ async function fixture(t, hooks = {}) {
   const spawn = () => run('spawn_capsule_agent', { provider: 'opencode', files: ['code.ts'], task: 'Update selected code', accountId: 'api', containerProfileId: 'image' });
   const stop = async child => {
     manager.dispose(child.sessionId);
-    for (let attempt = 0; attempt < 100; attempt++) {
-      if ((await capsules.summary(child.capsuleId)).state === 'retained') return;
-      await new Promise(resolve => setTimeout(resolve, 20));
-    }
-    throw new Error('Fixture container stop did not settle.');
+    // Retained status may precede the coordinator's final durable cleanup write.
+    // Await its shared completion rather than racing a metadata polling loop.
+    await prepared.get(child.sessionId)?.cleanup();
+    assert.equal((await capsules.summary(child.capsuleId)).state, 'retained');
   };
   t.after(async () => { await tests.shutdown(); await manager.shutdown(); await rm(root, { recursive: true, force: true }); });
   return { root, source, settings, storage, capsules, manager, parent, foreign, engine, calls, exits, control, run, spawn, stop, tests };
@@ -109,7 +111,7 @@ test('restarting the same parent id revokes persisted capsule ownership', async 
   const f = await fixture(t), child = await f.spawn(); await f.manager.waitForLaunch(child.sessionId); await f.stop(child);
   const before = f.manager.capsuleAuthority(f.parent.id).generation;
   f.exits[0]({ exitCode: 0 });
-  f.manager.configureProviderLaunch({ async prepare() { return { args: [], environment: {}, unsetEnvironment: [], skipBridges: true, bindingDigest: 'fixture', assertCurrent() {}, async cleanup() {} }; } });
+  f.manager.configureProviderLaunch({ async prepare() { return { args: [], environment: {}, unsetEnvironment: [], skipBridges: false, bindingDigest: 'fixture', assertCurrent() {}, async cleanup() {} }; } });
   f.manager.restart(f.parent.id); await f.manager.waitForLaunch(f.parent.id);
   assert.notEqual(f.manager.capsuleAuthority(f.parent.id).generation, before);
   const recovered = new TaskCapsuleService({ rootDirectory: join(f.root, 'capsules') }); await recovered.recover();

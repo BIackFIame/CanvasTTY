@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { TerminalManager } from "./helpers/delegation-test-manager.mjs";
 import { resolveTerminalLaunch } from "../src/main/services/terminalLaunch.ts";
 import { createProviderCliRegistry } from "../src/main/services/providerCliRegistry.ts";
 import { normalizeApiProfiles } from "../src/main/services/SettingsStore.ts";

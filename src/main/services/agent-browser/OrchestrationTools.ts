@@ -25,11 +25,11 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       signal?.throwIfAborted();
       switch (request.tool) {
         case 'spawn_capsule_agent': case 'list_capsules': case 'review_capsule': case 'read_capsule_patch': case 'apply_capsule': case 'recover_capsule_apply':
-        case 'list_capsule_test_profiles': case 'test_capsule': case 'list_capsule_tests': case 'get_capsule_test_result': case 'cancel_capsule_test':
+        case 'preview_capsule_review_agent': case 'launch_capsule_review_agent': case 'list_capsule_test_profiles': case 'test_capsule': case 'validate_capsule_conventions': case 'list_capsule_tests': case 'get_capsule_test_result': case 'cancel_capsule_test':
           if (!this.capsules) throw new Error('Scoped capsule control is unavailable.');
           return await this.capsules.execute(sessionId, request.tool, request.arguments, signal);
         case "spawn_agent":
-          return await this.spawn(sessionId, request.arguments);
+          return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
           return this.send(sessionId, request.arguments);
         case "observe_agent":
@@ -55,11 +55,16 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
 
   // The spawn may await a placement decision (host "auto"), so the whole call
   // stays async even though the local fast path resolves synchronously.
-  private async spawn(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const auto = args.containerRoute === 'auto';
+    if (args.containerRoute !== undefined && !auto) throw new Error('Unsupported container route.');
+    if (auto && (args.isolation !== 'container' || args.host !== undefined || args.containerProfileId !== undefined || args.worktreeRef !== undefined)) throw new Error('Container auto-placement requires container isolation without a fixed host, profile or worktree ref.');
+    if (!auto && args.containerProfileIds !== undefined) throw new Error('containerProfileIds requires automatic container placement.');
     if (args.worktreeRef !== undefined && args.isolation !== "worktree") throw new Error("worktreeRef requires worktree isolation.");
     if (args.containerProfileId !== undefined && args.isolation !== "container") throw new Error("containerProfileId requires container isolation.");
-    const isolation = args.isolation === undefined ? undefined : args.isolation === "container" ? { mode: "container", profileId: args.containerProfileId } : { mode: args.isolation, ...(args.worktreeRef !== undefined ? { ref: args.worktreeRef } : {}) };
+    const isolation = auto || args.isolation === undefined ? undefined : args.isolation === "container" ? { mode: "container", profileId: args.containerProfileId } : { mode: args.isolation, ...(args.worktreeRef !== undefined ? { ref: args.worktreeRef } : {}) };
     const created = await this.control.spawn({
+      ...(auto ? { containerPlacement: { ...(args.containerProfileIds !== undefined ? { profileIds: args.containerProfileIds as string[] } : {}) } } : {}),
       ...(isolation ? { isolation: isolation as IsolationRequest } : {}),
       parentSessionId: orchestratorId,
       provider: args.provider as never,
@@ -73,12 +78,15 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.host !== undefined ? { host: args.host as string } : {}),
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {})
-    });
+    }, signal);
     return {
       sessionId: created.id,
       provider: created.provider,
       status: created.status,
-      title: created.title
+      title: created.title,
+      hostId: created.hostId ?? 'local',
+      ...(created.accountId !== undefined ? { accountId: created.accountId } : {}),
+      ...(created.isolation ? { isolation: created.isolation } : {})
     };
   }
 

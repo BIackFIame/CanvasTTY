@@ -80,3 +80,10 @@ if __name__ == '__main__':
     try: run()
     except Exception: fail()
 `;
+
+/** Fixed read-only variant; preserve the original recipe identity for retained ordinary generations. */
+export const ADVISORY_CONTAINER_BOOTSTRAP = CONTAINER_BOOTSTRAP
+  .replace("    recipe = json.loads(raw)", "    recipe = json.loads(raw)\n    readonly = recipe.get('workspaceMode') == 'advisory-readonly'\n    if not readonly: fail()")
+  .replace("('rw' not in options or any", "('ro' not in options or 'rw' in options or any")
+  .replace("    os.unlink(marker_path)", "    # The immutable marker is removed by the owning host after confirmed stop.")
+  .replace("    fd, probe = tempfile.mkstemp(prefix='.canvastty-write-', dir='/workspace'); os.close(fd); os.unlink(probe)", "    if os.access('/workspace', os.W_OK): fail()\n    if sorted(os.listdir('/workspace')) != sorted(['Task.md', 'Review.patch', marker['name']]): fail()");

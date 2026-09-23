@@ -12,7 +12,7 @@ export function capsuleEngine(profile, hooks = {}) {
       const directory = args.find(a => a.startsWith('--mount=')).match(/src=([^,]+)/)[1];
       record = { Id: id, Name: '/' + args[args.indexOf('--name') + 1], Image: image, Path: profile.python, Args: ['-I', '-S', '-c', args.at(-1)],
         Config: { Labels: Object.fromEntries(args.flatMap((a, i) => a === '--label' ? [args[i + 1].split('=')] : [])), WorkingDir: '/workspace', User: profile.user, Tty: args.includes('--tty'), OpenStdin: args.includes('--interactive'), Env: args.filter(a => a.startsWith('--env=')).flatMap(a => { const s = a.slice(6); return s.includes('=') ? [s] : environment[s] === undefined ? [] : [`${s}=${environment[s]}`]; }) },
-        Mounts: [{ Type: 'bind', Source: directory, Destination: '/workspace', RW: true, Propagation: 'rprivate' }],
+        Mounts: [{ Type: 'bind', Source: directory, Destination: '/workspace', RW: !args.find(a => a.startsWith('--mount=')).includes('readonly=true'), Propagation: 'rprivate' }],
         HostConfig: { Privileged: false, ReadonlyRootfs: true, CapDrop: ['ALL'], CapAdd: [], SecurityOpt: ['no-new-privileges'], NetworkMode: args.find(arg => arg.startsWith('--network=')).slice(10), Memory: profile.memoryMb * 1048576, NanoCpus: profile.cpus * 1e9, PidsLimit: profile.pids, CgroupnsMode: 'private', Mounts: [{ BindOptions: { NonRecursive: true } }], Tmpfs: { '/tmp': 'rw,nosuid,nodev,noexec,size=256m,mode=1777' }, RestartPolicy: { Name: 'no' }, LogConfig: { Type: 'none' } } };
       await hooks.created?.(directory); return { stdout: id };
     }

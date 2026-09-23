@@ -1,7 +1,8 @@
+import { accountRouteBinding } from '../src/shared/providerAccountPolicy.ts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { CONTAINER_BOOTSTRAP } from '../src/main/services/ContainerBootstrap.ts';
+import { ADVISORY_CONTAINER_BOOTSTRAP, CONTAINER_BOOTSTRAP } from '../src/main/services/ContainerBootstrap.ts';
 import { assertContainerProfile } from '../src/shared/containerProfiles.ts';
 import { WorktreeService } from '../src/main/services/WorktreeService.ts';
 import { SessionLaunchCoordinator } from '../src/main/services/SessionLaunchCoordinator.ts';
@@ -9,7 +10,7 @@ import { SessionLaunchPolicy } from '../src/main/services/SessionLaunchPolicy.ts
 import { AgentControlService } from '../src/main/services/AgentControlService.ts';
 import { ProviderAccountLaunchService } from '../src/main/services/ProviderAccountLaunchService.ts';
 import { remoteContainerCommand, REMOTE_CONTAINER_HOST } from '../src/main/services/RemoteContainerHost.ts';
-import { TerminalManager } from '../src/main/services/TerminalManager.ts';
+import { TerminalManager } from './helpers/delegation-test-manager.mjs';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,7 +42,7 @@ async function fixture(t, options = {}) {
       await options.createGate; return { stdout: id + '\n' };
     }
     if (args.includes('inspect')) { const value = inspected(record); value.State.Running = controls.running; controls.mutate?.(value); return { stdout: JSON.stringify([value]) }; }
-    if (args.includes('ls')) return { stdout: controls.exists ? id : '' };
+    if (args.includes('ls')) return { stdout: controls.exists ? args.includes('--last') ? JSON.stringify({ id, name: record.name, image, state: 'running', status: 'Up' }) : id : '' };
     if (args.includes('stop')) controls.running = false;
     if (args.includes('rm')) controls.exists = false;
     return { stdout: '' };
@@ -282,23 +283,26 @@ test('real policy + coordinator + account adapter + MCP control launch a scoped 
   f.settings.containerProfiles = [containerProfile];
   const settings = { ...f.settings, providerAccounts: [{ id: 'api-account', label: 'API', provider: runtime, binding: { kind: 'api-profile', profileId: 'api-profile' } }],
     apiProfiles: [{ id: 'api-profile', name: 'API', protocol: 'openai-compatible', baseUrl: 'https://api.example/v1', secretRef: 'OPENAI_API_KEY', defaultModel: 'fixture-model' }],
-    requiresSandboxProfiles: [], pathPolicies: [], defaultDataClass: 'D0', maxAccountsPerProviderPerHost: 1, agentBudgets: { maxLocalAgents: 2, maxRemoteAgentsPerHost: 2, maxChildren: 1, maxDepth: 2 } };
+    requiresSandboxProfiles: [], pathPolicies: [], defaultDataClass: 'D0', maxAccountsPerProviderPerHost: 1, agentBudgets: { maxLocalAgents: 3, maxRemoteAgentsPerHost: 2, maxChildren: 1, maxDepth: 2 } };
+  // Freeform task text independently requires D2 before provider credentials.
+  const assessedAccount = settings.providerAccounts[0];
+  assessedAccount.assessment = { profile: { training: 'none', retention: 'bounded', thirdPartyProcessing: 'no', contractualMode: 'api' }, evidence: { kind: 'user-attested', reviewedAt: new Date().toISOString().slice(0, 10), sources: [], note: 'Explicit private fixture route', binding: accountRouteBinding(assessedAccount, settings.apiProfiles), models: '*' } };
   const calls = []; let keyReads = 0, hostProbes = 0;
   const worktrees = new WorktreeService({ rootDirectory: join(f.root, 'managed') });
   const accounts = new ProviderAccountLaunchService(() => settings, { generation: 0, get: async () => { keyReads++; return 'fixture-api-key'; } }, { temporaryRoot: join(f.root, 'api-configs') });
-  const manager = new TerminalManager(() => {}, { get() { throw new Error('Host CLI discovery must not run'); } }, undefined, undefined, false,
+  const manager = new TerminalManager(() => {}, { get(provider) { if (provider !== 'claude') throw new Error('Container CLI discovery must not run'); return { provider, state: 'available', executable: '/fixture/claude', launcher: 'native', environment: {}, checked: [] }; } }, undefined, undefined, false,
     (command, args, options) => { calls.push({ command, args, ...options }); return { onData() {}, onExit() {}, write() {}, resize() {}, kill() {} }; });
   manager.configureLaunchPolicy(new SessionLaunchPolicy(() => settings));
   manager.configureProviderLaunch(new SessionLaunchCoordinator(accounts, worktrees, () => settings, { checkShell: async () => { hostProbes++; }, place: async () => { hostProbes++; throw new Error('wrong discovery'); } }, f.service));
   const control = new AgentControlService(manager, { place: async () => { hostProbes++; throw new Error('Generic placement must not handle containers'); } });
   t.after(async () => { await manager.shutdown(); await worktrees.dispose(); });
-  const parent = manager.create({ provider: 'terminal', cwd: source, profile: 'normal', position: { x: 0, y: 0 }, role: 'orchestrator' }); await manager.waitForLaunch(parent.id);
+  const parent = manager.create({ provider: 'claude', cwd: source, profile: 'normal', position: { x: 0, y: 0 }, role: 'orchestrator' }); await manager.waitForLaunch(parent.id);
   const request = { parentSessionId: parent.id, provider: runtime, cwd: source, isolation: { mode: 'container', profileId: profile.id }, accountId: 'api-account', initialPrompt: '! literal\n/command @file $(literal)' };
   assert.throws(() => control.spawn({ ...request, host: 'auto' }), /exact host/);
   const child = await control.spawn(request); await manager.waitForLaunch(child.id);
   const actual = manager.list().find(s => s.id === child.id); assert.equal(actual.exitCode, null, actual.failureDetails);
   assert.equal(calls.at(-1).command, profile.executable); assert.equal(hostProbes, 0); assert.equal(keyReads, 1);
-  assert.equal(actual.cwd, source); assert.equal(actual.dataClass, 'D0');
+  assert.equal(actual.cwd, source); assert.equal(actual.dataClass, 'D2'); assert.equal(actual.disclosureClass, 'D2');
   const create = f.calls.find(c => c.args.includes('create'));
   assert.equal(create.environment.CANVASTTY_PROFILE_API_KEY, 'fixture-api-key');
   const argv = JSON.parse(create.environment.CANVASTTY_CONTAINER_RECIPE).args;
@@ -322,21 +326,27 @@ test('container-specific MiniMax and OMP preparation leaves no host config files
   }
 });
 
-test('fixed bootstrap validates mounts/marker/caps and writes MiniMax or OMP config privately before exec', async t => {
+test('fixed bootstrap verifies writable and readonly advisory mounts/marker/config before exec', async t => {
   const root = await mkdtemp(join(tmpdir(), 'canvastty-bootstrap-')); t.after(() => rm(root, { recursive: true, force: true }));
   const script = String.raw`
 import os,sys,json,io,tempfile,builtins,stat
 namespace={'__name__':'fixture'}; exec(json.loads(sys.argv[1]),namespace)
-root=sys.argv[2]; runtime=sys.argv[3]
-workspace=os.path.join(root,runtime); os.mkdir(workspace)
+root=sys.argv[2]; runtime=sys.argv[3]; mode=sys.argv[4]
+readonly=mode!='normal'
+workspace=os.path.join(root,runtime+'-'+mode); os.mkdir(workspace)
 marker={'name':'.canvastty-container-11111111-1111-4111-8111-111111111111','token':'22222222-2222-4222-8222-222222222222'}
 with open(os.path.join(workspace,marker['name']),'w') as f: f.write(marker['token'])
 recipe={'command':'/bin/sh','args':[],'cwd':'/workspace','limits':{'cpus':2,'memoryMb':1024,'pids':128},'marker':marker,'api':{'runtime':runtime,'provider':'fixture','model':'model','baseUrl':'https://api.example/v1','api':'openai-completions'}}
+if readonly:
+    recipe['workspaceMode']='advisory-readonly'
+    for name in ['Task.md','Review.patch']:
+        with open(os.path.join(workspace,name),'w') as f: f.write('fixture')
 os.environ.clear(); os.environ.update({'CANVASTTY_CONTAINER_RECIPE':json.dumps(recipe),'CANVASTTY_PROFILE_API_KEY':'dummy-bootstrap-key','UNRELATED_API_KEY':'not-in-child'})
 original_open=builtins.open; original_os_open=os.open; original_unlink=os.unlink
-original_realpath=os.path.realpath; original_isdir=os.path.isdir; original_stat=os.stat
+original_realpath=os.path.realpath; original_isdir=os.path.isdir; original_stat=os.stat; original_access=os.access; original_listdir=os.listdir
 original_mkstemp=tempfile.mkstemp; original_mkdtemp=tempfile.mkdtemp
 mounts='1 0 0:1 / / ro - overlay overlay ro\n2 1 0:2 / /workspace rw - ext4 workspace rw\n3 1 0:3 / /tmp rw,nosuid,nodev,noexec - tmpfs tmpfs rw\n'
+if mode=='readonly': mounts=mounts.replace('/workspace rw - ext4 workspace rw','/workspace ro - ext4 workspace ro')
 files={'/proc/self/status':'NoNewPrivs:\t1\n'+''.join(k+':\t00000000\n' for k in ['CapInh','CapPrm','CapEff','CapBnd','CapAmb']),'/proc/self/cgroup':'0::/','/proc/self/mountinfo':mounts,'/sys/fs/cgroup/cpu.max':'200000 100000','/sys/fs/cgroup/memory.max':'1073741824','/sys/fs/cgroup/pids.max':'128'}
 def opened(path,*args,**kwargs): return io.StringIO(files[path]) if path in files else original_open(path,*args,**kwargs)
 builtins.open=opened
@@ -345,7 +355,12 @@ os.unlink=lambda path,*args,**kwargs: original_unlink(path.replace('/workspace/'
 os.path.realpath=lambda path: path if path=='/workspace' else original_realpath(path)
 os.path.isdir=lambda path: True if path=='/workspace' else original_isdir(path)
 os.stat=lambda path,*args,**kwargs: original_stat(workspace if path=='/workspace' else path,*args,**kwargs)
-tempfile.mkstemp=lambda **kwargs: original_mkstemp(**dict(kwargs,dir=workspace))
+def mkstemp(**kwargs):
+    if readonly: raise AssertionError('Readonly review must not write-probe workspace')
+    return original_mkstemp(**dict(kwargs,dir=workspace))
+tempfile.mkstemp=mkstemp
+os.access=lambda path,flag: False if path=='/workspace' and readonly else original_access(path,flag)
+os.listdir=lambda path: original_listdir(workspace if path=='/workspace' else path)
 tempfile.mkdtemp=lambda **kwargs: original_mkdtemp(**dict(kwargs,dir=root))
 os.chdir=lambda path: None
 captured=[]
@@ -364,9 +379,12 @@ if runtime=='minimax':
 else:
     assert config['providers']['fixture']['apiKey']=='CANVASTTY_PROFILE_API_KEY'
     assert env['CANVASTTY_PROFILE_API_KEY']=='dummy-bootstrap-key'
-assert not os.path.exists(os.path.join(workspace,marker['name']))
+assert os.path.exists(os.path.join(workspace,marker['name'])) == readonly
 `;
-  for (const runtime of ['minimax', 'omp']) assert.doesNotThrow(() => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(CONTAINER_BOOTSTRAP), root, runtime], { stdio: 'pipe' }));
+  for (const runtime of ['minimax', 'omp']) {
+    for (const mode of ['normal', 'readonly']) assert.doesNotThrow(() => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(mode === 'normal' ? CONTAINER_BOOTSTRAP : ADVISORY_CONTAINER_BOOTSTRAP), root, runtime, mode], { stdio: 'pipe' }));
+    assert.throws(() => execFileSync('/usr/bin/python3', ['-I', '-S', '-c', script, JSON.stringify(ADVISORY_CONTAINER_BOOTSTRAP), root, runtime, 'masquerading-rw'], { stdio: 'pipe' }));
+  }
 });
 
 test('fixed remote helper creates and verifies a retained checkout using only temporary fixtures', async t => {
@@ -429,4 +447,18 @@ test('failed prepare keeps local workspace reserved until exact container cleanu
   f.controls.mutate = null; await f.service.cleanup(generation.id);
   assert.equal((await worktrees.list())[0].state, 'retained');
   await worktrees.cleanup(saved.id); assert.equal((await worktrees.list()).length, 0);
+});
+
+test('inventory registry annotation requires the exact engine and ID and grants no new cleanup authority', async t => {
+  const f = await fixture(t); const prepared = await f.service.prepare(metadata(), f.workspace, noAccount);
+  assert.equal((await f.service.inventory())[0].containers[0].managed, true);
+  f.changed(); assert.equal((await f.service.inventory(undefined, true))[0].containers[0].managed, false);
+  await assert.rejects(() => prepared.cleanup(), /identity|changed/);
+  assert.equal(f.calls.some(call => call.args.includes('stop') || call.args.includes('rm')), false);
+});
+
+test('inventory does not annotate a removed profile generation as managed by another profile', async t => {
+  const f = await fixture(t); await f.service.prepare(metadata(), f.workspace, noAccount);
+  f.settings.containerProfiles = [{ ...profile, id: 'replacement' }];
+  assert.equal((await f.service.inventory())[0].containers[0].managed, false);
 });

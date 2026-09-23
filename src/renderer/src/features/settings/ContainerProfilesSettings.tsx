@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import type { AppSettings, ContainerProfile, ProviderId, RemoteWorkspaceReview, RetainedContainer } from '../../../../shared/contracts';
 import { assertContainerProfile } from '../../../../shared/containerProfiles';
+import { ContainerInventorySettings } from './ContainerInventorySettings';
 
-export function ContainerProfilesSettings({ settings, recordId, selectionRequest, onPersist }: { settings: AppSettings; recordId?: string; selectionRequest?: unknown; onPersist(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
+export function ContainerProfilesSettings({ settings, active = true, recordId, selectionRequest, onPersist }: { settings: AppSettings; active?: boolean; recordId?: string; selectionRequest?: unknown; onPersist(patch: Partial<AppSettings>): Promise<void> }): React.JSX.Element {
   const ru = settings.locale === 'ru';
   const text = (en: string, russian: string): string => ru ? russian : en;
   const [draft, setDraft] = useState<ContainerProfile | null>(null);
@@ -15,6 +16,7 @@ export function ContainerProfilesSettings({ settings, recordId, selectionRequest
   const run = async (operation: () => Promise<void>): Promise<void> => { setBusy(true); setMessage(''); try { await operation(); } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
   const set = (patch: Partial<ContainerProfile>): void => setDraft(value => value && ({ ...value, ...patch }));
   return <section aria-label={text('Container profiles', 'Профили контейнеров')} className="container-profiles">
+    <ContainerInventorySettings settings={settings} active={active} />
     <div className="agent-settings-heading"><h3>{text('Container profiles', 'Профили контейнеров')}</h3></div>
     <p className="agent-settings-hint">{text('Existing Docker / Podman only. Images and Python must already be installed; engines and virtual machines are never started automatically. Full committed workspace is mounted; source classification is preserved.', 'Только уже доступные Docker / Podman. Образ и Python должны быть подготовлены заранее; движки и виртуальные машины не запускаются автоматически. Монтируется весь checkout из Git; класс данных исходного проекта сохраняется.')}</p>
     {(settings.containerProfiles ?? []).map(p => <div className="container-profiles__card" key={p.id}>
