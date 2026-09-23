@@ -123,6 +123,7 @@ let servicesReady = false;
 let startupRunning = false;
 let shutdownRunning = false;
 let shutdownComplete = false;
+let observeMainWindowState: ((window: BrowserWindow | null) => void) | null = null;
 // Set the instant the shell window's close is requested — before the window is
 // destroyed — and cleared when a new one is created. Electron aborts the
 // navigations that race that close (ERR_ABORTED / ERR_FAILED / "Object has been
@@ -150,6 +151,7 @@ async function createWindow(): Promise<BrowserWindow> {
     }
   });
   mainWindow = window;
+  observeMainWindowState?.(window);
   // A fresh window is not closing; the previous one's flag must not leak in.
   mainWindowClosing = false;
 
@@ -172,7 +174,10 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   window.on("closed", () => {
     mainWindowClosing = true;
-    if (mainWindow === window) mainWindow = null;
+    if (mainWindow === window) {
+      mainWindow = null;
+      observeMainWindowState?.(null);
+    }
   });
 
   try {
@@ -366,7 +371,7 @@ async function initializeServices(): Promise<void> {
   await pluginSecretsService.load();
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
-  registerIpc({
+  observeMainWindowState = registerIpc({
     settings,
     providerClis,
     recheckProviderClis: async () => {
