@@ -62,7 +62,7 @@ test("a final answer longer than one runtime message still reports its turn and 
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
   await gateway.start();
   t.after(() => gateway.close());
-  const capability = gateway.registerSession("terminal-long", "codex");
+  const capability = gateway.registerSession("terminal-long", "codex", Date.now() + 60_000);
   await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-long"));
   const helper = new URL("../src/agent-runtime/hook-helper.mjs", import.meta.url);
   const child = spawn(process.execPath, [helper.pathname, "idle", "Stop"], {
@@ -71,7 +71,10 @@ test("a final answer longer than one runtime message still reports its turn and 
       [AGENT_RUNTIME_ENV.address]: capability.address,
       [AGENT_RUNTIME_ENV.terminalSessionId]: capability.terminalSessionId,
       [AGENT_RUNTIME_ENV.provider]: capability.provider,
-      [AGENT_RUNTIME_ENV.capabilityToken]: capability.capabilityToken
+      [AGENT_RUNTIME_ENV.capabilityToken]: capability.capabilityToken,
+      // #55: the final answer is forwarded only under a live answer-capture grant.
+      CANVASTTY_RUNTIME_CAPTURE_ANSWER: "1",
+      CANVASTTY_RUNTIME_CAPTURE_ANSWER_EXPIRES_AT: String(Date.now() + 60_000)
     },
     stdio: ["pipe", "ignore", "pipe"]
   });
