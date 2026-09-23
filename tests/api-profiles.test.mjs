@@ -65,7 +65,7 @@ test("the profile catalog is capped at 32 entries", () => {
   assert.equal(normalizeApiProfiles(many, []).length, 32);
 });
 
-test("api profiles persist through the settings store and settingsVersion reaches 20", async (t) => {
+test("api profiles persist through the settings store and settingsVersion reaches 24", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-settings-apiprofiles-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const store = new SettingsStore(directory, "en");
@@ -85,7 +85,7 @@ test("api profiles persist through the settings store and settingsVersion reache
   assert.equal(reloaded.apiProfiles[1].defaultModel, "claude-sonnet-4-6");
 
   const persisted = JSON.parse(await (await import("node:fs/promises")).readFile(join(directory, "settings.json"), "utf8"));
-  assert.equal(persisted.settingsVersion, 20);
+  assert.equal(persisted.settingsVersion, 24);
   assert.equal(persisted.apiProfiles.length, 2);
 });
 

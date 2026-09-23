@@ -177,6 +177,10 @@ export class OrchestrationClient {
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     this.socket?.destroy();
     this.socket = null;
+    // close() during a pending authentication must settle it: handleDisconnect
+    // returns early once closed, so without this the connect() caller would
+    // await forever. Rejecting an already-settled authentication is a no-op.
+    this.failAuthentication(unavailable());
     for (const pending of this.pending.values()) pending.reject(unavailable());
     this.pending.clear();
   }

@@ -39,6 +39,11 @@ export interface PersistedTerminalSession {
   size: Size;
   role?: SessionRole;
   parentSessionId?: string;
+  /** Remote host for shell sessions; same id space as AppSettings.remoteHosts. */
+  hostId?: string;
+  /** Provider account chosen by spawn routing; same id space as
+   *  AppSettings.providerAccounts. Bookkeeping only. */
+  accountId?: string;
 }
 
 interface PersistedTerminalSessionState {
@@ -120,7 +125,9 @@ export function persistedTerminalSession(metadata: SessionMetadata): PersistedTe
         role: metadata.role,
         ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {})
       }
-      : {})
+      : {}),
+    ...(metadata.hostId !== undefined ? { hostId: metadata.hostId } : {}),
+    ...(metadata.accountId !== undefined ? { accountId: metadata.accountId } : {})
   };
 }
 
@@ -154,6 +161,22 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       : undefined;
     if (session.parentSessionId !== undefined && parentSessionId === undefined) continue;
     if (role === "subagent" && parentSessionId === undefined) continue;
+    // hostId follows the same drop-invalid discipline as parentSessionId: a
+    // non-empty string of at most 64 characters (the RemoteHost id schema in
+    // shared/contracts) or the whole entry disappears rather than silently
+    // re-aiming the session at another machine.
+    const hostId = typeof session.hostId === "string" && session.hostId.length > 0 && session.hostId.length <= 64
+      ? session.hostId
+      : undefined;
+    if (session.hostId !== undefined && hostId === undefined) continue;
+    // accountId follows the same drop-invalid discipline as hostId: a
+    // non-empty string of at most 64 characters (the ProviderAccount id
+    // schema) or the whole entry disappears rather than silently crediting
+    // the session to another subscription.
+    const accountId = typeof session.accountId === "string" && session.accountId.length > 0 && session.accountId.length <= 64
+      ? session.accountId
+      : undefined;
+    if (session.accountId !== undefined && accountId === undefined) continue;
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -167,7 +190,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
         height: clamp(session.size.height, 260, 1_100)
       },
       ...(role !== undefined ? { role } : {}),
-      ...(parentSessionId !== undefined ? { parentSessionId } : {})
+      ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+      ...(hostId !== undefined ? { hostId } : {}),
+      ...(accountId !== undefined ? { accountId } : {})
     });
     ids.add(session.id);
   }

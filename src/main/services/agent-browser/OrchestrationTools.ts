@@ -19,7 +19,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     try {
       switch (request.tool) {
         case "spawn_agent":
-          return this.spawn(sessionId, request.arguments);
+          return await this.spawn(sessionId, request.arguments);
         case "send_to_agent":
           return this.send(sessionId, request.arguments);
         case "observe_agent":
@@ -43,11 +43,14 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
-  private spawn(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {
-    const created = this.control.spawn({
+  // The spawn may await a placement decision (host "auto"), so the whole call
+  // stays async even though the local fast path resolves synchronously.
+  private async spawn(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
+      ...(args.host !== undefined ? { host: args.host as string } : {}),
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {})
     });

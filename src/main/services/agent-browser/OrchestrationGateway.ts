@@ -280,6 +280,14 @@ export class OrchestrationGateway {
     if (connection.authenticated || connection.lease !== null) {
       throw orchestrationBridgeError("AUTH_REPLAYED", "This connection is already authenticated.", false);
     }
+    // One live connection per lease: authenticating with the reconnect token
+    // supersedes any connection that still holds this lease (a half-open
+    // socket or a duplicated helper), so a lease never backs two concurrent
+    // dispatching connections. The bootstrap token cannot hit this path — it
+    // is single-use, so no earlier connection ever holds the lease yet.
+    for (const other of [...this.connections]) {
+      if (other !== connection && other.lease === lease) this.closeConnection(other, "revoked");
+    }
     connection.authenticated = true;
     connection.lease = lease;
     connection.lastHeartbeatAt = this.now();

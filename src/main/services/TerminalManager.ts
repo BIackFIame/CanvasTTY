@@ -7,6 +7,7 @@ import type {
   CreateSessionRequest,
   Point,
   ProviderId,
+  RemoteHost,
   SessionBounds,
   SessionRole,
   SessionEvent,
@@ -20,7 +21,8 @@ import {
   CANVAS_LAUNCHER_ITEMS,
   INITIAL_TERMINAL_COLS,
   INITIAL_TERMINAL_ROWS,
-  IPC
+  IPC,
+  remotePathForHost
 } from "../../shared/contracts.ts";
 import type {
   AgentBrowserLaunchCoordinator,
@@ -36,13 +38,16 @@ import { AGENT_RUNTIME_ENV } from "../../agent-runtime/runtime-protocol.mjs";
 import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
-import { resolveTerminalLaunch } from "./terminalLaunch.ts";
+import { remoteAgentLaunch } from "./remoteAgentLaunch.ts";
+import { remoteTerminalLaunch } from "./remoteTerminalLaunch.ts";
+import { resolveTerminalLaunch, type TerminalLaunch } from "./terminalLaunch.ts";
 import {
   persistedTerminalSession,
   type PersistedTerminalSession,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
+import { PROVIDER_CLI_DEFINITIONS } from "./providerCliRegistry.ts";
 import {
   createProviderLifecycleParser,
   initialSessionStatus,
@@ -94,6 +99,7 @@ export class TerminalManager {
   private readonly spawnPty: typeof pty.spawn;
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
+  private resolveRemoteHost: ((hostId: string) => RemoteHost | null) | null = null;
   private sessionStore: TerminalSessionStore | null = null;
   private sessionPersistenceEnabled = false;
   private suppressPersistence = false;
@@ -116,6 +122,14 @@ export class TerminalManager {
 
   configureOrchestration(coordinator: OrchestrationLaunchCoordinator | null): void {
     this.agentOrchestration = coordinator;
+  }
+
+  // Remote sessions — shells and agents alike — resolve their host through
+  // this injected lookup so the manager never imports settings itself
+  // (mirrors configureOrchestration). Callers read their live host registry
+  // on every resolve.
+  configureRemoteHosts(resolve: (hostId: string) => RemoteHost | null): void {
+    this.resolveRemoteHost = resolve;
   }
 
   configureSessionPersistence(store: TerminalSessionStore, enabled: boolean): void {
@@ -197,6 +211,16 @@ export class TerminalManager {
     if (request.parentSessionId !== undefined && !this.sessions.has(request.parentSessionId)) {
       throw new Error("Parent terminal session does not exist.");
     }
+    // A remote session must resolve to a configured host before anything
+    // spawns: an unknown host fails the create loudly, the same way the
+    // request assertions above do, instead of leaving a dead session behind.
+    // Agent sessions additionally need their project folder mapped on that
+    // host — the remote launch cds into the mapped workspace — so an unmapped
+    // folder fails the create here too.
+    if (request.hostId !== undefined) {
+      const host = this.requireRemoteHost(request.hostId);
+      if (request.provider !== "terminal") this.requireRemoteWorkspace(host, request.cwd);
+    }
 
     const id = randomUUID();
     const metadata: SessionMetadata = {
@@ -211,16 +235,22 @@ export class TerminalManager {
       size: DEFAULT_TERMINAL_SIZE,
       role,
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
+      ...(request.hostId !== undefined ? { hostId: request.hostId } : {}),
+      ...(request.accountId !== undefined ? { accountId: request.accountId } : {}),
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
       failureDetails: null
     };
+    // Grok's runtime bridge measures the grid before launching locally; a
+    // remote grok takes no runtime bridge (the helper runs on this machine,
+    // not the host), so it launches immediately instead of awaiting a resize.
     const awaitMeasuredGrid = request.provider === "grok"
+      && request.hostId === undefined
       && this.providerClis.get(request.provider).state === "available";
     const launched = awaitMeasuredGrid
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, role);
+      : this.spawnProcess(id, request.provider, request.profile, request.cwd, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, role, request.hostId);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -287,7 +317,8 @@ export class TerminalManager {
       session.cols,
       session.rows,
       false,
-      session.metadata.role
+      session.metadata.role,
+      session.metadata.hostId
     );
     session.process = launched.process;
     session.agentBrowser = launched.agentBrowser;
@@ -433,6 +464,8 @@ export class TerminalManager {
       size: descriptor.size,
       role: descriptor.role ?? "interactive",
       ...(descriptor.parentSessionId !== undefined ? { parentSessionId: descriptor.parentSessionId } : {}),
+      ...(descriptor.hostId !== undefined ? { hostId: descriptor.hostId } : {}),
+      ...(descriptor.accountId !== undefined ? { accountId: descriptor.accountId } : {}),
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -454,6 +487,7 @@ export class TerminalManager {
     }
     const awaitMeasuredGrid = directoryReady
       && descriptor.provider === "grok"
+      && descriptor.hostId === undefined
       && this.providerClis.get(descriptor.provider).state === "available";
 
     if (directoryReady && !awaitMeasuredGrid) {
@@ -466,7 +500,8 @@ export class TerminalManager {
           INITIAL_TERMINAL_COLS,
           INITIAL_TERMINAL_ROWS,
           descriptor.provider !== "terminal",
-          descriptor.role ?? "interactive"
+          descriptor.role ?? "interactive",
+          descriptor.hostId
         );
         process = launched.process;
         agentBrowser = launched.agentBrowser;
@@ -541,7 +576,8 @@ export class TerminalManager {
         session.cols,
         session.rows,
         resumePrevious,
-        session.metadata.role
+        session.metadata.role,
+        session.metadata.hostId
       );
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
@@ -576,7 +612,8 @@ export class TerminalManager {
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
     resumePrevious = false,
-    sessionRole: SessionRole = "interactive"
+    sessionRole: SessionRole = "interactive",
+    hostId?: string
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -584,14 +621,24 @@ export class TerminalManager {
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
     failure: UnavailableProviderCli | null;
   } {
-    const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
+    // A remote agent session launches its provider CLI over ssh instead of
+    // resolving a local executable, so every local supplement is skipped:
+    // CLI resolution (the remote host owns command discovery, and a missing
+    // local CLI must not fail a remote spawn), browser/runtime/orchestration
+    // bridges (their helpers run on this machine, not on the host), resume
+    // flags, and profile arguments. That is also "normal" profile semantics
+    // by construction — the remote command is exactly `exec <cli>`.
+    const remoteAgent = provider !== "terminal" && hostId !== undefined;
+    const providerCli = provider === "terminal" || remoteAgent
+      ? undefined
+      : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") {
       return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: providerCli };
     }
-    const agentRuntime = provider === "terminal"
+    const agentRuntime = provider === "terminal" || remoteAgent
       ? null
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd }) ?? null;
-    const agentOrchestration = sessionRole === "orchestrator" && this.agentOrchestration?.isEnabled
+    const agentOrchestration = sessionRole === "orchestrator" && !remoteAgent && this.agentOrchestration?.isEnabled
       ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id })
       : null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
@@ -602,7 +649,9 @@ export class TerminalManager {
       // and minimax until its MCP configuration is wired (plain PTY for now).
       // devin is cloud-session oriented and takes no browser adapter yet,
       // and antigravity keeps plain PTY integration for the same reason.
-      agentBrowser = provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
+      // Remote agents take none either: the bridge helper is a local process
+      // the remote CLI could never talk to.
+      agentBrowser = remoteAgent || provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
         ? null
         : this.agentBrowser?.prepareLaunch({
           terminalSessionId: id,
@@ -618,11 +667,30 @@ export class TerminalManager {
         ? { ...mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment), ...orchestrationEnvironment }
         : { ...browserEnvironment, ...runtimeEnvironment, ...orchestrationEnvironment };
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
-      const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
-        environment: { ...baseEnvironment, ...providerEnvironment },
-        ...(providerCli ? { providerCli } : {}),
-        resumePrevious
-      });
+      // A session bound to a remote host swaps its local launch for an
+      // interactive ssh session spawned through the same PTY with the same
+      // TERM/COLORTERM environment: a terminal session runs the remote shell,
+      // an agent session runs its provider CLI (by name, from the provider
+      // definitions) inside the host's mapped workspace. Everything below
+      // resolves the host and workspace mapping here too, so restore paths
+      // that bypass create()'s pre-checks still fail loudly per session.
+      const remoteHost = hostId !== undefined ? this.requireRemoteHost(hostId) : null;
+      let launch: TerminalLaunch;
+      if (remoteHost && provider !== "terminal") {
+        launch = remoteAgentLaunch(
+          remoteHost,
+          this.requireRemoteWorkspace(remoteHost, cwd),
+          PROVIDER_CLI_DEFINITIONS[provider].commands[0]
+        );
+      } else if (remoteHost) {
+        launch = remoteTerminalLaunch(remoteHost, baseEnvironment);
+      } else {
+        launch = resolveTerminalLaunch(provider, profile, providerArgs, {
+          environment: { ...baseEnvironment, ...providerEnvironment },
+          ...(providerCli ? { providerCli } : {}),
+          resumePrevious
+        });
+      }
       return {
         process: this.spawnPty(launch.command, launch.args, {
           name: "xterm-256color",
@@ -642,6 +710,27 @@ export class TerminalManager {
       agentOrchestration?.cleanup();
       throw error;
     }
+  }
+
+  // Resolves a session's remote host or throws. Called from create() before
+  // anything spawns (failing the create loudly) and from spawnProcess when
+  // composing an ssh launch; restore catches the throw per session instead.
+  private requireRemoteHost(hostId: string): RemoteHost {
+    const host = this.resolveRemoteHost ? this.resolveRemoteHost(hostId) : null;
+    if (!host) throw new Error(`Remote host ${hostId} is not configured.`);
+    return host;
+  }
+
+  // The remote counterpart of a local project folder, or a throw: an agent
+  // launch can only cd into a workspace the host maps, so an unmapped folder
+  // names itself and the host in the error. Same call sites and failure
+  // surfaces as requireRemoteHost.
+  private requireRemoteWorkspace(host: RemoteHost, localWorkspace: string): string {
+    const remoteWorkspace = remotePathForHost(host, localWorkspace);
+    if (remoteWorkspace === null) {
+      throw new Error(`Workspace ${localWorkspace} is not mapped on host ${host.id}.`);
+    }
+    return remoteWorkspace;
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
@@ -755,6 +844,12 @@ function assertCreateRequest(request: CreateSessionRequest): void {
   }
   if (request.parentSessionId !== undefined && typeof request.parentSessionId !== "string") {
     throw new Error("Session parent id must be a string.");
+  }
+  if (request.hostId !== undefined && typeof request.hostId !== "string") {
+    throw new Error("Session host id must be a string.");
+  }
+  if (request.accountId !== undefined && typeof request.accountId !== "string") {
+    throw new Error("Session account id must be a string.");
   }
 }
 

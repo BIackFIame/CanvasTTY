@@ -21,6 +21,12 @@ import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { AgentControlService } from "./services/AgentControlService";
+import { HostPlacementService } from "./services/HostPlacement";
+import { RemoteProviderDiscovery } from "./services/RemoteProviderDiscovery";
+import { RemoteProviderAccess } from "./services/RemoteProviderAccess";
+import { RemoteHostMetricsService } from "./services/RemoteHostMetrics";
+import { sshRunner } from "./services/RemoteHostsService";
+import { dataClassForPath } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
@@ -345,12 +351,38 @@ async function initializeServices(): Promise<void> {
 
   // The orchestration bridge exists only for sessions explicitly launched with
   // the orchestrator role; interactive sessions never receive capabilities.
+  const hostPlacement = new HostPlacementService({
+    metrics: (host) => new RemoteHostMetricsService(sshRunner).collect(host),
+    discovery: (host) => new RemoteProviderDiscovery(sshRunner).discover(host),
+    access: (host) => new RemoteProviderAccess(sshRunner).probe(host),
+    activeSessions: (hostId) => terminalManager!.list()
+      .filter((session) => session.hostId === hostId && session.exitCode === null).length
+  });
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager))
+    handler: new ScopedOrchestrationHandler(new AgentControlService(
+      terminalManager!,
+      { place: (request) => hostPlacement.place(settings.get().remoteHosts, request) },
+      {
+        defaultDataClass: settings.get().defaultDataClass,
+        accounts: (provider: string) => settings.get().providerAccounts
+          .filter((account) => account.provider === (provider as never)),
+        pathClass: (cwd: string) => dataClassForPath(
+          settings.get().pathPolicies,
+          cwd,
+          settings.get().defaultDataClass
+        )
+      }
+    ))
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
+
+  // Remote shell sessions resolve their host from the live settings registry:
+  // a hostId with no matching entry fails the create instead of spawning.
+  terminalManager.configureRemoteHosts(
+    (hostId) => settings.get().remoteHosts.find((host) => host.id === hostId) ?? null
+  );
 
   await terminalManager.restorePersistedSessions();
   limitsService = new LimitsService(providerClis, app.getVersion());

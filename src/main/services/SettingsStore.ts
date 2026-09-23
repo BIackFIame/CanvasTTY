@@ -14,6 +14,7 @@ import type {
   CanvasOverlayPlacement,
   CanvasWheelCaptureMode,
   CanvasPatternId,
+  DataClass,
   EdgePanSpeed,
   FocusActivation,
   HomeAccentColors,
@@ -25,9 +26,12 @@ import type {
   MediaFit,
   MinimapInteractionMode,
   PaletteId,
+  PathPolicy,
   PluginCanvasInstance,
+  ProviderAccount,
   ProviderSecretId,
   RadialLauncherItemId,
+  RemoteHost,
   SessionRowColorMode,
   ShortcutBindings,
   StickyNote,
@@ -36,6 +40,7 @@ import type {
 import {
   API_PROFILE_PROTOCOLS,
   CANVAS_LAUNCHER_ITEMS,
+  DATA_CLASSES,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_HOME_ACCENT_COLORS,
   DEFAULT_HOME_GRID_SIZE,
@@ -47,6 +52,8 @@ import {
   PROVIDER_SECRET_IDS,
   HOME_GRID_MIN_COLUMNS,
   HOME_GRID_MIN_ROWS,
+  isValidPathPolicyPattern,
+  isValidRemoteHost,
   RADIAL_LAUNCHER_ITEMS,
   STICKY_NOTE_MAX_SIZE,
   STICKY_NOTE_MIN_SIZE,
@@ -68,7 +75,8 @@ const SESSION_ROW_COLOR_MODES = new Set<SessionRowColorMode>(["monochrome", "sta
 const CANVAS_COLORS = new Set<CanvasColorId>(["sage", "lilac", "night", "sand", "mist", "rose", "slate"]);
 const PATTERNS = new Set<CanvasPatternId>(["dots", "grid", "waves", "diagonal", "rings", "none"]);
 const MEDIA_FITS = new Set<MediaFit>(["cover", "contain"]);
-const SETTINGS_VERSION = 20;
+const SETTINGS_VERSION = 24;
+const DATA_CLASS_SET = new Set<DataClass>(DATA_CLASSES);
 const GROK_LAUNCHER_SETTINGS_VERSION = 3;
 const EXPANDED_LIMIT_SETTINGS_VERSION = 5;
 const QWEN_SETTINGS_VERSION = 6;
@@ -168,6 +176,10 @@ export class SettingsStore {
         || !("canvasRegions" in source)
         || !("stickyNotes" in source)
         || !("apiProfiles" in source)
+        || !("remoteHosts" in source)
+        || !("defaultDataClass" in source)
+        || !("providerAccounts" in source)
+        || !("pathPolicies" in source)
         || source.canvasColor === "palette"
         || source.settingsVersion !== SETTINGS_VERSION;
       let migratedCandidate: Record<string, unknown> = source;
@@ -331,7 +343,11 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     mediaFit: "cover",
     lastDirectory: homedir(),
     acknowledgedDangerousProfiles: [],
+    defaultDataClass: "D2",
     apiProfiles: [],
+    remoteHosts: [],
+    providerAccounts: [],
+    pathPolicies: [],
     homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
     homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
     canvasRegions: [],
@@ -384,6 +400,166 @@ export function normalizeApiProfiles(
       : { id, name, protocol, secretRef });
   }
   return profiles;
+}
+
+// Invalid or absent classifications read as D2 (confidential): a tier nobody
+// can parse must fail toward protection, never toward public.
+export function normalizeDataClass(candidate: unknown): DataClass {
+  return typeof candidate === "string" && DATA_CLASS_SET.has(candidate as DataClass)
+    ? candidate as DataClass
+    : "D2";
+}
+
+const MAX_REMOTE_HOSTS = 32;
+
+// Invalid entries are dropped, never repaired: a host that no longer matches
+// the schema must disappear rather than silently aim orchestration at the
+// wrong machine. Field rules live in shared/contracts (remoteHostInvalidReason)
+// so the connectivity service enforces exactly the same shape.
+export function normalizeRemoteHosts(
+  value: unknown,
+  fallback: readonly RemoteHost[]
+): RemoteHost[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const seen = new Set<string>();
+  const hosts: RemoteHost[] = [];
+  for (const candidate of value) {
+    if (hosts.length >= MAX_REMOTE_HOSTS) break;
+    if (!isValidRemoteHost(candidate) || seen.has(candidate.id)) continue;
+    seen.add(candidate.id);
+    // Workspaces ride along only as rebuilt two-key rows: an invalid mapping
+    // already dropped the whole host above, and an empty array falls away the
+    // same way absent optional fields do.
+    const workspaces = candidate.workspaces && candidate.workspaces.length > 0
+      ? candidate.workspaces.map((workspace) => ({
+        localPath: workspace.localPath,
+        remotePath: workspace.remotePath
+      }))
+      : null;
+    hosts.push(candidate.sshUser
+      || candidate.sshPort !== undefined
+      || candidate.priority !== undefined
+      || candidate.maxSessions !== undefined
+      || workspaces !== null
+      || candidate.providerAccess !== undefined
+      || candidate.maxDataClass !== undefined
+      ? {
+        id: candidate.id,
+        label: candidate.label,
+        sshHost: candidate.sshHost,
+        ...(candidate.sshUser ? { sshUser: candidate.sshUser } : {}),
+        ...(candidate.sshPort !== undefined ? { sshPort: candidate.sshPort } : {}),
+        ...(candidate.priority !== undefined ? { priority: candidate.priority } : {}),
+        ...(candidate.maxSessions !== undefined ? { maxSessions: candidate.maxSessions } : {}),
+        ...(workspaces ? { workspaces } : {}),
+        ...(candidate.providerAccess
+          ? {
+            providerAccess: {
+              mode: candidate.providerAccess.mode,
+              providers: [...candidate.providerAccess.providers]
+            }
+          }
+          : {}),
+        ...(candidate.maxDataClass !== undefined ? { maxDataClass: candidate.maxDataClass } : {})
+      }
+      : { id: candidate.id, label: candidate.label, sshHost: candidate.sshHost });
+  }
+  return hosts;
+}
+
+const MAX_PROVIDER_ACCOUNTS = 32;
+const MAX_ACCOUNT_MODELS = 64;
+const MAX_PATH_POLICIES = 64;
+
+// Invalid entries are dropped, never repaired (the normalizeRemoteHosts
+// discipline): an account that no longer matches the schema must disappear
+// rather than silently route work past a tier or privacy boundary. Inside an
+// otherwise valid account, an invalid or duplicated model id drops just that
+// model entry — the account keeps the rest of its list; a models list left
+// empty by that filtering falls away entirely, i.e. reads as unrestricted.
+export function normalizeProviderAccounts(
+  value: unknown,
+  fallback: readonly ProviderAccount[]
+): ProviderAccount[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const seen = new Set<string>();
+  const accounts: ProviderAccount[] = [];
+  for (const candidate of value) {
+    if (accounts.length >= MAX_PROVIDER_ACCOUNTS) break;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    const id = typeof record.id === "string" && record.id.length > 0 && record.id.length <= 64
+      ? record.id
+      : null;
+    if (!id || seen.has(id)) continue;
+    const label = typeof record.label === "string"
+      && record.label.trim().length > 0
+      && record.label.length <= 80
+      ? record.label
+      : null;
+    if (!label) continue;
+    if (!AGENT_PROVIDERS.has(record.provider as AgentProviderId)) continue;
+    const tier = record.tier === undefined
+      ? undefined
+      : typeof record.tier === "string" && record.tier.trim().length > 0 && record.tier.length <= 40
+        ? record.tier
+        : null;
+    if (tier === null) continue;
+    let models: string[] | null = null;
+    if (record.models !== undefined) {
+      if (!Array.isArray(record.models) || record.models.length > MAX_ACCOUNT_MODELS) continue;
+      const collected: string[] = [];
+      const seenModels = new Set<string>();
+      for (const model of record.models) {
+        if (typeof model !== "string" || model.trim().length === 0 || model.length > 100) continue;
+        const key = model.toLowerCase();
+        if (seenModels.has(key)) continue;
+        seenModels.add(key);
+        collected.push(model);
+      }
+      models = collected.length > 0 ? collected : null;
+    }
+    const shared = record.shared;
+    if (shared !== undefined && typeof shared !== "boolean") continue;
+    const maxDataClass = record.maxDataClass;
+    if (maxDataClass !== undefined && !DATA_CLASS_SET.has(maxDataClass as DataClass)) continue;
+    accounts.push({
+      id,
+      provider: record.provider as AgentProviderId,
+      label,
+      ...(tier !== undefined ? { tier } : {}),
+      ...(models !== null ? { models } : {}),
+      ...(shared === true ? { shared } : {}),
+      ...(maxDataClass !== undefined ? { maxDataClass: maxDataClass as DataClass } : {})
+    });
+    seen.add(id);
+  }
+  return accounts;
+}
+
+// Same drop-don't-repair discipline as the other policy tables: a policy that
+// violates the pattern grammar or names an unknown class disappears rather
+// than silently classifying paths by a repaired guess. Duplicate patterns are
+// dropped (the first occurrence wins, matching the FIRST-MATCH-WINS lookup in
+// dataClassForPath), and the table holds at most 64 policies.
+export function normalizePathPolicies(
+  value: unknown,
+  fallback: readonly PathPolicy[]
+): PathPolicy[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const seen = new Set<string>();
+  const policies: PathPolicy[] = [];
+  for (const candidate of value) {
+    if (policies.length >= MAX_PATH_POLICIES) break;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    if (!isValidPathPolicyPattern(record.pattern)) continue;
+    if (typeof record.dataClass !== "string" || !DATA_CLASS_SET.has(record.dataClass as DataClass)) continue;
+    if (seen.has(record.pattern)) continue;
+    seen.add(record.pattern);
+    policies.push({ pattern: record.pattern, dataClass: record.dataClass as DataClass });
+  }
+  return policies;
 }
 
 export function normalizeSettings(
@@ -541,7 +717,11 @@ export function normalizeSettings(
       ? source.lastDirectory
       : fallback.lastDirectory,
     acknowledgedDangerousProfiles: [...new Set(acknowledged)],
+    defaultDataClass: normalizeDataClass(source.defaultDataClass),
   apiProfiles: normalizeApiProfiles(source.apiProfiles, fallback.apiProfiles ?? []),
+    remoteHosts: normalizeRemoteHosts(source.remoteHosts, fallback.remoteHosts ?? []),
+    providerAccounts: normalizeProviderAccounts(source.providerAccounts, fallback.providerAccounts ?? []),
+    pathPolicies: normalizePathPolicies(source.pathPolicies, fallback.pathPolicies ?? []),
     homeGridSize,
     homeLayout,
     canvasRegions,

@@ -26,12 +26,13 @@ function tool(name, description, properties = {}, required = []) {
 export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   tool(
     "spawn_agent",
-    "Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id.",
+    "Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. host is optional placement only: \"auto\" lets CanvasTTY pick a configured remote host (failing open to local), or pass a host id; the provider always runs exactly as requested.",
     {
       provider: string({ minLength: 1, maxLength: 32 }),
       cwd: string({ minLength: 1, maxLength: 4_096 }),
       prompt,
-      title
+      title,
+      host: string({ minLength: 1, maxLength: 128 })
     },
     ["provider", "cwd"]
   ),
