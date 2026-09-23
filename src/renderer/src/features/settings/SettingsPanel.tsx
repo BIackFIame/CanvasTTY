@@ -1,3 +1,5 @@
+import { ContainerProfilesSettings } from "./ContainerProfilesSettings";
+import { RetainedWorkspacesSettings } from "./RetainedWorkspacesSettings";
 import { EvenG2Controls } from "./EvenG2Controls";
 import { useEffect, useState } from "react";
 import type {
@@ -117,6 +119,8 @@ interface SettingsPanelProps {
   browser: BrowserSnapshot;
   onClose(): void;
   onChange(patch: Partial<AppSettings>): Promise<void>;
+  /** Rejecting persistence for forms with secret-store rollback. */
+  onPersist(patch: Partial<AppSettings>): Promise<void>;
   onPreviewPlugin(sourceUrl: string): Promise<PluginInstallPreview>;
   onInstallPlugin(token: string, selectedModules: string[]): Promise<void>;
   onSearchPlugins(query: string): Promise<GithubPluginSearchResult[]>;
@@ -144,6 +148,7 @@ export function SettingsPanel({
   browser,
   onClose,
   onChange,
+  onPersist,
   onPreviewPlugin,
   onInstallPlugin,
   onSearchPlugins,
@@ -721,7 +726,9 @@ export function SettingsPanel({
                 label={t(locale, "apiProfiles")}
                 description={t(locale, "apiProfilesDescription")}
               >
-                <ApiProfilesSettings settings={settings} onChange={onChange} />
+                <ApiProfilesSettings settings={settings} onChange={onChange} onPersist={onPersist} />
+                {open && <RetainedWorkspacesSettings settings={settings} onChange={onPersist} />}
+                {open && <ContainerProfilesSettings settings={settings} onPersist={onPersist} />}
               </SettingGroup>
             </>
           )}

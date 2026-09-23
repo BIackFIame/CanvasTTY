@@ -169,12 +169,12 @@ test("relative patterns match any path with the patterned ancestors", () => {
   assert.equal(dataClassForPath(policies, "docstuff/a.md", "D2"), "D2", "segments are whole, not prefixes");
 });
 
-test("anchored patterns match at most one repo-root directory deep", () => {
+test("anchored patterns use an explicit repository root for absolute paths", () => {
   const policies = [{ pattern: "/src/core/**", dataClass: "D3" }];
-  assert.equal(dataClassForPath(policies, "/repo/src/core/x.ts", "D1"), "D3");
-  assert.equal(dataClassForPath(policies, "/repo/src/core/deep/y.ts", "D1"), "D3");
+  assert.equal(dataClassForPath(policies, "/repo/src/core/x.ts", "D1", "/repo"), "D3");
+  assert.equal(dataClassForPath(policies, "/repo/src/core/deep/y.ts", "D1", "/repo"), "D3");
   assert.equal(dataClassForPath(policies, "src/core/x.ts", "D1"), "D3", "a repo-relative path anchors directly");
-  assert.equal(dataClassForPath(policies, "/repo/vendor/src/core/x.ts", "D1"), "D1", "two directories above the anchor never match");
+  assert.equal(dataClassForPath(policies, "/repo/vendor/src/core/x.ts", "D1", "/repo"), "D1", "two directories above the anchor never match");
   assert.equal(dataClassForPath(policies, "/repo/src/other/x.ts", "D1"), "D1");
 });
 
@@ -419,16 +419,15 @@ test("a path class lower than the request class never lowers the tier", async (t
   terminals.disposeAll();
 });
 
-test("with no classification in play at all, a resolver alone enforces nothing (fail-open)", async (t) => {
+test("a configured path resolver enforces classification without an explicit default", async (t) => {
   const { restricted } = await policyWorkspaces(t);
   const { terminals, control } = fixture({ pathClass: () => "D3" });
   const parent = parentUnder(terminals);
-  const child = control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: restricted });
-  assert.equal(child.provider, "qwen");
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: restricted }), /at most D1/u);
   terminals.disposeAll();
 });
 
-test("a throwing resolver reads as no policy and never breaks spawning", async (t) => {
+test("a throwing resolver fails closed before spawning", async (t) => {
   const { restricted } = await policyWorkspaces(t);
   const { terminals, control } = fixture({
     defaultDataClass: "D1",
@@ -437,8 +436,7 @@ test("a throwing resolver reads as no policy and never breaks spawning", async (
     }
   });
   const parent = parentUnder(terminals);
-  const child = control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: restricted });
-  assert.equal(child.provider, "qwen");
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: restricted }), /resolver exploded/u);
   terminals.disposeAll();
 });
 

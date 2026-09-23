@@ -1,3 +1,4 @@
+import type { AgentLaunchOptions, CreateSessionRequest } from "../../shared/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentProviderId,
@@ -113,6 +114,10 @@ const FALLBACK_SETTINGS: AppSettings = {
   lastDirectory: "/",
   acknowledgedDangerousProfiles: [],
   defaultDataClass: "D2",
+  agentBudgets: { maxLocalAgents: 4, maxRemoteAgentsPerHost: 4, maxChildren: 4, maxDepth: 2 },
+  maxAccountsPerProviderPerHost: 1,
+  requiresSandboxProfiles: [],
+  containerProfiles: [],
   homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
   homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
   canvasRegions: [],
@@ -357,15 +362,14 @@ export function App(): React.JSX.Element {
   }, []);
 
   const createSession = useCallback(async (
-    provider: ProviderId,
-    profile: LaunchProfileId,
-    cwd: string,
+    options: AgentLaunchOptions,
     requestedCenter?: Point
   ): Promise<SessionSnapshot> => {
+    const { cwd } = options;
     const position = requestedCenter
       ? centeredWindowPosition(requestedCenter, { width: 700, height: 430 })
       : nextSessionPosition(sessions.length, settings.homeGridSize);
-    const session = await window.canvasTTY.terminal.create({ provider, profile, cwd, position });
+    const session = await window.canvasTTY.terminal.create({ ...options, position });
     setSessions((current) => upsertSnapshot(current, session));
     setActiveSessionId(session.id);
     await saveSettings({ lastDirectory: cwd });
@@ -376,7 +380,7 @@ export function App(): React.JSX.Element {
 
   const openTerminal = useCallback(async (position?: Point): Promise<void> => {
     try {
-      await createSession("terminal", "normal", settings.lastDirectory, position);
+      await createSession({ provider: "terminal", profile: "normal", cwd: settings.lastDirectory }, position);
       showToast(t(settings.locale, "terminalStarted"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : t(settings.locale, "launchFailed"));
@@ -399,13 +403,11 @@ export function App(): React.JSX.Element {
 
 
   const launchAgent = useCallback(async (
-    provider: AgentProviderId,
-    profile: LaunchProfileId,
-    cwd: string
+    options: AgentLaunchOptions
   ): Promise<void> => {
-    await createSession(provider, profile, cwd, launchPosition ?? undefined);
+    await createSession(options, launchPosition ?? undefined);
     setLaunchPosition(null);
-    showToast(`${t(settings.locale, "sessionStarted")}: ${provider}`);
+    showToast(`${t(settings.locale, "sessionStarted")}: ${options.provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);
 
   const restartSession = useCallback(async (id: string): Promise<void> => {
@@ -1138,6 +1140,7 @@ export function App(): React.JSX.Element {
         browser={browser}
         onClose={() => setSettingsOpen(false)}
         onChange={saveSettings}
+        onPersist={persistSettings}
         onPreviewPlugin={previewPlugin}
         onInstallPlugin={installPlugin}
         onSearchPlugins={searchPlugins}

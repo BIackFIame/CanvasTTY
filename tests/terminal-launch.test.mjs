@@ -77,14 +77,14 @@ test("restored agent windows use each provider's native continue mode", () => {
       providerCli: available(provider, `/resolved/${provider}`),
       resumePrevious: true
     });
-    assert.deepEqual(launch.args, ["--bridge", "--continue"]);
+    assert.deepEqual(launch.args, [...(provider === "hermes" ? ["chat"] : []), "--bridge", "--continue"]);
   }
-  // antigravity deliberately restores fresh: no latest-session launch flag.
+  // Current Antigravity has a measured latest-session flag.
   const restored = resolveTerminalLaunch("antigravity", "normal", ["--bridge"], {
     providerCli: available("antigravity", "/resolved/agy"),
     resumePrevious: true
   });
-  assert.deepEqual(restored.args, ["--bridge"]);
+  assert.deepEqual(restored.args, ["--bridge", "--continue"]);
 });
 
 test("OMP and Pi use their documented dangerous flags instead of the legacy default", () => {
@@ -95,9 +95,9 @@ test("OMP and Pi use their documented dangerous flags instead of the legacy defa
   assert.deepEqual(pi.args, ["--approve"]);
 });
 
-test("Cursor YOLO uses its Claude-Code-style permission bypass", () => {
+test("Cursor YOLO uses its measured force flag", () => {
   const cursor = resolveTerminalLaunch("cursor", "yolo", [], { providerCli: available("cursor", "/resolved/agent") });
-  assert.deepEqual(cursor.args, ["--dangerously-skip-permissions"]);
+  assert.deepEqual(cursor.args, ["--force"]);
 });
 
 test("MiniMax YOLO launches the stock CLI because mcode has no bypass flag", () => {

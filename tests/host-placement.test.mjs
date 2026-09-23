@@ -450,7 +450,8 @@ test("every host is probed in parallel even when the first host would win", asyn
   assert.equal(probesOverlapped, true, "all metric probes must start before any of them resolves");
   assert.deepEqual([...probed.metrics].sort(), ["alpha", "beta", "gamma"]);
   assert.deepEqual([...probed.discovery].sort(), ["alpha", "beta", "gamma"]);
-  assert.deepEqual([...probed.sessions].sort(), ["alpha", "beta", "gamma"]);
+  assert.deepEqual([...new Set(probed.sessions)].sort(), ["alpha", "beta", "gamma"]);
+  assert.ok(probed.sessions.length >= 6, "live capacity is checked before and after probes");
   assert.equal(decision.kind, "remote");
   assert.equal(decision.host.id, "alpha");
 });

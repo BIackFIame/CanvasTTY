@@ -32,7 +32,15 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
       cwd: string({ minLength: 1, maxLength: 4_096 }),
       prompt,
       title,
-      host: string({ minLength: 1, maxLength: 128 })
+      host: string({ minLength: 1, maxLength: 128 }),
+      model: string({ minLength: 1, maxLength: 100 }),
+      accountId: string({ minLength: 1, maxLength: 64 }),
+      dataClass: string({ enum: ["D0", "D1", "D2", "D3"] }),
+      profile: string({ enum: ["normal", "yolo"] }),
+      isolation: string({ enum: ["direct", "worktree", "container"] }),
+      worktreeRef: string({ maxLength: 256 }),
+      containerProfileId: string({ maxLength: 64 }),
+      allowSubagents: boolean()
     },
     ["provider", "cwd"]
   ),
@@ -104,6 +112,7 @@ export function validateOrchestrationArguments(toolName, args) {
       }
       if (candidate.length < (property.minLength ?? 0)) errors.push(`${key} is too short.`);
       if (property.maxLength !== undefined && candidate.length > property.maxLength) errors.push(`${key} is too long.`);
+      if (property.enum && !property.enum.includes(candidate)) errors.push(`${key} has an unsupported value.`);
       value[key] = candidate;
     } else if (property.type === "boolean") {
       if (typeof candidate !== "boolean") errors.push(`${key} must be a boolean.`);

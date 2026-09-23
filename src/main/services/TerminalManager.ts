@@ -1,3 +1,5 @@
+import { assertIsolationRequest } from "../../shared/isolation.ts";
+import type { PreparedProviderAccountLaunch, ProviderAccountLaunchCoordinator } from "./ProviderAccountLaunchService.ts";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { basename } from "node:path";
@@ -7,6 +9,7 @@ import type {
   CreateSessionRequest,
   Point,
   ProviderId,
+  ProviderAccount,
   RemoteHost,
   SessionBounds,
   SessionRole,
@@ -36,6 +39,7 @@ import type {
 } from "./agent-runtime/AgentRuntimeBridge.ts";
 import { AGENT_RUNTIME_ENV } from "../../agent-runtime/runtime-protocol.mjs";
 import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { SessionLaunchPolicy, assertLaunchPolicyFields } from "./SessionLaunchPolicy.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { remoteAgentLaunch } from "./remoteAgentLaunch.ts";
@@ -54,6 +58,7 @@ import {
   type ProviderLifecycleParser
 } from "./providerLifecycle.ts";
 
+const MAX_PENDING_INPUT_CHARS = 131_072;
 const MAX_SCROLLBACK_CHARS = 240_000;
 const OUTPUT_BATCH_MS = 16;
 const DEFAULT_TERMINAL_SIZE = { width: 700, height: 430 };
@@ -70,6 +75,7 @@ interface ManagedSession {
   bufferLength: number;
   outputOffset: number;
   pendingOutput: string[];
+  pendingInput: string;
   outputTimer: ReturnType<typeof setTimeout> | null;
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
@@ -77,6 +83,9 @@ interface ManagedSession {
   lifecycle: ProviderLifecycleParser | null;
   awaitingInitialResize: boolean;
   resumeOnLaunch: boolean;
+  providerLaunch: PreparedProviderAccountLaunch | null;
+  launchGeneration: number;
+  launchTask: Promise<void> | null;
 }
 
 export interface ProviderLifecycleSignal {
@@ -100,6 +109,8 @@ export class TerminalManager {
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
   private resolveRemoteHost: ((hostId: string) => RemoteHost | null) | null = null;
+  private launchPolicy: SessionLaunchPolicy | null = null;
+  private providerLaunch: ProviderAccountLaunchCoordinator | null = null;
   private sessionStore: TerminalSessionStore | null = null;
   private sessionPersistenceEnabled = false;
   private suppressPersistence = false;
@@ -118,6 +129,28 @@ export class TerminalManager {
     this.agentRuntime = agentRuntime;
     this.spawnPty = spawnPty;
     this.lifecycleHooksEnabled = lifecycleHooksEnabled;
+  }
+
+  configureLaunchPolicy(policy: SessionLaunchPolicy): void {
+    this.launchPolicy = policy;
+  }
+
+  configureProviderLaunch(coordinator: ProviderAccountLaunchCoordinator): void { this.providerLaunch = coordinator; }
+
+  private needsPreparedLaunch(provider: ProviderId): boolean { return !!this.providerLaunch && (provider !== "terminal" || !!this.providerLaunch.handlesTerminals); }
+
+  async waitForLaunch(id: string): Promise<void> { await this.sessions.get(id)?.launchTask; }
+
+  hasLaunchPolicy(): boolean {
+    return this.launchPolicy !== null;
+  }
+
+  classifyLaunchRequest<T extends CreateSessionRequest>(request: T, forPlacement = false): T {
+    return this.launchPolicy?.classify(request, forPlacement) ?? request;
+  }
+
+  placementAccounts(request: CreateSessionRequest): ProviderAccount[] | undefined {
+    return this.launchPolicy?.placementAccounts(request);
   }
 
   configureOrchestration(coordinator: OrchestrationLaunchCoordinator | null): void {
@@ -170,7 +203,10 @@ export class TerminalManager {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
     this.suppressPersistence = true;
+    const pendingLaunches = [...this.sessions.values()].flatMap((session) => session.launchTask ? [session.launchTask] : []);
+    const preparedLaunches = [...this.sessions.values()].flatMap((session) => session.providerLaunch ? [session.providerLaunch] : []);
     this.disposeAll();
+    await Promise.allSettled([...pendingLaunches, ...preparedLaunches.map((prepared) => prepared.cleanup())]);
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
   }
 
@@ -206,6 +242,10 @@ export class TerminalManager {
   create(request: CreateSessionRequest): SessionSnapshot {
     assertCreateRequest(request);
     assertDirectory(request.cwd);
+    if (request.isolation?.mode === "container" && !this.providerLaunch?.handlesTerminals) throw new Error("Container launch preparation is unavailable.");
+    if (request.isolation?.mode === "worktree" && (!this.providerLaunch?.handlesTerminals || request.hostId !== undefined)) throw new Error("Local worktree launch preparation is required for this isolation mode.");
+    const dataClassInherited = request.dataClass === undefined;
+    request = this.launchPolicy?.check(request, this.listMetadata()) ?? request;
 
     const role = request.role ?? "interactive";
     if (request.parentSessionId !== undefined && !this.sessions.has(request.parentSessionId)) {
@@ -231,12 +271,18 @@ export class TerminalManager {
       title: request.title?.trim() || defaultTitle(request.provider, request.cwd),
       titleCustomized: Boolean(request.title?.trim()),
       cwd: request.cwd,
+      ...(request.isolation ? { isolation: structuredClone(request.isolation) } : {}),
+      ...(this.needsPreparedLaunch(request.provider) ? { execution: { mode: request.isolation?.mode ?? "direct", sourceCwd: request.cwd, filesystemRestricted: false, state: "preparing" } as const } : {}),
       position: request.position,
       size: DEFAULT_TERMINAL_SIZE,
       role,
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
       ...(request.hostId !== undefined ? { hostId: request.hostId } : {}),
       ...(request.accountId !== undefined ? { accountId: request.accountId } : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.dataClass !== undefined ? { dataClass: request.dataClass } : {}),
+      ...(role === "subagent" || request.allowSubagents !== undefined ? { allowSubagents: request.allowSubagents ?? false } : {}),
+      ...(this.launchPolicy ? { dataClassInherited } : {}),
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -248,9 +294,9 @@ export class TerminalManager {
     const awaitMeasuredGrid = request.provider === "grok"
       && request.hostId === undefined
       && this.providerClis.get(request.provider).state === "available";
-    const launched = awaitMeasuredGrid
+    const launched = awaitMeasuredGrid || (this.needsPreparedLaunch(request.provider))
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, role, request.hostId);
+      : this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -263,6 +309,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingInput: "",
       outputTimer: null,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
@@ -271,9 +318,11 @@ export class TerminalManager {
         ? createProviderLifecycleParser(request.provider, request.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: false
+      resumeOnLaunch: false,
+      providerLaunch: null, launchGeneration: 0, launchTask: null
     };
     this.sessions.set(id, session);
+    if (this.needsPreparedLaunch(request.provider) && !awaitMeasuredGrid) this.startPreparedLaunch(id, session, false);
     if (launched.process) this.bindProcess(id, session, launched.process);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
@@ -288,7 +337,23 @@ export class TerminalManager {
     if (!session) throw new Error("Terminal session does not exist.");
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
 
-    if (session.metadata.provider === "grok") {
+    if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
+    session.pendingInput = "";
+    if (this.needsPreparedLaunch(session.metadata.provider)) {
+      this.releaseProviderLaunch(session);
+      session.agentBrowser?.cleanup(); session.agentRuntime?.cleanup(); session.agentOrchestration?.cleanup();
+      session.agentBrowser = null; session.agentRuntime = null; session.agentOrchestration = null; session.process = null;
+      session.metadata.startedAt = Date.now(); session.metadata.status = initialSessionStatus(session.metadata.provider);
+      session.metadata.exitCode = null; session.metadata.failureDetails = null;
+      session.awaitingInitialResize = session.metadata.provider === "grok" && session.metadata.hostId === undefined;
+      session.resumeOnLaunch = false;
+      session.lifecycle = this.lifecycleHooksEnabled ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd) : null;
+      if (!session.awaitingInitialResize) this.startPreparedLaunch(id, session, false);
+      this.emitSession(session.metadata); this.schedulePersistence();
+      return snapshot(session);
+    }
+
+    if (session.metadata.provider === "grok" && session.metadata.hostId === undefined) {
       session.agentBrowser?.cleanup();
       session.agentRuntime?.cleanup();
       session.agentOrchestration?.cleanup();
@@ -309,17 +374,7 @@ export class TerminalManager {
     }
 
     session.agentOrchestration?.cleanup();
-    const launched = this.spawnProcess(
-      id,
-      session.metadata.provider,
-      session.metadata.profile,
-      session.metadata.cwd,
-      session.cols,
-      session.rows,
-      false,
-      session.metadata.role,
-      session.metadata.hostId
-    );
+    const launched = this.spawnProcess(session.metadata, session.cols, session.rows);
     session.process = launched.process;
     session.agentBrowser = launched.agentBrowser;
     session.agentRuntime = launched.agentRuntime;
@@ -346,7 +401,13 @@ export class TerminalManager {
   input(id: string, data: string): void {
     if (typeof data !== "string" || data.length === 0) return;
     const session = this.sessions.get(id);
-    if (!session || session.metadata.exitCode !== null || !session.process) return;
+    if (!session || session.metadata.exitCode !== null) return;
+    if (session.awaitingInitialResize || session.launchTask) {
+      if (session.pendingInput.length + data.length > MAX_PENDING_INPUT_CHARS) throw new Error("Agent pending input exceeds the limit.");
+      session.pendingInput += data;
+      return;
+    }
+    if (!session.process) return;
     const process = session.process;
     tryPtyOperation(() => process.write(data));
   }
@@ -425,11 +486,30 @@ export class TerminalManager {
   }
 
   dispose(id: string): void {
+    // Remove descendants first so their processes and capabilities cannot
+    // outlive the ownership chain. The visited set also bounds corrupt legacy
+    // descriptor cycles instead of recursing forever.
+    const pending = [id];
+    const ordered = new Set<string>();
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (ordered.has(current)) continue;
+      ordered.add(current);
+      for (const [childId, child] of this.sessions) {
+        if (child.metadata.parentSessionId === current) pending.push(childId);
+      }
+    }
+    for (const sessionId of [...ordered].reverse()) this.disposeSession(sessionId);
+  }
+
+  private disposeSession(id: string): void {
     const session = this.sessions.get(id);
     if (!session) return;
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    session.launchGeneration++;
+    this.releaseProviderLaunch(session);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -460,12 +540,20 @@ export class TerminalManager {
       title: descriptor.title,
       titleCustomized: descriptor.titleCustomized,
       cwd: descriptor.cwd,
+      ...(descriptor.isolation ? { isolation: structuredClone(descriptor.isolation) } : {}),
+      ...(descriptor.workspaceId ? { execution: { workspaceId: descriptor.workspaceId, mode: "worktree", sourceCwd: descriptor.cwd, filesystemRestricted: false, state: "preparing" } as const } : {}),
       position: descriptor.position,
       size: descriptor.size,
       role: descriptor.role ?? "interactive",
       ...(descriptor.parentSessionId !== undefined ? { parentSessionId: descriptor.parentSessionId } : {}),
       ...(descriptor.hostId !== undefined ? { hostId: descriptor.hostId } : {}),
       ...(descriptor.accountId !== undefined ? { accountId: descriptor.accountId } : {}),
+      ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
+      ...(descriptor.launchBinding !== undefined ? { launchBinding: descriptor.launchBinding } : {}),
+      ...(descriptor.dataClass !== undefined ? { dataClass: descriptor.dataClass } : {}),
+      ...(descriptor.role === "subagent" || descriptor.allowSubagents !== undefined ? { allowSubagents: descriptor.allowSubagents ?? false } : {}),
+      ...(this.launchPolicy || descriptor.dataClassInherited !== undefined
+        ? { dataClassInherited: descriptor.dataClassInherited ?? (descriptor.dataClass === undefined) } : {}),
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -479,9 +567,11 @@ export class TerminalManager {
     let directoryReady = true;
     try {
       assertDirectory(descriptor.cwd);
+      if (this.launchPolicy) Object.assign(metadata, this.launchPolicy.check(metadata, this.listMetadata(), descriptor.id));
     } catch (error) {
       directoryReady = false;
       metadata.status = "failed";
+      if (metadata.execution) metadata.execution.state = "failed";
       metadata.exitCode = 1;
       metadata.failureDetails = error instanceof Error ? error.message : String(error);
     }
@@ -490,19 +580,9 @@ export class TerminalManager {
       && descriptor.hostId === undefined
       && this.providerClis.get(descriptor.provider).state === "available";
 
-    if (directoryReady && !awaitMeasuredGrid) {
+    if (directoryReady && !awaitMeasuredGrid && !(this.needsPreparedLaunch(descriptor.provider))) {
       try {
-        const launched = this.spawnProcess(
-          descriptor.id,
-          descriptor.provider,
-          descriptor.profile,
-          descriptor.cwd,
-          INITIAL_TERMINAL_COLS,
-          INITIAL_TERMINAL_ROWS,
-          descriptor.provider !== "terminal",
-          descriptor.role ?? "interactive",
-          descriptor.hostId
-        );
+        const launched = this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, descriptor.provider !== "terminal");
         process = launched.process;
         agentBrowser = launched.agentBrowser;
         agentRuntime = launched.agentRuntime;
@@ -525,6 +605,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingInput: "",
       outputTimer: null,
       agentBrowser,
       agentRuntime,
@@ -533,9 +614,11 @@ export class TerminalManager {
         ? createProviderLifecycleParser(descriptor.provider, descriptor.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: awaitMeasuredGrid && descriptor.provider !== "terminal"
+      resumeOnLaunch: awaitMeasuredGrid && descriptor.provider !== "terminal",
+      providerLaunch: null, launchGeneration: 0, launchTask: null
     };
     this.sessions.set(descriptor.id, session);
+    if (directoryReady && !awaitMeasuredGrid && this.needsPreparedLaunch(descriptor.provider)) this.startPreparedLaunch(descriptor.id, session, true);
     if (process) this.bindProcess(descriptor.id, session, process);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
@@ -567,18 +650,10 @@ export class TerminalManager {
     session.awaitingInitialResize = false;
     const resumePrevious = session.resumeOnLaunch;
     session.resumeOnLaunch = false;
+    if (this.needsPreparedLaunch(session.metadata.provider)) { this.startPreparedLaunch(id, session, resumePrevious); return; }
     try {
-      const launched = this.spawnProcess(
-        id,
-        session.metadata.provider,
-        session.metadata.profile,
-        session.metadata.cwd,
-        session.cols,
-        session.rows,
-        resumePrevious,
-        session.metadata.role,
-        session.metadata.hostId
-      );
+      if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
+      const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious);
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
       session.agentRuntime = launched.agentRuntime;
@@ -589,7 +664,10 @@ export class TerminalManager {
         session.metadata.status = initialSessionStatus(session.metadata.provider);
         session.metadata.exitCode = null;
         session.metadata.failureDetails = null;
-        if (launched.process) this.bindProcess(id, session, launched.process);
+        if (launched.process) {
+          this.bindProcess(id, session, launched.process);
+          if (session.pendingInput.length > 0) tryPtyOperation(() => launched.process!.write(session.pendingInput));
+        }
         const runtimeStatus = this.agentRuntime?.currentStatus(id);
         if (runtimeStatus) session.metadata.status = runtimeStatus;
       }
@@ -601,19 +679,81 @@ export class TerminalManager {
       session.metadata.exitCode = 1;
       session.metadata.failureDetails = error instanceof Error ? error.message : String(error);
     }
+    session.pendingInput = "";
     this.emitSession(session.metadata);
+    this.schedulePersistence();
+  }
+
+  private startPreparedLaunch(id: string, session: ManagedSession, resumePrevious: boolean): void {
+    const coordinator = this.providerLaunch;
+    if (!coordinator || session.launchTask) return;
+    const generation = ++session.launchGeneration;
+    if (session.metadata.execution) session.metadata.execution.state = "preparing";
+    const active = (): boolean => this.sessions.get(id) === session && session.launchGeneration === generation && session.metadata.exitCode === null;
+    const operation = async (): Promise<void> => {
+      let prepared: PreparedProviderAccountLaunch | null = null;
+      try {
+        if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
+        prepared = await coordinator.prepare(structuredClone(session.metadata), resumePrevious, { isCurrent: active });
+        if (!active()) { await prepared.cleanup(); return; }
+        // Live policy cannot authorize stale prepared credentials or endpoint configuration.
+        if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
+        prepared.assertCurrent(session.metadata);
+        await prepared.beforeSpawn?.();
+        if (!active()) { await prepared.cleanup(); return; }
+        if (this.launchPolicy) Object.assign(session.metadata, this.launchPolicy.check(session.metadata, this.listMetadata(), id));
+        prepared.assertCurrent(session.metadata);
+        session.providerLaunch = prepared;
+        if (prepared.execution) session.metadata.execution = structuredClone(prepared.execution);
+        session.lifecycle = this.lifecycleHooksEnabled ? createProviderLifecycleParser(session.metadata.provider, prepared.execution?.executionCwd ?? session.metadata.cwd) : null;
+        if (prepared.skipBridges) session.metadata.integrationNote = prepared.integrationNote ?? "Custom account home: runtime hooks and browser bridge are unavailable; PTY/process integration only.";
+        else delete session.metadata.integrationNote;
+        const launched = this.spawnProcess(session.metadata, session.cols, session.rows, resumePrevious, prepared);
+        session.process = launched.process; session.agentBrowser = launched.agentBrowser;
+        session.agentRuntime = launched.agentRuntime; session.agentOrchestration = launched.agentOrchestration;
+        if (launched.failure) { applyLaunchFailure(session.metadata, launched.failure); if (session.metadata.execution) session.metadata.execution.state = "failed"; this.releaseProviderLaunch(session); }
+        else {
+          prepared.processStarted?.();
+          if (session.metadata.execution) session.metadata.execution.state = "running";
+          session.metadata.launchBinding = prepared.bindingDigest;
+          session.metadata.status = initialSessionStatus(session.metadata.provider);
+          session.metadata.failureDetails = null;
+          if (launched.process) {
+            this.bindProcess(id, session, launched.process);
+            if (session.pendingInput) tryPtyOperation(() => launched.process!.write(session.pendingInput));
+          }
+          const runtimeStatus = this.agentRuntime?.currentStatus(id);
+          if (runtimeStatus) session.metadata.status = runtimeStatus;
+        }
+      } catch (error) {
+        if (prepared) await prepared.cleanup().catch(() => undefined);
+        if (!active()) return;
+        session.providerLaunch = null; session.process = null;
+        session.metadata.status = "failed"; session.metadata.exitCode = 1;
+        if (session.metadata.execution) session.metadata.execution.state = "failed";
+        session.metadata.failureDetails = error instanceof Error ? error.message : "Provider launch preparation failed.";
+      } finally {
+        if (this.sessions.get(id) === session && session.launchGeneration === generation) {
+          session.pendingInput = ""; session.launchTask = null;
+          this.emitSession(session.metadata); this.schedulePersistence();
+        }
+      }
+    };
+    // Yield once so the reservation and promise exist before preparation starts.
+    session.launchTask = Promise.resolve().then(operation);
+  }
+
+  private releaseProviderLaunch(session: ManagedSession): void {
+    const prepared = session.providerLaunch; session.providerLaunch = null;
+    if (prepared) void prepared.cleanup().catch(() => { console.warn("CanvasTTY could not remove a temporary provider launch directory."); });
   }
 
   private spawnProcess(
-    id: string,
-    provider: ProviderId,
-    profile: CreateSessionRequest["profile"],
-    cwd: string,
+    metadata: SessionMetadata,
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
     resumePrevious = false,
-    sessionRole: SessionRole = "interactive",
-    hostId?: string
+    prepared?: PreparedProviderAccountLaunch
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -621,13 +761,16 @@ export class TerminalManager {
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
     failure: UnavailableProviderCli | null;
   } {
-    // A remote agent session launches its provider CLI over ssh instead of
-    // resolving a local executable, so every local supplement is skipped:
-    // CLI resolution (the remote host owns command discovery, and a missing
-    // local CLI must not fail a remote spawn), browser/runtime/orchestration
-    // bridges (their helpers run on this machine, not on the host), resume
-    // flags, and profile arguments. That is also "normal" profile semantics
-    // by construction — the remote command is exactly `exec <cli>`.
+    if (prepared?.process) {
+      prepared.assertCurrent(metadata);
+      const launch = prepared.process;
+      return { process: this.spawnPty(launch.command, launch.args, { name: "xterm-256color", cols, rows, cwd: launch.cwd, env: launch.environment }), agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null };
+    }
+    const { id, provider, profile, role: sessionRole, hostId, allowSubagents } = metadata;
+    const cwd = hostId === undefined ? prepared?.execution?.executionCwd ?? metadata.cwd : metadata.cwd;
+    const model = prepared ? prepared.model : metadata.model;
+    // Remote agents use the discovered executable and the same measured
+    // model/profile/resume arguments, but cannot use local bridge processes.
     const remoteAgent = provider !== "terminal" && hostId !== undefined;
     const providerCli = provider === "terminal" || remoteAgent
       ? undefined
@@ -635,38 +778,42 @@ export class TerminalManager {
     if (providerCli?.state === "unavailable") {
       return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: providerCli };
     }
-    const agentRuntime = provider === "terminal" || remoteAgent
-      ? null
-      : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd }) ?? null;
-    const agentOrchestration = sessionRole === "orchestrator" && !remoteAgent && this.agentOrchestration?.isEnabled
-      ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id })
-      : null;
+    let agentRuntime: PreparedAgentRuntimePtyLaunch | null = null;
+    let agentOrchestration: PreparedOrchestrationPtyLaunch | null = null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
     try {
+      agentRuntime = provider === "terminal" || remoteAgent || prepared?.skipBridges
+        ? null : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd }) ?? null;
+      agentOrchestration = (sessionRole === "orchestrator" || allowSubagents) && !remoteAgent && !prepared?.skipBridges && this.agentOrchestration?.isEnabled
+        ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id }) : null;
       // omp and pi take no browser bridge, exactly like grok: the adapter chain below
       // ends in the Kimi MCP configuration, which would hand them foreign launch flags.
       // cursor stays out too until its CLI grows a measured browser adapter,
       // and minimax until its MCP configuration is wired (plain PTY for now).
-      // devin is cloud-session oriented and takes no browser adapter yet,
+      // Devin has no verified browser adapter yet,
       // and antigravity keeps plain PTY integration for the same reason.
       // Remote agents take none either: the bridge helper is a local process
       // the remote CLI could never talk to.
-      agentBrowser = remoteAgent || provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
+      agentBrowser = prepared?.skipBridges || remoteAgent || provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
         ? null
         : this.agentBrowser?.prepareLaunch({
           terminalSessionId: id,
           provider,
           cwd,
-          ...(sessionRole === "orchestrator" ? { includeOrchestration: true } : {})
+          ...((sessionRole === "orchestrator" || allowSubagents) ? { includeOrchestration: true } : {})
         }) ?? null;
       const baseEnvironment = terminalEnvironment();
+      for (const name of prepared?.unsetEnvironment ?? []) delete baseEnvironment[name];
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
-      const providerEnvironment = provider === "opencode"
+      const bridgeEnvironment = provider === "opencode"
         ? { ...mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment), ...orchestrationEnvironment }
         : { ...browserEnvironment, ...runtimeEnvironment, ...orchestrationEnvironment };
-      const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
+      const providerEnvironment = provider === "opencode"
+        ? mergeOpenCodeLaunchEnvironment(bridgeEnvironment, prepared?.environment ?? {})
+        : { ...bridgeEnvironment, ...prepared?.environment };
+      const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? []), ...(prepared?.args ?? [])];
       // A session bound to a remote host swaps its local launch for an
       // interactive ssh session spawned through the same PTY with the same
       // TERM/COLORTERM environment: a terminal session runs the remote shell,
@@ -677,20 +824,25 @@ export class TerminalManager {
       const remoteHost = hostId !== undefined ? this.requireRemoteHost(hostId) : null;
       let launch: TerminalLaunch;
       if (remoteHost && provider !== "terminal") {
-        launch = remoteAgentLaunch(
-          remoteHost,
-          this.requireRemoteWorkspace(remoteHost, cwd),
-          PROVIDER_CLI_DEFINITIONS[provider].commands[0]
-        );
+        const command = prepared?.remoteExecutable ?? PROVIDER_CLI_DEFINITIONS[provider].commands[0];
+        const remoteArguments = resolveTerminalLaunch(provider, profile, providerArgs, {
+          providerCli: { state: "available", provider, executable: command, launcher: "native", environment: {}, checked: [] },
+          environment: providerEnvironment, model, resumePrevious
+        });
+        launch = remoteAgentLaunch(remoteHost, this.requireRemoteWorkspace(remoteHost, cwd), command, {
+          args: remoteArguments.args as string[], environment: { ...providerEnvironment, ...remoteArguments.environment },
+          unsetEnvironment: prepared?.unsetEnvironment, absoluteExecutable: !!prepared, accountHome: prepared?.remoteAccountHome
+        });
       } else if (remoteHost) {
         launch = remoteTerminalLaunch(remoteHost, baseEnvironment);
       } else {
         launch = resolveTerminalLaunch(provider, profile, providerArgs, {
           environment: { ...baseEnvironment, ...providerEnvironment },
           ...(providerCli ? { providerCli } : {}),
-          resumePrevious
+          resumePrevious, model
         });
       }
+      prepared?.assertCurrent(metadata);
       return {
         process: this.spawnPty(launch.command, launch.args, {
           name: "xterm-256color",
@@ -734,6 +886,7 @@ export class TerminalManager {
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
+    const preparedLaunch = session.providerLaunch;
     process.onData((data) => {
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
@@ -745,15 +898,18 @@ export class TerminalManager {
     });
 
     process.onExit(({ exitCode }) => {
+      void preparedLaunch?.processExited?.().catch(() => { console.warn("CanvasTTY could not persist workspace process exit."); });
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
 
       this.flushOutput(id, current);
       current.metadata.exitCode = exitCode;
+      if (current.metadata.execution) current.metadata.execution.state = "retained";
       current.metadata.status = exitCode === 0 ? "done" : "failed";
       current.metadata.failureDetails = exitCode === 0
         ? null
         : terminalFailureDetails(current.bufferChunks.slice(current.bufferStart).join(""));
+      this.releaseProviderLaunch(current);
       current.agentBrowser?.cleanup();
       current.agentBrowser = null;
       current.agentRuntime?.cleanup();
@@ -833,6 +989,9 @@ const SESSION_PROVIDERS = new Set<ProviderId>(CANVAS_LAUNCHER_ITEMS);
 const SESSION_ROLES = new Set<SessionRole>(["interactive", "orchestrator", "subagent"]);
 
 function assertCreateRequest(request: CreateSessionRequest): void {
+  if (request) { assertLaunchPolicyFields(request); assertIsolationRequest(request.isolation);
+    if ("execution" in request || "workspaceId" in request || "launchBinding" in request) throw new Error("Execution identity is owned by the main process.");
+  }
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
   if (request.profile !== "normal" && request.profile !== "yolo") throw new Error("Unknown launch profile.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");

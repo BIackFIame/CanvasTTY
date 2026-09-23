@@ -1,9 +1,12 @@
+import { normalizeContainerProfiles } from "../../shared/containerProfiles.ts";
+import { canonicalApiUrl, copyAssessment, isProviderSecretRef, validAccountBinding, validAssessment } from "../../shared/providerAccountPolicy.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   AgentProviderId,
   AgentCliAvailability,
+  AgentBudgets,
   ApiProfile,
   ApiProfileProtocol,
   AppSettings,
@@ -42,6 +45,7 @@ import {
   CANVAS_LAUNCHER_ITEMS,
   DATA_CLASSES,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
+  DEFAULT_AGENT_BUDGETS,
   DEFAULT_HOME_ACCENT_COLORS,
   DEFAULT_HOME_GRID_SIZE,
   DEFAULT_HOME_LAYOUT,
@@ -180,6 +184,8 @@ export class SettingsStore {
         || !("defaultDataClass" in source)
         || !("providerAccounts" in source)
         || !("pathPolicies" in source)
+        || !("agentBudgets" in source)
+        || !("maxAccountsPerProviderPerHost" in source)
         || source.canvasColor === "palette"
         || source.settingsVersion !== SETTINGS_VERSION;
       let migratedCandidate: Record<string, unknown> = source;
@@ -348,6 +354,10 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     remoteHosts: [],
     providerAccounts: [],
     pathPolicies: [],
+    agentBudgets: { ...DEFAULT_AGENT_BUDGETS },
+    maxAccountsPerProviderPerHost: 1,
+    requiresSandboxProfiles: [],
+    containerProfiles: [],
     homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
     homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
     canvasRegions: [],
@@ -361,7 +371,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
 }
 
 const API_PROFILE_PROTOCOL_SET = new Set<ApiProfileProtocol>(API_PROFILE_PROTOCOLS);
-const MAX_API_PROFILES = 32;
+const MAX_API_PROFILES = 512;
 
 // Invalid entries are dropped, never repaired: a profile that no longer matches
 // the schema must disappear rather than silently point a runtime at a wrong
@@ -382,22 +392,21 @@ export function normalizeApiProfiles(
     const protocol = API_PROFILE_PROTOCOL_SET.has(record.protocol as ApiProfileProtocol)
       ? record.protocol as ApiProfileProtocol
       : null;
-    const secretRef = (PROVIDER_SECRET_IDS as readonly string[]).includes(record.secretRef as string)
-      ? record.secretRef as ProviderSecretId
-      : null;
+    const secretRef = isProviderSecretRef(record.secretRef) ? record.secretRef : null;
     const baseUrl = record.baseUrl === undefined
       ? undefined
-      : typeof record.baseUrl === "string" && /^https:\/\//u.test(record.baseUrl) && record.baseUrl.length <= 500
+      : typeof record.baseUrl === "string" && record.baseUrl.length <= 500
         ? record.baseUrl
         : "invalid";
     const defaultModel = typeof record.defaultModel === "string" && record.defaultModel.trim().length > 0 && record.defaultModel.length <= 200
       ? record.defaultModel
       : undefined;
     if (!id || seen.has(id) || !name || !protocol || !secretRef || baseUrl === "invalid") continue;
+    if (baseUrl) { try { canonicalApiUrl(baseUrl); } catch { continue; } }
+    if (record.hostId !== undefined && (typeof record.hostId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(record.hostId))) continue;
     seen.add(id);
-    profiles.push(baseUrl || defaultModel
-      ? { id, name, protocol, ...(baseUrl ? { baseUrl } : {}), secretRef, ...(defaultModel ? { defaultModel } : {}) }
-      : { id, name, protocol, secretRef });
+    profiles.push({ id, name, protocol, ...(baseUrl ? { baseUrl } : {}), secretRef, ...(defaultModel ? { defaultModel } : {}),
+      ...(record.hostId !== undefined ? { hostId: record.hostId as string } : {}), ...normalizedAssessment(record) });
   }
   return profiles;
 }
@@ -410,7 +419,7 @@ export function normalizeDataClass(candidate: unknown): DataClass {
     : "D2";
 }
 
-const MAX_REMOTE_HOSTS = 32;
+const MAX_REMOTE_HOSTS = 512;
 
 // Invalid entries are dropped, never repaired: a host that no longer matches
 // the schema must disappear rather than silently aim orchestration at the
@@ -440,6 +449,8 @@ export function normalizeRemoteHosts(
       || candidate.sshPort !== undefined
       || candidate.priority !== undefined
       || candidate.maxSessions !== undefined
+      || candidate.minFreeMemoryMb !== undefined
+      || candidate.maxLoadPerCore !== undefined
       || workspaces !== null
       || candidate.providerAccess !== undefined
       || candidate.maxDataClass !== undefined
@@ -451,6 +462,8 @@ export function normalizeRemoteHosts(
         ...(candidate.sshPort !== undefined ? { sshPort: candidate.sshPort } : {}),
         ...(candidate.priority !== undefined ? { priority: candidate.priority } : {}),
         ...(candidate.maxSessions !== undefined ? { maxSessions: candidate.maxSessions } : {}),
+        ...(candidate.minFreeMemoryMb !== undefined ? { minFreeMemoryMb: candidate.minFreeMemoryMb } : {}),
+        ...(candidate.maxLoadPerCore !== undefined ? { maxLoadPerCore: candidate.maxLoadPerCore } : {}),
         ...(workspaces ? { workspaces } : {}),
         ...(candidate.providerAccess
           ? {
@@ -467,16 +480,13 @@ export function normalizeRemoteHosts(
   return hosts;
 }
 
-const MAX_PROVIDER_ACCOUNTS = 32;
+const MAX_PROVIDER_ACCOUNTS = 512;
 const MAX_ACCOUNT_MODELS = 64;
 const MAX_PATH_POLICIES = 64;
 
-// Invalid entries are dropped, never repaired (the normalizeRemoteHosts
-// discipline): an account that no longer matches the schema must disappear
-// rather than silently route work past a tier or privacy boundary. Inside an
-// otherwise valid account, an invalid or duplicated model id drops just that
-// model entry — the account keeps the rest of its list; a models list left
-// empty by that filtering falls away entirely, i.e. reads as unrestricted.
+// Invalid account identities are dropped. Model allowlists are narrowed only:
+// malformed or empty lists remain explicit deny-all, never unrestricted.
+// Ambiguous legacy host bindings are retained but disabled for explicit repair.
 export function normalizeProviderAccounts(
   value: unknown,
   fallback: readonly ProviderAccount[]
@@ -507,17 +517,28 @@ export function normalizeProviderAccounts(
     if (tier === null) continue;
     let models: string[] | null = null;
     if (record.models !== undefined) {
-      if (!Array.isArray(record.models) || record.models.length > MAX_ACCOUNT_MODELS) continue;
+      // Keep malformed allowlists as deny-all instead of losing the account
+      // and accidentally falling back to ambient CLI credentials.
+      const candidates = Array.isArray(record.models) && record.models.length <= MAX_ACCOUNT_MODELS
+        ? record.models : [];
       const collected: string[] = [];
       const seenModels = new Set<string>();
-      for (const model of record.models) {
+      for (const model of candidates) {
         if (typeof model !== "string" || model.trim().length === 0 || model.length > 100) continue;
         const key = model.toLowerCase();
         if (seenModels.has(key)) continue;
         seenModels.add(key);
         collected.push(model);
       }
-      models = collected.length > 0 ? collected : null;
+      models = collected;
+    }
+    const validHostId = (value: unknown): value is string => typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value);
+    let hostId = validHostId(record.hostId) ? record.hostId : undefined;
+    let bindingRequired = record.bindingRequired === true || (record.hostId !== undefined && hostId === undefined) || (record.binding !== undefined && !validAccountBinding(record.binding));
+    if (record.hostIds !== undefined) {
+      const legacy = record.hostIds;
+      if (Array.isArray(legacy) && legacy.length === 1 && validHostId(legacy[0]) && (hostId === undefined || hostId === legacy[0])) hostId = legacy[0];
+      else bindingRequired = true;
     }
     const shared = record.shared;
     if (shared !== undefined && typeof shared !== "boolean") continue;
@@ -527,9 +548,13 @@ export function normalizeProviderAccounts(
       id,
       provider: record.provider as AgentProviderId,
       label,
+      ...(validAccountBinding(record.binding) ? { binding: record.binding.kind === "cli-home" ? { kind: "cli-home" as const, directory: record.binding.directory } : { kind: "api-profile" as const, profileId: record.binding.profileId } } : {}),
+      ...normalizedAssessment(record),
       ...(tier !== undefined ? { tier } : {}),
       ...(models !== null ? { models } : {}),
       ...(shared === true ? { shared } : {}),
+      ...(hostId !== undefined ? { hostId } : {}),
+      ...(bindingRequired ? { bindingRequired: true } : {}),
       ...(maxDataClass !== undefined ? { maxDataClass: maxDataClass as DataClass } : {})
     });
     seen.add(id);
@@ -560,6 +585,16 @@ export function normalizePathPolicies(
     policies.push({ pattern: record.pattern, dataClass: record.dataClass as DataClass });
   }
   return policies;
+}
+
+export function normalizeAgentBudgets(value: unknown, fallback: AgentBudgets = { ...DEFAULT_AGENT_BUDGETS }): AgentBudgets {
+  const source = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  const bounded = (key: keyof AgentBudgets, maximum: number): number => {
+    const candidate = source[key];
+    return Number.isInteger(candidate) && (candidate as number) >= 1 && (candidate as number) <= maximum
+      ? candidate as number : fallback[key] ?? DEFAULT_AGENT_BUDGETS[key];
+  };
+  return { maxLocalAgents: bounded("maxLocalAgents", 64), maxRemoteAgentsPerHost: bounded("maxRemoteAgentsPerHost", 64), maxChildren: bounded("maxChildren", 64), maxDepth: bounded("maxDepth", 8) };
 }
 
 export function normalizeSettings(
@@ -718,9 +753,13 @@ export function normalizeSettings(
       : fallback.lastDirectory,
     acknowledgedDangerousProfiles: [...new Set(acknowledged)],
     defaultDataClass: normalizeDataClass(source.defaultDataClass),
+  containerProfiles: normalizeContainerProfiles(source.containerProfiles ?? fallback.containerProfiles),
+  requiresSandboxProfiles: Array.isArray(source.requiresSandboxProfiles) ? [...new Set(source.requiresSandboxProfiles.filter((value) => value === "normal" || value === "yolo"))] : fallback.requiresSandboxProfiles ?? [],
   apiProfiles: normalizeApiProfiles(source.apiProfiles, fallback.apiProfiles ?? []),
     remoteHosts: normalizeRemoteHosts(source.remoteHosts, fallback.remoteHosts ?? []),
     providerAccounts: normalizeProviderAccounts(source.providerAccounts, fallback.providerAccounts ?? []),
+    agentBudgets: normalizeAgentBudgets(source.agentBudgets, fallback.agentBudgets),
+    maxAccountsPerProviderPerHost: source.maxAccountsPerProviderPerHost === 2 ? 2 : 1,
     pathPolicies: normalizePathPolicies(source.pathPolicies, fallback.pathPolicies ?? []),
     homeGridSize,
     homeLayout,
@@ -1137,4 +1176,9 @@ function clamp(value: number, min: number, max: number): number {
 
 function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+function normalizedAssessment(record: Record<string, unknown>): Pick<ProviderAccount, "assessment" | "assessmentInvalid"> {
+  if (record.assessmentInvalid === true || (record.assessment !== undefined && !validAssessment(record.assessment))) return { assessmentInvalid: true };
+  return validAssessment(record.assessment) ? { assessment: copyAssessment(record.assessment) } : {};
 }

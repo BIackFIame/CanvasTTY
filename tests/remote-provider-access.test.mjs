@@ -78,7 +78,7 @@ test("one ssh round-trip probes every provider endpoint in background subshells,
   assert.equal(result.reachable, true);
 });
 
-test("any three-digit answer counts as reachable, 000 and noise do not", async () => {
+test("HTTP answers establish reachability except transport errors and explicit access blocks", async () => {
   const { calls, runner } = fakeRunner({
     code: 0,
     // grok=000 is what a blocked endpoint emits before the case filter, and
@@ -107,7 +107,7 @@ test("any three-digit answer counts as reachable, 000 and noise do not", async (
 
   // The script itself refuses to promote 000 even though it is three digits.
   const script = scriptFromCommand(calls[0].command);
-  assert.ok(script.includes("000) : ;;"));
+  assert.ok(script.includes("000|403|451) : ;;"));
   assert.ok(script.includes("[0-9][0-9][0-9]) printf"));
 });
 
@@ -131,7 +131,7 @@ test("each probe block degrades individually and the reachability answer rides =
   await new RemoteProviderAccess(runner).probe(validHost);
 
   const script = scriptFromCommand(calls[0].command);
-  assert.ok(script.includes("2>/dev/null || true)"));
+  assert.ok(script.includes("2>/dev/null) || code=000"));
   assert.ok(script.includes("printf \"codex=1\\n\""));
 });
 

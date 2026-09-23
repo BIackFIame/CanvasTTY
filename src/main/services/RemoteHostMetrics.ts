@@ -1,3 +1,4 @@
+import { ProbeCache, remoteProbeKey } from "./RemoteProbeCache.ts";
 import { remoteHostInvalidReason } from "../../shared/contracts.ts";
 import type { RemoteHost } from "../../shared/contracts";
 import type { RemoteHostRunner } from "./RemoteHostsService.ts";
@@ -10,18 +11,8 @@ import type { RemoteHostRunner } from "./RemoteHostsService.ts";
 // same TTL so it is not retried on every question either.
 
 /** Utilization snapshot for one remote host at one point in time. */
-export interface RemoteHostMetrics {
-  hostId: string;
-  collectedAt: number;
-  reachable: boolean;
-  load1: number | null;
-  cores: number | null;
-  memoryTotalMb: number | null;
-  memoryAvailableMb: number | null;
-  gpuVramTotalMb: number | null;
-  gpuVramUsedMb: number | null;
-  detail?: string;
-}
+export type { RemoteHostUtilization as RemoteHostMetrics } from "../../shared/contracts.ts";
+import type { RemoteHostUtilization as RemoteHostMetrics } from "../../shared/contracts.ts";
 
 /** Constructor knobs; every field is injectable so tests need no clock or network. */
 export interface RemoteHostMetricsOptions {
@@ -42,14 +33,13 @@ const DETAIL_MAX_LENGTH = 300;
 // invocation; collect() calls that hit it run none.
 export class RemoteHostMetricsService {
   private readonly run: RemoteHostRunner;
-  private readonly minCacheMs: number;
   private readonly now: () => number;
   private readonly timeoutMs: number;
-  private readonly cache = new Map<string, RemoteHostMetrics>();
+  private readonly cache: ProbeCache<RemoteHostMetrics>;
 
   constructor(runner: RemoteHostRunner, options: RemoteHostMetricsOptions = {}) {
     this.run = runner;
-    this.minCacheMs = options.minCacheMs ?? DEFAULT_MIN_CACHE_MS;
+    this.cache = new ProbeCache({ ...options, minCacheMs: options.minCacheMs ?? DEFAULT_MIN_CACHE_MS });
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
@@ -65,10 +55,11 @@ export class RemoteHostMetricsService {
     if (invalidReason !== null) {
       return unreachable(hostId, this.now(), invalidReason);
     }
-    const cached = this.cache.get(hostId);
-    if (!options.force && cached !== undefined && this.now() - cached.collectedAt < this.minCacheMs) {
-      return cached;
-    }
+    return this.cache.read(remoteProbeKey(host), () => this.collectUncached(host), options.force);
+  }
+
+  private async collectUncached(host: RemoteHost): Promise<RemoteHostMetrics> {
+    const hostId = host.id;
     let metrics: RemoteHostMetrics;
     try {
       const { code, stdout, stderr } = await this.run(
@@ -102,7 +93,6 @@ export class RemoteHostMetricsService {
     // Unreachable results are cached too, on the same TTL, so a dead host is
     // not hammered once per question while the cache would otherwise only
     // cover successes.
-    this.cache.set(hostId, metrics);
     return metrics;
   }
 }

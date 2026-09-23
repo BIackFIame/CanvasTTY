@@ -1,3 +1,4 @@
+import type { IsolationRequest } from "../../../shared/contracts.ts";
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { AgentControlService } from "../AgentControlService.ts";
@@ -46,10 +47,19 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   // The spawn may await a placement decision (host "auto"), so the whole call
   // stays async even though the local fast path resolves synchronously.
   private async spawn(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (args.worktreeRef !== undefined && args.isolation !== "worktree") throw new Error("worktreeRef requires worktree isolation.");
+    if (args.containerProfileId !== undefined && args.isolation !== "container") throw new Error("containerProfileId requires container isolation.");
+    const isolation = args.isolation === undefined ? undefined : args.isolation === "container" ? { mode: "container", profileId: args.containerProfileId } : { mode: args.isolation, ...(args.worktreeRef !== undefined ? { ref: args.worktreeRef } : {}) };
     const created = await this.control.spawn({
+      ...(isolation ? { isolation: isolation as IsolationRequest } : {}),
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
+      ...(args.model !== undefined ? { model: args.model as string } : {}),
+      ...(args.accountId !== undefined ? { accountId: args.accountId as string } : {}),
+      ...(args.dataClass !== undefined ? { dataClass: args.dataClass as never } : {}),
+      ...(args.profile !== undefined ? { profile: args.profile as never } : {}),
+      ...(args.allowSubagents !== undefined ? { allowSubagents: args.allowSubagents as boolean } : {}),
       ...(args.host !== undefined ? { host: args.host as string } : {}),
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {})

@@ -1,3 +1,5 @@
+import { ProbeCache, remoteProbeKey } from "./RemoteProbeCache.ts";
+import type { ProbeCacheOptions } from "./RemoteProbeCache.ts";
 import { PROVIDER_API_ENDPOINTS, providerApiUrl, remoteHostInvalidReason } from "../../shared/contracts.ts";
 import type { AgentProviderId, RemoteHost } from "../../shared/contracts";
 import type { RemoteHostRunner } from "./RemoteHostsService.ts";
@@ -30,11 +32,13 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DETAIL_MAX_LENGTH = 300;
 
 // Inert by design: constructing the service spawns nothing. Each probe()
-// call runs exactly one ssh invocation.
+// cache miss runs one ssh invocation; concurrent identical reads share it.
 export class RemoteProviderAccess {
   private readonly run: RemoteHostRunner;
+  private readonly cache: ProbeCache<RemoteProviderAccessResult>;
 
-  constructor(runner: RemoteHostRunner) {
+  constructor(runner: RemoteHostRunner, options: ProbeCacheOptions = {}) {
+    this.cache = new ProbeCache(options);
     this.run = runner;
   }
 
@@ -54,7 +58,13 @@ export class RemoteProviderAccess {
     if (invalidReason !== null) {
       return { hostId, reachable: false, providers: {}, detail: invalidReason };
     }
-    const providers = probedProviderIds(probeProviders);
+    const providers = probedProviderIds(probeProviders).sort();
+    return this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.probeUncached(host, timeoutMs, providers))
+      .catch((error: unknown) => ({ hostId, reachable: false, providers: {}, detail: excerpt(error instanceof Error ? error.message : String(error)) }));
+  }
+
+  private async probeUncached(host: RemoteHost, timeoutMs: number, providers: AgentProviderId[]): Promise<RemoteProviderAccessResult> {
+    const hostId = host.id;
     try {
       const { code, stdout, stderr } = await this.run(
         host,
@@ -105,10 +115,10 @@ function probedProviderIds(probeProviders: AgentProviderId[] | undefined): Agent
 }
 
 // The POSIX sh probe body. Every provider endpoint is probed in a background
-// subshell (`&` + `wait`), so 13 sequential 6-second timeouts collapse into
-// roughly one. curl is preferred: ANY three-digit HTTP status — 401, 403,
-// 404, 429 included — proves the network path works, while 000 (curl-speak
-// for DNS failure, refused connection, or timeout) does not. When curl is
+// subshell (`&` + `wait`). Placement narrows this to its single requested provider.
+// curl is preferred: 403/451 are conservatively blocked, and 000 means transport
+// failure. Other HTTP replies establish endpoint reachability only: 401 does
+// not authenticate an account, and no reply proves subscription entitlement. When curl is
 // absent, wget stands in and exit status 0 counts as reachable. Each block
 // degrades alone behind 2>/dev/null and || true, and the script always exits
 // 0: only ssh-level failures make the host unreachable, never a blocked
@@ -119,9 +129,9 @@ function providerProbeScript(providers: readonly AgentProviderId[]): string {
   const blocks = providers.map((provider) => [
     "(",
     "  if command -v curl >/dev/null 2>&1; then",
-    `    code=$(curl -s -o /dev/null -m 6 -w "%{http_code}" "${providerApiUrl(provider)}" 2>/dev/null || true)`,
+    `    code=$(curl -s -o /dev/null -m 6 -w "%{http_code}" "${providerApiUrl(provider)}" 2>/dev/null) || code=000`,
     '    case "$code" in',
-    "      000) : ;;",
+    "      000|403|451) : ;;",
     `      [0-9][0-9][0-9]) printf "${provider}=1\\n" ;;`,
     "    esac",
     "  elif command -v wget >/dev/null 2>&1; then",

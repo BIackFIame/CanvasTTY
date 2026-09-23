@@ -1,3 +1,4 @@
+import { accountRouteMaxDataClass } from "./providerAccountPolicy.ts";
 import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
 export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS };
 export type { CanvasLauncherItemId, ProviderId };
@@ -172,6 +173,17 @@ export interface CameraState extends Point {
   zoom: number;
 }
 
+export interface AgentBudgets {
+  maxLocalAgents: number;
+  maxRemoteAgentsPerHost: number;
+  maxChildren: number;
+  maxDepth: number;
+}
+
+export const DEFAULT_AGENT_BUDGETS: Readonly<AgentBudgets> = Object.freeze({
+  maxLocalAgents: 4, maxRemoteAgentsPerHost: 4, maxChildren: 4, maxDepth: 2
+});
+
 export interface AppSettings {
   locale: LocaleId;
   restoreTerminalSessions: boolean;
@@ -226,6 +238,12 @@ export interface AppSettings {
   /** Subscriptions per provider; see ProviderAccount. Drives spawn's account
    *  routing (model coverage + per-account privacy caps). */
   providerAccounts: ProviderAccount[];
+  agentBudgets: AgentBudgets;
+  /** Configured enabled subscriptions of one provider on one host. */
+  maxAccountsPerProviderPerHost: 1 | 2;
+  /** Profiles that require a separate worktree or container. Worktrees are not OS sandboxes. */
+  requiresSandboxProfiles: LaunchProfileId[];
+  containerProfiles: ContainerProfile[];
   homeGridSize: HomeGridSize;
   homeLayout: HomeWidgetPlacement[];
   canvasRegions: CanvasRegion[];
@@ -237,7 +255,36 @@ export interface AppSettings {
   browserRestoreTabs: boolean;
 }
 
+export interface ContainerProfile {
+  id: string; label: string; hostId: string; runtime: "docker" | "podman";
+  executable: string; endpoint: { kind: "native" } | { kind: "unix"; socket: string };
+  image: string; python: string; hostPython?: string; commands: Partial<Record<ProviderId, string>>;
+  network: "none" | "bridge"; cpus: number; memoryMb: number; pids: number; user: string;
+}
+export interface ContainerAvailability { available: boolean; runtime: "docker" | "podman"; rootless?: boolean; imageId?: string; reason?: string }
+export interface RetainedContainer { id: string; profileId: string; hostId: string; workspaceId: string; containerId?: string; state: "preparing" | "created" | "cleanup-needed" | "workspace-retained"; reason?: string; hostWorkspace?: string }
+/** Main validates isolation; the renderer never supplies an execution directory. */
+export type IsolationRequest = { mode: "direct" } | { mode: "worktree"; ref?: string } | { mode: "container"; profileId: string };
+export interface ExecutionWorkspaceSummary {
+  workspaceId?: string;
+  mode: "direct" | "worktree" | "container";
+  sourceCwd: string;
+  executionCwd?: string;
+  baseCommit?: string;
+  containerProfileId?: string;
+  hostWorkspace?: string;
+  filesystemRestricted: boolean;
+  state: "preparing" | "ready" | "running" | "retained" | "failed";
+}
+export interface RetainedWorkspace {
+  id: string; sourceCwd: string; executionCwd: string; baseCommit: string; createdAt: number;
+  state: "retained" | "running" | "uncertain" | "unavailable"; reason: string; sessionId?: string;
+}
+export interface WorkspaceReview { workspaceId: string; reviewId: string; patch: string; limitations: string[]; baseCommit: string; createdAt: number }
+export type AgentLaunchOptions = Pick<CreateSessionRequest, "provider" | "profile" | "cwd" | "isolation" | "accountId" | "hostId" | "model">;
+
 export interface CreateSessionRequest {
+  isolation?: IsolationRequest;
   provider: ProviderId;
   cwd: string;
   profile: LaunchProfileId;
@@ -252,14 +299,19 @@ export interface CreateSessionRequest {
    *  require the cwd to be mapped on the host — an unmapped workspace fails
    *  the create. */
   hostId?: string;
-  /** Provider account selected for this session; names an
-   *  AppSettings.providerAccounts entry. Bookkeeping only: it records WHICH
-   *  subscription the placement layer chose, it never changes how the
-   *  process spawns. */
+  /** Provider account selected and validated by launch policy; names an
+   *  AppSettings.providerAccounts entry with a fixed host binding. */
   accountId?: string;
+  model?: string;
+  dataClass?: DataClass;
+  /** Explicit permission for a child to delegate; false by default. */
+  allowSubagents?: boolean;
 }
 
 export interface SessionMetadata {
+  isolation?: IsolationRequest;
+  /** Main-owned identity; persisted separately from caller-supplied launch options. */
+  execution?: ExecutionWorkspaceSummary;
   id: string;
   revision: number;
   provider: ProviderId;
@@ -276,6 +328,15 @@ export interface SessionMetadata {
   /** Present only when account routing picked a subscription; names an
    *  AppSettings.providerAccounts entry. */
   accountId?: string;
+  model?: string;
+  dataClass?: DataClass;
+  /** Main-generated nonsecret digest; resume must keep the same account route. */
+  launchBinding?: string;
+  /** Actual adapter limitations for this session, distinct from provider-wide capabilities. */
+  integrationNote?: string;
+  /** Re-evaluate the live default for sessions without an explicit class. */
+  dataClassInherited?: boolean;
+  allowSubagents?: boolean;
   status: SessionStatus;
   startedAt: number;
   exitCode: number | null;
@@ -592,6 +653,10 @@ export const PROVIDER_SECRET_IDS = [
   "CURSOR_API_KEY"
 ] as const;
 export type ProviderSecretId = (typeof PROVIDER_SECRET_IDS)[number];
+export type ProviderSecretRef = ProviderSecretId | `secret:${string}`;
+export interface ProviderSecretOwner { profileId: string; hostId: string; }
+export interface ProviderSecretStatus { ref: ProviderSecretRef; owner: ProviderSecretOwner; configured: boolean; }
+export const PROVIDER_SECRET_LIMITS = Object.freeze({ count: 1024, valueBytes: 16 * 1024, rawBytes: 4 * 1024 * 1024, payloadBytes: 32 * 1024 * 1024, encryptedBytes: 48 * 1024 * 1024 });
 
 // An ApiProfile names a model backend for BYOK-capable provider CLIs. It is
 // deliberately not an agent provider: it never appears in launchers or session
@@ -604,8 +669,13 @@ export interface ApiProfile {
   name: string;
   protocol: ApiProfileProtocol;
   baseUrl?: string;
-  secretRef: ProviderSecretId;
+  secretRef: ProviderSecretRef;
   defaultModel?: string;
+  /** Local vault entries are never forwarded over SSH. */
+  hostId?: string;
+  assessment?: DataHandlingAssessment;
+  /** Invalid explicit evidence is retained as a denial, never erased. */
+  assessmentInvalid?: boolean;
 }
 
 export const API_PROFILE_PROTOCOLS: readonly ApiProfileProtocol[] = ["openai-compatible", "anthropic-compatible", "google"];
@@ -634,6 +704,10 @@ export interface RemoteHost {
   priority?: number;
   /** Concurrent sessions this host accepts. 1-64. */
   maxSessions?: number;
+  /** Required available RAM in MiB; unknown metrics fail this constraint. */
+  minFreeMemoryMb?: number;
+  /** Maximum one-minute load divided by CPU cores. */
+  maxLoadPerCore?: number;
   /** Which providers the host may run (see ProviderAccessRule). Absent means
    *  unrestricted: every provider is permitted until a rule says otherwise. */
   providerAccess?: ProviderAccessRule;
@@ -765,6 +839,7 @@ export function remoteHostInvalidReason(value: unknown): string | null {
   if (typeof record.id !== "string" || record.id.length === 0 || record.id.length > 64) {
     return "id must be a non-empty string of at most 64 characters";
   }
+  if (record.id === "local" || record.id === "auto") return "id is reserved for a launch selector";
   if (typeof record.label !== "string" || record.label.trim().length === 0 || record.label.length > 80) {
     return "label must be a non-empty string of at most 80 characters";
   }
@@ -791,6 +866,12 @@ export function remoteHostInvalidReason(value: unknown): string | null {
   }
   if (record.maxSessions !== undefined && !isIntegerInRange(record.maxSessions, 1, 64)) {
     return "maxSessions must be an integer between 1 and 64";
+  }
+  if (record.minFreeMemoryMb !== undefined && !isIntegerInRange(record.minFreeMemoryMb, 0, 16777216)) {
+    return "minFreeMemoryMb must be an integer between 0 and 16777216";
+  }
+  if (record.maxLoadPerCore !== undefined && (typeof record.maxLoadPerCore !== "number" || !Number.isFinite(record.maxLoadPerCore) || record.maxLoadPerCore < 0 || record.maxLoadPerCore > 1024)) {
+    return "maxLoadPerCore must be a finite number between 0 and 1024";
   }
   if (record.maxDataClass !== undefined && !DATA_CLASSES.includes(record.maxDataClass as DataClass)) {
     return "maxDataClass must be a data class (D0-D3) when present";
@@ -967,6 +1048,21 @@ export interface DataHandlingProfile {
   sources?: string[];
 }
 
+/** Operator-supplied evidence; this is not a CanvasTTY verification badge. */
+export interface DataHandlingAssessment {
+  profile: DataHandlingProfile;
+  evidence: {
+    kind: "user-attested" | "provider-documentation" | "organization-contract";
+    reviewedAt: string;
+    sources: string[];
+    note?: string;
+    /** Exact nonsecret route snapshot produced by accountRouteBinding(). */
+    binding: string;
+    models: "*" | string[];
+  };
+  trustedSelfHosted?: boolean;
+}
+
 // Static DEFAULTS for the confidentiality tiers. These describe each
 // provider's consumer-tier data path as shipped, NOT any particular
 // organization's contract: an org with a ZDR or enterprise add-on carries its
@@ -1126,15 +1222,23 @@ export function dataClassSatisfies(required: DataClass, allowed: DataClass): boo
 // for nothing. Like ApiProfile and RemoteHost this is pure settings data:
 // nothing about it touches a process until spawn consults it.
 export interface ProviderAccount {
+  /** A single fixed host; omitted or "local" means this machine. */
+  hostId?: string;
+  /** Ambiguous legacy host bindings stay disabled until explicitly repaired. */
+  bindingRequired?: boolean;
   id: string;
   provider: AgentProviderId;
   label: string;
+  /** Absent legacy bindings must be configured before production launch. */
+  binding?: { kind: "cli-home"; directory: string } | { kind: "api-profile"; profileId: string };
+  assessment?: DataHandlingAssessment;
+  assessmentInvalid?: boolean;
   /** Free-form subscription label, e.g. "chatgpt-plus", "chatgpt-pro",
    *  "claude-pro", "claude-max", "grok-standard". Diagnostic only — tiers
    *  are never parsed, the models list below is what placement enforces. */
   tier?: string;
-  /** Model ids this account's tier is ALLOWED to run. Absent or empty means
-   *  unrestricted. A cheap tier should list only what it can sensibly run —
+  /** Model ids this account's tier is ALLOWED to run. Absent means unrestricted; an explicit empty list disables
+   *  this account. A cheap tier should list only what it can sensibly run —
    *  a plus-tier account lists its light models and leaves the heavyweight
    *  ids (Astra-class, Opus-class) to the pro account above it, because even
    *  on Pro the heavyweight models eat quota. Entries are exact matches or
@@ -1144,39 +1248,29 @@ export interface ProviderAccount {
    *  privacy tightens — accountEffectiveMaxDataClass caps it at D1 even when
    *  the provider's own ceiling is higher. */
   shared?: boolean;
-  /** Optionally tightens the data-class ceiling BELOW the provider's own
+  /** Optionally tightens the actual route's data-class ceiling
    *  (never raises it): a named account can be held to internal-only data
    *  even on a provider whose default path allows more. */
   maxDataClass?: DataClass;
 }
 
-// The most sensitive data class this ACCOUNT may carry. Pure lookup: the
-// account's own cap when set, else the provider's default ceiling — and
-// never ABOVE that ceiling (a devin account claiming D3 reads as D2, the
-// provider's actual ceiling) — tightened to at most D1 when the account is
-// shared. An explicit cap below the ceiling survives: shared with maxDataClass
-// D0 stays D0.
-export function accountEffectiveMaxDataClass(account: ProviderAccount): DataClass {
-  const providerCeiling = providerMaxDataClass(account.provider);
-  let effective: DataClass = account.maxDataClass !== undefined
-    && DATA_CLASS_RANK[account.maxDataClass] <= DATA_CLASS_RANK[providerCeiling]
-    ? account.maxDataClass
-    : providerCeiling;
-  if (account.shared && DATA_CLASS_RANK[effective] > DATA_CLASS_RANK.D1) {
-    effective = "D1";
-  }
-  return effective;
+// Resolve the actual assessed account/API route first, then tighten it with
+// account/shared caps. Without assessment only a native default uses the
+// provider default; an unassessed API backend is D0.
+export function accountEffectiveMaxDataClass(account: ProviderAccount, profiles: readonly ApiProfile[] = [], model?: string): DataClass {
+  return accountRouteMaxDataClass(account, profiles, model);
 }
 
 // Does this account's tier cover the requested model? A request without a
-// model (undefined) constrains nothing, and an account with no models list
-// is unrestricted. Matching is case-insensitive: entries are exact ids
+// model (undefined) cannot satisfy an explicit allowlist; an account with
+// no models list is unrestricted. Matching is case-insensitive: entries are exact ids
 // ("gpt-5-mini") or prefix wildcards ending in "*" ("gpt-5*" covers
 // "gpt-5", "gpt-5-codex", "GPT-5-Mini").
 export function accountSupportsModel(account: ProviderAccount, model: string | undefined): boolean {
-  if (model === undefined) return true;
   const models = account.models;
-  if (models === undefined || models.length === 0) return true;
+  if (models !== undefined && models.length === 0) return false;
+  if (models === undefined) return true;
+  if (model === undefined) return false;
   const wanted = model.toLowerCase();
   for (const entry of models) {
     const candidate = entry.toLowerCase();
@@ -1244,31 +1338,25 @@ export function isValidPathPolicyPattern(value: unknown): value is string {
   return true;
 }
 
-// Pure path-class lookup, no I/O: the caller hands in a path (typically a
-// session cwd) and the fallback class that applies when no policy covers it.
-// Paths are normalized by treating "\" as "/" and stripping any leading "./",
-// then split into segments. Matching is suffix-based and case-sensitive:
-//   - a RELATIVE pattern ("docs/**") matches any path whose trailing segments
-//     satisfy it — any docs ancestor qualifies, whatever sits above it;
-//   - an ANCHORED pattern ("/src/core/**", leading slash) matches only from
-//     the repo root: at most one leading directory (the repo root itself in
-//     an absolute path like /repo/src/core/x.ts) may sit above the pattern,
-//     so /repo/vendor/src/core/x.ts does NOT match /src/core/**.
-// Within a segment `*` matches zero or more characters and never crosses a
-// "/"; a whole-segment `**` matches zero or more whole segments. A pattern
-// must consume the entire remaining suffix — write "docs/**" (not "docs") to
-// cover a subtree. The FIRST matching policy wins; a policy with an invalid
-// pattern never matches; a malformed path argument falls straight through to
-// the fallback. This function never throws.
+// Pure classification of the task's cwd, not a filesystem access boundary.
+// Anchored patterns need repository-relative paths or an explicit repository
+// root for absolute paths. Relative patterns retain suffix matching.
 export function dataClassForPath(
   policies: readonly PathPolicy[],
   path: string,
-  fallback: DataClass
+  fallback: DataClass,
+  repositoryRoot?: string
 ): DataClass {
   if (typeof path !== "string" || path.length === 0) return fallback;
+  let target = path.replace(/\\/gu, "/");
+  if (repositoryRoot !== undefined) {
+    const root = repositoryRoot.replace(/\\/gu, "/").replace(/\/+$/u, "");
+    if (!root || (target !== root && !target.startsWith(`${root}/`))) return fallback;
+    target = target.slice(root.length).replace(/^\//u, "");
+  }
   for (const policy of policies) {
-    if (!policy || typeof policy !== "object") continue;
-    if (pathPolicyMatches(policy.pattern, path)) return policy.dataClass;
+    if (!policy || typeof policy !== "object" || !DATA_CLASSES.includes(policy.dataClass)) continue;
+    if (pathPolicyMatches(policy.pattern, target)) return policy.dataClass;
   }
   return fallback;
 }
@@ -1279,14 +1367,12 @@ function pathPolicyMatches(pattern: string, path: string): boolean {
   const anchored = patternSegments[0] === "";
   const patternBody = anchored ? patternSegments.slice(1) : patternSegments;
   const rootless = splitPolicySegments(path);
-  const withoutRootMarker = rootless[0] === "" ? rootless.slice(1) : rootless;
-  // A relative pattern tries every suffix position; an anchored pattern only
-  // the first two — the path either starts at the repo root (a relative path,
-  // or an absolute path equal to root + content) or carries the repo root as
-  // its single leading directory (/repo/src/core/x.ts under /src/core/**).
-  const lastStart = anchored ? Math.min(1, withoutRootMarker.length) : withoutRootMarker.length;
+  // Never guess where a repository begins inside an absolute filesystem path.
+  if (anchored && (rootless[0] === "" || /^[A-Za-z]:$/u.test(rootless[0] ?? ""))) return false;
+  const segments = rootless[0] === "" ? rootless.slice(1) : rootless;
+  const lastStart = anchored ? 0 : segments.length;
   for (let start = 0; start <= lastStart; start += 1) {
-    if (matchPolicySegments(patternBody, withoutRootMarker.slice(start), 0, 0)) return true;
+    if (matchPolicySegments(patternBody, segments.slice(start), 0, 0)) return true;
   }
   return false;
 }
@@ -1722,9 +1808,52 @@ export interface LimitsSnapshot {
   providers: ProviderLimitsSnapshot[];
 }
 
+/** On-demand operational values only; never prompts, paths or credentials. */
+export interface LocalOperationalMetrics {
+  collectedAt: number;
+  activeSessions: number;
+  activeLocalSessions: number;
+  activeRemoteSessions: number;
+  /** Sum across CanvasTTY Electron processes; can exceed 100 on multiple cores. */
+  cpuPercent: number | null;
+  memoryWorkingSetMb: number | null;
+  load1: number | null;
+  cores: number | null;
+  memoryTotalMb: number | null;
+  memoryAvailableMb: number | null;
+}
+
+export interface RemoteHostUtilization {
+  hostId: string;
+  collectedAt: number;
+  reachable: boolean;
+  load1: number | null;
+  cores: number | null;
+  memoryTotalMb: number | null;
+  memoryAvailableMb: number | null;
+  gpuVramTotalMb: number | null;
+  gpuVramUsedMb: number | null;
+  detail?: string;
+}
+
 export interface CanvasTTYApi {
   evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
+  containers: {
+    probe(profileId: string): Promise<ContainerAvailability>;
+    list(): Promise<RetainedContainer[]>;
+    cleanup(id: string): Promise<void>;
+  };
+  workspaces: {
+    list(): Promise<RetainedWorkspace[]>;
+    review(id: string): Promise<WorkspaceReview>;
+    exportPatch(id: string, reviewId: string): Promise<boolean>;
+    cleanup(id: string): Promise<void>;
+  };
+  operationalMetrics: {
+    local(): Promise<LocalOperationalMetrics>;
+    remote(hostId: string): Promise<RemoteHostUtilization>;
+  };
   clipboard: {
     readText(): Promise<string>;
     writeText(text: string): void;
@@ -1754,6 +1883,10 @@ export interface CanvasTTYApi {
     status(): Promise<Record<ProviderSecretId, boolean>>;
     set(secretId: ProviderSecretId, value: string): Promise<void>;
     clear(secretId: ProviderSecretId): Promise<void>;
+    create(owner: ProviderSecretOwner, value: string): Promise<ProviderSecretStatus>;
+    scopedStatus(): Promise<ProviderSecretStatus[]>;
+    update(ref: ProviderSecretRef, owner: ProviderSecretOwner, value: string): Promise<void>;
+    remove(ref: ProviderSecretRef, owner: ProviderSecretOwner): Promise<void>;
   };
   plugins: {
     list(): Promise<InstalledPlugin[]>;
@@ -1862,6 +1995,15 @@ export const IPC = {
   clipboardRead: "clipboard:read",
   clipboardWrite: "clipboard:write",
   externalOpenUrl: "external:open-url",
+  containersProbe: "containers:probe",
+  containersList: "containers:list",
+  containersCleanup: "containers:cleanup",
+  workspacesList: "workspaces:list",
+  workspacesReview: "workspaces:review",
+  workspacesExport: "workspaces:export",
+  workspacesCleanup: "workspaces:cleanup",
+  operationalMetricsLocal: "operational-metrics:local",
+  operationalMetricsRemote: "operational-metrics:remote",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   dialogPickDirectory: "dialog:pick-directory",
@@ -1892,6 +2034,10 @@ export const IPC = {
   providerSecretsStatus: "provider-secrets:status",
   providerSecretsSet: "provider-secrets:set",
   providerSecretsClear: "provider-secrets:clear",
+  providerSecretsCreate: "provider-secrets:create",
+  providerSecretsScopedStatus: "provider-secrets:scoped-status",
+  providerSecretsUpdate: "provider-secrets:update",
+  providerSecretsRemove: "provider-secrets:remove",
   pluginsSecretsSet: "plugins:secrets-set",
   pluginsSecretsDelete: "plugins:secrets-delete",
   pluginsMediaPickLibrary: "plugins:media-pick-library",

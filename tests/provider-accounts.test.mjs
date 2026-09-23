@@ -63,10 +63,10 @@ test("accountSupportsModel matches exactly, case-insensitively, and by prefix wi
   assert.equal(accountSupportsModel(plus, "gpt-5-astra"), false);
   assert.equal(accountSupportsModel(plus, "gpt-5"), false);
 
-  // Unrestricted accounts: no request model, no models list, empty list.
-  assert.equal(accountSupportsModel(CHATGPT_PLUS, undefined), true);
+  // An omitted list is unrestricted; an explicit empty allowlist denies all.
+  assert.equal(accountSupportsModel(CHATGPT_PLUS, undefined), false);
   assert.equal(accountSupportsModel({ ...CHATGPT_PLUS, models: undefined }, "anything"), true);
-  assert.equal(accountSupportsModel({ ...CHATGPT_PLUS, models: [] }, "anything"), true);
+  assert.equal(accountSupportsModel({ ...CHATGPT_PLUS, models: [] }, "anything"), false);
 });
 
 test("accountEffectiveMaxDataClass tightens without ever raising the ceiling", () => {
@@ -110,10 +110,10 @@ test("eligibleAccountsForModel filters by provider and model, keeping settings o
     eligibleAccountsForModel([CHATGPT_PLUS, CHATGPT_PRO], "codex", "gpt-6").map((account) => account.id),
     []
   );
-  // No model constrains nothing.
+  // A constrained account requires an explicit covered model.
   assert.deepEqual(
     eligibleAccountsForModel([CHATGPT_PLUS], "codex", undefined).map((account) => account.id),
-    ["chatgpt-plus"]
+    []
   );
 });
 
@@ -149,7 +149,7 @@ test("normalizeProviderAccounts drops entries that no longer match the schema", 
       { ...valid, id: "bad-shared", provider: "codex", label: "Bad shared", shared: "yes" },
       { ...valid, id: "bad-models", provider: "codex", label: "Bad models", models: "gpt-5" }
     ], []),
-    [valid]
+    [valid, { id: "bad-models", provider: "codex", label: "Bad models", models: [] }]
   );
 });
 
@@ -170,22 +170,22 @@ test("normalizeProviderAccounts drops invalid model entries, not the account", (
   }], []);
   assert.deepEqual(normalized[0].models, ["gpt-5-mini", "gpt-5*"]);
 
-  // A models list left empty by that filtering falls away: unrestricted.
+  // A models list left empty by filtering stays deny-all.
   const emptied = normalizeProviderAccounts([{
     ...CHATGPT_PLUS,
     models: ["", "   "]
   }], []);
   assert.equal(emptied.length, 1);
-  assert.equal("models" in emptied[0], false);
+  assert.deepEqual(emptied[0].models, []);
 });
 
-test("normalizeProviderAccounts caps the catalog at 32 and falls back on non-arrays", () => {
-  const many = Array.from({ length: 40 }, (_value, index) => ({
+test("normalizeProviderAccounts caps the catalog at 512 and falls back on non-arrays", () => {
+  const many = Array.from({ length: 520 }, (_value, index) => ({
     ...CHATGPT_PLUS,
     id: `account-${index}`,
     label: `Account ${index}`
   }));
-  assert.equal(normalizeProviderAccounts(many, []).length, 32);
+  assert.equal(normalizeProviderAccounts(many, []).length, 512);
   assert.deepEqual(normalizeProviderAccounts("nope", []), []);
   assert.deepEqual(normalizeProviderAccounts(undefined, [CHATGPT_PLUS]), [CHATGPT_PLUS]);
 });
@@ -289,15 +289,7 @@ test("an explicit accountId that exists and covers the work is recorded on the s
   assert.equal(child.accountId, "chatgpt-pro");
   assert.equal(control.status(child.id).accountId, "chatgpt-pro");
 
-  // Without a model the account still must belong to the provider, but no
-  // model coverage applies.
-  const modelless = control.spawn({
-    parentSessionId: parent.id,
-    provider: "codex",
-    cwd: process.cwd(),
-    accountId: "chatgpt-plus"
-  });
-  assert.equal(modelless.accountId, "chatgpt-plus");
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "codex", cwd: process.cwd(), accountId: "chatgpt-plus" }), /model/);
   terminals.disposeAll();
 });
 

@@ -1,3 +1,4 @@
+import { remoteProbeLimiter } from "./RemoteProbeCache.ts";
 import { execFile } from "node:child_process";
 import { remoteHostInvalidReason } from "../../shared/contracts.ts";
 import type { RemoteHost } from "../../shared/contracts";
@@ -57,7 +58,7 @@ export function sshRunner(
   timeoutMs: number
 ): Promise<RemoteRunnerResult> {
   const args = buildSshArguments(host, timeoutMs, command);
-  return new Promise((resolve) => {
+  return remoteProbeLimiter.run(() => new Promise((resolve) => {
     execFile("ssh", args, { timeout: timeoutMs, maxBuffer: MAX_OUTPUT_BYTES }, (error, stdout, stderr) => {
       const code = error
         ? typeof error.code === "number" ? error.code : null
@@ -68,7 +69,7 @@ export function sshRunner(
         stderr: typeof stderr === "string" ? stderr : ""
       });
     });
-  });
+  }));
 }
 
 // Inert by design: constructing the service spawns nothing. Only

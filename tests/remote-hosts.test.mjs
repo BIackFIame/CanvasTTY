@@ -66,13 +66,13 @@ test("non-array input falls back to the provided default", () => {
   assert.deepEqual(normalizeRemoteHosts("nope", []), []);
 });
 
-test("the remote host registry is capped at 32 entries", () => {
-  const many = Array.from({ length: 40 }, (_value, index) => ({
+test("the remote host registry is capped at 512 entries", () => {
+  const many = Array.from({ length: 520 }, (_value, index) => ({
     ...validHost,
     id: `host-${index}`,
     label: `Host ${index}`
   }));
-  assert.equal(normalizeRemoteHosts(many, []).length, 32);
+  assert.equal(normalizeRemoteHosts(many, []).length, 512);
 });
 
 test("remote hosts persist through the settings store and settingsVersion reaches 24", async (t) => {

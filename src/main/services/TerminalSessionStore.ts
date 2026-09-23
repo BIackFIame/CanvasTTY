@@ -1,7 +1,10 @@
+import { assertIsolationRequest } from "../../shared/isolation.ts";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
+  IsolationRequest,
+  DataClass,
   SessionRole,
   Point,
   ProviderId,
@@ -10,7 +13,7 @@ import type {
 } from "../../shared/contracts.ts";
 
 export const TERMINAL_SESSION_STORE_VERSION = 1;
-const MAX_PERSISTED_SESSIONS = 64;
+const MAX_PERSISTED_SESSIONS = 512;
 const PROVIDERS = new Set<ProviderId>([
   "terminal",
   "codex",
@@ -29,6 +32,8 @@ const PROVIDERS = new Set<ProviderId>([
 ]);
 
 export interface PersistedTerminalSession {
+  isolation?: IsolationRequest;
+  workspaceId?: string;
   id: string;
   provider: ProviderId;
   profile: LaunchProfileId;
@@ -42,8 +47,13 @@ export interface PersistedTerminalSession {
   /** Remote host for shell sessions; same id space as AppSettings.remoteHosts. */
   hostId?: string;
   /** Provider account chosen by spawn routing; same id space as
-   *  AppSettings.providerAccounts. Bookkeeping only. */
+   *  AppSettings.providerAccounts. Revalidated against its launch digest on restore. */
   accountId?: string;
+  model?: string;
+  launchBinding?: string;
+  dataClass?: DataClass;
+  dataClassInherited?: boolean;
+  allowSubagents?: boolean;
 }
 
 interface PersistedTerminalSessionState {
@@ -113,6 +123,8 @@ export class TerminalSessionStore {
 export function persistedTerminalSession(metadata: SessionMetadata): PersistedTerminalSession {
   return {
     id: metadata.id,
+    ...(metadata.isolation ? { isolation: structuredClone(metadata.isolation) } : {}),
+    ...(metadata.execution?.workspaceId ? { workspaceId: metadata.execution.workspaceId } : {}),
     provider: metadata.provider,
     profile: metadata.profile,
     title: metadata.title,
@@ -127,7 +139,12 @@ export function persistedTerminalSession(metadata: SessionMetadata): PersistedTe
       }
       : {}),
     ...(metadata.hostId !== undefined ? { hostId: metadata.hostId } : {}),
-    ...(metadata.accountId !== undefined ? { accountId: metadata.accountId } : {})
+    ...(metadata.accountId !== undefined ? { accountId: metadata.accountId } : {}),
+    ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+    ...(metadata.launchBinding !== undefined ? { launchBinding: metadata.launchBinding } : {}),
+    ...(metadata.dataClass !== undefined ? { dataClass: metadata.dataClass } : {}),
+    ...(metadata.dataClassInherited !== undefined ? { dataClassInherited: metadata.dataClassInherited } : {}),
+    ...(metadata.allowSubagents !== undefined ? { allowSubagents: metadata.allowSubagents } : {})
   };
 }
 
@@ -143,6 +160,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
   for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS)) {
     if (!value || typeof value !== "object") continue;
     const session = value as Partial<PersistedTerminalSession>;
+    try { assertIsolationRequest(session.isolation); } catch { continue; }
+    if (session.workspaceId !== undefined && (typeof session.workspaceId !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u.test(session.workspaceId) || session.isolation?.mode !== "worktree" && session.isolation?.mode !== "container")) continue;
+    if ((session.isolation?.mode === "worktree" || session.isolation?.mode === "container") && session.workspaceId === undefined) continue;
     if (!isSessionId(session.id) || ids.has(session.id)) continue;
     if (!PROVIDERS.has(session.provider as ProviderId)) continue;
     if (session.profile !== "normal" && session.profile !== "yolo") continue;
@@ -177,8 +197,14 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ? session.accountId
       : undefined;
     if (session.accountId !== undefined && accountId === undefined) continue;
+    if (session.model !== undefined && (typeof session.model !== "string" || session.model.trim().length === 0 || session.model.length > 100)) continue;
+    if (session.dataClass !== undefined && !["D0", "D1", "D2", "D3"].includes(session.dataClass)) continue;
+    if (session.dataClassInherited !== undefined && typeof session.dataClassInherited !== "boolean") continue;
+    if (session.allowSubagents !== undefined && typeof session.allowSubagents !== "boolean") continue;
     sessions.push({
       id: session.id,
+      ...(session.isolation ? { isolation: structuredClone(session.isolation) } : {}),
+      ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
       provider: session.provider as ProviderId,
       profile: session.profile,
       title: session.title.trim().slice(0, 80),
@@ -192,7 +218,12 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(role !== undefined ? { role } : {}),
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       ...(hostId !== undefined ? { hostId } : {}),
-      ...(accountId !== undefined ? { accountId } : {})
+      ...(accountId !== undefined ? { accountId } : {}),
+      ...(session.model !== undefined ? { model: session.model } : {}),
+      ...(typeof session.launchBinding === "string" && /^[0-9a-f]{64}$/u.test(session.launchBinding) ? { launchBinding: session.launchBinding } : {}),
+      ...(session.dataClass !== undefined ? { dataClass: session.dataClass } : {}),
+      ...(session.dataClassInherited !== undefined ? { dataClassInherited: session.dataClassInherited } : {}),
+      ...(session.allowSubagents !== undefined ? { allowSubagents: session.allowSubagents } : {})
     });
     ids.add(session.id);
   }

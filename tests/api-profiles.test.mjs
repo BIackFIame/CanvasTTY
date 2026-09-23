@@ -56,13 +56,13 @@ test("non-array input falls back to the provided default", () => {
   assert.deepEqual(normalizeApiProfiles("nope", []), []);
 });
 
-test("the profile catalog is capped at 32 entries", () => {
-  const many = Array.from({ length: 40 }, (_value, index) => ({
+test("the profile catalog is capped at 512 entries", () => {
+  const many = Array.from({ length: 520 }, (_value, index) => ({
     ...validProfile,
     id: `profile-${index}`,
     name: `Profile ${index}`
   }));
-  assert.equal(normalizeApiProfiles(many, []).length, 32);
+  assert.equal(normalizeApiProfiles(many, []).length, 512);
 });
 
 test("api profiles persist through the settings store and settingsVersion reaches 24", async (t) => {

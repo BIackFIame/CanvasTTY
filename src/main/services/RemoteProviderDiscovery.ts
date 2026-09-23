@@ -1,3 +1,5 @@
+import { ProbeCache, remoteProbeKey } from "./RemoteProbeCache.ts";
+import type { ProbeCacheOptions } from "./RemoteProbeCache.ts";
 import { remoteHostInvalidReason } from "../../shared/contracts.ts";
 import type { AgentProviderId, RemoteHost } from "../../shared/contracts";
 import type { RemoteHostRunner } from "./RemoteHostsService.ts";
@@ -35,15 +37,17 @@ const DETAIL_MAX_LENGTH = 300;
 // remote shell intact.
 
 // Inert by design: constructing the service spawns nothing. Each discover()
-// call runs exactly one ssh invocation.
+// cache miss runs one ssh invocation; concurrent identical reads share it.
 export class RemoteProviderDiscovery {
   private readonly run: RemoteHostRunner;
+  private readonly cache: ProbeCache<RemoteDiscoveryResult>;
 
-  constructor(runner: RemoteHostRunner) {
+  constructor(runner: RemoteHostRunner, options: ProbeCacheOptions = {}) {
+    this.cache = new ProbeCache(options);
     this.run = runner;
   }
 
-  async discover(host: RemoteHost, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<RemoteDiscoveryResult> {
+  async discover(host: RemoteHost, timeoutMs = DEFAULT_TIMEOUT_MS, probeProviders: readonly AgentProviderId[] = PROVIDER_CLI_IDS): Promise<RemoteDiscoveryResult> {
     const hostId = host && typeof host === "object" && typeof (host as { id?: unknown }).id === "string"
       ? (host as { id: string }).id
       : "unknown";
@@ -51,10 +55,16 @@ export class RemoteProviderDiscovery {
     if (invalidReason !== null) {
       return { hostId, reachable: false, providers: [], detail: invalidReason };
     }
+    const providers = PROVIDER_CLI_IDS.filter((provider) => probeProviders.includes(provider));
+    return this.cache.read(remoteProbeKey(host, [timeoutMs, providers]), () => this.discoverUncached(host, timeoutMs, providers));
+  }
+
+  private async discoverUncached(host: RemoteHost, timeoutMs: number, providers: readonly AgentProviderId[]): Promise<RemoteDiscoveryResult> {
+    const hostId = host.id;
     try {
       const { code, stdout, stderr } = await this.run(
         host,
-        [`sh -lc '${remoteProbeScript(dedupedCommandNames())}'`],
+        [`sh -lc '${remoteProbeScript(dedupedCommandNames(providers))}'`],
         timeoutMs
       );
       if (code !== 0) {
@@ -69,7 +79,7 @@ export class RemoteProviderDiscovery {
       return {
         hostId,
         reachable: true,
-        providers: PROVIDER_CLI_IDS.map((provider) => providerStatus(provider, resolved))
+        providers: providers.map((provider) => providerStatus(provider, resolved))
       };
     } catch (error) {
       return {
@@ -86,10 +96,10 @@ export class RemoteProviderDiscovery {
 // one loop checks each name exactly once no matter how providers share
 // spellings. PROVIDER_CLI_DEFINITIONS stays the only place that knows which
 // commands belong to which provider.
-function dedupedCommandNames(): string[] {
+function dedupedCommandNames(providers: readonly AgentProviderId[]): string[] {
   const seen = new Set<string>();
   const names: string[] = [];
-  for (const id of PROVIDER_CLI_IDS) {
+  for (const id of providers) {
     for (const command of PROVIDER_CLI_DEFINITIONS[id].commands) {
       if (!seen.has(command)) {
         seen.add(command);
