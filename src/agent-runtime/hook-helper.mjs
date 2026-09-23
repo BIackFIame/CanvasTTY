@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import { MAX_HOOK_INPUT_BYTES, RUNTIME_STATES } from "./runtime-protocol.mjs";
+import {
+  CAPTURE_ANSWER_ENV,
+  CAPTURE_ANSWER_EXPIRES_AT_ENV,
+  MAX_HOOK_INPUT_BYTES,
+  RUNTIME_STATES
+} from "./runtime-protocol.mjs";
 import { reportLifecycle } from "./runtime-client.mjs";
 
 const [state, event] = process.argv.slice(2);
@@ -28,7 +33,11 @@ const turnId = firstString(
   input?.prompt_id,
   input?.promptId
 );
-const lastAssistantMessage = event === 'Stop' && typeof input?.last_assistant_message === 'string'
+const answerCaptureExpiresAt = Number(process.env[CAPTURE_ANSWER_EXPIRES_AT_ENV]);
+const hasLiveAnswerCaptureGrant = process.env[CAPTURE_ANSWER_ENV] === "1"
+  && Number.isFinite(answerCaptureExpiresAt) && answerCaptureExpiresAt > Date.now();
+const lastAssistantMessage = hasLiveAnswerCaptureGrant
+  && state === "idle" && event === "Stop" && typeof input?.last_assistant_message === "string"
   ? boundedText(input.last_assistant_message, 4000) : undefined;
 await reportLifecycle({ state, event, turnId, lastAssistantMessage });
 

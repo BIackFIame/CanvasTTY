@@ -10,4 +10,7 @@ export const AGENT_RUNTIME_ENV = Object.freeze({
   capabilityToken: "CANVASTTY_RUNTIME_CAPABILITY"
 });
 
+export const CAPTURE_ANSWER_ENV = "CANVASTTY_RUNTIME_CAPTURE_ANSWER";
+export const CAPTURE_ANSWER_EXPIRES_AT_ENV = "CANVASTTY_RUNTIME_CAPTURE_ANSWER_EXPIRES_AT";
+
 export const RUNTIME_STATES = Object.freeze(["idle", "working", "needs_approval"]);

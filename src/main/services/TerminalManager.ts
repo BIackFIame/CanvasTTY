@@ -479,12 +479,12 @@ export class TerminalManager {
     };
   }
 
-  create(request: CreateSessionRequest): SessionSnapshot {
+  create(request: CreateSessionRequest, control: { answerCaptureGrantExpiresAt?: number } = {}): SessionSnapshot {
     if (request?.containerPlacement !== undefined) throw new Error('Container placement requires the asynchronous launch boundary.');
-    return this.createFixed(request);
+    return this.createFixed(request, undefined, undefined, control.answerCaptureGrantExpiresAt);
   }
 
-  private createFixed(request: CreateSessionRequest, routeGuard?: (excludeSessionId?: string) => void, ownedLaunch?: OwnedContextLaunch): SessionSnapshot {
+  private createFixed(request: CreateSessionRequest, routeGuard?: (excludeSessionId?: string) => void, ownedLaunch?: OwnedContextLaunch, answerCaptureGrantExpiresAt?: number): SessionSnapshot {
     routeGuard?.();
     if (ownedLaunch) { const { disclosureClass: _floor, dataClassInherited: _inherited, ...publicRequest } = request as CreateSessionRequest & { disclosureClass?: DataClass; dataClassInherited?: boolean }; assertCreateRequest(publicRequest); }
     else assertCreateRequest(request);
@@ -559,7 +559,7 @@ export class TerminalManager {
       && this.providerClis.get(request.provider).state === "available";
     const launched = request.transport === "acp" || awaitMeasuredGrid || (this.needsPreparedLaunch(request.provider))
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, undefined, startup);
+      : this.spawnProcess(metadata, INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, undefined, startup, answerCaptureGrantExpiresAt);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -1284,7 +1284,8 @@ export class TerminalManager {
     rows = INITIAL_TERMINAL_ROWS,
     resumePrevious = false,
     prepared?: PreparedProviderAccountLaunch,
-    startup?: AgentStartup
+    startup?: AgentStartup,
+    answerCaptureGrantExpiresAt?: number
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -1317,7 +1318,7 @@ export class TerminalManager {
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
     try {
       agentRuntime = provider === "terminal" || remoteAgent || prepared?.skipBridges
-        ? null : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd }) ?? null;
+        ? null : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd, ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
       agentOrchestration = (sessionRole === "orchestrator" || allowSubagents) && !remoteAgent && !prepared?.skipBridges && this.agentOrchestration?.isEnabled
         ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id }) : null;
       // omp and pi take no browser bridge, exactly like grok: the adapter chain below

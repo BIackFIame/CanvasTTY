@@ -342,8 +342,16 @@ async function initializeServices(): Promise<void> {
           state: signal.state,
           ...(signal.turnId ? { requestId: signal.turnId } : {})
         });
-        if (signal.lastAssistantMessage !== undefined) evenG2?.answer(terminalSessionId, signal.lastAssistantMessage, signal.turnId);
-      }
+        if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
+          evenG2?.answer(
+            terminalSessionId,
+            signal.lastAssistantMessage,
+            signal.turnId,
+            signal.answerCaptureGrantExpiresAt
+          );
+        }
+      },
+      onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId)
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
