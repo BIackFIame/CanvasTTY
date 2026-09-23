@@ -127,6 +127,7 @@ interface SettingsPanelProps {
   onRevealSession?(id: string): void;
   sessions: SessionSnapshot[];
   open: boolean;
+  openUpdatesRequest: number;
   settings: AppSettings;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
@@ -159,6 +160,7 @@ export function SettingsPanel({
   location,
   sessions,
   open,
+  openUpdatesRequest,
   settings,
   agentAvailability,
   onRecheckAgentClis,
@@ -203,6 +205,10 @@ export function SettingsPanel({
   useEffect(() => { if (section === "execution") setExecutionVisited(true); if (section === "execution" && executionView === "containers") setContainersVisited(true); }, [section, executionView]);
   useEffect(() => { if (!open || !location) return; setSection(location.section); if (location.section === "execution") setExecutionView(location.view); requestAnimationFrame(() => document.getElementById(`settings-tab-${location.section}`)?.focus()); }, [open, location]);
   useEffect(() => { if (section === "connections") setConnectionsVisited(true); }, [section]);
+
+  useEffect(() => {
+    if (openUpdatesRequest > 0) setSection("about");
+  }, [openUpdatesRequest]);
   const [capturing, setCapturing] = useState<ShortcutAction | null>(null);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [activity, setActivity] = useState<BrowserActivityEvent[]>([]);

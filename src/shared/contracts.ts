@@ -1878,6 +1878,16 @@ export interface LimitsSnapshot {
   providers: ProviderLimitsSnapshot[];
 }
 
+export type UpdateStatus =
+  | { type: "idle" }
+  | { type: "checking" }
+  | { type: "available"; version: string; notes?: string; manualUrl?: string }
+  | { type: "downloading"; percent?: number }
+  | { type: "ready"; version: string }
+  | { type: "installing" }
+  | { type: "upToDate" }
+  | { type: "error"; message: string };
+
 /** On-demand operational values only; never prompts, paths or credentials. */
 export interface LocalOperationalMetrics {
   collectedAt: number;
@@ -1939,6 +1949,13 @@ export interface CanvasTTYApi {
     prepareStatus(jobIds: string[]): Promise<ServerPreparationJob[]>;
   };
   accountHomes: { inspect(directory: string): Promise<AccountHomeInspection>; };
+  update: {
+    status(): Promise<UpdateStatus>;
+    check(): Promise<void>;
+    download(): Promise<void>;
+    install(): Promise<void>;
+    onStatus(listener: (status: UpdateStatus) => void): () => void;
+  };
   evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
   containers: {
@@ -2093,6 +2110,7 @@ export interface CanvasTTYApi {
   };
   window: {
     isMacOS: boolean;
+    onOpenUpdates(listener: () => void): () => void;
     minimize(): void;
     toggleMaximize(): Promise<WindowState>;
     close(): void;
@@ -2241,6 +2259,12 @@ export const IPC = {
   canvasNavigationPointerGesture: "canvas-navigation:pointer-gesture",
   canvasNavigationOverrideState: "canvas-navigation:override-state",
   appVersion: "app:version",
+  updateStatus: "update:status",
+  updateCheck: "update:check",
+  updateDownload: "update:download",
+  updateInstall: "update:install",
+  updateChanged: "update:changed",
+  windowOpenUpdates: "window:open-updates",
   githubAuthStatus: "github-auth:status",
   githubAuthStart: "github-auth:start",
   githubAuthSignOut: "github-auth:sign-out",
