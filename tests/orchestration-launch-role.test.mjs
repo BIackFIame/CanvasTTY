@@ -83,6 +83,8 @@ test("only orchestrator sessions receive the orchestration capability environmen
   assert.ok(orchestratorEnv, "orchestrator session spawned");
   assert.ok(orchestratorEnv.CANVASTTY_ORCHESTRATION_ADDRESS);
   assert.ok(orchestratorEnv.CANVASTTY_ORCHESTRATION_CAPABILITY);
+  // The helper authenticates with the connection id the capability was issued for.
+  assert.ok(orchestratorEnv.CANVASTTY_ORCHESTRATION_CONNECTION_ID);
 
   const interactiveEnv = calls[1]?.options?.env;
   assert.ok(interactiveEnv, "interactive session spawned");

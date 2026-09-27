@@ -16,7 +16,9 @@ export const MAX_INFLIGHT_ORCHESTRATION_COMMANDS = 4;
 export const ORCHESTRATION_ENV = Object.freeze({
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
   capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
-  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID"
+  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID",
+  // The gateway checks it on authenticate, so the helper must get the one the capability was issued for.
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID"
 });
 
 export type OrchestrationToolName =

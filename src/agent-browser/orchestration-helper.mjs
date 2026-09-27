@@ -17,7 +17,8 @@ const DEFAULT_MCP_PROTOCOL_VERSION = "2025-06-18";
 const ENV = {
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
   capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
-  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID"
+  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID",
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID"
 };
 
 export const ORCHESTRATION_AGENT_INSTRUCTIONS = [
@@ -257,7 +258,9 @@ function readIdentity() {
   const address = requiredEnvironment(ENV.address);
   const capabilityToken = requiredEnvironment(ENV.capabilityToken);
   const terminalSessionId = requiredEnvironment(ENV.terminalSessionId);
-  return { address, capabilityToken, terminalSessionId, connectionId: `helper-${randomUUID()}` };
+  // The connection id the capability was issued for: the gateway refuses any other.
+  const connectionId = requiredEnvironment(ENV.connectionId);
+  return { address, capabilityToken, terminalSessionId, connectionId };
 }
 
 function requiredEnvironment(key) {

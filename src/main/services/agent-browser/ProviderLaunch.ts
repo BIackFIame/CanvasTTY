@@ -309,7 +309,7 @@ export function codexMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: St
       `command=${tomlString(orchestrationHelper.command)}`,
       `args=${tomlStringArray(orchestrationHelper.args)}`,
       `env=${tomlStringTable(orchestrationHelper.env ?? {})}`,
-      `env_vars=${tomlStringArray(["CANVASTTY_ORCHESTRATION_ADDRESS", "CANVASTTY_ORCHESTRATION_CAPABILITY", "CANVASTTY_TERMINAL_SESSION_ID"])}`,
+      `env_vars=${tomlStringArray(["CANVASTTY_ORCHESTRATION_ADDRESS", "CANVASTTY_ORCHESTRATION_CAPABILITY", "CANVASTTY_TERMINAL_SESSION_ID", "CANVASTTY_ORCHESTRATION_CONNECTION_ID"])}`,
       "enabled=true",
       "required=false",
       'default_tools_approval_mode="approve"',
