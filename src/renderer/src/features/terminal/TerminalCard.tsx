@@ -67,7 +67,8 @@ interface TerminalCardProps {
   onRenameEnd(): void;
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onRestart(id: string, resume?: boolean): Promise<void>;
-  onDispose(id: string): void;
+  /** `keepEnvironmentData` is the answer to "Keep environment data?" for a card in a plugin environment. */
+  onDispose(id: string, keepEnvironmentData?: boolean): void;
   /** Saving sessions is on, so the per-card "Don't restore" choice applies. */
   restoreEnabled?: boolean;
   onOpenUrl(url: string): void;
@@ -155,6 +156,7 @@ export function TerminalCard({
   const [restarting, setRestarting] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [noteDismissed, setNoteDismissed] = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
   const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
@@ -736,6 +738,11 @@ export function TerminalCard({
           {session.role === "orchestrator" && (
             <span className="terminal-card__role" title={t(locale, "orchestratorRoleNote")}>{t(locale, "roleOrchestrator")}</span>
           )}
+          {session.environment && (
+            <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
+              {session.environment.label}
+            </span>
+          )}
         </div>
         <div className="terminal-card__actions">
           {!summaryMode && (
@@ -795,7 +802,11 @@ export function TerminalCard({
           >
             <UiIcon name={fullscreen ? "restore" : "maximize"} size="1.23em" />
           </button>
-          <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => onDispose(session.id)} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
+          <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => {
+            // A card in a plugin environment asks once whether its data stays.
+            if (session.environment) setConfirmClose(true);
+            else onDispose(session.id);
+          }} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
         </div>
       </header>
       <div className="terminal-card__surface" ref={terminalHost} />
@@ -813,6 +824,18 @@ export function TerminalCard({
             />
             {t(locale, "cardSkipRestore")}
           </label>
+        </div>
+      )}
+      {confirmClose && session.environment && (
+        <div className="terminal-card__menu terminal-card__confirm" role="alertdialog" aria-label={t(locale, "environmentKeepTitle")}
+          onKeyDown={(event) => { if (event.key === "Escape") setConfirmClose(false); }}>
+          <strong>{t(locale, "environmentKeepTitle")}</strong>
+          <span>{session.environment.label} · {t(locale, "environmentKeepDetail")}</span>
+          <div className="terminal-card__confirm-actions">
+            <button type="button" autoFocus onClick={() => { setConfirmClose(false); onDispose(session.id, true); }}>{t(locale, "environmentKeep")}</button>
+            <button type="button" onClick={() => { setConfirmClose(false); onDispose(session.id, false); }}>{t(locale, "environmentRemove")}</button>
+            <button type="button" onClick={() => setConfirmClose(false)}>{t(locale, "cancel")}</button>
+          </div>
         </div>
       )}
       {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (

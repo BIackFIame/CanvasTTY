@@ -207,7 +207,7 @@ const api: CanvasTTYApi = {
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.terminalBounds, id, bounds),
     rename: (id: string, title: string) => ipcRenderer.invoke(IPC.terminalRename, id, title),
     setRestore: (id: string, restore: boolean) => ipcRenderer.invoke(IPC.terminalSetRestore, id, restore),
-    dispose: (id: string) => ipcRenderer.invoke(IPC.terminalDispose, id),
+    dispose: (id: string, options?: { keepEnvironmentData?: boolean }) => ipcRenderer.invoke(IPC.terminalDispose, id, options),
     setVisible: (id: string, visible: boolean) => ipcRenderer.send(IPC.terminalSetVisible, id, visible),
     onData: (listener: (event: TerminalDataEvent) => void) => subscribe(IPC.terminalData, listener),
     onSession: (listener: (event: SessionEvent) => void) => subscribe(IPC.terminalSession, listener),

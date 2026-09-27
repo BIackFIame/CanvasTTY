@@ -75,7 +75,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide">;
     modules: string[];
   };
   contribution: {
@@ -163,6 +163,85 @@ export interface CanvasTTYPluginServiceManifestEntry {
   module?: string;
   /** Launch contributor; needs `launch:contribute`. At most one service per plugin. */
   launch?: CanvasTTYServiceLaunch;
+  /** Session environments; needs `environment:provide`. At most 8 kinds per plugin, unique across its services. */
+  environments?: CanvasTTYEnvironmentKind[];
+}
+
+export type CanvasTTYProviderId = "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity";
+
+export interface CanvasTTYEnvironmentKind {
+  /** `^[a-z0-9][a-z0-9-]{0,31}$`, unique within the service. */
+  kind: string;
+  label: string;
+  description?: string;
+  /** Providers it applies to ("terminal" included); all when omitted. */
+  appliesTo?: CanvasTTYProviderId[];
+  /** At most 8 launcher fields; values reach `prepare` only. */
+  fields?: CanvasTTYLaunchField[];
+}
+
+/** Opaque to CanvasTTY: saved with the card (at most 4 KB of JSON) and handed back unchanged. */
+export type CanvasTTYEnvironmentRef = unknown;
+
+/** `canvastty.environment.prepare` (15 s): create the place once, when the card first starts. */
+export interface CanvasTTYEnvironmentPrepareParams {
+  sessionId: string;
+  kind: string;
+  provider: CanvasTTYProviderId;
+  cwd: string;
+  options: Record<string, boolean | string>;
+}
+export type CanvasTTYEnvironmentPrepareResult =
+  /** `label` is the card badge (80 characters); `cwd` (an existing absolute folder) becomes the card's folder. */
+  | { ref: CanvasTTYEnvironmentRef; label: string; cwd?: string }
+  | { refuse: { reason: string } };
+
+/** `canvastty.environment.wrap` (5 s): before every start; the host still spawns the PTY. */
+export interface CanvasTTYEnvironmentWrapParams {
+  sessionId: string;
+  kind: string;
+  ref: CanvasTTYEnvironmentRef;
+  provider: CanvasTTYProviderId;
+  command: string;
+  args: string[];
+  /** The launch's own variables, without reserved `CANVASTTY_*` names and without secret values. */
+  env: Record<string, string>;
+  /** Names whose values the spawned process gets from the host (forward them by name). */
+  secretEnvNames: string[];
+  cwd: string;
+}
+export type CanvasTTYEnvironmentWrapResult =
+  | {
+    /** An absolute path to an executable, or a bare program name resolved on PATH. Never a shell string. */
+    command: string;
+    /** At most 256, 8 KB each, no NUL. */
+    args: string[];
+    /** Launch-contributor rules: no reserved names, no names this launch already sets. */
+    env?: Record<string, string>;
+    /** Env name -> the plugin's own secret key (needs `secrets`); set and masked by the host. */
+    secretEnv?: Record<string, string>;
+    /** An existing absolute folder; the launch's folder when omitted. */
+    cwd?: string;
+  }
+  | { refuse: { reason: string } };
+
+/** `canvastty.environment.resume` (10 s): on restore, and before restarting a card from an earlier run. */
+export type CanvasTTYEnvironmentResumeResult = { ok: true } | { stopped: { reason: string } };
+
+/** `canvastty.environment.release` (10 s): the card was closed, or the app quit with saving off. */
+export interface CanvasTTYEnvironmentReleaseParams {
+  sessionId: string;
+  kind: string;
+  ref: CanvasTTYEnvironmentRef;
+  /** The person's answer to "Keep environment data?"; always true when quitting. */
+  keepData: boolean;
+  reason: "closed" | "quit";
+}
+
+/** `canvastty.environment.describe` (3 s): the card badge and its tooltip. */
+export interface CanvasTTYEnvironmentDescribeResult {
+  label: string;
+  detail?: string;
 }
 
 export interface CanvasTTYServiceLaunch {
@@ -201,6 +280,8 @@ export interface CanvasTTYLaunchContext {
   options: Record<string, boolean | string>;
   /** The person chose this plugin for the launch; false for a policy check, whose answer may only refuse. */
   chosen: boolean;
+  /** Where the card runs: the chosen or saved environment, or null on this computer. */
+  environment: { pluginId: string; kind: string } | null;
 }
 
 /**
@@ -240,7 +321,12 @@ export type CanvasTTYServiceHostNotification =
 export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.launch.prepare"; params: CanvasTTYLaunchContext }
   /** Answer `{ "<field key>": [{ value, label }] }` (at most 64 per field) within 3 s. */
-  | { jsonrpc: "2.0"; id: number; method: "canvastty.launch.options"; params: { provider: CanvasTTYLaunchContext["provider"]; fields: string[] } };
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.launch.options"; params: { provider: CanvasTTYLaunchContext["provider"]; fields: string[] } }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.prepare"; params: CanvasTTYEnvironmentPrepareParams }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.wrap"; params: CanvasTTYEnvironmentWrapParams }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.resume"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.release"; params: CanvasTTYEnvironmentReleaseParams }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {

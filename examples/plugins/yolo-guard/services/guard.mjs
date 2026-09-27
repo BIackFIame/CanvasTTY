@@ -6,9 +6,9 @@ import { createInterface } from "node:readline";
 
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 
-function prepare({ profile }) {
-  if (profile === "yolo") {
-    return { refuse: { reason: "YOLO launches are turned off by the YOLO Guard plugin: start without YOLO, or disable the plugin." } };
+function prepare({ profile, environment }) {
+  if (profile === "yolo" && !environment) {
+    return { refuse: { reason: "YOLO runs only in an isolated environment: pick one under Advanced → Where, or start without YOLO." } };
   }
   return null;
 }

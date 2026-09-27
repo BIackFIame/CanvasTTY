@@ -46,7 +46,8 @@ export function planSessionRestore(
   mode: SessionRestoreMode,
   context: {
     isLiveSession(id: string): boolean;
-    environmentAvailable(environment: PersistedEnvironmentRef): boolean;
+    /** False when the environment's plugin is unavailable or its resume answered stopped. */
+    environmentAvailable(environment: PersistedEnvironmentRef, record: PersistedTerminalSession): boolean;
     /** False when a plugin named in the saved launch options cannot prepare launches now. */
     launchOptionsAvailable?(options: Record<string, unknown>): boolean;
   }
@@ -75,7 +76,7 @@ export function planSessionRestore(
 
   return ordered.map((record): RestoreStep => {
     const recorded = record.threadId ? { threadId: record.threadId } : {};
-    if (record.environment && !context.environmentAvailable(record.environment)) {
+    if (record.environment && !context.environmentAvailable(record.environment, record)) {
       return { record, launch: "stopped", note: "environment-unavailable", ...recorded };
     }
     // Never launch without the contribution the person chose: hold the card with its reason.

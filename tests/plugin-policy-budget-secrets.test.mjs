@@ -1,6 +1,6 @@
 /**
  * Small extension points a model-backed plugin needs (the CanvasTTY Assistant): launch policies (`launch.policy`,
- * asked before every launch with `chosen: false`, refusal only), and `secrets.get` for a service's own
+ * asked before every launch with `chosen: false` and the card's environment, refusal only), and `secrets.get` for a service's own
  * secrets. HOME is whatever the test runner's fake HOME is.
  */
 import assert from "node:assert/strict";
@@ -44,7 +44,7 @@ test("manifests: launch.policy is a boolean; the examples validate", async () =>
   assert.deepEqual(validatePluginManifest(await readJson(new URL("canvastty.plugin.json", echoExample))).permissions, ["storage", "secrets"]);
 });
 
-test("launch policies: asked with chosen false for every agent launch; they may only refuse", async (t) => {
+test("launch policies: asked with chosen false and the environment for every agent launch; they may only refuse", async (t) => {
   const runsRoot = await mkdtemp(join(tmpdir(), "canvastty-points-runs-"));
   t.after(() => rm(runsRoot, { recursive: true, force: true }));
   const requests = [];
@@ -69,31 +69,32 @@ test("launch policies: asked with chosen false for every agent launch; they may 
   assert.equal(pipeline.hasPolicy("claude"), true);
   assert.equal(pipeline.hasPolicy("terminal"), false, "a plain terminal has no launch policy");
 
-  answers["a.policy"] = ({ profile }) => profile === "yolo" ? { refuse: { reason: "No YOLO here." } } : null;
-  const refused = await pipeline.prepare({ ...base, options: {} });
-  assert.deepEqual(refused, { ok: false, reason: "Policy: No YOLO here." });
+  answers["a.policy"] = ({ profile, environment }) => profile === "yolo" && !environment ? { refuse: { reason: "YOLO only in an environment." } } : null;
+  const refused = await pipeline.prepare({ ...base, options: {}, environment: null });
+  assert.deepEqual(refused, { ok: false, reason: "Policy: YOLO only in an environment." });
   assert.deepEqual(requests.map((request) => [request.pluginId, request.params.chosen, request.params.options]), [["a.policy", false, {}]]);
 
   requests.length = 0;
-  const chosen = await pipeline.prepare({ ...base, profile: "normal", options: { "b.option": { on: true } } });
-  assert.equal(chosen.ok, true);
-  await chosen.cleanup();
+  const placed = await pipeline.prepare({ ...base, options: { "b.option": { on: true } }, environment: { pluginId: "env", kind: "worktree" } });
+  assert.equal(placed.ok, true);
+  await placed.cleanup();
   assert.deepEqual(requests.map((request) => [request.pluginId, request.params.chosen]).sort(), [["a.policy", false], ["b.option", true]]);
+  assert.deepEqual(requests.find((request) => request.pluginId === "a.policy").params.environment, { pluginId: "env", kind: "worktree" });
 
   // A policy the person also chose is asked once, as chosen.
   requests.length = 0;
-  (await pipeline.prepare({ ...base, profile: "normal", options: { "a.policy": {} } })).ok || assert.fail("normal launch refused");
+  (await pipeline.prepare({ ...base, profile: "normal", options: { "a.policy": {} }, environment: null })).ok || assert.fail("normal launch refused");
   assert.deepEqual(requests.map((request) => [request.pluginId, request.params.chosen]), [["a.policy", true]]);
 
   answers["a.policy"] = () => ({ env: { SNEAKY: "1" } });
-  assert.match((await pipeline.prepare({ ...base, profile: "normal", options: {} })).reason, /a policy may only refuse/u);
+  assert.match((await pipeline.prepare({ ...base, profile: "normal", options: {}, environment: null })).reason, /a policy may only refuse/u);
   answers["a.policy"] = () => new Promise(() => undefined);
-  assert.match((await pipeline.prepare({ ...base, profile: "normal", options: {} })).reason, /did not answer its launch policy within 0\.3 s/u);
+  assert.match((await pipeline.prepare({ ...base, profile: "normal", options: {}, environment: null })).reason, /did not answer its launch policy within 0\.3 s/u);
   answers["a.policy"] = () => { throw new Error("broken"); };
-  assert.equal((await pipeline.prepare({ ...base, profile: "normal", options: {} })).ok, false, "an error refuses, never passes");
+  assert.equal((await pipeline.prepare({ ...base, profile: "normal", options: {}, environment: null })).ok, false, "an error refuses, never passes");
 });
 
-test("the yolo-guard example refuses YOLO launches over JSON-RPC", async (t) => {
+test("the yolo-guard example refuses YOLO outside an environment over JSON-RPC", async (t) => {
   const source = await readFile(new URL("services/guard.mjs", guardExample), "utf8");
   const dir = join(root, "guard");
   await mkdir(dir, { recursive: true });
@@ -106,8 +107,9 @@ test("the yolo-guard example refuses YOLO launches over JSON-RPC", async (t) => 
   await supervisor.sync([{ pluginId: "com.example.yolo-guard", serviceId: "guard", root: dir, entryPath: join(dir, "guard.mjs"), sha256: sha256(source), dataDir: join(dir, "data"), permissions: ["launch:contribute"] }]);
   const call = (params) => supervisor.hostCall("com.example.yolo-guard", "guard", "canvastty.launch.prepare", params, 2_000);
   const context = { sessionId: "s", provider: "claude", role: "agent", cwd: project, restoring: false, resume: false, options: {}, chosen: false };
-  assert.match((await call({ ...context, profile: "yolo" })).refuse.reason, /YOLO launches are turned off/u);
-  assert.equal(await call({ ...context, profile: "normal" }), null);
+  assert.match((await call({ ...context, profile: "yolo", environment: null })).refuse.reason, /isolated environment/u);
+  assert.equal(await call({ ...context, profile: "yolo", environment: { pluginId: "e", kind: "worktree" } }), null);
+  assert.equal(await call({ ...context, profile: "normal", environment: null }), null);
 });
 
 test("secrets.get: a service reads its own plugin's secret only with the permission", async (t) => {
@@ -137,7 +139,7 @@ test("secrets.get: a service reads its own plugin's secret only with the permiss
   assert.deepEqual(await supervisor.request("com.example.service-echo", "echo", "token", null), { set: false });
 });
 
-test("a card waits for the launch policies that apply; a YOLO card is refused, terminals are not asked", async (t) => {
+test("a card waits for the launch policies that apply; a YOLO card outside an environment is refused, terminals are not asked", async (t) => {
   const { TerminalManager } = await import("../src/main/services/TerminalManager.ts");
   const runsRoot = await mkdtemp(join(tmpdir(), "canvastty-points-manager-"));
   t.after(() => rm(runsRoot, { recursive: true, force: true }));
@@ -146,7 +148,7 @@ test("a card waits for the launch policies that apply; a YOLO card is refused, t
     contributors: () => [{ pluginId: "com.example.yolo-guard", pluginName: "YOLO Guard", serviceId: "guard", launch: { policy: true, fields: [] }, secrets: false }],
     call: async (_pluginId, _serviceId, _method, params) => {
       asked.push(params);
-      return params.profile === "yolo" ? { refuse: { reason: "No YOLO here." } } : null;
+      return params.profile === "yolo" && !params.environment ? { refuse: { reason: "YOLO only in an environment." } } : null;
     },
     secret: async () => null,
     runsRoot,
@@ -168,8 +170,8 @@ test("a card waits for the launch policies that apply; a YOLO card is refused, t
   const yolo = manager.create({ provider: "claude", profile: "yolo", cwd: project, position: at });
   assert.equal(calls.length, 0, "the card waits for the policy");
   await waitFor(() => manager.list().find((session) => session.id === yolo.id)?.status === "failed");
-  assert.match(manager.list().find((session) => session.id === yolo.id).failureDetails, /^Launch refused: YOLO Guard: No YOLO here\./u);
-  assert.deepEqual({ chosen: asked[0].chosen, options: asked[0].options }, { chosen: false, options: {} });
+  assert.match(manager.list().find((session) => session.id === yolo.id).failureDetails, /^Launch refused: YOLO Guard: YOLO only in an environment\./u);
+  assert.deepEqual({ chosen: asked[0].chosen, options: asked[0].options, environment: asked[0].environment }, { chosen: false, options: {}, environment: null });
   const normal = manager.create({ provider: "claude", profile: "normal", cwd: project, position: at });
   await waitFor(() => calls.length === 1);
   assert.equal(manager.list().find((session) => session.id === normal.id).status !== "failed", true);

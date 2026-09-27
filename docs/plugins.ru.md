@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-Рабочий пример sandboxed web-поверхностей без привилегированного хука: [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). Минимальный сервис с canvas-приложением, которое его вызывает: [`examples/plugins/service-echo`](../examples/plugins/service-echo). Launch contributor: [`examples/plugins/launch-env`](../examples/plugins/launch-env), политика запуска: [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard).
+Рабочий пример sandboxed web-поверхностей без привилегированного хука: [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). Минимальный сервис с canvas-приложением, которое его вызывает: [`examples/plugins/service-echo`](../examples/plugins/service-echo). Launch contributor: [`examples/plugins/launch-env`](../examples/plugins/launch-env), политика запуска: [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). Среда сессии (git worktree): [`examples/plugins/env-worktree`](../examples/plugins/env-worktree).
 Для IDE доступны [JSON Schema manifest](canvastty-plugin.schema.json) и [TypeScript declarations SDK](plugin-api.d.ts).
 
 ## Manifest v1
@@ -196,13 +196,48 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 - Нет ответа за 5 с, ошибка, неверный ответ, отсутствующий секрет или выключенный, удалённый либо переставший быть доверенным плагин отклоняют запуск, и причина видна в окне. Агент никогда не запускается без выбранного вклада. Восстановленное окно с недоступным плагином возвращается остановленным с этой причиной и сохраняет запись, пока плагин не вернётся или окно не закроют.
 - Обычный терминал параметров запуска не принимает.
 
-**Политики запуска.** С `"policy": true` сервис спрашивают ещё и перед каждым запуском агентов, к которым он относится (создание, перезапуск, восстановление), где человек его не выбрал, с `"chosen": false` и пустыми `options`. Такой ответ может быть только `null` или `refuse`; всё остальное, нет ответа за 5 с или ошибка — отказ в запуске, так что политика никогда не пропускает запуск из-за сбоя. Политика без `fields` в запускателе не показывается. Отзыв доверия к нативному коду плагина убирает его политику.
+**Политики запуска.** С `"policy": true` сервис спрашивают ещё и перед каждым запуском агентов, к которым он относится (создание, перезапуск, восстановление), где человек его не выбрал, с `"chosen": false` и пустыми `options`. Такой ответ может быть только `null` или `refuse`; всё остальное, нет ответа за 5 с или ошибка — отказ в запуске, так что политика никогда не пропускает запуск из-за сбоя. Каждый `canvastty.launch.prepare` несёт и `"environment"`: `{ pluginId, kind }` среды окна или `null` на этом компьютере. Политика без `fields` в запускателе не показывается. Отзыв доверия к нативному коду плагина убирает его политику.
 
 ```json
 "launch": { "policy": true, "fields": [] }
 ```
 
-Полные примеры: [`examples/plugins/launch-env`](../examples/plugins/launch-env) (параметры) и [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (политика, которая не пускает YOLO).
+Полные примеры: [`examples/plugins/launch-env`](../examples/plugins/launch-env) (параметры) и [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (политика, которая не пускает YOLO вне среды).
+
+### Среды сессий (`environment:provide`)
+
+Среда — это место, где работает окно: git worktree, контейнер, удалённый хост. Плагин может перечислить до 8 видов в `environments` — в одном сервисе или в нескольких (например, по сервису на модуль); каждый вид уникален в плагине, и на него отвечает сервис, который его перечислил. После доверия нативному коду в разделе **Дополнительно** лаунчера появляется **Где запустить** (по умолчанию **Этот компьютер**) с видами, подходящими провайдеру, и их необязательными `fields` (те же виды и лимиты, что у полей запуска). Пока какой-то вид подходит терминалам, **Открыть терминал** открывает тот же лаунчер (папка и «Где запустить»), а не терминал сразу.
+
+```json
+"permissions": ["environment:provide"],
+"services": [{
+  "id": "worktree", "title": "Git worktree", "entry": "services/worktree.mjs",
+  "environments": [{
+    "kind": "worktree", "label": "Git worktree",
+    "description": "A branch in its own folder",
+    "appliesTo": ["terminal", "claude"],
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+  }]
+}]
+```
+
+CanvasTTY владеет окном, PTY, сохранённой записью и порядком восстановления; сервис отвечает на пять запросов, которые может отправить только хост:
+
+| Запрос | Параметры | Ответ | Лимит |
+|:--|:--|:--|:--|
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` или `{ refuse: { reason } }`. `ref` — непрозрачный JSON до 4 КБ, хранится с окном; `label` (80 символов) — бейдж; `cwd` (существующая абсолютная папка) становится папкой окна | 15 с |
+| `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` или `{ refuse }` | 5 с |
+| `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` или `{ stopped: { reason } }` | 10 с |
+| `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason` (`closed` или `quit`) | игнорируется | 10 с |
+| `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }` для бейджа окна и подсказки | 3 с |
+
+- `prepare` вызывается один раз, при первом запуске окна. `wrap` вызывается перед каждым запуском (создание, перезапуск, восстановление) и превращает то, что хост запустил бы, в то, что работает внутри среды: `ssh -tt host …`, `docker exec -it …` или та же программа в другой папке. PTY по-прежнему создаёт хост через node-pty, поэтому прокрутка, статус и оркестрация работают как раньше.
+- Ответ `wrap` проверяется: `command` — абсолютный путь к исполняемому файлу или простое имя программы, которое хост находит в `PATH`; командная строка, относительный путь или синтаксис оболочки отклоняются, ничего не запускается через оболочку. `args` — массив (256 элементов, до 8 КБ, без NUL). `env` и `secretEnv` подчиняются правилам launch contributors: зарезервированные имена и имена, которые CanvasTTY или параметр запуска уже задают для этого запуска, отклоняются. Значения `secretEnv` берутся из собственных секретов плагина (нужно `secrets`) и маскируются так же, как секреты запуска.
+- `wrap` получает переменные самого запуска (от CanvasTTY и выбранных параметров запуска) без зарезервированных имён `CANVASTTY_*` и без значений секретов; `secretEnvNames` перечисляет имена, значения которых процесс получит от хоста, чтобы обёртка могла пробросить их по имени (`docker exec -e NAME`).
+- При восстановлении сначала возобновляются все сохранённые среды, затем запускаются родители, потом дочерние окна. Если плагин выключен, удалён или не доверен либо `resume` ответил `stopped`, окно возвращается остановленным с причиной и сохраняет запись; «Перезапуск» снова вызывает `resume`. Окно никогда не запускается локально вместо среды, а таймаут или ошибка отклоняют запуск без запасного варианта.
+- При закрытии окна в среде один раз спрашивается «Сохранить данные среды?», затем вызывается `release` с ответом. Выход из приложения ничего не освобождает (среда вернётся вместе с окном); если сохранение выключено, выход вызывает `release` с `keepData: true` и `reason: "quit"`, чтобы остановить вычисления. Плагин не ведёт своего списка сессий и не содержит логики восстановления.
+
+Полный пример: [`examples/plugins/env-worktree`](../examples/plugins/env-worktree): `prepare` выполняет `git worktree add` в папке внутри каталога данных плагина, `wrap` задаёт папку, `resume` проверяет, что она существует, `describe` показывает текущую ветку, `release` удаляет worktree (и созданную им ветку), если вы не решили её сохранить.
 
 host.onStorageChange(listener) сообщает всем открытым поверхностям того же плагина — canvas cards, HOME widgets и отдельным окнам — об изменениях через host.storage.set, поэтому нескольким поверхностям не требуется постоянный polling.
 
@@ -214,6 +249,7 @@ host.onStorageChange(listener) сообщает всем открытым пов
 | `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; `secrets.get` сервиса | Строковые секреты, зашифрованные через Electron `safeStorage`; без защищённого хранилища ОС вызов завершается ошибкой. Доверенный сервис читает только секреты своего плагина |
 | `sessions:read` | `sessions.list` | Только ID, provider, title, status, startedAt и exitCode |
 | `launch:contribute` | Блок `launch` сервиса и `canvastty.launch.prepare` | Может добавлять переменные окружения, аргументы и файлы агентам, запущенным с его опцией; с `policy` может отказать любому запуску агента |
+| `environment:provide` | `environments` сервиса и `canvastty.environment.*` | Может создавать место для окон, запущенных в его среде, и менять команду, аргументы, переменные и папку, с которыми они там работают |
 | `limits:read` | `limits.get` | Тот же очищенный `LimitsSnapshot`, который использует HOME |
 | `launcher:open` | `launcher.open` | Открывает штатную Focus Card или запуск терминала; не обходит пользовательский выбор |
 | `external:open` | `external.open` | Передаёт ОС только явную HTTP(S)-ссылку |

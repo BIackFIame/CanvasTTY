@@ -28,6 +28,7 @@ import {
 import { PluginManager } from "./services/PluginManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
+import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -485,7 +486,12 @@ async function initializeServices(): Promise<void> {
   });
   await launchPipeline.clearRuns().catch(() => undefined);
   terminalManager.configureLaunchPipeline(launchPipeline);
-  // Restored cards with launch options ask their plugin's service, so start services first.
+  terminalManager.configureEnvironments(new EnvironmentRegistry({
+    providers: () => pluginManager!.environmentProviders(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key)
+  }));
+  // Restored cards with launch options or an environment ask their plugin's service, so start services first.
   await pluginServicesStarted.catch(() => undefined);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration

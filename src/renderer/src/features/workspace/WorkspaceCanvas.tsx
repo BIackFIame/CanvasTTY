@@ -180,7 +180,7 @@ interface WorkspaceCanvasProps {
   onFocusPluginCanvas(id: string): void;
   onSessionBoundsChange(id: string, bounds: SessionBounds): void;
   onRestartSession(id: string, resume?: boolean): Promise<void>;
-  onDisposeSession(id: string): void;
+  onDisposeSession(id: string, keepEnvironmentData?: boolean): void;
   onBrowserBoundsChange(bounds: BrowserCanvasState): void;
   onFocusBrowser(): void;
   onCloseBrowser(): void;

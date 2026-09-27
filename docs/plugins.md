@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -215,13 +215,48 @@ Rules the host enforces, none of which is ever skipped:
 - No answer within 5 s, an error, an invalid answer, a missing secret, or a plugin that is disabled, removed or no longer trusted refuses the launch with the reason on the card. The agent is never started without a contribution the person chose. A restored card whose plugin is unavailable comes back stopped with that reason and keeps its record until the plugin returns or the card is closed.
 - A plain terminal takes no launch options.
 
-**Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
+**Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. Every `canvastty.launch.prepare` also carries `"environment"`: `{ pluginId, kind }` of the card's environment, or `null` on this computer. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
 
 ```json
 "launch": { "policy": true, "fields": [] }
 ```
 
-The full examples are [`examples/plugins/launch-env`](../examples/plugins/launch-env) (options) and [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (a policy that refuses YOLO launches).
+The full examples are [`examples/plugins/launch-env`](../examples/plugins/launch-env) (options) and [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (a policy that refuses YOLO outside an environment).
+
+### Session environments (`environment:provide`)
+
+An environment is where a card runs: a git worktree, a container, a remote host. A plugin may list up to 8 `environments` kinds, on one service or split over several (for example one service per module); each kind is unique in the plugin and answered by the service that lists it. Once the plugin's native code is trusted, the launcher's **Advanced** section shows **Where** (default **This computer**) with each kind that applies to the provider, and its optional `fields` (same kinds and limits as launch fields). While a kind applies to terminals, **Open terminal** opens the same launcher (folder and Where) instead of opening at once.
+
+```json
+"permissions": ["environment:provide"],
+"services": [{
+  "id": "worktree", "title": "Git worktree", "entry": "services/worktree.mjs",
+  "environments": [{
+    "kind": "worktree", "label": "Git worktree",
+    "description": "A branch in its own folder",
+    "appliesTo": ["terminal", "claude"],
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+  }]
+}]
+```
+
+CanvasTTY keeps the card, the PTY, the saved record and the restore order; the service answers five host-only requests (surfaces cannot send them):
+
+| Request | Params | Answer | Budget |
+|:--|:--|:--|:--|
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` or `{ refuse: { reason } }`. `ref` is opaque JSON of at most 4 KB saved with the card; `label` (80 characters) is the badge; `cwd` (an existing absolute folder) becomes the card's folder | 15 s |
+| `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` or `{ refuse }` | 5 s |
+| `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` or `{ stopped: { reason } }` | 10 s |
+| `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason` (`closed` or `quit`) | ignored | 10 s |
+| `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }` for the card badge and its tooltip | 3 s |
+
+- `prepare` runs once, when the card first starts. `wrap` runs before every start (create, restart, restore) and turns what the host would spawn into what runs inside the environment, for example `ssh -tt host …`, `docker exec -it …`, or the same program in another folder. The host still spawns it with node-pty, so scrollback, status and orchestration work unchanged.
+- `wrap` output is checked: `command` must be an absolute path to an executable file or a bare program name that the host resolves on `PATH`; a command line, a relative path or shell syntax is refused, and nothing runs through a shell. `args` is an array (256 items, 8 KB each, no NUL). `env` and `secretEnv` follow the launch-contributor rules: reserved names are refused, and so is any name CanvasTTY or a launch option already sets for this launch. `secretEnv` values come from the plugin's own secrets (needs `secrets`) and are masked like launch secrets.
+- `wrap` receives the launch's own variables (from CanvasTTY and chosen launch options) without reserved `CANVASTTY_*` names and without secret values; `secretEnvNames` lists names whose values the spawned process gets from the host, so a wrapper can forward them by name (`docker exec -e NAME`).
+- Restore resumes every saved environment first, then starts parents before children. If the plugin is disabled, removed or untrusted, or `resume` answers `stopped`, the card comes back stopped with the reason and keeps its record; Restart asks `resume` again. A card is never started locally instead, and a timeout or error refuses, never falls back.
+- Closing a card in an environment asks once, "Keep environment data?", then calls `release` with the answer. Quitting releases nothing (the environment comes back with the card); with saving off, quitting calls `release` with `keepData: true` and `reason: "quit"` so compute can stop. The plugin keeps no session list of its own and has no restore logic.
+
+The full example is [`examples/plugins/env-worktree`](../examples/plugins/env-worktree): `prepare` runs `git worktree add` in a folder under the plugin's data directory, `wrap` sets the folder, `resume` checks it still exists, `describe` shows the current branch, and `release` removes the worktree (and the branch it created) unless you keep it.
 
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
@@ -233,6 +268,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; a service's `secrets.get` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable. A trusted service reads its own plugin's secrets only |
 | `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
 | `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
+| `environment:provide` | A service's `environments` and `canvastty.environment.*` | Can create a place for cards the person starts in its environment and change the command, arguments, variables and folder they run with there |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |

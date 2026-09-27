@@ -3,7 +3,7 @@
   "id": "com.example.yolo-guard",
   "name": "YOLO Guard",
   "version": "1.0.0",
-  "description": "Minimal launch policy: refuses every YOLO agent launch. It has no launcher options; CanvasTTY asks it before every agent launch.",
+  "description": "Minimal launch policy: refuses every YOLO agent launch that is not in a plugin environment (a worktree, a container, a server). It has no launcher options; CanvasTTY asks it before every agent launch.",
   "author": "CanvasTTY contributors",
   "permissions": ["launch:contribute"],
   "services": [

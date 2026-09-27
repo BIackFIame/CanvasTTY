@@ -1051,6 +1051,7 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "playlists:write": "permissionPlaylistsWrite",
     "hermes:hud": "permissionHermesHud",
     "launch:contribute": "permissionLaunchContribute",
+    "environment:provide": "permissionEnvironmentProvide",
     network: "permissionNetwork"
   } as const)[permission];
 }

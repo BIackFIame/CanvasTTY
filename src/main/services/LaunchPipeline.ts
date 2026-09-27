@@ -48,6 +48,8 @@ export interface LaunchContext {
   options: PluginLaunchValues;
   /** The person chose this plugin for the launch; false for a launch policy check, whose answer may only refuse. */
   chosen: boolean;
+  /** Where the card runs (the chosen or saved environment), or null on this computer. */
+  environment: { pluginId: string; kind: string } | null;
 }
 
 export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen"> & { options: Record<string, PluginLaunchValues> };
@@ -72,9 +74,9 @@ const MAX_SERVICE_OPTIONS = 64;
 /** Replaced in env values and args with the plugin's folder of written files for this run. */
 export const LAUNCH_FILES_TOKEN = "{launchFiles}";
 const MAX_OPTION_PLUGINS = 16;
-const MAX_ENV = 32;
-const MAX_ENV_VALUE_BYTES = 8 * 1024;
-const MAX_SECRET_ENV = 16;
+export const MAX_ENV = 32;
+export const MAX_ENV_VALUE_BYTES = 8 * 1024;
+export const MAX_SECRET_ENV = 16;
 const MAX_ARGS = 32;
 const MAX_ARG_LENGTH = 1_024;
 const MAX_FILES = 16;
@@ -82,7 +84,7 @@ const MAX_FILES_BYTES = 256 * 1024;
 const MAX_REASON = 240;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 /** Names that steer CanvasTTY itself or the process loader, never a plugin's to set. */
-const RESERVED_ENV = /^(?:CANVASTTY_|ELECTRON_|DYLD_|LD_)|^(?:NODE_OPTIONS|PATH|TERM|COLORTERM)$/i;
+export const RESERVED_ENV = /^(?:CANVASTTY_|ELECTRON_|DYLD_|LD_)|^(?:NODE_OPTIONS|PATH|TERM|COLORTERM)$/i;
 
 export class LaunchPipeline {
   private readonly dependencies: LaunchPipelineDependencies;
@@ -377,7 +379,8 @@ function validContribution(value: unknown): Contribution | string {
   return { env, secretEnv, args: args as string[], files };
 }
 
-function stringMap(value: unknown, limit: number, field: string): Record<string, string> | string {
+/** Env names a plugin may set: valid, not reserved for CanvasTTY or the loader, text values. */
+export function stringMap(value: unknown, limit: number, field: string): Record<string, string> | string {
   if (value === undefined) return {};
   if (!isRecord(value) || Object.keys(value).length > limit) return `${field} must be an object of at most ${limit} entries`;
   for (const [key, entry] of Object.entries(value)) {
@@ -398,10 +401,10 @@ function safeSegment(value: string): string {
 
 class TimeoutError extends Error {}
 
-function errorText(error: unknown): string {
+export function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, MAX_REASON);
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }

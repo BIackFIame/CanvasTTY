@@ -668,7 +668,10 @@ export function registerIpc({
   ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
   ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
   ipcMain.handle(IPC.terminalSetRestore, (_event, id: string, restore: boolean) => terminals.setRestore(id, restore));
-  ipcMain.handle(IPC.terminalDispose, (_event, id: string) => terminals.dispose(id));
+  ipcMain.handle(IPC.terminalDispose, (_event, id: string, options?: { keepEnvironmentData?: unknown }) => (
+    // Environment data is kept unless the person explicitly chose Remove.
+    terminals.dispose(id, { keepEnvironmentData: options?.keepEnvironmentData !== false })
+  ));
   // Fire-and-forget, like the other stream-reporting channels: a malformed
   // report is ignored rather than rejecting into the renderer.
   ipcMain.on(IPC.terminalSetVisible, (_event, id: unknown, visible: unknown) => {

@@ -272,6 +272,8 @@ export interface CreateSessionRequest {
   parentSessionId?: string;
   /** Launch options per plugin id; each named plugin's launch service prepares this launch. */
   launchOptions?: Record<string, PluginLaunchValues>;
+  /** Where the session runs: a plugin environment kind; omitted = this computer. */
+  environment?: SessionEnvironmentChoice;
 }
 
 export interface SessionMetadata {
@@ -293,6 +295,8 @@ export interface SessionMetadata {
   /** Set when the person chose "Don't restore this card". */
   skipRestore?: boolean;
   restoreNote?: SessionRestoreNote;
+  /** The plugin environment this card runs in (badge text from the plugin's describe). */
+  environment?: SessionEnvironmentBadge;
 }
 
 export interface SessionSnapshot extends SessionMetadata {
@@ -359,7 +363,8 @@ export type PluginPermission =
   | "playlists:write"
   | "hermes:hud"
   | "network"
-  | "launch:contribute";
+  | "launch:contribute"
+  | "environment:provide";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -427,6 +432,32 @@ export interface PluginService {
   module?: string;
   /** Launch contribution (`launch:contribute`): options shown in the launcher's Advanced section. */
   launch?: PluginServiceLaunch;
+  /** Session environments (`environment:provide`): kinds offered in the launcher's "Where" choice. */
+  environments?: PluginEnvironmentKind[];
+}
+
+/** One place a session can run (a worktree, a container, a remote host), provided by a plugin service. */
+export interface PluginEnvironmentKind {
+  kind: string;
+  label: string;
+  description?: string;
+  /** Providers it applies to, "terminal" included; all when omitted. */
+  appliesTo?: ProviderId[];
+  /** Launcher fields for this kind; values go to `canvastty.environment.prepare` only. */
+  fields?: PluginLaunchField[];
+}
+
+export interface SessionEnvironmentChoice {
+  pluginId: string;
+  kind: string;
+  options?: PluginLaunchValues;
+}
+
+export interface SessionEnvironmentBadge {
+  pluginId: string;
+  kind: string;
+  label: string;
+  detail?: string;
 }
 
 export type PluginLaunchFieldKind = "boolean" | "select" | "text";
@@ -1286,7 +1317,8 @@ export interface CanvasTTYApi {
     setBounds(id: string, bounds: SessionBounds): void;
     rename(id: string, title: string): Promise<SessionMetadata>;
     setRestore(id: string, restore: boolean): Promise<SessionMetadata>;
-    dispose(id: string): Promise<void>;
+    /** `keepEnvironmentData` answers "Keep environment data?" for a card that runs in a plugin environment. */
+    dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
     onData(listener: (event: TerminalDataEvent) => void): () => void;

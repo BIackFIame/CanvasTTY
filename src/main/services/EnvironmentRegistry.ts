@@ -1,0 +1,368 @@
+import { accessSync, constants, statSync } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
+import type {
+  PluginEnvironmentKind,
+  PluginLaunchValues,
+  ProviderId,
+  SessionEnvironmentChoice
+} from "../../shared/contracts.ts";
+import { errorText, isRecord, MAX_ENV, MAX_ENV_VALUE_BYTES, MAX_SECRET_ENV, stringMap } from "./LaunchPipeline.ts";
+import { MAX_PLUGIN_SLOT_BYTES, type PersistedEnvironmentRef } from "./TerminalSessionStore.ts";
+
+/** A trusted plugin service that provides session environments (PluginManager.environmentProviders). */
+export interface EnvironmentProvider {
+  pluginId: string;
+  pluginName: string;
+  serviceId: string;
+  kinds: PluginEnvironmentKind[];
+  /** The plugin holds the `secrets` permission, so `wrap` may name its secrets in `secretEnv`. */
+  secrets: boolean;
+}
+
+export type EnvironmentStep = "prepare" | "wrap" | "resume" | "release" | "describe";
+export type EnvironmentMethod = `canvastty.environment.${EnvironmentStep}`;
+
+export interface EnvironmentRegistryDependencies {
+  providers(): EnvironmentProvider[];
+  call(pluginId: string, serviceId: string, method: EnvironmentMethod, params: unknown, timeoutMs: number): Promise<unknown>;
+  /** Reads one of the plugin's own secrets in this process; the value never reaches plugin code or UI. */
+  secret(pluginId: string, key: string): Promise<string | null>;
+  timeouts?: Partial<Record<EnvironmentStep, number>>;
+  platform?: NodeJS.Platform;
+}
+
+/** The core never waits longer and never falls back to a local launch when a step runs out. */
+export const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
+  prepare: 15_000,
+  wrap: 5_000,
+  resume: 10_000,
+  release: 10_000,
+  describe: 3_000
+};
+
+/** What the host would spawn without an environment; `wrap` returns its replacement. */
+export interface EnvironmentLaunch {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  cwd: string;
+}
+
+export type PreparedEnvironment =
+  | { ok: true; environment: PersistedEnvironmentRef; cwd?: string }
+  | { ok: false; reason: string };
+
+export type WrappedLaunch =
+  | { ok: true; command: string; args: string[]; env: Record<string, string>; cwd: string; secrets: string[] }
+  | { ok: false; reason: string };
+
+const MAX_LABEL = 80;
+const MAX_DETAIL = 240;
+const MAX_REASON = 240;
+const MAX_WRAP_ARGS = 256;
+const MAX_WRAP_ARG_BYTES = 8 * 1024;
+const BARE_COMMAND = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
+
+export class EnvironmentRegistry {
+  private readonly dependencies: EnvironmentRegistryDependencies;
+  private readonly timeouts: Record<EnvironmentStep, number>;
+
+  constructor(dependencies: EnvironmentRegistryDependencies) {
+    this.dependencies = dependencies;
+    this.timeouts = { ...ENVIRONMENT_TIMEOUTS, ...dependencies.timeouts };
+  }
+
+  /** True when the plugin named by a saved ref can serve that kind now. */
+  available(environment: Pick<PersistedEnvironmentRef, "pluginId" | "kind">): boolean {
+    return Boolean(this.lookup(environment.pluginId, environment.kind));
+  }
+
+  unavailableReason(environment: Pick<PersistedEnvironmentRef, "pluginId" | "kind" | "label">): string {
+    return `Needs plugin ${environment.pluginId} (${environment.label}); it is disabled, removed, or its native code is not trusted. It was not started locally.`;
+  }
+
+  /**
+   * Checks a launcher choice against the provider's declared kinds and fields and fills defaults.
+   * Throws with a person-readable reason; returns undefined for "this computer".
+   */
+  normalizeChoice(provider: ProviderId, candidate: unknown): SessionEnvironmentChoice | undefined {
+    if (candidate === undefined || candidate === null) return undefined;
+    if (!isRecord(candidate) || typeof candidate.pluginId !== "string" || typeof candidate.kind !== "string") {
+      throw new Error("Environment choice is invalid.");
+    }
+    const found = this.lookup(candidate.pluginId, candidate.kind);
+    if (!found) throw new Error(`Environment ${candidate.kind.slice(0, 32)} from plugin ${candidate.pluginId.slice(0, 80)} is not available.`);
+    const { provider: owner, kind } = found;
+    if (kind.appliesTo && !kind.appliesTo.includes(provider)) throw new Error(`${kind.label} does not apply to ${provider}.`);
+    const raw = candidate.options ?? {};
+    if (!isRecord(raw)) throw new Error(`${kind.label} options are invalid.`);
+    const fields = kind.fields ?? [];
+    const known = new Set(fields.map((field) => field.key));
+    const unknown = Object.keys(raw).find((key) => !known.has(key));
+    if (unknown) throw new Error(`${kind.label} has no option ${unknown.slice(0, 40)}.`);
+    const options: PluginLaunchValues = {};
+    for (const field of fields) {
+      const value = raw[field.key] ?? field.default
+        ?? (field.kind === "boolean" ? false : field.kind === "select" ? field.options?.[0]?.value ?? "" : "");
+      const valid = field.kind === "boolean"
+        ? typeof value === "boolean"
+        : field.kind === "select"
+          ? typeof value === "string" && Boolean(field.options?.some((option) => option.value === value))
+          : typeof value === "string" && value.length <= (field.maxLength ?? 200) && !/[\u0000-\u001f\u007f]/.test(value);
+      if (!valid) throw new Error(`${kind.label} option ${field.label} is invalid.`);
+      options[field.key] = value as boolean | string;
+    }
+    return { pluginId: owner.pluginId, kind: kind.kind, ...(fields.length ? { options } : {}) };
+  }
+
+  /** `canvastty.environment.prepare`: creates the place (a worktree, a container) and returns its ref. */
+  async prepare(request: {
+    sessionId: string;
+    provider: ProviderId;
+    cwd: string;
+    choice: SessionEnvironmentChoice;
+  }): Promise<PreparedEnvironment> {
+    const found = this.lookup(request.choice.pluginId, request.choice.kind);
+    if (!found) return { ok: false, reason: `Environment ${request.choice.kind} from plugin ${request.choice.pluginId} is not available.` };
+    const answer = await this.ask(found.provider, "prepare", {
+      sessionId: request.sessionId,
+      kind: request.choice.kind,
+      provider: request.provider,
+      cwd: request.cwd,
+      options: request.choice.options ?? {}
+    });
+    if (!answer.ok) return answer;
+    const value = answer.value;
+    const name = found.provider.pluginName;
+    if (isRecord(value) && value.refuse !== undefined) return { ok: false, reason: `${name}: ${refusal(value.refuse)}` };
+    if (!isRecord(value)) return { ok: false, reason: `${name} answered with an invalid environment: not an object` };
+    const unknown = Object.keys(value).find((key) => !["ref", "label", "cwd"].includes(key));
+    if (unknown) return { ok: false, reason: `${name} answered with an invalid environment: unknown key ${unknown.slice(0, 40)}` };
+    if (value.ref === undefined || !fitsSlot(value.ref)) {
+      return { ok: false, reason: `${name} answered with an invalid environment: ref must be JSON of at most 4 KB` };
+    }
+    const label = plainText(value.label, MAX_LABEL);
+    if (!label) return { ok: false, reason: `${name} answered with an invalid environment: label is required` };
+    if (value.cwd !== undefined && !isDirectory(value.cwd)) {
+      return { ok: false, reason: `${name} answered with an invalid environment: cwd must be an existing absolute folder` };
+    }
+    return {
+      ok: true,
+      environment: { pluginId: found.provider.pluginId, kind: request.choice.kind, ref: structuredClone(value.ref), label },
+      ...(typeof value.cwd === "string" ? { cwd: value.cwd } : {})
+    };
+  }
+
+  /** `canvastty.environment.resume`: on restore and before relaunching a card from an earlier run. */
+  async resume(environment: PersistedEnvironmentRef, sessionId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const found = this.lookup(environment.pluginId, environment.kind);
+    if (!found) return { ok: false, reason: this.unavailableReason(environment) };
+    const answer = await this.ask(found.provider, "resume", refParams(environment, sessionId));
+    if (!answer.ok) return answer;
+    const value = answer.value;
+    const name = found.provider.pluginName;
+    if (isRecord(value) && value.ok === true && Object.keys(value).length === 1) return { ok: true };
+    if (isRecord(value) && value.stopped !== undefined) return { ok: false, reason: `${name}: ${refusal(value.stopped)}` };
+    return { ok: false, reason: `${name} answered resume with neither ok nor stopped.` };
+  }
+
+  /**
+   * `canvastty.environment.wrap`: turns the host's launch into the one that runs inside the environment.
+   * The host still spawns the PTY; the answer is validated and merged under the launch-contributor rules.
+   */
+  async wrap(environment: PersistedEnvironmentRef, request: {
+    sessionId: string;
+    provider: ProviderId;
+    launch: EnvironmentLaunch;
+    /** Names the host sets for this launch whose values the environment never sees (secrets). */
+    secretEnvNames: string[];
+    /** Names CanvasTTY or a launch contributor sets for this launch; the environment may not set them. */
+    takenEnv: ReadonlySet<string>;
+    /** PATH used to resolve a bare command name. */
+    path: string | undefined;
+  }): Promise<WrappedLaunch> {
+    const found = this.lookup(environment.pluginId, environment.kind);
+    if (!found) return { ok: false, reason: this.unavailableReason(environment) };
+    const { provider } = found;
+    const name = provider.pluginName;
+    const answer = await this.ask(provider, "wrap", {
+      ...refParams(environment, request.sessionId),
+      provider: request.provider,
+      command: request.launch.command,
+      args: request.launch.args,
+      env: request.launch.env,
+      secretEnvNames: request.secretEnvNames,
+      cwd: request.launch.cwd
+    });
+    if (!answer.ok) return answer;
+    const invalid = (problem: string): WrappedLaunch => ({ ok: false, reason: `${name} answered with an invalid launch: ${problem}` });
+    const value = answer.value;
+    if (isRecord(value) && value.refuse !== undefined) return { ok: false, reason: `${name}: ${refusal(value.refuse)}` };
+    if (!isRecord(value)) return invalid("not an object");
+    const unknown = Object.keys(value).find((key) => !["command", "args", "env", "secretEnv", "cwd"].includes(key));
+    if (unknown) return invalid(`unknown key ${unknown.slice(0, 40)}`);
+    if (typeof value.command !== "string" || value.command.length === 0 || value.command.length > 1_024) return invalid("command is required");
+    const command = resolveCommand(value.command, request.path, this.dependencies.platform ?? process.platform);
+    if (!command) {
+      return invalid(`command ${value.command.slice(0, 80)} must be an absolute path to a program or a bare program name on PATH; CanvasTTY runs no shell string`);
+    }
+    const args = value.args ?? [];
+    if (!Array.isArray(args) || args.length > MAX_WRAP_ARGS) return invalid(`args must be an array of at most ${MAX_WRAP_ARGS}`);
+    for (const argument of args) {
+      if (typeof argument !== "string" || argument.includes("\u0000") || Buffer.byteLength(argument, "utf8") > MAX_WRAP_ARG_BYTES) {
+        return invalid("every arg must be text without NUL, at most 8 KB");
+      }
+    }
+    if (value.cwd !== undefined && !isDirectory(value.cwd)) return invalid("cwd must be an existing absolute folder");
+    const env = stringMap(value.env, MAX_ENV, "env");
+    if (typeof env === "string") return invalid(env);
+    for (const [key, entry] of Object.entries(env)) {
+      if (entry.includes("\u0000") || Buffer.byteLength(entry, "utf8") > MAX_ENV_VALUE_BYTES) return invalid(`env ${key} value is invalid or larger than 8 KB`);
+    }
+    const secretEnv = stringMap(value.secretEnv, MAX_SECRET_ENV, "secretEnv");
+    if (typeof secretEnv === "string") return invalid(secretEnv);
+    const merged: Record<string, string> = {};
+    const secrets: string[] = [];
+    for (const key of [...Object.keys(env), ...Object.keys(secretEnv)]) {
+      if (request.takenEnv.has(key)) return { ok: false, reason: `${name} sets ${key}, which CanvasTTY or a launch option already sets for this launch.` };
+      if (key in merged) return { ok: false, reason: `${name} sets ${key} twice.` };
+      merged[key] = env[key] ?? "";
+    }
+    for (const [key, secretKey] of Object.entries(secretEnv)) {
+      if (!/^[A-Za-z0-9._-]{1,80}$/.test(secretKey)) return invalid(`secretEnv ${key} must name a plugin secret key`);
+      if (!provider.secrets) return { ok: false, reason: `${name} asked for a secret without the secrets permission.` };
+      const secret = await this.dependencies.secret(provider.pluginId, secretKey).catch(() => null);
+      if (typeof secret !== "string" || secret.length === 0) return { ok: false, reason: `${name}: its secret ${secretKey} is not set.` };
+      if (secret.includes("\u0000")) return { ok: false, reason: `${name}: its secret ${secretKey} cannot be passed in the environment.` };
+      merged[key] = secret;
+      secrets.push(secret);
+    }
+    return {
+      ok: true,
+      command,
+      args: args as string[],
+      env: merged,
+      cwd: typeof value.cwd === "string" ? value.cwd : request.launch.cwd,
+      secrets
+    };
+  }
+
+  /** `canvastty.environment.release`: the card was closed (or the app quit with saving off). Never throws. */
+  async release(environment: PersistedEnvironmentRef, sessionId: string, options: { keepData: boolean; reason: "closed" | "quit"; timeoutMs?: number }): Promise<void> {
+    const found = this.lookup(environment.pluginId, environment.kind);
+    if (!found) return;
+    const answer = await this.ask(found.provider, "release", {
+      ...refParams(environment, sessionId),
+      keepData: options.keepData,
+      reason: options.reason
+    }, options.timeoutMs);
+    if (!answer.ok) console.warn(`CanvasTTY environment ${environment.label} could not be released: ${answer.reason}`);
+  }
+
+  /** `canvastty.environment.describe`: the card badge text; null when the plugin gave none. */
+  async describe(environment: PersistedEnvironmentRef, sessionId: string): Promise<{ label: string; detail?: string } | null> {
+    const found = this.lookup(environment.pluginId, environment.kind);
+    if (!found) return null;
+    const answer = await this.ask(found.provider, "describe", refParams(environment, sessionId));
+    if (!answer.ok || !isRecord(answer.value)) return null;
+    const label = plainText(answer.value.label, MAX_LABEL);
+    if (!label) return null;
+    const detail = plainText(answer.value.detail, MAX_DETAIL);
+    return { label, ...(detail ? { detail } : {}) };
+  }
+
+  private lookup(pluginId: string, kindId: string): { provider: EnvironmentProvider; kind: PluginEnvironmentKind } | null {
+    // Kinds are unique within a plugin, whichever of its services lists them.
+    const provider = this.dependencies.providers()
+      .find((candidate) => candidate.pluginId === pluginId && candidate.kinds.some((kind) => kind.kind === kindId));
+    const kind = provider?.kinds.find((candidate) => candidate.kind === kindId);
+    return provider && kind ? { provider, kind } : null;
+  }
+
+  private async ask(
+    provider: EnvironmentProvider,
+    step: EnvironmentStep,
+    params: unknown,
+    timeoutMs = this.timeouts[step]
+  ): Promise<{ ok: true; value: unknown } | { ok: false; reason: string }> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const value = await Promise.race([
+        this.dependencies.call(provider.pluginId, provider.serviceId, `canvastty.environment.${step}`, params, timeoutMs),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+        })
+      ]);
+      return { ok: true, value };
+    } catch (error) {
+      const text = errorText(error);
+      if (/timed out/i.test(text)) {
+        return { ok: false, reason: `${provider.pluginName} did not answer ${step} within ${Number((timeoutMs / 1000).toFixed(1))} s; nothing was started locally.` };
+      }
+      return { ok: false, reason: `${provider.pluginName} could not ${step} the environment: ${text}` };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+}
+
+function refParams(environment: PersistedEnvironmentRef, sessionId: string): Record<string, unknown> {
+  return { sessionId, kind: environment.kind, ref: structuredClone(environment.ref) };
+}
+
+function refusal(value: unknown): string {
+  const reason = isRecord(value) ? value.reason : value;
+  return plainText(reason, MAX_REASON) || "no reason given";
+}
+
+function plainText(value: unknown, limit: number): string {
+  return typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, limit) : "";
+}
+
+function fitsSlot(value: unknown): boolean {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === "string" && Buffer.byteLength(json, "utf8") <= MAX_PLUGIN_SLOT_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(value: unknown): value is string {
+  if (typeof value !== "string" || !isAbsolute(value) || value.includes("\u0000")) return false;
+  try {
+    return statSync(value).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * An absolute path to an executable file, or a bare program name found on PATH. Anything else
+ * (a relative path, a command line with spaces or shell syntax) is refused: the host spawns the
+ * program directly with an argv and never through a shell.
+ */
+export function resolveCommand(command: string, path: string | undefined, platform: NodeJS.Platform = process.platform): string | null {
+  if (command.includes("\u0000")) return null;
+  if (isAbsolute(command)) return isExecutable(command, platform) ? command : null;
+  if (!BARE_COMMAND.test(command)) return null;
+  const extensions = platform === "win32" ? [".exe", ".com"] : [""];
+  for (const directory of (path ?? "").split(platform === "win32" ? ";" : delimiter)) {
+    if (!directory || !isAbsolute(directory)) continue;
+    for (const extension of extensions) {
+      const candidate = join(directory, `${command}${extension}`);
+      if (isExecutable(candidate, platform)) return candidate;
+    }
+  }
+  return null;
+}
+
+function isExecutable(path: string, platform: NodeJS.Platform): boolean {
+  try {
+    if (!statSync(path).isFile()) return false;
+    if (platform !== "win32") accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}

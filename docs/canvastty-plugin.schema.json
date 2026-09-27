@@ -37,7 +37,7 @@
       "type": "array",
       "maxItems": 12,
       "uniqueItems": true,
-      "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute"] }
+      "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide"] }
     },
     "contributions": {
       "type": "array",
@@ -83,7 +83,7 @@
           "type": "array",
           "maxItems": 12,
           "uniqueItems": true,
-          "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute"] }
+          "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide"] }
         },
         "files": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/$defs/moduleAsset" } }
       }
@@ -122,7 +122,12 @@
         "description": { "type": "string", "minLength": 1, "maxLength": 240 },
         "entry": { "type": "string", "minLength": 1, "maxLength": 180, "pattern": "^(?!/)(?!.*\\\\)(?!\\.\\.?/)(?!.*(?:/\\.\\.?/|/\\.\\.?$|//)).+\\.(?:js|mjs|cjs)$" },
         "module": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$" },
-        "launch": { "$ref": "#/$defs/serviceLaunch" }
+        "launch": { "$ref": "#/$defs/serviceLaunch" },
+        "environments": {
+          "description": "Session environments (needs environment:provide; at most 8 kinds per plugin, unique across its services): kinds offered under Where in the launcher; the host calls canvastty.environment.prepare/wrap/resume/release/describe.",
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "items": { "$ref": "#/$defs/environmentKind" }
+        }
       }
     },
     "serviceLaunch": {
@@ -137,6 +142,21 @@
         },
         "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } },
         "policy": { "description": "Also ask before every launch of these agents where the person did not choose the plugin; that answer may only refuse, and no answer refuses too.", "type": "boolean" }
+      }
+    },
+    "environmentKind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label"],
+      "properties": {
+        "kind": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,31}$" },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "appliesTo": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": { "enum": ["terminal", "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"] }
+        },
+        "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } }
       }
     },
     "launchField": {

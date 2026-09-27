@@ -389,6 +389,7 @@ button { border: 0; }
 .terminal-card__identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 .92em var(--font-mono); }
 .terminal-card__header .provider-icon--small { --provider-icon-art-size: 1.85em; width: 2.15em; height: 2.15em; }
 .terminal-card__role { flex: none; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.2); font: 800 .7em var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
+.terminal-card__environment { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.14); font: 700 .7em var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .terminal-card__rename { width: min(27.7em, calc(100% - .92em)); height: 2.31em; padding: 0 .69em; border: .08em solid rgba(255,255,255,.24); outline: 0; border-radius: .54em; color: white; background: rgba(23,26,36,.72); font: 700 .92em var(--font-mono); user-select: text; }
 .terminal-card__rename:focus { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 32%, transparent); }
 .terminal-card__actions { display: flex; align-items: center; gap: .38em; }
@@ -1169,3 +1170,9 @@ button { border: 0; }
 .launch-advanced__use, .launch-advanced__field { display: flex; align-items: center; gap: 8px; }
 .launch-advanced__field { padding-left: 22px; }
 .launch-advanced__field input[type="text"], .launch-advanced__field select { flex: 1; min-width: 0; padding: 4px 8px; border: 0; border-radius: 8px; font: inherit; }
+.launch-advanced__where { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+.launch-advanced__where select { flex: 1; min-width: 0; padding: 4px 8px; border: 0; border-radius: 8px; font: inherit; }
+.terminal-card__confirm { display: flex; flex-direction: column; gap: 6px; max-width: 300px; }
+.terminal-card__confirm span { font-weight: 500; line-height: 1.35; }
+.terminal-card__confirm-actions { display: flex; gap: 6px; }
+.terminal-card__confirm-actions button { padding: 4px 10px; border-radius: 7px; color: white; background: rgba(255,255,255,.12); font: inherit; cursor: pointer; }

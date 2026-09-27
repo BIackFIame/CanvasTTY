@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。
+不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。会话环境（git worktree）示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)。
 编辑器工具可以使用 [manifest JSON Schema](canvastty-plugin.schema.json) 和 [SDK TypeScript 声明](plugin-api.d.ts)。
 
 ## Manifest v1
@@ -194,13 +194,48 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 - 5 秒内无应答、出错、应答无效、缺少机密，或插件被禁用、删除或不再受信任，都会拒绝启动并在卡片上显示原因。智能体绝不会在缺少用户所选贡献的情况下启动。插件不可用的恢复卡片以停止状态返回并显示该原因，记录保留到插件恢复或卡片被关闭。
 - 普通终端不接受启动选项。
 
-**启动策略。** 设置 `"policy": true` 后，在该服务适用的智能体每次启动（创建、重启、恢复）而用户没有选择它时，也会以 `"chosen": false` 和空的 `options` 询问它。这样的回答只能是 `null` 或 `refuse`；其他任何回答、5 秒内无回答或出错都会拒绝启动，因此策略绝不会因失败而放行。没有 `fields` 的策略不会显示在启动器中。撤销插件的原生代码信任即移除其策略。
+**启动策略。** 设置 `"policy": true` 后，在该服务适用的智能体每次启动（创建、重启、恢复）而用户没有选择它时，也会以 `"chosen": false` 和空的 `options` 询问它。这样的回答只能是 `null` 或 `refuse`；其他任何回答、5 秒内无回答或出错都会拒绝启动，因此策略绝不会因失败而放行。每个 `canvastty.launch.prepare` 还带有 `"environment"`：卡片环境的 `{ pluginId, kind }`，在本机运行时为 `null`。没有 `fields` 的策略不会显示在启动器中。撤销插件的原生代码信任即移除其策略。
 
 ```json
 "launch": { "policy": true, "fields": [] }
 ```
 
-完整示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)（选项）和 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)（拒绝 YOLO 启动的策略）。
+完整示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)（选项）和 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)（拒绝环境之外的 YOLO 的策略）。
+
+### 会话环境（`environment:provide`）
+
+环境是卡片运行的位置：git worktree、容器或远程主机。每个插件最多可以在 `environments` 中列出 8 种类型，可以放在一个服务中，也可以分布在多个服务中（例如每个模块一个服务）；每种类型在插件内唯一，由列出它的服务应答。信任插件原生代码后，启动器的 **Advanced** 部分会显示 **Where**（默认 **This computer**），列出适用于该服务商的类型及其可选 `fields`（种类和限制与启动字段相同）。只要有类型适用于终端，**Open terminal** 就会打开同一个启动器（文件夹和 Where），而不是立即打开终端。
+
+```json
+"permissions": ["environment:provide"],
+"services": [{
+  "id": "worktree", "title": "Git worktree", "entry": "services/worktree.mjs",
+  "environments": [{
+    "kind": "worktree", "label": "Git worktree",
+    "description": "A branch in its own folder",
+    "appliesTo": ["terminal", "claude"],
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+  }]
+}]
+```
+
+CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五个只有宿主能发送的请求：
+
+| 请求 | 参数 | 应答 | 时限 |
+|:--|:--|:--|:--|
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` 或 `{ refuse: { reason } }`。`ref` 是不超过 4 KB 的不透明 JSON，随卡片保存；`label`（80 字符）是徽标；`cwd`（已存在的绝对路径文件夹）成为卡片的文件夹 | 15 秒 |
+| `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` 或 `{ refuse }` | 5 秒 |
+| `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` 或 `{ stopped: { reason } }` | 10 秒 |
+| `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason`（`closed` 或 `quit`） | 忽略 | 10 秒 |
+| `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }`，用于卡片徽标及其提示 | 3 秒 |
+
+- `prepare` 只在卡片首次启动时调用一次。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
+- `wrap` 的输出会被检查：`command` 必须是可执行文件的绝对路径，或由宿主在 `PATH` 中解析的纯程序名；命令行、相对路径或 shell 语法会被拒绝，任何内容都不经过 shell 运行。`args` 是数组（256 项，每项 8 KB，不含 NUL）。`env` 和 `secretEnv` 遵循启动贡献者的规则：保留名称以及 CanvasTTY 或启动选项已为此次启动设置的名称会被拒绝。`secretEnv` 的值来自插件自己的机密（需要 `secrets`），并像启动机密一样被遮蔽。
+- `wrap` 收到此次启动自身的变量（来自 CanvasTTY 和所选启动选项），不含保留的 `CANVASTTY_*` 名称，也不含机密值；`secretEnvNames` 列出进程将从宿主获得值的名称，包装器可以按名称转发它们（`docker exec -e NAME`）。
+- 恢复时先恢复所有保存的环境，再先启动父卡片、后启动子卡片。如果插件被禁用、删除或不受信任，或 `resume` 应答 `stopped`，卡片以停止状态返回并显示原因，记录保留；重启会再次调用 `resume`。卡片绝不会改为在本地启动，超时或错误会拒绝启动，不会回退。
+- 关闭环境中的卡片时只询问一次“Keep environment data?”，然后带着答案调用 `release`。退出应用不会释放任何环境（环境随卡片一起恢复）；关闭保存时，退出会以 `keepData: true` 和 `reason: "quit"` 调用 `release`，以便停止计算。插件不保存自己的会话列表，也没有恢复逻辑。
+
+完整示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)：`prepare` 在插件数据目录下的文件夹中运行 `git worktree add`，`wrap` 设置文件夹，`resume` 检查它仍然存在，`describe` 显示当前分支，`release` 删除该 worktree（以及它创建的分支），除非你选择保留。
 
 host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一插件的所有活动界面——画布卡片、HOME 小组件和独立窗口——从而避免轮询。
 
@@ -212,6 +247,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `secrets` | `secrets.get`、`secrets.set`、`secrets.delete`；服务的 `secrets.get` | 通过 Electron `safeStorage` 加密的字符串机密；操作系统没有受保护存储时会明确失败。受信任的服务只能读取自身插件的机密 |
 | `sessions:read` | `sessions.list` | 仅限 ID、服务商、标题、状态、开始时间、退出码 |
 | `launch:contribute` | 服务的 `launch` 块和 `canvastty.launch.prepare` | 可以为用户以其选项启动的智能体添加环境变量、参数和文件；设置 `policy` 后可以拒绝任何智能体启动 |
+| `environment:provide` | 服务的 `environments` 和 `canvastty.environment.*` | 可以为用户在其环境中启动的卡片创建运行位置，并更改它们在那里运行的命令、参数、变量和文件夹 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
