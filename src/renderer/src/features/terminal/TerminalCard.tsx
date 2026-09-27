@@ -66,8 +66,10 @@ interface TerminalCardProps {
   onRename(id: string, title: string): Promise<void>;
   onRenameEnd(): void;
   onBoundsChange(id: string, bounds: SessionBounds): void;
-  onRestart(id: string): Promise<void>;
+  onRestart(id: string, resume?: boolean): Promise<void>;
   onDispose(id: string): void;
+  /** Saving sessions is on, so the per-card "Don't restore" choice applies. */
+  restoreEnabled?: boolean;
   onOpenUrl(url: string): void;
 }
 
@@ -123,7 +125,8 @@ export function TerminalCard({
   onBoundsChange,
   onRestart,
   onDispose,
-  onOpenUrl
+  onOpenUrl,
+  restoreEnabled = false
 }: TerminalCardProps): React.JSX.Element {
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -140,7 +143,7 @@ export function TerminalCard({
   const suppressFocusReport = useRef(false);
   const sessionExited = useRef(session.exitCode !== null);
   sessionExited.current = session.exitCode !== null;
-  const restartAction = useRef<() => Promise<void>>(async () => undefined);
+  const restartAction = useRef<(resume?: boolean) => Promise<void>>(async () => undefined);
   const invertTerminalWheelRef = useRef(invertTerminalWheel);
   invertTerminalWheelRef.current = invertTerminalWheel;
   const captureCanvasWheelRef = useRef(captureCanvasWheelOverWidgets);
@@ -150,6 +153,8 @@ export function TerminalCard({
   const [position, setPosition] = useState(session.position);
   const [size, setSize] = useState(session.size);
   const [restarting, setRestarting] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [noteDismissed, setNoteDismissed] = useState<string | null>(null);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
   const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
@@ -170,11 +175,11 @@ export function TerminalCard({
   const visibleTitleRef = useRef(visibleTitle);
   visibleTitleRef.current = visibleTitle;
 
-  restartAction.current = async () => {
+  restartAction.current = async (resume = false) => {
     if (restarting || !sessionExited.current) return;
     setRestarting(true);
     try {
-      await onRestart(session.id);
+      await onRestart(session.id, resume);
       const terminal = terminalRef.current;
       if (terminal) window.canvasTTY.terminal.resize(session.id, terminal.cols, terminal.rows);
     } finally {
@@ -756,6 +761,31 @@ export function TerminalCard({
               <UiIcon name={restarting ? "working" : "reload"} size="1.23em" />
             </button>
           )}
+          {session.exitCode !== null && session.provider !== "terminal" && (
+            <button
+              className="terminal-card__action terminal-card__action--continue"
+              type="button"
+              disabled={restarting}
+              onClick={() => void restartAction.current(true)}
+              title={t(locale, "continueSession")}
+              aria-label={t(locale, "continueSession")}
+            >
+              <UiIcon name="arrow" size="1.23em" />
+            </button>
+          )}
+          {restoreEnabled && (
+            <button
+              className="terminal-card__action terminal-card__action--options"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={optionsOpen}
+              onClick={() => setOptionsOpen((open) => !open)}
+              title={t(locale, "cardOptions")}
+              aria-label={t(locale, "cardOptions")}
+            >
+              <UiIcon name="sliders-horizontal" size="1.23em" />
+            </button>
+          )}
           <button
             className="terminal-card__action terminal-card__action--fullscreen"
             type="button"
@@ -769,6 +799,30 @@ export function TerminalCard({
         </div>
       </header>
       <div className="terminal-card__surface" ref={terminalHost} />
+      {optionsOpen && restoreEnabled && (
+        <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
+          <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
+            <input
+              type="checkbox"
+              autoFocus
+              checked={session.skipRestore === true}
+              onChange={(event) => {
+                setOptionsOpen(false);
+                void window.canvasTTY.terminal.setRestore(session.id, !event.target.checked);
+              }}
+            />
+            {t(locale, "cardSkipRestore")}
+          </label>
+        </div>
+      )}
+      {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
+        <div className="terminal-card__note" role="status">
+          <span>{t(locale, session.restoreNote === "fresh-shared-folder" ? "restoreNoteSharedFolder" : "restoreNoteEnvironment")}</span>
+          <button type="button" onClick={() => setNoteDismissed(session.restoreNote ?? null)} aria-label={t(locale, "close")}>
+            <UiIcon name="close" size="1em" />
+          </button>
+        </div>
+      )}
       {searchOpen && !summaryMode && (
         <div className="terminal-card__search" role="search">
           <input
@@ -867,5 +921,5 @@ function compactPath(path: string): string {
 }
 
 function isCardControl(target: EventTarget): boolean {
-  return target instanceof Element && Boolean(target.closest("button, input, .terminal-card__resize-handle"));
+  return target instanceof Element && Boolean(target.closest("button, input, .terminal-card__menu, .terminal-card__note, .terminal-card__resize-handle"));
 }

@@ -1110,6 +1110,11 @@ button { border: 0; }
 .terminal-card__search input:focus { border-color: var(--primary); }
 .terminal-card__search button { width: 26px; height: 26px; display: grid; place-items: center; border-radius: 6px; color: rgba(255,255,255,.78); background: rgba(255,255,255,.07); cursor: pointer; }
 .terminal-card__search button:hover { color: white; background: rgba(255,255,255,.16); }
+.terminal-card__menu { position: absolute; z-index: 18; top: calc(var(--card-header-height) + 6px); right: 10px; padding: 6px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; color: white; background: rgba(28,30,40,.96); box-shadow: var(--shadow-md); font-size: 12px; font-weight: 700; }
+.terminal-card__menu label { display: flex; align-items: center; gap: 8px; padding: 4px 2px; cursor: pointer; }
+.terminal-card__note { position: absolute; z-index: 17; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 9px; color: white; background: rgba(28,30,40,.94); box-shadow: var(--shadow-md); font-size: 12px; font-weight: 650; line-height: 1.35; }
+.terminal-card__note span { flex: 1; min-width: 0; }
+.terminal-card__note button { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: rgba(255,255,255,.78); background: rgba(255,255,255,.07); cursor: pointer; }
 .terminal-card__search-count { min-width: 46px; color: rgba(255,255,255,.62); font: 750 11px var(--font-mono); text-align: center; }
 
 .canvas-marquee { position: absolute; z-index: 40; border: 1px solid color-mix(in srgb, var(--primary) 78%, transparent); border-radius: 6px; background: color-mix(in srgb, var(--primary) 18%, transparent); pointer-events: none; }

@@ -52,7 +52,7 @@ test("opt-in restore preserves card identity and relaunches the agent in native 
       true,
       fakeSpawner(firstCalls)
     );
-    first.configureSessionPersistence(new TerminalSessionStore(directory), true);
+    first.configureSessionPersistence(new TerminalSessionStore(directory), "continue");
     await first.restorePersistedSessions();
     const created = first.create({
       provider: "codex",
@@ -76,7 +76,7 @@ test("opt-in restore preserves card identity and relaunches the agent in native 
       true,
       fakeSpawner(restoredCalls)
     );
-    restored.configureSessionPersistence(new TerminalSessionStore(directory), true);
+    restored.configureSessionPersistence(new TerminalSessionStore(directory), "continue");
     await restored.restorePersistedSessions();
 
     assert.equal(restoredCalls.length, 1);
@@ -122,7 +122,7 @@ test("the default opt-out clears old descriptors instead of restoring them", asy
       true,
       fakeSpawner(calls)
     );
-    manager.configureSessionPersistence(store, false);
+    manager.configureSessionPersistence(store, "off");
     await manager.restorePersistedSessions();
     assert.deepEqual(manager.list(), []);
     assert.deepEqual(store.get(), []);
@@ -155,7 +155,7 @@ test("a restored Grok session still waits for the measured grid before continuin
       true,
       fakeSpawner(calls)
     );
-    manager.configureSessionPersistence(store, true);
+    manager.configureSessionPersistence(store, "continue");
     await manager.restorePersistedSessions();
     assert.equal(calls.length, 0);
     manager.resize("grok-session", 71, 17);

@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- 将“重启后的窗口”改为统一的“重启后的智能体会话”模型：**不保存**、**重新打开窗口**（新会话）或 **继续会话**（原先的“开启”迁移到此项）。Claude Code 和 OpenCode 现在与 Codex 一样，按其 lifecycle hook 报告的 id 继续自己的会话（`claude --resume`、`opencode --session`）；同一文件夹中同一 CLI 的两张卡片不再继续同一个会话。已结束的智能体恢复为停止状态，提供“重启”/“继续”，卡片选项菜单提供 **不恢复此卡片**，会话记录（v2，可读取 v1）不保存 scrollback、提示词或密钥。
 - 将代理编排端点改为显式设置（设置 → 代理 → “代理编排端点”，`agentControlEnabled`，默认关闭；`--agent-control` / `CANVASTTY_AGENT_CONTROL=1` 仍可为单次启动强制开启），并在运行时按设置启动和停止端点；启动对话框在 normal/YOLO 配置旁新增 **Orchestrator（编排器）** 角色：会话保留打开对话框时的提供方，环境中携带 `CANVASTTY_CONTROL_CONNECTION` 和 `CANVASTTY_CONTROL_CLI`，使内置 CLI 无需配置即可工作，卡片显示 “Orchestrator” 徽标，恢复会话时保留角色；端点关闭时对话框会先提示并提供开启按钮，而不会静默开启任何内容。端点的 `create` 现在接受所有代理提供方（`codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi`），并在 `create` 和 `list` 响应中为每个工作会话报告 `capabilities { result, menus }`：仅 Codex 两者都为 `true`；其他提供方的 `screen` 没有菜单交互，`choose`/`dismiss` 返回 `NOT_SUPPORTED`，`send` 仅依据 idle 状态，`result` 以 `no_result` 结束。
 - 新增原生 Codex 编排 CLI（`agent-control/canvastty-control.mjs`，文档见 `agent/orchestrator/SKILL.md`），通过 `--agent-control` 或 `CANVASTTY_AGENT_CONTROL=1` 启用：本地控制器在项目目录中创建 Codex 会话、发送任务、按屏幕修订号观察有界的终端输出并收集最终回答。每个控制器只能看到自己创建的会话，授权绑定到会话代次，变更 ID 去重，且只有受控会话会启用经过认证的 Stop-hook 结果捕获。不包含自动批准或删除终端的端点。
 - 新增可选的 Even G2 伴侣（设置 → 控制 → Even G2，伴侣应用位于 `integrations/even-g2`）：Bonjour 发现、带六位码和显式设备批准的短期 SRP-6a 配对、加密的本地请求与音频、按会话授权、眼镜 HUD 上的有界终端展示、通过固定版本的 transcribe.cpp helper 进行本地语音识别（仅 macOS 随包提供），以及通过现有桌面启动器创建会话。Codex 一轮的最终回答只会送达在伴侣启用期间启动的会话：runtime hook 以单独的会话授权上报，限制为 4000 个字符，gateway 会拒绝任何其他会话的该字段。

@@ -51,7 +51,7 @@ function manager(directory, calls) {
     true,
     spawner(calls)
   );
-  instance.configureSessionPersistence(new TerminalSessionStore(directory), true);
+  instance.configureSessionPersistence(new TerminalSessionStore(directory), "continue");
   return instance;
 }
 
@@ -63,8 +63,8 @@ test("restoring two Codex cards in one cwd resumes their own conversations", asy
     const first = initial.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
     const second = initial.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 20, y: 20 } });
     // SessionStart is idle while a new card is already idle. The ID must still persist.
-    initial.applyProviderSignal(first.id, { kind: "lifecycle", state: "idle", codexThreadId: FIRST_THREAD });
-    initial.applyProviderSignal(second.id, { kind: "lifecycle", state: "idle", codexThreadId: SECOND_THREAD });
+    initial.applyProviderSignal(first.id, { kind: "lifecycle", state: "idle", threadId: FIRST_THREAD });
+    initial.applyProviderSignal(second.id, { kind: "lifecycle", state: "idle", threadId: SECOND_THREAD });
     await initial.shutdown();
 
     const calls = [];
@@ -141,14 +141,14 @@ test("restarting a Codex card after an exit clears stale thread ID and launches 
       customSpawner
     );
     const store = new TerminalSessionStore(directory);
-    inst.configureSessionPersistence(store, true);
+    inst.configureSessionPersistence(store, "continue");
     await inst.restorePersistedSessions();
 
     const created = inst.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
-    inst.applyProviderSignal(created.id, { kind: "lifecycle", state: "idle", codexThreadId: FIRST_THREAD });
+    inst.applyProviderSignal(created.id, { kind: "lifecycle", state: "idle", threadId: FIRST_THREAD });
 
     // Verify stored
-    assert.equal(store.get()[0]?.codexThreadId, FIRST_THREAD);
+    assert.equal(store.get()[0]?.threadId, FIRST_THREAD);
 
     // Simulate exit
     exitHandler?.({ exitCode: 0 });
@@ -162,7 +162,7 @@ test("restarting a Codex card after an exit clears stale thread ID and launches 
     assert.equal(calls[1].args.includes(FIRST_THREAD), false);
 
     // Stored session should no longer have the stale thread ID
-    assert.equal(store.get()[0]?.codexThreadId, undefined);
+    assert.equal(store.get()[0]?.threadId, undefined);
 
     await inst.shutdown();
   } finally {

@@ -179,7 +179,7 @@ interface WorkspaceCanvasProps {
   onDisposePluginCanvas(id: string): void;
   onFocusPluginCanvas(id: string): void;
   onSessionBoundsChange(id: string, bounds: SessionBounds): void;
-  onRestartSession(id: string): Promise<void>;
+  onRestartSession(id: string, resume?: boolean): Promise<void>;
   onDisposeSession(id: string): void;
   onBrowserBoundsChange(bounds: BrowserCanvasState): void;
   onFocusBrowser(): void;
@@ -865,6 +865,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               onBoundsChange={onSessionBoundsChange}
               onRestart={onRestartSession}
               onDispose={onDisposeSession}
+              restoreEnabled={settings.sessionRestoreMode !== "off"}
               onOpenUrl={onOpenTerminalUrl}
             />
           ))}
@@ -1017,6 +1018,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               onBoundsChange={() => {}}
               onRestart={onRestartSession}
               onDispose={onDisposeSession}
+              restoreEnabled={settings.sessionRestoreMode !== "off"}
               onOpenUrl={onOpenTerminalUrl}
             />
           ))}

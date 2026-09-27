@@ -30,6 +30,7 @@ import type {
   PluginInstallPreview,
   PluginUpdateStatus,
   RadialLauncherItemId,
+  SessionRestoreMode,
   SessionRowColorMode,
   ShortcutAction,
   UpdaterState,
@@ -425,9 +426,13 @@ export function SettingsPanel({
                 description={t(locale, "terminalSessionRestoreDescription")}
               >
                 <Segmented
-                  value={settings.restoreTerminalSessions ? "save" : "discard"}
-                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
-                  onChange={(value) => void onChange({ restoreTerminalSessions: value === "save" })}
+                  value={settings.sessionRestoreMode}
+                  options={[
+                    ["off", t(locale, "doNotSave")],
+                    ["reopen", t(locale, "sessionRestoreReopen")],
+                    ["continue", t(locale, "sessionRestoreContinue")]
+                  ]}
+                  onChange={(value) => void onChange({ sessionRestoreMode: value as SessionRestoreMode })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "persistCanvasRegions")}>

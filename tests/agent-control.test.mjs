@@ -240,7 +240,7 @@ test("a control write waiting on terminal replay cannot reach a restarted sessio
 
 test("YOLO persists across native restart/restore while stale control grants fail", localSocket, async (t) => {
   const f = await fixture(t);
-  f.terminals.configureSessionPersistence(new TerminalSessionStore(f.root), true);
+  f.terminals.configureSessionPersistence(new TerminalSessionStore(f.root), "continue");
   const { session } = await f.create();
   f.calls[0].pty.exit(1);
   await delay(2);
@@ -251,7 +251,7 @@ test("YOLO persists across native restart/restore while stale control grants fai
   const restoredCalls = [];
   const restored = new TerminalManager(() => {}, registry(), undefined, undefined, true,
     (_command, args) => { restoredCalls.push(args); return { onData() {}, onExit() {}, kill() {}, write() {}, resize() {} }; });
-  restored.configureSessionPersistence(new TerminalSessionStore(f.root), true);
+  restored.configureSessionPersistence(new TerminalSessionStore(f.root), "continue");
   await restored.restorePersistedSessions();
   t.after(() => restored.shutdown());
   assert.ok(restoredCalls[0].includes("--dangerously-bypass-approvals-and-sandbox"));

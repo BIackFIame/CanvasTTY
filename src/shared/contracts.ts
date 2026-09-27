@@ -13,6 +13,14 @@ export type LaunchProfileId = "normal" | "yolo";
 export type LaunchRole = "agent" | "orchestrator";
 export type SessionRole = LaunchRole | "subagent";
 export type SessionStatus = "idle" | "working" | "needs_approval" | "unavailable" | "done" | "failed";
+/** Settings → General, "Agent sessions after restart". */
+export type SessionRestoreMode = "off" | "reopen" | "continue";
+/**
+ * Why a restored card is not simply running as before: it started a new
+ * conversation because another card of that CLI shares its folder, or it is
+ * held stopped because the environment it ran in is unavailable.
+ */
+export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable";
 export type PaletteId = "sage" | "lilac" | "night";
 export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom";
 export type SessionRowColorMode = "monochrome" | "status";
@@ -185,7 +193,7 @@ export interface CameraState extends Point {
 
 export interface AppSettings {
   locale: LocaleId;
-  restoreTerminalSessions: boolean;
+  sessionRestoreMode: SessionRestoreMode;
   persistCanvasRegions: boolean;
   persistStickyNotes: boolean;
   palette: PaletteId;
@@ -280,6 +288,9 @@ export interface SessionMetadata {
   startedAt: number;
   exitCode: number | null;
   failureDetails: string | null;
+  /** Set when the person chose "Don't restore this card". */
+  skipRestore?: boolean;
+  restoreNote?: SessionRestoreNote;
 }
 
 export interface SessionSnapshot extends SessionMetadata {
@@ -1179,11 +1190,13 @@ export interface CanvasTTYApi {
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
     create(request: CreateSessionRequest): Promise<SessionSnapshot>;
-    restart(id: string): Promise<SessionSnapshot>;
+    /** `resume` continues the card's own conversation instead of starting a new one. */
+    restart(id: string, options?: { resume?: boolean }): Promise<SessionSnapshot>;
     input(id: string, data: string): void;
     resize(id: string, cols: number, rows: number): void;
     setBounds(id: string, bounds: SessionBounds): void;
     rename(id: string, title: string): Promise<SessionMetadata>;
+    setRestore(id: string, restore: boolean): Promise<SessionMetadata>;
     dispose(id: string): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
@@ -1312,6 +1325,7 @@ export const IPC = {
   terminalResize: "terminal:resize",
   terminalBounds: "terminal:bounds",
   terminalRename: "terminal:rename",
+  terminalSetRestore: "terminal:set-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
   terminalSession: "terminal:session",

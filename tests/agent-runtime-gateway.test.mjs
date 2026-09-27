@@ -46,12 +46,17 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
     },
     stdio: ["pipe", "ignore", "pipe"]
   });
-  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one" }));
+  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one", session_id: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677" }));
   const result = await childResult(child);
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(signals, [{
     id: "terminal-one",
-    signal: { state: "working", event: "UserPromptSubmit", turnId: "turn-one" }
+    signal: {
+      state: "working",
+      event: "UserPromptSubmit",
+      turnId: "turn-one",
+      threadId: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677"
+    }
   }]);
   assert.equal(JSON.stringify(signals).includes("must stay local"), false);
 });
@@ -105,9 +110,13 @@ test("RuntimeGateway rejects a wrong capability and ignores a stale turn complet
 
   assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
   assert.equal(gateway.currentStatus("terminal-two"), "working");
+
+  // A thread id reaches a provider argv on restore, so a flag-shaped one is refused.
+  await send(capability.address, { ...message(capability, "idle", "Stop", "turn-new"), threadId: "--config=evil" });
+  assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
 });
 
-test("RuntimeGateway propagates codexThreadId for codex sessions with canonical UUID", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+test("RuntimeGateway propagates threadId for codex sessions with canonical UUID", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
@@ -132,7 +141,7 @@ test("RuntimeGateway propagates codexThreadId for codex sessions with canonical 
   assert.equal(result.code, 0, result.stderr);
   assert.equal(signals.length, 1);
   assert.equal(signals[0].signal.turnId, "turn-codex-1");
-  assert.equal(signals[0].signal.codexThreadId, validUuid);
+  assert.equal(signals[0].signal.threadId, validUuid);
 });
 
 test("RuntimeGateway normalizes uppercase UUID to lowercase canonical UUID for codex", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
@@ -160,36 +169,36 @@ test("RuntimeGateway normalizes uppercase UUID to lowercase canonical UUID for c
   const result = await childResult(child);
   assert.equal(result.code, 0, result.stderr);
   assert.equal(signals.length, 1);
-  assert.equal(signals[0].signal.codexThreadId, lowerUuid);
+  assert.equal(signals[0].signal.threadId, lowerUuid);
 });
 
-test("RuntimeGateway ignores codexThreadId when non-canonical or cross-provider", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+test("RuntimeGateway ignores threadId when non-canonical or from a provider without exact resume", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
   await gateway.start();
   t.after(() => gateway.close());
 
-  // 1. Cross-provider: claude provider with session_id UUID in hook input
-  const claudeCap = gateway.registerSession("terminal-claude-test", "claude");
+  // 1. Cross-provider: qwen has no exact resume, so its session_id UUID is dropped
+  const qwenCap = gateway.registerSession("terminal-qwen-test", "qwen");
   const validUuid = "12345678-1234-1234-1234-123456789abc";
   const helper = new URL("../src/agent-runtime/hook-helper.mjs", import.meta.url);
 
-  const claudeChild = spawn(process.execPath, [helper.pathname, "working", "UserPromptSubmit"], {
+  const qwenChild = spawn(process.execPath, [helper.pathname, "working", "UserPromptSubmit"], {
     env: {
       ...process.env,
-      [AGENT_RUNTIME_ENV.address]: claudeCap.address,
-      [AGENT_RUNTIME_ENV.terminalSessionId]: claudeCap.terminalSessionId,
-      [AGENT_RUNTIME_ENV.provider]: claudeCap.provider,
-      [AGENT_RUNTIME_ENV.capabilityToken]: claudeCap.capabilityToken
+      [AGENT_RUNTIME_ENV.address]: qwenCap.address,
+      [AGENT_RUNTIME_ENV.terminalSessionId]: qwenCap.terminalSessionId,
+      [AGENT_RUNTIME_ENV.provider]: qwenCap.provider,
+      [AGENT_RUNTIME_ENV.capabilityToken]: qwenCap.capabilityToken
     },
     stdio: ["pipe", "ignore", "pipe"]
   });
-  claudeChild.stdin.end(JSON.stringify({ turn_id: "turn-claude-1", session_id: validUuid }));
-  const claudeResult = await childResult(claudeChild);
-  assert.equal(claudeResult.code, 0, claudeResult.stderr);
+  qwenChild.stdin.end(JSON.stringify({ turn_id: "turn-qwen-1", session_id: validUuid }));
+  const qwenResult = await childResult(qwenChild);
+  assert.equal(qwenResult.code, 0, qwenResult.stderr);
   assert.equal(signals.length, 1);
-  assert.equal(signals[0].signal.codexThreadId, undefined);
+  assert.equal(signals[0].signal.threadId, undefined);
 
   // 2. Malformed UUID: not canonical format (e.g. invalid chars, wrong length, path traversal)
   const codexCap = gateway.registerSession("terminal-codex-malformed", "codex");
@@ -216,18 +225,18 @@ test("RuntimeGateway ignores codexThreadId when non-canonical or cross-provider"
     const badRes = await childResult(childBad);
     assert.equal(badRes.code, 0, badRes.stderr);
   }
-  // All malformed ones should either be omitted or ignored without codexThreadId
+  // All malformed ones should either be omitted or ignored without threadId
   for (let i = 1; i < signals.length; i++) {
-    assert.equal(signals[i].signal.codexThreadId, undefined);
+    assert.equal(signals[i].signal.threadId, undefined);
   }
 
-  // 3. Direct protocol injection with cross-provider codexThreadId is rejected
-  await send(claudeCap.address, {
-    ...message(claudeCap, "working", "UserPromptSubmit", "turn-claude-direct"),
-    codexThreadId: validUuid
+  // 3. Direct protocol injection with cross-provider threadId is rejected
+  await send(qwenCap.address, {
+    ...message(qwenCap, "working", "UserPromptSubmit", "turn-qwen-direct"),
+    threadId: validUuid
   });
   // Signal should not be delivered or accepted
-  assert.equal(signals.filter((s) => s.id === "terminal-claude-test").length, 1);
+  assert.equal(signals.filter((s) => s.id === "terminal-qwen-test").length, 1);
 });
 
 test("ordinary Codex Stop reports omit answer text without an explicit capture grant", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {

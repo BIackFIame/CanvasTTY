@@ -167,13 +167,13 @@ test("an exited PTY can restart in place without recreating its xterm card", asy
     readFile(terminalManagerPath, "utf8")
   ]);
 
-  assert.match(manager, /restart\(id: string\): SessionSnapshot/);
+  assert.match(manager, /restart\(id: string, options: \{ resume\?: boolean \} = \{\}\): SessionSnapshot/);
   assert.match(manager, /session\.metadata\.exitCode === null/);
   assert.match(manager, /session\.metadata\.status = initialSessionStatus\(session\.metadata\.provider\)/);
   assert.match(manager, /session\.metadata\.failureDetails = null/);
   assert.match(manager, /if \(launched\.process\) this\.bindProcess\(id, session, launched\.process\)/);
   assert.match(card, /shouldRestartExitedTerminal\(event, sessionExited\.current\)/);
-  assert.match(card, /onRestart\(session\.id\)/);
+  assert.match(card, /onRestart\(session\.id, resume\)/);
 });
 
 test("failed PTYs preserve their final sanitized output as failure details", async () => {

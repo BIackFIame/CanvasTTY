@@ -342,7 +342,7 @@ async function initializeServices(): Promise<void> {
           kind: "lifecycle",
           state: signal.state,
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
-          ...(signal.codexThreadId ? { codexThreadId: signal.codexThreadId } : {})
+          ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
@@ -431,7 +431,7 @@ async function initializeServices(): Promise<void> {
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
-  terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().restoreTerminalSessions);
+  terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
 
   // The orchestration bridge exists only for sessions explicitly launched with
   // the orchestrator role; interactive sessions never receive capabilities.
@@ -567,7 +567,7 @@ async function initializeServices(): Promise<void> {
         wheelBinding: activeCanvasWheelBinding(next.canvasWheelCaptureMode, next.canvasWheelOverride),
         navigationBinding: next.canvasNavigationOverride
       });
-      await terminalManager?.setSessionPersistenceEnabled(next.restoreTerminalSessions);
+      await terminalManager?.setSessionRestoreMode(next.sessionRestoreMode);
     },
     setCanvasNavigationShortcutCapture: (active) => {
       if (active) browserService?.cancelCanvasNavigationGesture();

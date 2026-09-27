@@ -131,14 +131,29 @@ test("Codex restore throws on malformed resumeThreadId", () => {
   }
 });
 
-test("Other providers ignore resumeThreadId and retain standard continue flags", () => {
+test("Claude and OpenCode resume their own session by id; other providers keep their continue flags", () => {
   const uuid = "12345678-1234-4234-8234-123456789abc";
   const claude = resolveTerminalLaunch("claude", "normal", ["--bridge"], {
     providerCli: available("claude", "/resolved/claude"),
     resumePrevious: true,
-    resumeThreadId: uuid
+    resumeThreadId: uuid.toUpperCase()
   });
-  assert.deepEqual(claude.args, ["--bridge", "--continue"]);
+  assert.deepEqual(claude.args, ["--bridge", "--resume", uuid]);
+
+  const opencode = resolveTerminalLaunch("opencode", "normal", [], {
+    providerCli: available("opencode", "/resolved/opencode"),
+    resumePrevious: true,
+    resumeThreadId: "ses_7a1b2c3d4ffeAbCdEfGhIjKlMn"
+  });
+  assert.deepEqual(opencode.args, ["--session", "ses_7a1b2c3d4ffeAbCdEfGhIjKlMn"]);
+
+  for (const [provider, malformed] of [["claude", "--config=evil"], ["claude", "not-a-uuid"], ["opencode", uuid], ["opencode", "ses_../x"]]) {
+    assert.throws(() => resolveTerminalLaunch(provider, "normal", [], {
+      providerCli: available(provider, `/resolved/${provider}`),
+      resumePrevious: true,
+      resumeThreadId: malformed
+    }), /session ID format/u);
+  }
 
   const qwen = resolveTerminalLaunch("qwen", "yolo", [], {
     providerCli: available("qwen", "/resolved/qwen"),

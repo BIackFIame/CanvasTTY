@@ -112,7 +112,7 @@ test("a restored session whose folder vanished announces its failure as restore-
   try {
     const store = await persistedStore(dir, join(dir, "deleted-folder"));
     const { manager, announcements } = createManager(t);
-    manager.configureSessionPersistence(store, true);
+    manager.configureSessionPersistence(store, "continue");
 
     await manager.restorePersistedSessions();
 
@@ -131,7 +131,7 @@ test("a restored session whose CLI is gone announces its failure as restore-deri
     const store = await persistedStore(dir, process.cwd());
     const { manager, announcements, availability } = createManager(t);
     availability.state = "unavailable";
-    manager.configureSessionPersistence(store, true);
+    manager.configureSessionPersistence(store, "continue");
 
     await manager.restorePersistedSessions();
 
@@ -147,7 +147,7 @@ test("a restored session that still launches announces no failure origin", async
   try {
     const store = await persistedStore(dir, process.cwd());
     const { manager, announcements } = createManager(t);
-    manager.configureSessionPersistence(store, true);
+    manager.configureSessionPersistence(store, "continue");
 
     await manager.restorePersistedSessions();
 

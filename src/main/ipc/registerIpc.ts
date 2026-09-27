@@ -617,13 +617,16 @@ export function registerIpc({
     return terminals.readBuffer(id);
   });
   ipcMain.handle(IPC.terminalCreate, (_event, request: CreateSessionRequest) => terminals.create(request));
-  ipcMain.handle(IPC.terminalRestart, (_event, id: string) => terminals.restart(id));
+  ipcMain.handle(IPC.terminalRestart, (_event, id: string, options?: { resume?: unknown }) => (
+    terminals.restart(id, { resume: options?.resume === true })
+  ));
   ipcMain.on(IPC.terminalInput, (_event, id: string, data: string) => terminals.input(id, data));
   ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
     terminals.resize(id, cols, rows);
   });
   ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
   ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
+  ipcMain.handle(IPC.terminalSetRestore, (_event, id: string, restore: boolean) => terminals.setRestore(id, restore));
   ipcMain.handle(IPC.terminalDispose, (_event, id: string) => terminals.dispose(id));
   // Fire-and-forget, like the other stream-reporting channels: a malformed
   // report is ignored rather than rejecting into the renderer.

@@ -5,13 +5,14 @@ import {
   CAPTURE_ANSWER_EXPIRES_AT_ENV,
   MAX_ANSWER_CHARS,
   MAX_RUNTIME_MESSAGE_BYTES,
+  normalizeThreadId,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "./runtime-protocol.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_000;
 
-export async function reportLifecycle({ state, event, turnId = null, codexThreadId, result, lastAssistantMessage }) {
+export async function reportLifecycle({ state, event, turnId = null, threadId, result, lastAssistantMessage }) {
   if (!RUNTIME_STATES.includes(state)) return false;
   if (typeof event !== "string" || event.length === 0 || event.length > 80) return false;
   const address = process.env[AGENT_RUNTIME_ENV.address];
@@ -20,9 +21,7 @@ export async function reportLifecycle({ state, event, turnId = null, codexThread
   const capabilityToken = process.env[AGENT_RUNTIME_ENV.capabilityToken];
   if (!address || !terminalSessionId || !provider || !capabilityToken) return false;
 
-  const validCodexThreadId = provider === "codex" && typeof codexThreadId === "string" && isCanonicalUuid(codexThreadId)
-    ? codexThreadId.toLowerCase()
-    : undefined;
+  const validThreadId = normalizeThreadId(provider, threadId);
 
   const message = {
     v: RUNTIME_PROTOCOL_VERSION,
@@ -33,7 +32,7 @@ export async function reportLifecycle({ state, event, turnId = null, codexThread
     state,
     event,
     turnId: normalizedId(turnId),
-    ...(validCodexThreadId !== undefined ? { codexThreadId: validCodexThreadId } : {}),
+    ...(validThreadId !== undefined ? { threadId: validThreadId } : {}),
     ...(result === undefined ? {} : { result })
   };
   const answerCaptureExpiresAt = Number(process.env[CAPTURE_ANSWER_EXPIRES_AT_ENV]);
@@ -102,10 +101,4 @@ function sendMessage(address, payload, accepted) {
 
 function normalizedId(value) {
   return typeof value === "string" && value.length > 0 && value.length <= 160 ? value : null;
-}
-
-const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function isCanonicalUuid(value) {
-  return typeof value === "string" && CANONICAL_UUID_RE.test(value);
 }

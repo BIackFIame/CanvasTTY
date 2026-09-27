@@ -8,9 +8,13 @@ import type {
   SessionMetadata,
   Size
 } from "../../shared/contracts.ts";
+import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 
-export const TERMINAL_SESSION_STORE_VERSION = 1;
+export const TERMINAL_SESSION_STORE_VERSION = 2;
 const MAX_PERSISTED_SESSIONS = 64;
+/** Opaque plugin-owned JSON (launch options, environment refs) is capped per value. */
+export const MAX_PLUGIN_SLOT_BYTES = 4_096;
+const MAX_OPTION_PLUGINS = 16;
 const PROVIDERS = new Set<ProviderId>([
   "terminal",
   "codex",
@@ -40,7 +44,26 @@ export interface PersistedTerminalSession {
   position: Point;
   size: Size;
   parentSessionId?: string;
-  codexThreadId?: string;
+  /** The provider's own conversation id (Codex thread, Claude or OpenCode session) its hook reported. */
+  threadId?: string;
+  /** State at quit or at the moment the process exited; v1 records read as "running". */
+  lastState: PersistedLastState;
+  exitCode?: number | null;
+  /** False when the person chose "Don't restore this card". */
+  restore: boolean;
+  /** Plugin launch options keyed by plugin id, each opaque and at most 4 KB. */
+  options?: Record<string, unknown>;
+  /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
+  environment?: PersistedEnvironmentRef;
+}
+
+export type PersistedLastState = "running" | "exited" | "failed";
+
+export interface PersistedEnvironmentRef {
+  pluginId: string;
+  kind: string;
+  ref: unknown;
+  label: string;
 }
 
 interface PersistedTerminalSessionState {
@@ -107,20 +130,24 @@ export class TerminalSessionStore {
   }
 }
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
-function normalizeCodexThreadId(provider: ProviderId, candidate: unknown): string | undefined {
-  if (provider !== "codex") return undefined;
-  if (typeof candidate !== "string") return undefined;
-  const trimmed = candidate.trim().toLowerCase();
-  return UUID_REGEX.test(trimmed) ? trimmed : undefined;
+function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): string | undefined {
+  return typeof candidate === "string" ? normalizeThreadId(provider, candidate.trim()) : undefined;
 }
+
+/** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment"> & {
+  /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
+  heldState?: PersistedLastState;
+};
 
 export function persistedTerminalSession(
   metadata: SessionMetadata,
-  codexThreadId?: unknown
+  threadId?: unknown,
+  extras: PersistedSessionExtras = {}
 ): PersistedTerminalSession {
-  const normalizedCodexThreadId = normalizeCodexThreadId(metadata.provider, codexThreadId);
+  const normalizedThreadId = normalizeStoredThreadId(metadata.provider, threadId);
+  const lastState: PersistedLastState = extras.heldState
+    ?? (metadata.exitCode === null ? "running" : metadata.exitCode === 0 ? "exited" : "failed");
   return {
     id: metadata.id,
     provider: metadata.provider,
@@ -132,14 +159,20 @@ export function persistedTerminalSession(
     position: { ...metadata.position },
     size: { ...metadata.size },
     ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
-    ...(normalizedCodexThreadId !== undefined ? { codexThreadId: normalizedCodexThreadId } : {})
+    ...(normalizedThreadId !== undefined ? { threadId: normalizedThreadId } : {}),
+    lastState,
+    ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
+    restore: metadata.skipRestore !== true,
+    ...(extras.options ? { options: structuredClone(extras.options) } : {}),
+    ...(extras.environment ? { environment: structuredClone(extras.environment) } : {})
   };
 }
 
 export function normalizePersistedTerminalSessions(candidate: unknown): PersistedTerminalSessionState {
   if (!candidate || typeof candidate !== "object") return structuredClone(EMPTY_STATE);
-  const source = candidate as Partial<PersistedTerminalSessionState>;
-  if (source.version !== TERMINAL_SESSION_STORE_VERSION || !Array.isArray(source.sessions)) {
+  const source = candidate as { version?: unknown; sessions?: unknown };
+  // v1 is read-compatible: missing v2 fields mean unknown conversation, no environment, running.
+  if ((source.version !== 1 && source.version !== TERMINAL_SESSION_STORE_VERSION) || !Array.isArray(source.sessions)) {
     return structuredClone(EMPTY_STATE);
   }
 
@@ -147,7 +180,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
   const ids = new Set<string>();
   for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS)) {
     if (!value || typeof value !== "object") continue;
-    const session = value as Partial<PersistedTerminalSession>;
+    // codexThreadId: the v1 name of threadId (Codex only).
+    const session = value as Partial<PersistedTerminalSession> & { codexThreadId?: unknown };
     if (!isSessionId(session.id) || ids.has(session.id)) continue;
     if (!PROVIDERS.has(session.provider as ProviderId)) continue;
     if (session.profile !== "normal" && session.profile !== "yolo") continue;
@@ -167,9 +201,18 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     if (role === "subagent" && parentSessionId === undefined) continue;
     // A damaged or obsolete conversation ID must not make the whole card disappear.
     // It can still restore with Codex's interactive resume picker.
-    const codexThreadId = session.provider === "codex" && typeof session.codexThreadId === "string" && UUID_REGEX.test(session.codexThreadId.trim())
-      ? session.codexThreadId.trim().toLowerCase()
-      : undefined;
+    const threadId = normalizeStoredThreadId(
+      session.provider as ProviderId,
+      session.threadId ?? (session.provider === "codex" ? session.codexThreadId : undefined)
+    );
+    const lastState: PersistedLastState = session.lastState === "exited" || session.lastState === "failed"
+      ? session.lastState
+      : "running";
+    const exitCode = Number.isInteger(session.exitCode) ? session.exitCode as number : null;
+    const options = normalizeOptions(session.options);
+    const environment = normalizeEnvironment(session.environment);
+    // A placed session whose ref is unreadable must not come back as a local one.
+    if (session.environment !== undefined && !environment) continue;
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -184,11 +227,58 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
         height: clamp(session.size.height, 260, 1_100)
       },
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-      ...(codexThreadId !== undefined ? { codexThreadId } : {})
+      ...(threadId !== undefined ? { threadId } : {}),
+      lastState,
+      ...(lastState !== "running" ? { exitCode } : {}),
+      restore: session.restore !== false,
+      ...(options ? { options } : {}),
+      ...(environment ? { environment } : {})
     });
     ids.add(session.id);
   }
   return { version: TERMINAL_SESSION_STORE_VERSION, sessions };
+}
+
+function normalizeOptions(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const options: Record<string, unknown> = {};
+  for (const [pluginId, entry] of Object.entries(value).slice(0, MAX_OPTION_PLUGINS)) {
+    if (!isPluginId(pluginId) || !fitsPluginSlot(entry)) continue;
+    options[pluginId] = structuredClone(entry);
+  }
+  return Object.keys(options).length > 0 ? options : undefined;
+}
+
+function normalizeEnvironment(value: unknown): PersistedEnvironmentRef | undefined {
+  if (!isRecord(value) || !isPluginId(value.pluginId)) return undefined;
+  if (typeof value.kind !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.kind)) return undefined;
+  if (typeof value.label !== "string" || value.label.trim().length === 0) return undefined;
+  if (value.ref === undefined || !fitsPluginSlot(value.ref)) return undefined;
+  return {
+    pluginId: value.pluginId,
+    kind: value.kind,
+    ref: structuredClone(value.ref),
+    label: value.label.trim().slice(0, 80)
+  };
+}
+
+/** Same shape PluginManager accepts for plugin ids. */
+function isPluginId(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 3 && value.length <= 80
+    && /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(value) && !value.includes("..");
+}
+
+function fitsPluginSlot(value: unknown): boolean {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === "string" && Buffer.byteLength(json, "utf8") <= MAX_PLUGIN_SLOT_BYTES;
+  } catch {
+    return false;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function isSessionId(value: unknown): value is string {

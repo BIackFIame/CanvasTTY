@@ -92,8 +92,8 @@ test("canvas overlays share configurable collision-safe corner slots", async () 
 
 test("General keeps independent persistence controls", async () => {
   const settings = await readFile(settingsPanelPath, "utf8");
-  assert.match(settings, /settings\.restoreTerminalSessions \? "save" : "discard"/);
-  assert.match(settings, /restoreTerminalSessions: value === "save"/);
+  assert.match(settings, /value=\{settings\.sessionRestoreMode\}/);
+  assert.match(settings, /\["off", t\(locale, "doNotSave"\)\],\s*\["reopen", t\(locale, "sessionRestoreReopen"\)\],\s*\["continue", t\(locale, "sessionRestoreContinue"\)\]/);
   assert.match(settings, /settings\.persistCanvasRegions \? "save" : "discard"/);
   assert.match(settings, /persistCanvasRegions: value === "save"/);
   assert.match(settings, /settings\.persistStickyNotes \? "save" : "discard"/);

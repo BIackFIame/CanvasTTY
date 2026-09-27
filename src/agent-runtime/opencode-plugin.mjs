@@ -25,7 +25,9 @@ export const CanvasTTYLifecycle = async () => ({
       rootSessionId = stringField(session.id, sessionId);
       rootWorking = false;
       if (!rootSessionId) return;
-      if (lifecycleEnabled) await reportLifecycle({ state: "idle", event: event.type, turnId: rootSessionId });
+      if (lifecycleEnabled) {
+        await reportLifecycle({ state: "idle", event: event.type, turnId: rootSessionId, threadId: rootSessionId });
+      }
       runPluginHooks("session-start", event.type, event);
       return;
     }

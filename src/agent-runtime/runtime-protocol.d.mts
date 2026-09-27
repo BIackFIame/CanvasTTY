@@ -13,3 +13,5 @@ export const AGENT_RUNTIME_ENV: Readonly<{
   capabilityToken: "CANVASTTY_RUNTIME_CAPABILITY";
 }>;
 export const RUNTIME_STATES: readonly ["idle", "working", "needs_approval"];
+/** The provider's conversation id in the one form it may be stored or passed to its CLI, or undefined. */
+export function normalizeThreadId(provider: string, value: unknown): string | undefined;

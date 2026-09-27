@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import type { ProviderId } from "../../shared/contracts.ts";
+import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import {
   providerTerminalBatchCommandLine,
@@ -88,7 +89,35 @@ function resolveResumeArguments(
     }
     return ["resume"];
   }
+  const byId = RESUME_BY_ID_ARGUMENTS[provider];
+  if (byId && resumeThreadId) {
+    const threadId = normalizeThreadId(provider, resumeThreadId);
+    if (!threadId) throw new Error(`Invalid ${provider} session ID format: "${resumeThreadId}".`);
+    return byId(threadId);
+  }
   return RESUME_ARGUMENTS[provider];
+}
+
+// The same exact resume for the other CLIs whose hook reports that CLI's own session
+// id, each checked against its --help: `claude -r, --resume [value]`,
+// `opencode -s, --session <id>`. Everything else continues with RESUME_ARGUMENTS.
+const RESUME_BY_ID_ARGUMENTS: Partial<Record<Exclude<ProviderId, "terminal" | "codex">, (id: string) => string[]>> = {
+  claude: (id) => ["--resume", id],
+  opencode: (id) => ["--session", id]
+};
+
+export function canResumeThreadById(provider: ProviderId): boolean {
+  return provider === "codex" || (provider !== "terminal" && RESUME_BY_ID_ARGUMENTS[provider] !== undefined);
+}
+
+/** Without an id, Codex opens its own resume picker, so the person chooses; nothing is guessed. */
+export function resumeWithoutIdOpensPicker(provider: ProviderId): boolean {
+  return provider === "codex";
+}
+
+/** The CLI has a "latest conversation in this folder" flag. */
+export function canResumeLatestConversation(provider: ProviderId): boolean {
+  return provider !== "terminal" && provider !== "codex" && RESUME_ARGUMENTS[provider].length > 0;
 }
 
 // Per-provider instead of a fallthrough: the old `return ["--continue"]` default would

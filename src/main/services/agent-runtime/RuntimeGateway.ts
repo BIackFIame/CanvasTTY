@@ -9,6 +9,7 @@ import {
   MAX_ANSWER_CHARS,
   MAX_RUNTIME_MESSAGE_BYTES,
   MAX_RESULT_CHARS,
+  normalizeThreadId,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "../../../agent-runtime/runtime-protocol.mjs";
@@ -29,7 +30,8 @@ export interface RuntimeLifecycleSignal {
   state: RuntimeLifecycleState;
   event: string;
   turnId: string | null;
-  codexThreadId?: string;
+  /** The provider's own conversation id (Codex thread, Claude or OpenCode session), as its hook reported it. */
+  threadId?: string;
   result?: { text: string; truncated: boolean };
   lastAssistantMessage?: string;
   answerCaptureGrantExpiresAt?: number;
@@ -59,7 +61,7 @@ interface ParsedLifecycleMessage {
   state: RuntimeLifecycleState;
   event: string;
   turnId: string | null;
-  codexThreadId?: string;
+  threadId?: string;
   result?: { text: string; truncated: boolean };
   lastAssistantMessage?: string;
 }
@@ -316,7 +318,7 @@ export class RuntimeGateway {
       state: message.state,
       event: message.event,
       turnId: message.turnId,
-      ...(message.codexThreadId === undefined ? {} : { codexThreadId: message.codexThreadId }),
+      ...(message.threadId === undefined ? {} : { threadId: message.threadId }),
       ...(message.result === undefined ? {} : { result: message.result }),
       ...(message.lastAssistantMessage === undefined ? {} : { lastAssistantMessage: message.lastAssistantMessage })
     };
@@ -328,7 +330,7 @@ export class RuntimeGateway {
       state: signal.state,
       event: signal.event,
       turnId: signal.turnId,
-      ...(signal.codexThreadId === undefined ? {} : { codexThreadId: signal.codexThreadId })
+      ...(signal.threadId === undefined ? {} : { threadId: signal.threadId })
     };
     this.onSignal?.(message.terminalSessionId, signal);
   }
@@ -345,7 +347,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     "capabilityToken", "event", "provider", "state", "terminalSessionId", "turnId", "type", "v"
   ];
   if (value.result !== undefined) expected.push("result");
-  if (value.codexThreadId !== undefined) expected.push("codexThreadId");
+  if (value.threadId !== undefined) expected.push("threadId");
   expected.sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new Error("Runtime message has an invalid schema.");
@@ -368,11 +370,10 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     || value.event.length > 80
     || (value.turnId !== null && (typeof value.turnId !== "string" || value.turnId.length > 160))
   ) throw new Error("Runtime message fields are invalid.");
-  if (value.codexThreadId !== undefined && (
-    value.provider !== "codex"
-    || typeof value.codexThreadId !== "string"
-    || !CANONICAL_UUID_RE.test(value.codexThreadId)
-  )) throw new Error("Runtime codexThreadId is invalid.");
+  // Only the provider's own id shape, already in its stored form, is accepted.
+  if (value.threadId !== undefined && normalizeThreadId(String(value.provider), value.threadId) !== value.threadId) {
+    throw new Error("Runtime threadId is invalid.");
+  }
   if (value.result !== undefined && (
     value.state !== "idle" || value.event !== "Stop" || !isRecord(value.result)
     || Object.keys(value.result).sort().join(",") !== "text,truncated"
@@ -385,8 +386,6 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
   )) throw new Error("Runtime lastAssistantMessage is invalid.");
   return value as unknown as ParsedLifecycleMessage;
 }
-
-const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 function isTurnStart(event: string): boolean {
   return event === "UserPromptSubmit"

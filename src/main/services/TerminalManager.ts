@@ -12,6 +12,7 @@ import type {
   SessionEvent,
   SessionMetadata,
   SessionRemovedEvent,
+  SessionRestoreMode,
   SessionSnapshot,
   TerminalBufferSnapshot,
   TerminalDataEvent
@@ -36,7 +37,8 @@ import {
   AGENT_RUNTIME_ENV,
   CAPTURE_ANSWER_ENV,
   CAPTURE_ANSWER_EXPIRES_AT_ENV,
-  CAPTURE_RESULT_ENV
+  CAPTURE_RESULT_ENV,
+  normalizeThreadId
 } from "../../agent-runtime/runtime-protocol.mjs";
 import {
   CONTROL_CLI_ENV,
@@ -50,9 +52,11 @@ import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { resolveTerminalLaunch } from "./terminalLaunch.ts";
 import {
   persistedTerminalSession,
-  type PersistedTerminalSession,
+  type PersistedEnvironmentRef,
+  type PersistedSessionExtras,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
+import { chooseResume, planSessionRestore, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
 import {
   createProviderLifecycleParser,
@@ -82,17 +86,19 @@ interface ManagedSession {
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
   lifecycle: ProviderLifecycleParser | null;
   awaitingInitialResize: boolean;
-  resumeOnLaunch: boolean;
-  resumeThreadId?: string;
-  codexThreadId?: string;
+  resumeOnLaunch: ResumeRequest;
+  /** The provider's own conversation id, once its hook reported it (or from the saved record). */
+  threadId?: string;
   captureResult: boolean;
+  /** Plugin options and environment ref carried into the saved record. */
+  extras: PersistedSessionExtras;
 }
 
 export interface ProviderLifecycleSignal {
   kind: "lifecycle";
   state: "idle" | "working" | "needs_approval";
   requestId?: string;
-  codexThreadId?: string;
+  threadId?: string;
 }
 
 /**
@@ -122,7 +128,10 @@ export class TerminalManager {
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
   private sessionStore: TerminalSessionStore | null = null;
-  private sessionPersistenceEnabled = false;
+  private sessionRestoreMode: SessionRestoreMode = "off";
+  // No environment provider exists in core yet, so a placed session can only
+  // come back stopped; the environment registry (plugins) answers this later.
+  private environmentAvailable: (environment: PersistedEnvironmentRef) => boolean = () => false;
   private suppressPersistence = false;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
@@ -152,37 +161,47 @@ export class TerminalManager {
     this.agentOrchestration = coordinator;
   }
 
-  configureSessionPersistence(store: TerminalSessionStore, enabled: boolean): void {
+  configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
     this.sessionStore = store;
-    this.sessionPersistenceEnabled = Boolean(enabled);
+    this.sessionRestoreMode = mode;
   }
 
   async restorePersistedSessions(): Promise<void> {
     const store = this.sessionStore;
     if (!store) return;
     const persisted = await store.load();
-    if (!this.sessionPersistenceEnabled) {
+    if (this.sessionRestoreMode === "off") {
       if (persisted.length > 0) await store.clear();
       return;
     }
 
-    // A subagent whose owning session is gone restores as nothing: its
-    // parent's runtime state no longer exists to collect its result.
-    const restorable = persisted.filter((descriptor) => (
-      descriptor.role !== "subagent"
-      || persisted.some((candidate) => candidate.id === descriptor.parentSessionId)
-      || this.sessions.has(descriptor.parentSessionId ?? "")
-    ));
-    for (const descriptor of restorable) this.restorePersistedSession(descriptor);
+    // Parents come first; a subagent whose owning session is gone restores as
+    // nothing, since its parent's runtime state no longer exists.
+    const steps = planSessionRestore(persisted, this.sessionRestoreMode, {
+      isLiveSession: (id) => this.sessions.has(id),
+      environmentAvailable: (environment) => this.environmentAvailable(environment)
+    });
+    for (const step of steps) this.restorePersistedSession(step);
     await this.persistSessions();
   }
 
-  async setSessionPersistenceEnabled(enabled: boolean): Promise<void> {
-    const next = Boolean(enabled);
-    if (this.sessionPersistenceEnabled === next) return;
-    this.sessionPersistenceEnabled = next;
-    if (next) await this.persistSessions();
-    else await this.sessionStore?.clear();
+  async setSessionRestoreMode(mode: SessionRestoreMode): Promise<void> {
+    if (this.sessionRestoreMode === mode) return;
+    this.sessionRestoreMode = mode;
+    if (mode === "off") await this.sessionStore?.clear();
+    else await this.persistSessions();
+  }
+
+  /** The per-card "Don't restore this card" choice. */
+  setRestore(id: string, restore: boolean): SessionMetadata {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    if (typeof restore !== "boolean") throw new Error("Restore choice is invalid.");
+    if (restore) delete session.metadata.skipRestore;
+    else session.metadata.skipRestore = true;
+    this.emitSession(session.metadata);
+    this.schedulePersistence();
+    return structuredClone(session.metadata);
   }
 
   async shutdown(): Promise<void> {
@@ -275,7 +294,7 @@ export class TerminalManager {
     const launched = awaitMeasuredGrid
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
       : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, control.captureResult, role,
+        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, null, control.captureResult, role,
         control.answerCaptureGrantExpiresAt);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
@@ -297,8 +316,9 @@ export class TerminalManager {
         ? createProviderLifecycleParser(request.provider, request.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: false,
-      captureResult: control.captureResult === true
+      resumeOnLaunch: null,
+      captureResult: control.captureResult === true,
+      extras: {}
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
@@ -310,10 +330,29 @@ export class TerminalManager {
     return snapshot(session);
   }
 
-  restart(id: string): SessionSnapshot {
+  restart(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
+    const environment = session.extras.environment;
+    if (environment && !this.environmentAvailable(environment)) {
+      // Never run a placed session locally instead of where it belongs.
+      throw new Error(`This card runs in ${environment.label} from plugin ${environment.pluginId}, which is not available. It was not started locally.`);
+    }
+    delete session.extras.heldState;
+    delete session.metadata.restoreNote;
+    let resume: ResumeRequest = null;
+    if (options.resume === true && session.metadata.provider !== "terminal") {
+      const peers = [...this.sessions.values()].filter((candidate) => (
+        candidate.metadata.provider === session.metadata.provider && candidate.metadata.cwd === session.metadata.cwd
+      )).length;
+      const chosen = chooseResume(session.metadata.provider, session.threadId, peers);
+      resume = chosen.resume;
+      if (chosen.note) session.metadata.restoreNote = chosen.note;
+    } else {
+      // A plain restart is a new conversation, so the old id must not be resumed later.
+      delete session.threadId;
+    }
 
     if (session.metadata.provider === "grok") {
       session.agentBrowser?.cleanup();
@@ -326,9 +365,7 @@ export class TerminalManager {
         ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
         : null;
       session.awaitingInitialResize = true;
-      session.resumeOnLaunch = false;
-      delete session.resumeThreadId;
-      delete session.codexThreadId;
+      session.resumeOnLaunch = resume;
       session.metadata.startedAt = Date.now();
       session.metadata.status = initialSessionStatus(session.metadata.provider);
       session.metadata.exitCode = null;
@@ -338,7 +375,6 @@ export class TerminalManager {
       return snapshot(session);
     }
 
-    delete session.codexThreadId;
     session.agentOrchestration?.cleanup();
     const launched = this.spawnProcess(
       id,
@@ -347,7 +383,7 @@ export class TerminalManager {
       session.metadata.cwd,
       session.cols,
       session.rows,
-      false,
+      resume,
       session.captureResult,
       session.metadata.role
     );
@@ -440,9 +476,9 @@ export class TerminalManager {
     const session = this.sessions.get(id);
     if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
 
-    if (signal.codexThreadId && session.metadata.provider === "codex"
-      && signal.codexThreadId !== session.codexThreadId) {
-      session.codexThreadId = signal.codexThreadId;
+    const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
+    if (threadId && threadId !== session.threadId) {
+      session.threadId = threadId;
       this.schedulePersistence();
     }
 
@@ -546,7 +582,8 @@ export class TerminalManager {
     }
   }
 
-  private restorePersistedSession(descriptor: PersistedTerminalSession): void {
+  private restorePersistedSession(step: RestoreStep): void {
+    const descriptor = step.record;
     if (this.sessions.has(descriptor.id)) return;
     const metadata: SessionMetadata = {
       id: descriptor.id,
@@ -563,22 +600,43 @@ export class TerminalManager {
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
-      failureDetails: null
+      failureDetails: null,
+      ...(step.note ? { restoreNote: step.note } : {})
+    };
+    const extras: PersistedSessionExtras = {
+      ...(descriptor.options ? { options: descriptor.options } : {}),
+      ...(descriptor.environment ? { environment: descriptor.environment } : {})
     };
 
     let process: IPty | null = null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
     let agentRuntime: PreparedAgentRuntimePtyLaunch | null = null;
     let agentOrchestration: PreparedOrchestrationPtyLaunch | null = null;
-    let directoryReady = true;
-    try {
-      assertDirectory(descriptor.cwd);
-    } catch (error) {
-      directoryReady = false;
-      metadata.status = "failed";
-      metadata.exitCode = 1;
-      metadata.failureDetails = error instanceof Error ? error.message : String(error);
+    let directoryReady = step.launch !== "stopped";
+    if (step.launch === "stopped") {
+      // A finished card comes back as it ended; a placed card whose environment
+      // is unavailable is held with its reason and keeps its saved state.
+      if (step.note === "environment-unavailable" && descriptor.environment) {
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        metadata.failureDetails = `Needs plugin ${descriptor.environment.pluginId} (${descriptor.environment.label}).`;
+      } else {
+        metadata.exitCode = descriptor.exitCode ?? (descriptor.lastState === "exited" ? 0 : 1);
+        metadata.status = metadata.exitCode === 0 ? "done" : "failed";
+      }
     }
+    if (directoryReady) {
+      try {
+        assertDirectory(descriptor.cwd);
+      } catch (error) {
+        directoryReady = false;
+        metadata.status = "failed";
+        metadata.exitCode = 1;
+        metadata.failureDetails = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const resume: ResumeRequest = step.launch === "stopped" ? null : step.launch;
     const awaitMeasuredGrid = directoryReady
       && descriptor.provider === "grok"
       && this.providerClis.get(descriptor.provider).state === "available";
@@ -592,11 +650,9 @@ export class TerminalManager {
           descriptor.cwd,
           INITIAL_TERMINAL_COLS,
           INITIAL_TERMINAL_ROWS,
-          descriptor.provider !== "terminal",
+          resume,
           false,
-          descriptor.role,
-          undefined,
-          descriptor.codexThreadId
+          descriptor.role
         );
         process = launched.process;
         agentBrowser = launched.agentBrowser;
@@ -610,6 +666,10 @@ export class TerminalManager {
       }
     }
 
+    // A card that started comes back tied to the conversation the plan chose (none for
+    // a fresh start); one that did not start keeps its recorded id for Continue.
+    const started = process !== null || awaitMeasuredGrid;
+    const threadId = started ? step.threadId : descriptor.threadId;
     const session: ManagedSession = {
       metadata,
       process,
@@ -628,9 +688,10 @@ export class TerminalManager {
         ? createProviderLifecycleParser(descriptor.provider, descriptor.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: awaitMeasuredGrid && descriptor.provider !== "terminal",
-      ...(descriptor.codexThreadId ? { resumeThreadId: descriptor.codexThreadId, codexThreadId: descriptor.codexThreadId } : {}),
-      captureResult: false
+      resumeOnLaunch: awaitMeasuredGrid ? resume : null,
+      ...(threadId ? { threadId } : {}),
+      captureResult: false,
+      extras
     };
     this.sessions.set(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
@@ -644,11 +705,11 @@ export class TerminalManager {
   }
 
   private persistSessions(): Promise<void> {
-    if (!this.sessionPersistenceEnabled || this.suppressPersistence || !this.sessionStore) {
+    if (this.sessionRestoreMode === "off" || this.suppressPersistence || !this.sessionStore) {
       return Promise.resolve();
     }
     return this.sessionStore.replace(
-      [...this.sessions.values()].map((session) => persistedTerminalSession(session.metadata, session.codexThreadId))
+      [...this.sessions.values()].map((session) => persistedTerminalSession(session.metadata, session.threadId, session.extras))
     );
   }
 
@@ -669,10 +730,8 @@ export class TerminalManager {
   private launchAwaitingSession(id: string, session: ManagedSession): void {
     if (!session.awaitingInitialResize) return;
     session.awaitingInitialResize = false;
-    const resumePrevious = session.resumeOnLaunch;
-    session.resumeOnLaunch = false;
-    const resumeThreadId = session.resumeThreadId;
-    delete session.resumeThreadId;
+    const resume = session.resumeOnLaunch;
+    session.resumeOnLaunch = null;
     try {
       const launched = this.spawnProcess(
         id,
@@ -681,11 +740,9 @@ export class TerminalManager {
         session.metadata.cwd,
         session.cols,
         session.rows,
-        resumePrevious,
+        resume,
         session.captureResult,
-        session.metadata.role,
-        undefined,
-        resumeThreadId
+        session.metadata.role
       );
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
@@ -719,11 +776,10 @@ export class TerminalManager {
     cwd: string,
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
-    resumePrevious = false,
+    resume: ResumeRequest = null,
     captureResult = false,
     role: SessionRole = "agent",
-    answerCaptureGrantExpiresAt?: number,
-    resumeThreadId?: string
+    answerCaptureGrantExpiresAt?: number
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -777,8 +833,8 @@ export class TerminalManager {
       const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
         environment: { ...baseEnvironment, ...providerEnvironment },
         ...(providerCli ? { providerCli } : {}),
-        resumePrevious,
-        ...(resumeThreadId ? { resumeThreadId } : {})
+        resumePrevious: resume !== null,
+        ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {})
       });
       return {
         process: this.spawnPty(launch.command, launch.args, {
@@ -829,6 +885,8 @@ export class TerminalManager {
       current.agentOrchestration?.cleanup();
       current.agentOrchestration = null;
       this.emitSession(current.metadata);
+      // Recorded at the moment of exit, so a finished agent is never relaunched.
+      this.schedulePersistence();
     });
   }
 

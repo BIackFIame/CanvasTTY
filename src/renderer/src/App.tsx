@@ -72,7 +72,7 @@ interface HomeEditDraft {
 
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
-  restoreTerminalSessions: false,
+  sessionRestoreMode: "off",
   persistCanvasRegions: true,
   persistStickyNotes: true,
   palette: "sage",
@@ -441,9 +441,9 @@ export function App(): React.JSX.Element {
     showToast(`${t(settings.locale, "sessionStarted")}: ${provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);
 
-  const restartSession = useCallback(async (id: string): Promise<void> => {
+  const restartSession = useCallback(async (id: string, resume = false): Promise<void> => {
     try {
-      await window.canvasTTY.terminal.restart(id);
+      await window.canvasTTY.terminal.restart(id, { resume });
       showToast(t(settings.locale, "sessionRestarted"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : t(settings.locale, "restartFailed"));
