@@ -9,6 +9,7 @@ import {
   IPC,
   type LocaleId,
   type PluginCanvasRequest,
+  type PluginServiceEvent,
   type SessionStatus,
   type UpdaterState,
   type UpdaterStateEvent
@@ -25,6 +26,7 @@ import {
   type ProviderCliRegistry
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
+import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -122,6 +124,7 @@ let terminalManager: TerminalManager | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
 let pluginManager: PluginManager | null = null;
+let pluginServices: PluginServiceSupervisor | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
@@ -267,6 +270,26 @@ async function initializeServices(): Promise<void> {
   await settings.load();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
+  // Trusted plugin services run as separate processes, started the way plugin hooks are.
+  pluginServices = new PluginServiceSupervisor({
+    command: process.execPath,
+    hostVersion: app.getVersion(),
+    locale: () => settings.get().locale,
+    host: {
+      storageGet: (pluginId, key) => pluginManager!.storageGet(pluginId, key),
+      storageSet: async (pluginId, key, value) => {
+        await pluginManager!.storageSet(pluginId, key, value);
+        broadcastPluginStorageChange(pluginId, key, value);
+      },
+      emit: (pluginId, serviceId, event, data) => broadcastPluginServiceEvent({ pluginId, serviceId, event, data }),
+      secretGet: (pluginId, key) => {
+        if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
+        return pluginSecretsService.get(pluginId, key);
+      }
+    }
+  });
+  pluginManager.setServiceObserver((specs) => pluginServices!.sync(specs));
+  void pluginServices.sync(pluginManager.trustedServiceSpecs());
 
   canvasNavigationInput = new CanvasNavigationInputController(
     {
@@ -546,6 +569,7 @@ async function initializeServices(): Promise<void> {
     terminals: terminalManager,
     limits: limitsService,
     plugins: pluginManager,
+    pluginServices,
     pluginMedia: pluginMediaService,
     pluginSecrets: pluginSecretsService,
     providerSecrets: providerSecretsService!,
@@ -921,6 +945,7 @@ async function shutdownServices(): Promise<void> {
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
+  if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
 }
 
@@ -982,6 +1007,16 @@ function broadcastPluginStorageChange(pluginId: string, key: string, value: unkn
   for (const [window, ownerPluginId] of pluginWindows) {
     if (ownerPluginId !== pluginId || window.isDestroyed()) continue;
     window.webContents.send(IPC.pluginsStorageChanged, change);
+  }
+}
+
+function broadcastPluginServiceEvent(event: PluginServiceEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.pluginsServiceEvent, event);
+  }
+  for (const [window, ownerPluginId] of pluginWindows) {
+    if (ownerPluginId !== event.pluginId || window.isDestroyed()) continue;
+    window.webContents.send(IPC.pluginsServiceEvent, event);
   }
 }
 

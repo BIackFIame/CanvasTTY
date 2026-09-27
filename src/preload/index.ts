@@ -17,6 +17,7 @@ import type {
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
   PluginLauncherRequest,
+  PluginServiceEvent,
   PluginStorageChangeEvent,
   PluginUpdateStatus,
   SessionBounds,
@@ -98,6 +99,14 @@ const api: CanvasTTYApi = {
     setHookEnabled: (pluginId: string, hookId: string, enabled: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetHookEnabled, pluginId, hookId, enabled)
     ),
+    setNativeCodeTrusted: (pluginId: string, trusted: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetNativeCodeTrusted, pluginId, trusted)
+    ),
+    serviceReport: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsServiceReport, pluginId),
+    serviceRequest: (pluginId: string, serviceId: string, method: string, params: unknown) => (
+      ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)
+    ),
+    onServiceEvent: (listener: (event: PluginServiceEvent) => void) => subscribe(IPC.pluginsServiceEvent, listener),
     uninstall: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsUninstall, pluginId),
     openCanvas: (pluginId: string, contributionId: string, sourceCanvasInstanceId?: string) => (
       ipcRenderer.invoke(IPC.pluginsOpenCanvas, pluginId, contributionId, sourceCanvasInstanceId)

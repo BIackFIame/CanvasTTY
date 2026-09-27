@@ -78,6 +78,7 @@ import {
 } from "./appearanceSettings";
 import { CanvasNavigationShortcutEditor } from "./CanvasNavigationShortcutEditor";
 import { AgentHooksSettings } from "./AgentHooksSettings";
+import { PluginServicesSettings } from "./PluginServicesSettings";
 import { ProviderSecretsSettings } from "./ProviderSecretsSettings";
 import { ApiProfilesSettings } from "./ApiProfilesSettings";
 import { AboutSettings } from "./AboutSettings";
@@ -134,6 +135,7 @@ interface SettingsPanelProps {
   onSetPluginModules(pluginId: string, selectedModules: string[]): Promise<void>;
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onSetPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<void>;
+  onSetPluginNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
@@ -161,6 +163,7 @@ export function SettingsPanel({
   onSetPluginModules,
   onSetPluginEnabled,
   onSetPluginHookEnabled,
+  onSetPluginNativeCodeTrusted,
   onUninstallPlugin,
   onOpenPluginContribution,
   onToggleHomeWidget,
@@ -621,6 +624,11 @@ export function SettingsPanel({
                 plugins={plugins}
                 onChange={onChange}
                 onSetPluginHookEnabled={onSetPluginHookEnabled}
+              />
+              <PluginServicesSettings
+                locale={locale}
+                plugins={plugins}
+                onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
               />
               <SettingGroup
                 label={t(locale, "agentControlEnabled")}

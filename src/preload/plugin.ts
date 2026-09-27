@@ -2,6 +2,7 @@ import { ipcRenderer } from "electron";
 
 const PLUGIN_HOST_INVOKE = "plugins:host-invoke";
 const PLUGIN_STORAGE_CHANGED = "plugins:storage-changed";
+const PLUGIN_SERVICE_EVENT = "plugins:service-event";
 
 const pluginId = argument("--canvastty-plugin-id=");
 const contributionId = argument("--canvastty-contribution-id=");
@@ -49,6 +50,12 @@ function invokeHost(method: string, params: Record<string, unknown>): Promise<un
 ipcRenderer.on(PLUGIN_STORAGE_CHANGED, (_event, change: unknown) => {
   if (!isRecord(change) || change.pluginId !== pluginId || typeof change.key !== "string") return;
   window.postMessage({ source: "canvastty-host", type: "storage-change", key: change.key, value: change.value }, "*");
+});
+
+ipcRenderer.on(PLUGIN_SERVICE_EVENT, (_event, message: unknown) => {
+  if (!isRecord(message) || message.pluginId !== pluginId) return;
+  const { serviceId, event, data } = message;
+  window.postMessage({ source: "canvastty-host", type: "service-event", value: { serviceId, event, data } }, "*");
 });
 
 function argument(prefix: string): string {

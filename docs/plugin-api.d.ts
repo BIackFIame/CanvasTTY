@@ -29,6 +29,7 @@ export interface CanvasTTYPluginHost {
   request(method: "secrets.get", params: { key: string }): Promise<string | null>;
   request(method: "secrets.set", params: { key: string; value: string }): Promise<null>;
   request(method: "secrets.delete", params: { key: string }): Promise<null>;
+  request(method: "service.request", params: { serviceId: string; method: string; params?: unknown }): Promise<unknown>;
   request(method: string, params?: Record<string, unknown>): Promise<unknown>;
   storage: {
     get(key: string): Promise<unknown>;
@@ -57,6 +58,12 @@ export interface CanvasTTYPluginHost {
     getState(): Promise<CanvasTTYPluginHermesHudSnapshot>;
     open(): Promise<CanvasTTYPluginHermesHudSnapshot>;
     close(): Promise<CanvasTTYPluginHermesHudSnapshot>;
+  };
+  /** Talks to this plugin's own services only (apiVersion 2 `services`). */
+  service: {
+    /** Rejects when the service is not running (native code not trusted, disabled, restarting, failed) or after 15 s. */
+    request(serviceId: string, method: string, params?: unknown): Promise<unknown>;
+    onEvent(listener: (event: CanvasTTYPluginServiceEvent) => void): () => void;
   };
   onContext(listener: (context: CanvasTTYPluginContext) => void): () => void;
   onStorageChange(listener: (key: string, value: unknown) => void): () => void;
@@ -134,4 +141,54 @@ export interface CanvasTTYAgentHookInput {
   event: "session-start" | "prompt-submit" | "permission-request" | "permission-result" | "after-tool" | "stop" | "session-end";
   providerEvent: string;
   payload: unknown;
+}
+
+export interface CanvasTTYPluginServiceEvent {
+  serviceId: string;
+  event: string;
+  data: unknown;
+}
+
+/**
+ * Plugin services (manifest apiVersion 2). A service is a bundled single-file Node.js program that
+ * CanvasTTY runs as a separate process after the user trusts the plugin's native code. It speaks
+ * newline-delimited JSON-RPC 2.0 over stdin/stdout, at most 1 MB per message.
+ */
+export interface CanvasTTYPluginServiceManifestEntry {
+  id: string;
+  title: string;
+  description?: string;
+  /** `.js`, `.mjs` or `.cjs` inside the plugin; integrity-declared in modular plugins. */
+  entry: string;
+  module?: string;
+}
+
+/** Params of the first host notification, `canvastty.initialize`. */
+export interface CanvasTTYServiceContext {
+  apiVersion: 2;
+  pluginId: string;
+  serviceId: string;
+  /** `<userData>/plugin-data/<pluginId>`: created before start, removed on uninstall. */
+  dataDir: string;
+  locale: string;
+  hostVersion: string;
+}
+
+/** Notifications the host sends to a service. */
+export type CanvasTTYServiceHostNotification =
+  | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
+  | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> };
+
+/** Methods a service may call on the host. Every other method is answered with error -32601. */
+export interface CanvasTTYServiceHostApi {
+  /** Request or notification. */
+  log(params: { level?: "info" | "warn" | "error"; message: string }): null;
+  /** Needs the `storage` permission. */
+  "storage.get"(params: { key: string }): unknown;
+  /** Needs the `storage` permission. */
+  "storage.set"(params: { key: string; value: unknown }): null;
+  /** Notification only: delivered to this plugin's surfaces through `host.service.onEvent`. */
+  event(params: { event: string; data?: unknown }): void;
+  /** Needs the `secrets` permission: the plugin's own secret, or null. */
+  "secrets.get"(params: { key: string }): string | null;
 }

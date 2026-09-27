@@ -166,7 +166,7 @@ test("recognizes the narrow Hermes HUD control permission", () => {
 });
 
 test("rejects executable escapes, unknown permissions, and unsupported API versions", () => {
-  assert.throws(() => validatePluginManifest({ ...manifest, apiVersion: 2 }));
+  assert.throws(() => validatePluginManifest({ ...manifest, apiVersion: 3 }));
   assert.throws(() => validatePluginManifest({ ...manifest, permissions: ["filesystem"] }));
   assert.throws(() => validatePluginManifest({
     ...manifest,

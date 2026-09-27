@@ -2,7 +2,7 @@
 
 [English](plugins.md) · [Русский](plugins.ru.md) · [简体中文](plugins.zh-CN.md) · [Docs home](README.md)
 
-CanvasTTY runtime plugins are installed from an HTTPS GitHub repository. A plugin can contribute sandboxed web surfaces and can optionally declare agent hook scripts. Web contributions run without Node.js. Agent hooks are a separate, explicit trust boundary and stay disabled until the user enables each hook in **Settings → Agents → Hooks**.
+CanvasTTY runtime plugins are installed from an HTTPS GitHub repository. A plugin can contribute sandboxed web surfaces and can optionally declare agent hook scripts and long-lived services. Web contributions run without Node.js. Agent hooks and services are native code: a separate, explicit trust boundary that stays off until the user enables each hook in **Settings → Agents → Hooks** and each plugin's services in **Settings → Agents → Extension native code**.
 
 ## Trust model
 
@@ -15,6 +15,7 @@ Installing a plugin is equivalent to allowing third-party browser code to run lo
 - Every privileged SDK method is gated by a manifest permission. Permissions are shown before the user confirms installation.
 - Sandboxed web contributions never receive provider credentials, PTY buffers, working directories, raw provider responses, or filesystem access.
 - Disabling or uninstalling a plugin immediately stops serving its assets and closes its separate windows.
+- Declared services follow the same rule as hooks, per plugin: install never starts them, and update, module changes, disabling, or a changed entry file revokes the confirmation. Services run out of process; no plugin code runs in the CanvasTTY main process.
 - Declared agent hooks are never enabled by install, update, or module changes. Enabling one is equivalent to running that repository's JavaScript as a native application with the current user's OS privileges, access to the provider event payload, and potential access to user-readable configuration or credentials. Updating the plugin, replacing modules, or disabling the plugin revokes every enabled hook so changed code must be trusted again.
 
 CanvasTTY does not embed arbitrary native OS windows. A `window` contribution is a sandboxed CanvasTTY-owned `BrowserWindow`. Native reparenting is not portable or reliable across Wayland, macOS, Windows, DPI modes, popups, and GPU surfaces.
@@ -35,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -121,6 +122,49 @@ interface CanvasTTYAgentHookInput {
 
 Hook stdout/stderr is discarded, execution is time-bounded, and CanvasTTY's internal runtime/browser capability tokens are removed from the child environment. This is isolation from host internals, not a sandbox: the hook still has the user's normal filesystem and process privileges.
 
+### Services (apiVersion 2)
+
+A manifest with `"apiVersion": 2` may declare up to 8 `services`. Version 1 manifests stay valid; only `services` needs version 2.
+
+```json
+"services": [
+  { "id": "echo", "title": "Echo", "description": "Echoes requests.", "entry": "services/echo.mjs" }
+]
+```
+
+A service has a stable `id`, a `title`, an optional `description` and `module`, and an `entry` ending in `.js`, `.mjs`, or `.cjs`. The entry must be a bundled single file (for example built with esbuild): the installer runs no build and no `npm install`, and Electron and node-pty are not available to it. In a modular plugin the entry must be integrity-declared by its `module`, or by `coreFiles` when it has none, exactly like hook entries. When the user trusts the plugin's native code, CanvasTTY records the entry's SHA-256 and checks it again before every start; a changed file is never run and the confirmation is revoked on the next launch.
+
+Lifecycle: every service of an enabled, trusted plugin runs as its own process (`process.execPath` with `ELECTRON_RUN_AS_NODE=1`) with the plugin folder as its working directory. The environment is minimal: `PATH`, `HOME`, user, shell, locale, temp and XDG folders, `SSH_AUTH_SOCK`, and the Windows system folders. Provider keys, tokens, `NODE_OPTIONS`, and every `CANVASTTY_*` variable are removed. A service that exits unexpectedly restarts after 1, 2, 4, 8, then 16 s; after more than 5 unexpected exits in 10 minutes it stays failed until its trust is confirmed again. Disabling, uninstalling, updating, changing modules, revoking trust, or quitting CanvasTTY stops it: first a `canvastty.shutdown` notification and closed stdin, then `SIGTERM`, then `SIGKILL`. `<userData>/plugin-data/<pluginId>` is created for the service and removed on uninstall. Its stderr, non-protocol stdout, `log` calls, and lifecycle events go to a bounded per-plugin log (the last 300 entries) shown under the plugin in **Settings → Agents → Extension native code**.
+
+Protocol: newline-delimited JSON-RPC 2.0 over stdin/stdout, at most 1 MB per message in each direction. A larger message from the host is refused; a larger line from the service is dropped and logged. The host first sends a notification:
+
+```json
+{"jsonrpc":"2.0","method":"canvastty.initialize","params":{"apiVersion":2,"pluginId":"com.example.service-echo","serviceId":"echo","dataDir":"…/plugin-data/com.example.service-echo","locale":"en","hostVersion":"1.5.2"}}
+```
+
+Requests from the plugin's own surfaces arrive with the method and params chosen by the surface; method names starting with `canvastty.` are reserved for the host. Answer with `{"jsonrpc":"2.0","id":…,"result":…}` or `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}`. A request unanswered within 15 s fails with a timeout error, as does a request while the service is stopped, restarting, or failed; at most 64 requests wait at once per service.
+
+A service may call back this host API (the base that later extension points add to; anything else is answered with error `-32601`):
+
+| Method | Kind | Gate | Result |
+|:--|:--|:--|:--|
+| `log` `{ level?: "info" \| "warn" \| "error", message }` | request or notification | none | Adds a line to the plugin log |
+| `storage.get` `{ key }` | request | `storage` permission | The same isolated 64 KB storage as `host.storage.get` |
+| `storage.set` `{ key, value }` | request | `storage` permission | Writes it and notifies the plugin's surfaces |
+| `event` `{ event, data }` | notification | none | Delivered to this plugin's live surfaces through `host.service.onEvent` |
+| `secrets.get` `{ key }` | request | `secrets` permission | The plugin's own secret (the same store as `host.secrets`), or `null`. For keys a service needs itself (an API key for a model it calls); never send one back to a surface |
+
+The host binds every call to the service's own plugin; a service cannot name another plugin, read another plugin's secrets, or reach sessions. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
+
+UI channel: sandboxed surfaces call their own plugin's services, and only those:
+
+```js
+const reply = await host.service.request("echo", "echo", { text: "hi" });
+host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
+```
+
+The permission is implicit when the plugin declares a service. The host relays opaque JSON and never adds credentials. A request to a service that is not running (not trusted yet, disabled, restarting, failed) or that times out rejects with an error.
+
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
 ## Permissions
@@ -128,7 +172,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | Permission | SDK capability | Data boundary |
 |:--|:--|:--|
 | `storage` | `storage.get`, `storage.set` | Isolated JSON storage, 64 KB per plugin |
-| `secrets` | `secrets.get`, `secrets.set`, `secrets.delete` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable |
+| `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; a service's `secrets.get` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable. A trusted service reads its own plugin's secrets only |
 | `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
@@ -185,7 +229,7 @@ if (library) {
 }
 ```
 
-Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, and `hermesHud.*`. `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
+Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, `hermesHud.*`, and `service.request` (see [Services](#services-apiversion-2)). `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
 
 Use `storage` for non-sensitive JSON preferences and `secrets` only for credentials such as OAuth tokens or API keys. Secrets are string-only, limited to 32 keys / 16 KB per value / 64 KB per plugin, removed on uninstall, and never fall back to plaintext storage. A secret call fails explicitly when the operating system cannot provide protected encryption.
 

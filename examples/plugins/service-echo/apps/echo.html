@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="./echo.css">
+    <title>Service echo</title>
+  </head>
+  <body>
+    <main class="echo">
+      <input id="text" value="hello" maxlength="200" aria-label="Text to echo">
+      <button id="send" type="button">Call service</button>
+      <output id="result" aria-live="polite">Not called yet.</output>
+      <input id="token" type="password" autocomplete="off" aria-label="Token">
+      <button id="save-token" type="button">Save token</button>
+      <button id="check-token" type="button">Does the service see it?</button>
+    </main>
+    <script src="canvastty-plugin://host/sdk.js"></script>
+    <script src="./echo.js"></script>
+  </body>
+</html>

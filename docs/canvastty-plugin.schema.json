@@ -1,16 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/howdeploy/CanvasTTY/blob/main/docs/canvastty-plugin.schema.json",
-  "title": "CanvasTTY plugin manifest v1",
+  "title": "CanvasTTY plugin manifest (apiVersion 1 and 2)",
   "type": "object",
   "additionalProperties": false,
   "required": ["apiVersion", "id", "name", "version", "description", "permissions", "contributions"],
   "anyOf": [
     { "properties": { "contributions": { "minItems": 1 } } },
-    { "required": ["hooks"], "properties": { "hooks": { "minItems": 1 } } }
+    { "required": ["hooks"], "properties": { "hooks": { "minItems": 1 } } },
+    { "required": ["services"], "properties": { "services": { "minItems": 1 } } }
   ],
+  "if": { "properties": { "apiVersion": { "const": 1 } } },
+  "then": { "not": { "required": ["services"] } },
   "properties": {
-    "apiVersion": { "const": 1 },
+    "apiVersion": { "enum": [1, 2] },
     "id": { "type": "string", "minLength": 3, "maxLength": 80, "pattern": "^(?!.*\\.\\.)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$" },
     "name": { "type": "string", "minLength": 1, "maxLength": 80 },
     "version": { "type": "string", "maxLength": 40, "pattern": "^\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.-]+)?$" },
@@ -47,6 +50,13 @@
       "minItems": 1,
       "maxItems": 16,
       "items": { "$ref": "#/$defs/agentHook" }
+    },
+    "services": {
+      "description": "apiVersion 2 only: bundled single-file services run as separate processes after the user trusts the plugin's native code.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": { "$ref": "#/$defs/service" }
     }
   },
   "$defs": {
@@ -99,6 +109,18 @@
           "uniqueItems": true,
           "items": { "enum": ["session-start", "prompt-submit", "permission-request", "permission-result", "after-tool", "stop", "session-end"] }
         },
+        "module": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "entry"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+        "entry": { "type": "string", "minLength": 1, "maxLength": 180, "pattern": "^(?!/)(?!.*\\\\)(?!\\.\\.?/)(?!.*(?:/\\.\\.?/|/\\.\\.?$|//)).+\\.(?:js|mjs|cjs)$" },
         "module": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$" }
       }
     },

@@ -2,7 +2,7 @@
 
 [English](plugins.md) · [Русский](plugins.ru.md) · [简体中文](plugins.zh-CN.md) · [文档首页](README.zh-CN.md)
 
-CanvasTTY 运行时插件从 HTTPS GitHub 仓库安装。插件可以提供 sandboxed web contribution，也可以声明可选的 agent hook 脚本。Web contribution 不具备 Node.js 能力；每个 hook 在用户于 **设置 → Agents → Hooks** 中单独确认信任前始终关闭。
+CanvasTTY 运行时插件从 HTTPS GitHub 仓库安装。插件可以提供 sandboxed web contribution，也可以声明可选的 agent hook 脚本和长期运行的服务。Web contribution 不具备 Node.js 能力。Hook 和服务属于原生代码：每个 hook 在用户于 **设置 → Agents → Hooks** 中单独确认信任前始终关闭，插件的服务在 **设置 → Agents → Extension native code** 中确认前不会运行。
 
 ## 信任模型
 
@@ -15,6 +15,7 @@ CanvasTTY 运行时插件从 HTTPS GitHub 仓库安装。插件可以提供 sand
 - 每个特权 SDK 方法都由 manifest 中的权限把关。权限会在用户确认安装之前展示。
 - Sandboxed web contribution 不会收到服务商凭据、PTY 缓冲区、工作目录、原始服务商响应或文件系统访问权限。
 - 禁用或卸载插件会立即停止提供其资源，并关闭其独立窗口。
+- 服务按插件整体遵循与 hook 相同的规则：安装不会启动服务，更新、更换 module、禁用插件或 entry 文件被修改都会撤销确认。服务在进程外运行；插件代码不会在 CanvasTTY 主进程中执行。
 - Agent hook 不会随安装自动启用。启用后，该脚本等同于原生应用：它会接收 agent 事件 payload、以当前用户权限运行，并可能访问该用户可读的配置或凭据；更新插件、更换 module 或禁用插件都会撤销全部 hook 信任。
 
 CanvasTTY 不嵌入任意的原生操作系统窗口。`window` 贡献是一个由 CanvasTTY 持有的 sandboxed `BrowserWindow`。原生 reparenting 在 Wayland、macOS、Windows、不同 DPI 模式、弹窗和 GPU surface 之间既不可移植也不可靠。
@@ -35,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。
+不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。
 编辑器工具可以使用 [manifest JSON Schema](canvastty-plugin.schema.json) 和 [SDK TypeScript 声明](plugin-api.d.ts)。
 
 ## Manifest v1
@@ -104,6 +105,45 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 
 脚本在独立进程中运行，并通过 stdin 接收包含 `apiVersion`、`pluginId`、`hookId`、`terminalSessionId`、`provider`、`event`、`providerEvent` 与 `payload` 的 JSON。Stdout/stderr 会被丢弃，执行时间受限，CanvasTTY 内部 capability token 会从子进程环境中移除。这不是 sandbox：脚本仍以当前用户权限读写文件或启动进程。
 
+### 服务（apiVersion 2）
+
+`"apiVersion": 2` 的 manifest 最多可声明 8 个 `services`。版本 1 的 manifest 仍然有效；只有 `services` 需要版本 2。
+
+```json
+"services": [
+  { "id": "echo", "title": "Echo", "description": "回显请求。", "entry": "services/echo.mjs" }
+]
+```
+
+服务包含稳定的 `id`、`title`、可选的 `description` 和 `module`，以及以 `.js`、`.mjs` 或 `.cjs` 结尾的 `entry`。entry 必须是打包好的单文件（例如用 esbuild 构建）：安装器不执行构建也不运行 `npm install`，服务无法使用 Electron 和 node-pty。在模块化插件中，entry 必须像 hook entry 一样由其 `module`（或 `coreFiles`）声明完整性。用户信任插件的原生代码时，CanvasTTY 记录 entry 的 SHA-256，并在每次启动前重新校验；被修改的文件不会运行，信任会在下次启动时撤销。
+
+生命周期：已启用且受信任插件的每个服务都作为独立进程运行（`process.execPath` 加 `ELECTRON_RUN_AS_NODE=1`），工作目录为插件目录。环境变量最小化：`PATH`、`HOME`、用户、shell、语言区域、临时目录与 XDG 目录、`SSH_AUTH_SOCK` 以及 Windows 系统目录；provider 密钥、令牌、`NODE_OPTIONS` 和所有 `CANVASTTY_*` 变量都会被移除。意外退出的服务会在 1、2、4、8、16 秒后重启；10 分钟内意外退出超过 5 次后保持失败状态，直到重新确认信任。禁用、卸载、更新、更换模块、撤销信任或退出 CanvasTTY 都会停止服务：先发送 `canvastty.shutdown` 通知并关闭 stdin，然后 `SIGTERM`，最后 `SIGKILL`。服务会获得 `<userData>/plugin-data/<pluginId>` 目录，卸载时删除。stderr、协议之外的 stdout、`log` 调用和生命周期事件写入每个插件的有界日志（最近 300 条），显示在 **设置 → Agents → Extension native code**。
+
+协议：通过 stdin/stdout 的逐行 JSON-RPC 2.0，每个方向单条消息最多 1 MB。更大的宿主请求会被拒绝，服务输出的超长行会被丢弃并记录。宿主首先发送 `canvastty.initialize` 通知，参数为 `{ apiVersion: 2, pluginId, serviceId, dataDir, locale, hostVersion }`。
+
+来自插件自身界面的请求使用界面选择的方法和参数；以 `canvastty.` 开头的方法名保留给宿主。用 `{"jsonrpc":"2.0","id":…,"result":…}` 或 `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}` 应答。15 秒内未应答的请求以超时错误结束；服务已停止、正在重启或失败时的请求同样返回错误；每个服务同时最多等待 64 个请求。
+
+服务可以回调以下宿主 API（后续扩展点在此基础上扩展；其他方法返回错误 `-32601`）：
+
+| 方法 | 类型 | 条件 | 结果 |
+|:--|:--|:--|:--|
+| `log` `{ level?: "info" \| "warn" \| "error", message }` | 请求或通知 | 无 | 写入插件日志 |
+| `storage.get` `{ key }` | 请求 | `storage` 权限 | 与 `host.storage.get` 相同的隔离 64 KB 存储 |
+| `storage.set` `{ key, value }` | 请求 | `storage` 权限 | 写入并通知插件界面 |
+| `event` `{ event, data }` | 通知 | 无 | 通过 `host.service.onEvent` 发送给该插件的活动界面 |
+| `secrets.get` `{ key }` | 请求 | `secrets` 权限 | 插件自己的机密（与 `host.secrets` 同一存储），或 `null`。用于服务自身需要的密钥（例如它调用的模型的 API 密钥）；绝不要把它发回界面 |
+
+宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件、读取其他插件的机密或访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
+
+UI 通道：sandboxed 界面只能调用自身插件的服务：
+
+```js
+const reply = await host.service.request("echo", "echo", { text: "hi" });
+host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
+```
+
+插件声明服务即隐含该权限。宿主只转发不透明的 JSON，从不附加凭据。对未运行（尚未信任、已禁用、重启中、失败）的服务的请求或超时请求会返回错误。
+
 host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一插件的所有活动界面——画布卡片、HOME 小组件和独立窗口——从而避免轮询。
 
 ## 权限
@@ -111,7 +151,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | 权限 | SDK 能力 | 数据边界 |
 |:--|:--|:--|
 | `storage` | `storage.get`、`storage.set` | 隔离的 JSON 存储，每个插件 64 KB |
-| `secrets` | `secrets.get`、`secrets.set`、`secrets.delete` | 通过 Electron `safeStorage` 加密的字符串机密；操作系统没有受保护存储时会明确失败 |
+| `secrets` | `secrets.get`、`secrets.set`、`secrets.delete`；服务的 `secrets.get` | 通过 Electron `safeStorage` 加密的字符串机密；操作系统没有受保护存储时会明确失败。受信任的服务只能读取自身插件的机密 |
 | `sessions:read` | `sessions.list` | 仅限 ID、服务商、标题、状态、开始时间、退出码 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |

@@ -340,7 +340,9 @@ export interface WindowState {
   fullscreen: boolean;
 }
 
-export const PLUGIN_API_VERSION = 1;
+/** Newest manifest apiVersion. Version 1 manifests stay valid; `services` needs version 2. */
+export const PLUGIN_API_VERSION = 2;
+export type PluginApiVersion = 1 | typeof PLUGIN_API_VERSION;
 
 export type PluginPermission =
   | "storage"
@@ -410,6 +412,47 @@ export interface PluginAgentHook {
   module?: string;
 }
 
+/**
+ * A long-lived native service: a bundled single-file JavaScript entry that CanvasTTY runs as a
+ * separate supervised process after the user trusts the plugin's native code (apiVersion 2).
+ */
+export interface PluginService {
+  id: string;
+  title: string;
+  description?: string;
+  entry: string;
+  module?: string;
+}
+
+export type PluginServiceState = "stopped" | "starting" | "running" | "backoff" | "failed";
+
+export interface PluginServiceStatus {
+  serviceId: string;
+  state: PluginServiceState;
+  restarts: number;
+  lastError?: string;
+}
+
+export interface PluginServiceLogEntry {
+  at: number;
+  serviceId: string;
+  source: "host" | "service" | "stderr" | "stdout";
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface PluginServiceReport {
+  services: PluginServiceStatus[];
+  log: PluginServiceLogEntry[];
+}
+
+export interface PluginServiceEvent {
+  pluginId: string;
+  serviceId: string;
+  event: string;
+  data: unknown;
+}
+
 export interface PluginHomeWidgetContribution extends PluginContributionBase {
   kind: "home-widget";
   defaultSize: PluginGridSize;
@@ -433,7 +476,7 @@ export type PluginContribution =
   | PluginWindowContribution;
 
 export interface PluginManifest {
-  apiVersion: typeof PLUGIN_API_VERSION;
+  apiVersion: PluginApiVersion;
   id: string;
   name: string;
   version: string;
@@ -455,6 +498,7 @@ export interface PluginManifest {
   permissions: PluginPermission[];
   contributions: PluginContribution[];
   hooks?: PluginAgentHook[];
+  services?: PluginService[];
   settingsContribution?: string;
   coreFiles?: PluginModuleAsset[];
   modules?: PluginModule[];
@@ -498,6 +542,8 @@ export interface InstalledPlugin {
   selectedModules: string[];
   /** Hook ids explicitly trusted by the user. Never populated during install or update. */
   enabledHooks: string[];
+  /** The user trusted this plugin's services to run as native code. Never set by install or update. */
+  nativeCodeTrusted: boolean;
 }
 
 export interface PluginInstallPreview {
@@ -1121,6 +1167,10 @@ export interface CanvasTTYApi {
     setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin>;
     setEnabled(pluginId: string, enabled: boolean): Promise<InstalledPlugin>;
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
+    setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
+    serviceReport(pluginId: string): Promise<PluginServiceReport>;
+    serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
+    onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
     uninstall(pluginId: string): Promise<void>;
     openCanvas(pluginId: string, contributionId: string, sourceCanvasInstanceId?: string): Promise<void>;
     openWindow(pluginId: string, contributionId: string): Promise<void>;
@@ -1247,6 +1297,10 @@ export const IPC = {
   pluginsSetModules: "plugins:set-modules",
   pluginsSetEnabled: "plugins:set-enabled",
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
+  pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
+  pluginsServiceReport: "plugins:service-report",
+  pluginsServiceRequest: "plugins:service-request",
+  pluginsServiceEvent: "plugins:service-event",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",
   pluginsOpenWindow: "plugins:open-window",

@@ -841,6 +841,16 @@ export function App(): React.JSX.Element {
     }
   }, [refreshPlugins]);
 
+  const setPluginNativeCodeTrusted = useCallback(async (pluginId: string, trusted: boolean): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted);
+      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+    } catch (error) {
+      await refreshPlugins().catch(() => undefined);
+      throw error;
+    }
+  }, [refreshPlugins]);
+
   const setPluginModules = useCallback(async (pluginId: string, selectedModules: string[]): Promise<void> => {
     let updated: InstalledPlugin;
     try {
@@ -1214,6 +1224,7 @@ export function App(): React.JSX.Element {
         onSetPluginModules={setPluginModules}
         onSetPluginEnabled={setPluginEnabled}
         onSetPluginHookEnabled={setPluginHookEnabled}
+        onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
         onUninstallPlugin={uninstallPlugin}
         onOpenPluginContribution={openPluginContribution}
         onToggleHomeWidget={toggleHomeWidget}

@@ -22,6 +22,7 @@ import { providerCliAvailability, type ProviderCliRegistry } from "../services/p
 import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
+import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
 import type { ProviderSecretsService } from "../services/ProviderSecretsService";
@@ -48,6 +49,7 @@ interface Dependencies {
   terminals: TerminalManager;
   limits: LimitsService;
   plugins: PluginManager;
+  pluginServices: PluginServiceSupervisor;
   pluginMedia: PluginMediaService;
   pluginSecrets: PluginSecretsService;
   providerSecrets: ProviderSecretsService;
@@ -80,6 +82,7 @@ export function registerIpc({
   terminals,
   limits,
   plugins,
+  pluginServices,
   pluginMedia,
   pluginSecrets,
   providerSecrets,
@@ -98,6 +101,13 @@ export function registerIpc({
   updater
 }: Dependencies): (window: BrowserWindow | null) => void {
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
+  // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
+  // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
+  const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
+    const serviceId = stringValue(values.serviceId, "serviceId");
+    plugins.assertService(pluginId, serviceId);
+    return pluginServices.request(pluginId, serviceId, stringValue(values.method, "method"), values.params);
+  };
   const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
     plugins.assertPermission(pluginId, "browser:open");
     await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
@@ -268,11 +278,32 @@ export function registerIpc({
     }
     return plugins.setHookEnabled(pluginId, hookId, enabled);
   });
+  ipcMain.handle(IPC.pluginsSetNativeCodeTrusted, (event, pluginId: string, trusted: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof trusted !== "boolean") throw new Error("Plugin native code state is invalid.");
+    return plugins.setNativeCodeTrusted(pluginId, trusted);
+  });
+  ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");
+    return pluginServices.report(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsServiceRequest, (
+    event,
+    pluginId: string,
+    serviceId: string,
+    method: string,
+    params: unknown
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return requestPluginService(pluginId, { serviceId, method, params });
+  });
   ipcMain.handle(IPC.pluginsUninstall, async (_event, pluginId: string) => {
     closePluginWindows(pluginId);
     await pluginSecrets.revokeAll(pluginId);
     await pluginMedia.revokeAll(pluginId);
     await plugins.uninstall(pluginId);
+    pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (
     _event,
@@ -486,6 +517,7 @@ export function registerIpc({
         playlistContent(values.content)
       );
     }
+    if (method === "service.request") return requestPluginService(pluginId, values);
     if (method === "window.open") {
       const targetId = stringValue(values.contributionId, "contributionId");
       const target = plugins.contribution(pluginId, targetId);

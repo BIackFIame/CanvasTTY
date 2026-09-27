@@ -170,6 +170,16 @@ export function PluginFrame({
     postToFrame(frame.current, { source: "canvastty-host", type: "storage-change", key, value });
   }), [plugin.manifest.id]);
 
+  const hasServices = Boolean(plugin.manifest.services?.length);
+  useEffect(() => {
+    if (!hasServices) return;
+    const pluginId = plugin.manifest.id;
+    return window.canvasTTY.plugins.onServiceEvent(({ pluginId: owner, serviceId, event, data }) => {
+      if (owner !== pluginId) return;
+      postToFrame(frame.current, { source: "canvastty-host", type: "service-event", value: { serviceId, event, data } });
+    });
+  }, [hasServices, plugin.manifest.id]);
+
   return (
     <iframe
       ref={frame}
@@ -318,6 +328,15 @@ async function handleRequest({
       playlistContent(params.content)
     );
   }
+  if (method === "service.request") {
+    // Only this frame's own plugin id is ever passed, so a plugin reaches only its own services.
+    return window.canvasTTY.plugins.serviceRequest(
+      pluginId,
+      stringParam(params.serviceId, "serviceId"),
+      stringParam(params.method, "method"),
+      params.params
+    );
+  }
   if (method === "window.open") {
     const contributionId = stringParam(params.contributionId, "contributionId");
     const target = plugin.manifest.contributions.find((contribution) => (
@@ -423,5 +442,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function safeError(error: unknown): string {
   const value = error instanceof Error ? error.message : "Plugin request failed.";
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 240);
+  // Plugins see the host's message, not Electron's IPC wrapper around it.
+  return value
+    .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .slice(0, 240);
 }
