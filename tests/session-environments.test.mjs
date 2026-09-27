@@ -439,3 +439,104 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
   assert.ok(existsSync(keptDir));
   assert.match(git("branch", "--list", "feature/kept"), /feature\/kept/u);
 });
+
+test("quitting while prepare is pending: the choice is saved, the card comes back held, never local; Restart prepares with it", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-env-pending-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let finish;
+  const slow = registryFixture({ answers: defaultAnswers({ prepare: () => new Promise((resolve) => { finish = resolve; }) }) });
+  const first = await managerFixture(t, slow.registry, { directory });
+  const pending = first.manager.create({ provider: "terminal", profile: "normal", cwd, position: at,
+    environment: { ...choice, options: { name: "two" } } });
+  await waitFor(() => typeof finish === "function");
+  await first.manager.shutdown();
+  const [record] = await saved(directory);
+  assert.equal(record.id, pending.id);
+  assert.equal(record.lastState, "running");
+  assert.equal(record.environment, undefined);
+  assert.deepEqual(record.environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
+  // The late answer belongs to a launch that no longer exists: released at once, never adopted or saved.
+  finish({ ref: { box: "late" }, label: "late" });
+  await waitFor(() => slow.requests.some((request) => request.step === "release"));
+  assert.deepEqual(slow.requests.find((request) => request.step === "release").params,
+    { sessionId: pending.id, kind: "box", ref: { box: "late" }, keepData: false, reason: "closed" });
+  assert.equal(first.calls.length, 0);
+  assert.equal((await saved(directory))[0].environment, undefined);
+
+  // Next start: held with the reason, nothing spawned locally or anywhere, the choice kept for Restart.
+  const second = registryFixture({ answers: defaultAnswers() });
+  const restored = await managerFixture(t, second.registry, { directory });
+  const held = card(restored.manager, pending.id);
+  assert.equal(held.status, "failed");
+  assert.equal(held.restoreNote, "environment-pending");
+  assert.match(held.failureDetails, /was being prepared when CanvasTTY closed.*not started locally/u);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(restored.calls.length, 0, "no local PTY");
+  assert.equal(second.requests.length, 0, "nothing prepared without the person");
+  // Held again on the next quit, until the person restarts it.
+  await restored.manager.shutdown();
+  assert.deepEqual((await saved(directory))[0].environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
+  assert.equal((await saved(directory))[0].lastState, "running");
+
+  const third = await managerFixture(t, second.registry, { directory });
+  third.manager.restart(pending.id);
+  await waitFor(() => third.calls.length === 1);
+  assert.deepEqual(second.requests.filter((request) => request.step === "prepare").map((request) => request.params.options), [{ name: "two" }]);
+  assert.equal(third.calls[0].command, "/bin/sh", "wrapped by the environment, not the local shell");
+  await waitFor(async () => (await saved(directory).catch(() => []))[0]?.environment?.ref?.box === "b-1");
+  assert.equal((await saved(directory))[0].environmentChoice, undefined, "a prepared environment replaces the choice");
+
+  // A pending choice whose plugin is gone is held with the plugin's reason; Restart refuses, never runs locally.
+  await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{
+    ...record, environmentChoice: { pluginId: "gone.plugin", kind: "box" }
+  }] }));
+  const gone = await managerFixture(t, registryFixture({ answers: defaultAnswers() }).registry, { directory });
+  assert.equal(card(gone.manager, pending.id).restoreNote, "environment-pending");
+  assert.match(card(gone.manager, pending.id).failureDetails, /Needs plugin gone\.plugin.*not started locally/u);
+  assert.throws(() => gone.manager.restart(pending.id), /not started locally/u);
+  assert.equal(gone.calls.length, 0);
+});
+
+test("a failed prepare keeps its choice across an app restart; manual Restart prepares it again, never locally", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-env-failed-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let answer = { refuse: { reason: "no docker" } };
+  const { registry, requests } = registryFixture({ answers: defaultAnswers({ prepare: () => answer }) });
+  const first = await managerFixture(t, registry, { directory });
+  const created = first.manager.create({ provider: "terminal", profile: "normal", cwd, position: at,
+    environment: { ...choice, options: { name: "two" } } });
+  await waitFor(() => card(first.manager, created.id).status === "failed");
+  // Restart in the same run keeps the options too.
+  first.manager.restart(created.id);
+  await waitFor(() => requests.filter((request) => request.step === "prepare").length === 2 && card(first.manager, created.id).status === "failed");
+  await first.manager.shutdown();
+  const [record] = await saved(directory);
+  assert.equal(record.lastState, "failed");
+  assert.deepEqual(record.environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
+
+  const second = await managerFixture(t, registry, { directory });
+  const restored = card(second.manager, created.id);
+  assert.equal(restored.status, "failed");
+  assert.match(restored.failureDetails, /environment was not prepared.*not started locally/u);
+  assert.equal(second.calls.length, 0);
+  answer = { ref: { box: "b-2" }, label: "box b-2" };
+  second.manager.restart(created.id);
+  await waitFor(() => second.calls.length === 1);
+  assert.equal(second.calls[0].command, "/bin/sh");
+  assert.deepEqual(requests.filter((request) => request.step === "prepare").map((request) => request.params.options),
+    [{ name: "two" }, { name: "two" }, { name: "two" }]);
+  assert.equal(first.calls.length, 0);
+});
+
+test("a saved environment choice that cannot be read drops the card instead of restoring it locally", async () => {
+  const { normalizePersistedTerminalSessions } = await import("../src/main/services/TerminalSessionStore.ts");
+  const base = { id: "c", provider: "terminal", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
+    position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true };
+  const read = (environmentChoice) => normalizePersistedTerminalSessions({ version: 2, sessions: [{ ...base, environmentChoice }] }).sessions;
+  assert.deepEqual(read({ pluginId: PLUGIN, kind: "box", options: { name: "x", on: true } })[0].environmentChoice,
+    { pluginId: PLUGIN, kind: "box", options: { name: "x", on: true } });
+  for (const bad of [null, "box", { pluginId: PLUGIN }, { pluginId: "Bad Id", kind: "box" }, { pluginId: PLUGIN, kind: "box", options: { n: 1 } },
+    { pluginId: PLUGIN, kind: "box", options: { big: "x".repeat(5_000) } }]) {
+    assert.deepEqual(read(bad), [], JSON.stringify(bad)?.slice(0, 60));
+  }
+});

@@ -76,6 +76,10 @@ export function planSessionRestore(
 
   return ordered.map((record): RestoreStep => {
     const recorded = record.threadId ? { threadId: record.threadId } : {};
+    // Its environment was chosen but never prepared (the app quit while preparing): hold it, never run it here.
+    if (record.environmentChoice && !record.environment && record.lastState === "running") {
+      return { record, launch: "stopped", note: "environment-pending", ...recorded };
+    }
     if (record.environment && !context.environmentAvailable(record.environment, record)) {
       return { record, launch: "stopped", note: "environment-unavailable", ...recorded };
     }

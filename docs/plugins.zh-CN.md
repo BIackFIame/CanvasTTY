@@ -243,6 +243,7 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 - `wrap` 的输出会被检查：`command` 必须是可执行文件的绝对路径，或由宿主在 `PATH` 中解析的纯程序名；命令行、相对路径或 shell 语法会被拒绝，任何内容都不经过 shell 运行。`args` 是数组（256 项，每项 8 KB，不含 NUL）。`env` 和 `secretEnv` 遵循启动贡献者的规则：保留名称以及 CanvasTTY 或启动选项已为此次启动设置的名称会被拒绝。`secretEnv` 的值来自插件自己的机密（需要 `secrets`），并像启动机密一样被遮蔽。
 - `wrap` 收到此次启动自身的变量（来自 CanvasTTY 和所选启动选项），不含保留的 `CANVASTTY_*` 名称，也不含机密值；`secretEnvNames` 列出进程将从宿主获得值的名称，包装器可以按名称转发它们（`docker exec -e NAME`）。
 - 恢复时先恢复所有保存的环境，再先启动父卡片、后启动子卡片。如果插件被禁用、删除或不受信任，或 `resume` 应答 `stopped`，卡片以停止状态返回并显示原因，记录保留；重启会再次调用 `resume`。卡片绝不会改为在本地启动，超时或错误会拒绝启动，不会回退。
+- 在 `prepare` 成功之前，卡片的保存记录保留启动器中的选择（插件、种类、选项），而不是 ref。如果应用在 `prepare` 进行时退出，卡片以停止状态返回并显示该原因，在用户重启它之前不会准备或启动任何东西；重启会用相同的选项重新准备。`prepare` 失败时同样保留选择。在卡片关闭或重启之后、或应用开始退出之后才到达的 `prepare` 回答不会被使用或保存：只要宿主仍在运行，就立即以 `keepData: false` 和 `reason: "closed"` 调用 `release`。
 - 关闭环境中的卡片时只询问一次“Keep environment data?”，然后带着答案调用 `release`。退出应用不会释放任何环境（环境随卡片一起恢复）；关闭保存时，退出会以 `keepData: true` 和 `reason: "quit"` 调用 `release`，以便停止计算。插件不保存自己的会话列表，也没有恢复逻辑。
 
 完整示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)：`prepare` 在插件数据目录下的文件夹中运行 `git worktree add`，`wrap` 设置文件夹，`resume` 检查它仍然存在，`describe` 显示当前分支，`release` 删除该 worktree（以及它创建的分支），除非你选择保留。

@@ -342,7 +342,7 @@ export type CanvasTTYEnvironmentWrapResult =
 /** `canvastty.environment.resume` (10 s): on restore, and before restarting a card from an earlier run. */
 export type CanvasTTYEnvironmentResumeResult = { ok: true } | { stopped: { reason: string } };
 
-/** `canvastty.environment.release` (10 s): the card was closed, or the app quit with saving off. */
+/** `canvastty.environment.release` (10 s): the card was closed, the app quit with saving off, or a `prepare` answer came after its launch was gone. */
 export interface CanvasTTYEnvironmentReleaseParams {
   sessionId: string;
   kind: string;

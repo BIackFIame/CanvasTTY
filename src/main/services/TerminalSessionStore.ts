@@ -5,6 +5,7 @@ import type {
   SessionRole,
   Point,
   ProviderId,
+  SessionEnvironmentChoice,
   SessionMetadata,
   Size
 } from "../../shared/contracts.ts";
@@ -56,6 +57,11 @@ export interface PersistedTerminalSession {
   options?: Record<string, unknown>;
   /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
   environment?: PersistedEnvironmentRef;
+  /**
+   * The launcher's environment choice while its plugin has not prepared it (pending, or prepare failed). A card
+   * with it never restores as a local one: it comes back held, and Restart prepares with these options.
+   */
+  environmentChoice?: SessionEnvironmentChoice;
   /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
   ownerPluginId?: string;
 }
@@ -138,7 +144,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "ownerPluginId"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -168,6 +174,7 @@ export function persistedTerminalSession(
     restore: metadata.skipRestore !== true,
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
+    ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
     ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {})
   };
 }
@@ -217,6 +224,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     const environment = normalizeEnvironment(session.environment);
     // A placed session whose ref is unreadable must not come back as a local one.
     if (session.environment !== undefined && !environment) continue;
+    // Likewise a launch whose environment was chosen but not prepared yet.
+    const environmentChoice = environment ? undefined : normalizeEnvironmentChoice(session.environmentChoice);
+    if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -237,6 +247,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       restore: session.restore !== false,
       ...(options ? { options } : {}),
       ...(environment ? { environment } : {}),
+      ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {})
     });
     ids.add(session.id);
@@ -264,6 +275,18 @@ function normalizeEnvironment(value: unknown): PersistedEnvironmentRef | undefin
     kind: value.kind,
     ref: structuredClone(value.ref),
     label: value.label.trim().slice(0, 80)
+  };
+}
+
+function normalizeEnvironmentChoice(value: unknown): SessionEnvironmentChoice | undefined {
+  if (!isRecord(value) || !isPluginId(value.pluginId) || !fitsPluginSlot(value)) return undefined;
+  if (typeof value.kind !== "string" || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(value.kind)) return undefined;
+  if (value.options !== undefined && (!isRecord(value.options)
+    || Object.values(value.options).some((option) => typeof option !== "boolean" && typeof option !== "string"))) return undefined;
+  return {
+    pluginId: value.pluginId,
+    kind: value.kind,
+    ...(value.options !== undefined ? { options: structuredClone(value.options) as Record<string, boolean | string> } : {})
   };
 }
 

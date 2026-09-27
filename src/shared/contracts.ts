@@ -21,7 +21,7 @@ export type SessionRestoreMode = "off" | "reopen" | "continue";
  * conversation because another card of that CLI shares its folder, or it is
  * held stopped because the environment it ran in is unavailable.
  */
-export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable" | "plugin-unavailable";
+export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable" | "environment-pending" | "plugin-unavailable";
 export type PaletteId = "sage" | "lilac" | "night";
 export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom";
 export type SessionRowColorMode = "monochrome" | "status";

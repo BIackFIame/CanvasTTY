@@ -97,7 +97,10 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
-  /** Plugin options, environment ref and owning plugin carried into the saved record. */
+  /**
+   * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
+   * and owning plugin carried into the saved record.
+   */
   extras: PersistedSessionExtras;
   /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
   launchToken: number;
@@ -105,8 +108,6 @@ interface ManagedSession {
   launchCleanup: (() => Promise<void>) | null;
   /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
   restoringLaunch: boolean;
-  /** The launcher's environment choice until the plugin has prepared it (then `extras.environment`). */
-  environmentChoice: SessionEnvironmentChoice | null;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
   /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
@@ -461,11 +462,13 @@ export class TerminalManager {
       awaitingInitialResize: awaitMeasuredGrid,
       resumeOnLaunch: null,
       captureResult: control.captureResult === true,
-      extras: launchOptions ? { options: launchOptions } : {},
+      extras: {
+        ...(launchOptions ? { options: launchOptions } : {}),
+        ...(environmentChoice ? { environmentChoice } : {})
+      },
       launchToken: 0,
       launchCleanup: null,
       restoringLaunch: false,
-      environmentChoice,
       environmentReady: false
     };
     this.sessions.set(id, session);
@@ -487,6 +490,10 @@ export class TerminalManager {
     if (environment && !this.environmentUsable(environment)) {
       // Never run a placed session locally instead of where it belongs.
       throw new Error(`This card runs in ${environment.label} from plugin ${environment.pluginId}, which is not available. It was not started locally.`);
+    }
+    const pendingChoice = session.extras.environment ? undefined : session.extras.environmentChoice;
+    if (pendingChoice && !this.environments?.available(pendingChoice)) {
+      throw new Error(`${this.pendingEnvironmentReason(pendingChoice)} It was not started locally.`);
     }
     const missingPlugins = this.unavailableLaunchPlugins(session.extras.options);
     if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
@@ -824,6 +831,7 @@ export class TerminalManager {
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
+      ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
       ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {})
     };
 
@@ -843,6 +851,16 @@ export class TerminalManager {
           ? `Environment stopped: ${resumed.reason}`
           : this.environments?.unavailableReason(descriptor.environment)
             ?? `Needs plugin ${descriptor.environment.pluginId} (${descriptor.environment.label}). It was not started locally.`;
+      } else if (step.note === "environment-pending" && extras.environmentChoice) {
+        // The app quit while the plugin prepared it: whatever it prepared then is unknown, so nothing runs
+        // until the person restarts it, which prepares again with the saved options.
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        const choice = extras.environmentChoice;
+        metadata.failureDetails = this.environments?.available(choice)
+          ? `Its environment (${choice.kind} from plugin ${choice.pluginId}) was being prepared when CanvasTTY closed. It was not started locally; Restart prepares it again.`
+          : `${this.pendingEnvironmentReason(choice)} It was not started locally.`;
       } else if (step.note === "plugin-unavailable" && descriptor.options) {
         extras.heldState = descriptor.lastState;
         metadata.status = "failed";
@@ -851,6 +869,9 @@ export class TerminalManager {
       } else {
         metadata.exitCode = descriptor.exitCode ?? (descriptor.lastState === "exited" ? 0 : 1);
         metadata.status = metadata.exitCode === 0 ? "done" : "failed";
+        if (extras.environmentChoice && metadata.status === "failed") {
+          metadata.failureDetails = "Its environment was not prepared, so it was not started locally; Restart prepares it again.";
+        }
       }
     }
     if (directoryReady) {
@@ -928,7 +949,6 @@ export class TerminalManager {
       launchToken: 0,
       launchCleanup: null,
       restoringLaunch: awaitMeasuredGrid,
-      environmentChoice: null,
       environmentReady: resumed?.ok === true,
       restored: true
     };
@@ -1190,13 +1210,17 @@ export class TerminalManager {
   }
 
   private contributed(session: ManagedSession): boolean {
-    return Boolean(session.extras.options) || Boolean(session.extras.environment) || Boolean(session.environmentChoice)
+    return Boolean(session.extras.options) || Boolean(session.extras.environment) || Boolean(session.extras.environmentChoice)
       || this.policyApplies(session.metadata.provider);
   }
 
   /** A trusted plugin's launch policy applies to this agent: its launches wait for the policy's answer. */
   private policyApplies(provider: ProviderId): boolean {
     try { return this.launchPipeline?.hasPolicy?.(provider) === true; } catch { return false; }
+  }
+
+  private pendingEnvironmentReason(choice: SessionEnvironmentChoice): string {
+    return `Needs plugin ${choice.pluginId} (${choice.kind}) to prepare its environment; it is disabled, removed, or its native code is not trusted.`;
   }
 
   private environmentUsable(environment: PersistedEnvironmentRef): boolean {
@@ -1256,18 +1280,20 @@ export class TerminalManager {
     };
     const environments = this.environments;
 
-    // 1. Place a new session where the person chose.
-    const choice = session.environmentChoice;
+    // 1. Place a new session where the person chose. The choice stays saved with the card until the plugin has
+    // prepared it, so a card whose preparation was cut short (quit, crash) or failed never restores locally.
+    const choice = session.extras.environmentChoice;
     if (choice && !session.extras.environment) {
       if (!environments) return refuse("plugin environments are not available.");
       const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice });
       if (!live()) {
-        // Closed while it was being prepared: nobody used it, so nothing is kept.
+        // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
+        // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.
         if (placed.ok) void environments.release(placed.environment, id, { keepData: false, reason: "closed" });
         return "superseded";
       }
       if (!placed.ok) return refuse(placed.reason);
-      session.environmentChoice = null;
+      delete session.extras.environmentChoice;
       session.environmentReady = true;
       session.extras.environment = placed.environment;
       metadata.environment = environmentBadge(placed.environment);
