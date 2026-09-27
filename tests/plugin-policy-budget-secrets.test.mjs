@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -311,4 +311,42 @@ test("a card waits for the launch policies that apply; a YOLO card outside an en
   manager.create({ provider: "terminal", profile: "normal", cwd: project, position: at });
   assert.equal(calls.length, 2, "a terminal launches at once");
   assert.equal(asked.length, 2);
+});
+
+test("a decide budget above the supervisor's 15 s request default is honored through the real supervisor, and still ends at the budget", { ...POSIX, timeout: 40_000 }, async (t) => {
+  const { createHash } = await import("node:crypto");
+  const { readFile: read } = await import("node:fs/promises");
+  const { PluginServiceSupervisor, MAX_HOST_CALL_TIMEOUT_MS } = await import("../src/main/services/PluginServiceSupervisor.ts");
+  const { DecisionHooks } = await import("../src/main/services/DecisionHooks.ts");
+  const { MAX_DECIDE_TIMEOUT_MS, permissionGateTimings } = await import("../src/agent-runtime/runtime-protocol.mjs");
+  const entryPath = new URL("./fixtures/slow-decide-service.mjs", import.meta.url).pathname;
+  const dataDir = await mkdtemp(join(tmpdir(), "canvastty-slow-decide-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+  // Production construction: no requestTimeoutMs, so surface requests keep the 15 s default.
+  const supervisor = new PluginServiceSupervisor({ command: process.execPath, hostVersion: "9.9.9", locale: () => "en", stopGraceMs: 300,
+    host: { storageGet: async () => null, storageSet: async () => undefined, emit: () => undefined } });
+  t.after(() => supervisor.dispose());
+  await supervisor.sync([{ pluginId: "p.slow", serviceId: "svc", root: dirname(entryPath), entryPath, dataDir, permissions: ["decision:provide"],
+    sha256: createHash("sha256").update(await read(entryPath)).digest("hex") }]);
+  const hooks = new DecisionHooks({
+    baseProtection: () => false,
+    services: () => [
+      { pluginId: "p.slow", pluginName: "Slow", serviceId: "svc", mayAllow: false, timeoutMs: 18_000, appliesTo: ["claude"] },
+      { pluginId: "p.slow", pluginName: "Slow", serviceId: "svc", mayAllow: false, timeoutMs: 16_000, appliesTo: ["codex"] }
+    ],
+    call: (pluginId, serviceId, method, params, timeoutMs) => supervisor.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    session: (sessionId) => ({ provider: sessionId === "wait-16000" ? "claude" : "codex", role: "agent", cwd: project, configDirs: [] })
+  });
+  const request = { toolName: "Bash", toolInput: { command: "ls" }, toolInputPreview: null, cwd: project, truncated: false };
+  const [withinBudget, pastBudget] = await Promise.all([
+    hooks.decide("wait-16000", request, new AbortController().signal),
+    hooks.decide("wait-17000", request, new AbortController().signal)
+  ]);
+  assert.equal(withinBudget.behavior, "deny", "an answer after 16 s within an 18 s budget is kept");
+  assert.match(withinBudget.message, /denied after 16000 ms/u);
+  assert.equal(pastBudget.behavior, "ask", "an answer after its 16 s budget is a timeout's ask");
+  // The supervisor's bound is the manifest's maximum, and the session gate's deadlines stay longer than it.
+  assert.equal(MAX_HOST_CALL_TIMEOUT_MS, MAX_DECIDE_TIMEOUT_MS);
+  const gate = permissionGateTimings(MAX_DECIDE_TIMEOUT_MS);
+  assert.ok(gate.gatewayMs > MAX_HOST_CALL_TIMEOUT_MS && gate.helperMs > gate.gatewayMs);
 });

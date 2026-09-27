@@ -8,6 +8,7 @@ import type {
   PluginServiceState,
   PluginServiceStatus
 } from "../../shared/contracts";
+import { MAX_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 
 /** One trusted service the supervisor should keep running. Built by PluginManager. */
 export interface PluginServiceSpec {
@@ -61,6 +62,12 @@ export interface PluginServiceSupervisorOptions {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * The longest budget a host call may carry: the largest budget a manifest can declare (`decide.timeoutMs`, 60 s).
+ * Host calls keep their own validated budget up to this bound; surface requests keep `requestTimeoutMs`. The decision
+ * gate's gateway and helper deadlines (permissionGateTimings) are sized from the same budget and stay longer.
+ */
+export const MAX_HOST_CALL_TIMEOUT_MS = MAX_DECIDE_TIMEOUT_MS;
 const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const DEFAULT_MAX_RESTARTS = 5;
@@ -199,9 +206,13 @@ export class PluginServiceSupervisor {
     return this.write(record, frame);
   }
 
-  /** A host-initiated call (`canvastty.*`, which plugin surfaces cannot send) with its own time budget. */
+  /**
+   * A host-initiated call (`canvastty.*`, which plugin surfaces cannot send) with its own time budget, bounded by
+   * MAX_HOST_CALL_TIMEOUT_MS (not by the surface request default, which would cut a longer decision budget short).
+   */
   hostCall(pluginId: string, serviceId: string, method: `canvastty.${string}`, params: unknown, timeoutMs: number): Promise<unknown> {
-    return this.send(pluginId, serviceId, method, params, Math.min(timeoutMs, this.options.requestTimeoutMs));
+    const budget = Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.min(timeoutMs, MAX_HOST_CALL_TIMEOUT_MS) : this.options.requestTimeoutMs;
+    return this.send(pluginId, serviceId, method, params, budget);
   }
 
   private send(pluginId: string, serviceId: string, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
