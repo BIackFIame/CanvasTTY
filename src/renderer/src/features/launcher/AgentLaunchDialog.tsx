@@ -14,6 +14,7 @@ import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
 import { LaunchOptionsSection } from "./LaunchOptionsSection";
+import { hasAutoMode } from "../../../../shared/autoMode";
 
 interface AgentLaunchDialogProps {
   /** "terminal" opens it only while a plugin environment applies to terminals (folder and Where). */
@@ -173,6 +174,10 @@ export function AgentLaunchDialog({
             setProfile("normal");
             setConfirmDanger(false);
           }}>{t(locale, "normal")}</button>
+          {hasAutoMode(provider) && <button className={profile === "auto" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
+            setProfile("auto");
+            setConfirmDanger(false);
+          }}>{t(locale, "autoProfile")}</button>}
           <button className={profile === "yolo" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
             setProfile("yolo");
             setConfirmDanger(false);
@@ -199,6 +204,7 @@ export function AgentLaunchDialog({
 
         <LaunchOptionsSection provider={provider} locale={locale} onChange={changeLaunchOptions} onEnvironmentChange={changeEnvironment} />
 
+        {profile === "auto" && <div className="role-note"><span>{t(locale, "autoProfileNote")}</span></div>}
         {profile === "yolo" && (
           <div className={`danger-note ${confirmDanger ? "danger-note--confirm" : ""}`}>
             <strong>{t(locale, dangerKey)}</strong>

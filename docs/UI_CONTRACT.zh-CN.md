@@ -19,7 +19,7 @@
 - 未检测到 CLI 的 agent 仍显示在 Settings 中，以缺失状态和官方外部安装链接替代启用开关。“再次检查”无需重启即可刷新检测、启动器可用性和限额，且不影响运行中的 session。后来检测到的 CLI 必须由用户手动重新选择。检测到文件不代表已登录或支持限额读取。
 
 - 点击服务商会打开该服务商的 Focus Card。服务商固定，不提供第二个 provider selector。
-- Focus Card 只包含 provider mark、project folder、Normal/YOLO profile、launch action 与上下文危险确认。
+- Focus Card 只包含 provider mark、project folder、Normal/Auto/YOLO profile（Auto 仅在 CLI 自带自动模式时出现）、launch action 与上下文危险确认。
 - Settings 顶部使用 General、Appearance、Agents、Controls、Browser、Plugins 分区。General 负责语言；Appearance 负责两个互相独立的颜色设置：按角色划分的 HOME palette preset/custom color，以及 Canvas background。修改其中一个不得重绘另一个。Appearance 还负责 Canvas pattern、shortcut hint、system HOME tile 与 HOME editor 入口。自定义 HOME 颜色只接受经过校验的 `#RRGGBB` 值，并且绝不重绘 provider mark；Agents 独立决定 HOME launcher 中显示哪些 provider 按钮，以及 HOME 限额 tile 中显示哪些真实服务商的限额行；一个选择不得改变另一个；Controls 负责 click focus、hover focus、window snapping、edge panning、zoom sensitivity、wheel direction、普通 scroll 的 pan/zoom、widget 上 Off/On/Key wheel/pinch capture、完整 canvas navigation override 与 action shortcut；Browser 负责 agent access、agent indicator visibility、tab restore、download、脱敏 activity 与 browser data 清理；Plugins 负责 install preview、permission review、installed-plugin list、enable/disable/uninstall 与 contribution action。Media control 不出现在这里。
 - Click focus 有 Off、Single click、Double click 三种明确模式，默认 Off。即使 camera focus 为 Off，selection 与可见 outline 仍然有效；Double click 模式不会在第一次点击时跳转 camera。
 - 当前 Terminal 与内置 Browser 之间的 selection 是排他的：点击空白 canvas 会清除选择。Input focus 独立保存，因此未来加入 multi-selection 时无需重新定义 wheel ownership。

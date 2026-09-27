@@ -129,12 +129,16 @@ test("the example service offers its profiles and refuses one that is gone", asy
     secret: async () => null,
     runsRoot
   });
-  assert.deepEqual(await choices.fieldOptions(checked.id, "claude"), { profile: [{ value: "work", label: "Work" }, { value: "home", label: "Home" }] });
+  assert.deepEqual(await choices.fieldOptions(checked.id, "claude"), { profile: [{ value: "work", label: "Work" }, { value: "home", label: "Home" }, { value: "local", label: "Local model" }] });
   const context = { sessionId: "s1", provider: "claude", profile: "normal", role: "agent", cwd: process.cwd(), restoring: false, resume: false, environment: null };
   const work = await choices.prepare({ ...context, options: choices.normalizeOptions("claude", { [checked.id]: { profile: "work" } }) });
   assert.equal(work.ok, true);
   assert.equal(work.env.CTTY_LAUNCH_PROFILE, "work");
+  assert.equal(work.thirdPartyModel, false);
   await work.cleanup();
+  const local = await choices.prepare({ ...context, profile: "auto", options: choices.normalizeOptions("claude", { [checked.id]: { profile: "local" } }) });
+  assert.equal(local.thirdPartyModel, true, "the example marks its local-model profile");
+  await local.cleanup();
   const gone = await choices.prepare({ ...context, options: choices.normalizeOptions("claude", { [checked.id]: { profile: "office" } }) });
   assert.deepEqual(gone, { ok: false, reason: "Launch Env: Profile office no longer exists; choose another one." });
 });

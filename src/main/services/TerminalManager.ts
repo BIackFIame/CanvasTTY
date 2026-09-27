@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { basename } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, relative, isAbsolute } from "node:path";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
@@ -48,12 +48,13 @@ import {
   controlEnvironment,
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
-import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { resolveTerminalLaunch } from "./terminalLaunch.ts";
+import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
 import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
@@ -110,6 +111,12 @@ interface ManagedSession {
   environmentReady: boolean;
   /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
   restored?: boolean;
+  /** What the CLI's own title last showed (Claude: spinner working, «✳» no turn running). */
+  titleState?: "idle" | "working" | "needs_approval";
+  /** How often the agent's lifecycle hooks reported; Claude's title defers to hooks once they have. */
+  hookSignals?: number;
+  /** Set after the person answered a hooked Claude prompt; see settleAnsweredPrompt. */
+  answeredPromptTimer?: ReturnType<typeof setTimeout>;
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
@@ -431,7 +438,7 @@ export class TerminalManager {
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
       : this.spawnProcess(id, request.provider, request.profile, request.cwd,
         INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, null, control.captureResult, role,
-        control.answerCaptureGrantExpiresAt);
+        control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -546,7 +553,10 @@ export class TerminalManager {
       session.rows,
       resume,
       session.captureResult,
-      session.metadata.role
+      session.metadata.role,
+      undefined,
+      null,
+      session.metadata.parentSessionId
     );
     session.process = launched.process;
     session.agentBrowser = launched.agentBrowser;
@@ -585,7 +595,30 @@ export class TerminalManager {
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process) return false;
     const process = session.process;
-    return tryPtyOperation(() => process.write(data));
+    const written = tryPtyOperation(() => process.write(data));
+    if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
+    return written;
+  }
+
+  /**
+   * A hooked Claude card waits at its permission prompt (needs_approval) and the person answered it. When they declined
+   * (Esc, or "No"), Claude interrupts the turn and runs no Stop hook, and its «✳» title defers to the hooks, so the card
+   * would stay needs_approval while Claude waits at its prompt line. If, a moment later, no hook moved the card on (an
+   * allowed tool reports PostToolUse, a new prompt PermissionRequest) and the title still shows no turn running, the
+   * turn ended: idle.
+   */
+  private settleAnsweredPrompt(id: string, session: ManagedSession): void {
+    if (session.metadata.status !== "needs_approval" || !titleDefersToHooks(session, "idle")) return;
+    if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
+    const hooksBefore = session.hookSignals ?? 0;
+    session.answeredPromptTimer = setTimeout(() => {
+      session.answeredPromptTimer = undefined;
+      if (this.sessions.get(id) !== session || session.metadata.exitCode !== null) return;
+      if (session.metadata.status !== "needs_approval" || session.titleState === "working") return;
+      if ((session.hookSignals ?? 0) !== hooksBefore) return;
+      this.applyProviderSignal(id, { kind: "lifecycle", state: "idle" }, "title");
+    }, ANSWERED_PROMPT_SETTLE_MS);
+    session.answeredPromptTimer.unref?.();
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -633,9 +666,11 @@ export class TerminalManager {
     return structuredClone(session.metadata);
   }
 
-  applyProviderSignal(id: string, signal: ProviderLifecycleSignal): void {
+  /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
+  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): void {
     const session = this.sessions.get(id);
     if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
+    if (source === "hook") session.hookSignals = (session.hookSignals ?? 0) + 1;
 
     const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
     if (threadId && threadId !== session.threadId) {
@@ -846,7 +881,10 @@ export class TerminalManager {
           INITIAL_TERMINAL_ROWS,
           resume,
           false,
-          descriptor.role
+          descriptor.role,
+          undefined,
+          null,
+          descriptor.parentSessionId
         );
         process = launched.process;
         agentBrowser = launched.agentBrowser;
@@ -949,7 +987,10 @@ export class TerminalManager {
         session.rows,
         resume,
         session.captureResult,
-        session.metadata.role
+        session.metadata.role,
+        undefined,
+        null,
+        session.metadata.parentSessionId
       );
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
@@ -987,7 +1028,8 @@ export class TerminalManager {
     captureResult = false,
     role: SessionRole = "agent",
     answerCaptureGrantExpiresAt?: number,
-    contribution: LaunchContribution | null = null
+    contribution: LaunchContribution | null = null,
+    parentSessionId?: string
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -995,7 +1037,8 @@ export class TerminalManager {
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
     failure: UnavailableProviderCli | null;
   } {
-    const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution);
+    const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution,
+      this.personTrustedFolder(parentSessionId, cwd));
     if ("failure" in planned) {
       return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: planned.failure };
     }
@@ -1027,7 +1070,8 @@ export class TerminalManager {
     captureResult: boolean,
     role: SessionRole,
     answerCaptureGrantExpiresAt: number | undefined,
-    contribution: LaunchContribution | null
+    contribution: LaunchContribution | null,
+    trustedFolder?: string
   ): PlannedSpawn | { failure: UnavailableProviderCli } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") return { failure: providerCli };
@@ -1085,14 +1129,19 @@ export class TerminalManager {
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
+      // A Codex subagent in the person's folder is not asked to trust it again (this run only, never ~/.codex).
+      if (provider === "codex" && trustedFolder) providerArgs.push(...codexTrustArguments([trustedFolder]));
       // Plugin arguments follow the core's own and precede the resume selection.
       if (contribution) providerArgs.push(...contribution.args);
       const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
         environment: { ...baseEnvironment, ...providerEnvironment },
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
-        ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {})
+        ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
+        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {})
       });
+      const session = this.sessions.get(id);
+      if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
       // A plugin may add to the person's environment, never replace what the core sets for this launch.
       const contributedEnvironment = contribution?.env ?? {};
       const collision = Object.keys(contributedEnvironment)
@@ -1115,6 +1164,28 @@ export class TerminalManager {
     } catch (error) {
       cleanup();
       throw error;
+    }
+  }
+
+  /**
+   * For a subagent: the folder the person chose for the top-level agent it descends from, when that agent runs on this
+   * computer, and this subagent's folder is it or inside it. The subagent's own real folder then needs no trust answer
+   * of the person again; unreadable counts as outside.
+   */
+  private personTrustedFolder(parentSessionId: string | undefined, cwd: string): string | undefined {
+    let root: ManagedSession | undefined;
+    for (let depth = 0, next = parentSessionId; next !== undefined && depth < 64; depth++) {
+      root = this.sessions.get(next);
+      if (!root) return undefined;
+      next = root.metadata.parentSessionId;
+    }
+    if (!root || root.extras.environment) return undefined;
+    try {
+      const folder = realpathSync(cwd);
+      const inside = relative(realpathSync(root.metadata.cwd), folder);
+      return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? folder : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -1223,6 +1294,7 @@ export class TerminalManager {
 
     // 3. Chosen launch contributors, and the launch policies that apply.
     let contribution: LaunchContribution | null = null;
+    const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
     if (session.extras.options || this.policyApplies(metadata.provider)) {
       const pipeline = this.launchPipeline;
       if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
@@ -1237,7 +1309,8 @@ export class TerminalManager {
         restoring,
         resume: resume !== null,
         options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
-        environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null
+        environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
+        ...(trustedFolder ? { trustedFolder } : {})
       });
       if (!live()) {
         if (prepared.ok) void prepared.cleanup().catch(() => undefined);
@@ -1255,7 +1328,7 @@ export class TerminalManager {
     let planned: PlannedSpawn | { failure: UnavailableProviderCli };
     try {
       planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution);
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder);
     } catch (error) {
       dropContribution();
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
@@ -1347,7 +1420,10 @@ export class TerminalManager {
       if (!current || current !== session || current.process !== process) return;
 
       const lifecycleState = current.lifecycle?.push(data);
-      if (lifecycleState) this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState });
+      if (lifecycleState) current.titleState = lifecycleState;
+      if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
+        this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState }, "title");
+      }
       appendScrollback(current, data);
       this.queueOutput(id, current, data);
     });
@@ -1417,6 +1493,26 @@ function environmentBadge(environment: PersistedEnvironmentRef): NonNullable<Ses
   return { pluginId: environment.pluginId, kind: environment.kind, label: environment.label };
 }
 
+/**
+ * Claude's title shows the same «✳» when its turn ended and while its permission prompt waits, and it can reach main
+ * before or after the hook that tells them apart (Stop, PermissionRequest). Once Claude's hooks have reported for this
+ * card they alone end a turn; the title only reports one starting. Without them (hooks off, or a remote run without a
+ * bridge) the title's idle stands.
+ */
+function titleDefersToHooks(session: ManagedSession, state: "idle" | "working" | "needs_approval"): boolean {
+  return state !== "working" && session.metadata.provider === "claude" && session.hookSignals !== undefined;
+}
+
+/** Keys that answer a prompt: Enter, a lone Esc, or a choice digit. */
+const ANSWERS_PROMPT = /\r|^\u001b$|^[1-9]$/;
+const ANSWERED_PROMPT_SETTLE_MS = 3_000;
+
+/** "auto" ran as accept-edits because a launch contributor marked a third-party model; shown on the card. */
+function setAutoDowngraded(metadata: SessionMetadata, downgraded: boolean): void {
+  if (downgraded) metadata.autoDowngraded = true;
+  else delete metadata.autoDowngraded;
+}
+
 function missingLaunchPlugins(pluginIds: readonly string[]): string {
   return `needs plugin ${pluginIds.join(", ")} for its launch options; it is disabled, removed, or its native code is not trusted.`;
 }
@@ -1481,7 +1577,8 @@ const SESSION_ROLES = new Set<SessionRole>(["agent", "orchestrator", "subagent"]
 
 function assertCreateRequest(request: CreateSessionRequest): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
-  if (request.profile !== "normal" && request.profile !== "yolo") throw new Error("Unknown launch profile.");
+  if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
+  if (request.profile === "auto" && !hasAutoMode(request.provider)) throw new Error(`${request.provider} has no auto mode; use the normal profile.`);
   if (request.role === "orchestrator" && request.provider === "terminal") throw new Error("A plain terminal cannot be an orchestrator.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");
   if (!isPoint(request.position)) throw new Error("Session position is invalid.");

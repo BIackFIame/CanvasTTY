@@ -3,6 +3,7 @@ import { win32 } from "node:path";
 import type { ProviderId } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
+import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
 import {
   providerTerminalBatchCommandLine,
   type ProviderCliResolution
@@ -21,6 +22,8 @@ interface LaunchResolutionOptions {
   providerCli?: ProviderCliResolution;
   resumePrevious?: boolean;
   resumeThreadId?: string;
+  /** A launch contributor runs the CLI on another model: "auto" becomes accept-edits (autoModeArguments). */
+  thirdPartyModel?: boolean;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -29,7 +32,7 @@ const WINDOWS_NATIVE_EXTENSIONS = [".exe", ".com"];
 
 export function resolveTerminalLaunch(
   provider: ProviderId,
-  profile: "normal" | "yolo",
+  profile: LaunchProfile,
   agentBrowserArgs: string[] = [],
   options: LaunchResolutionOptions = {}
 ): TerminalLaunch {
@@ -52,10 +55,15 @@ export function resolveTerminalLaunch(
   const launchEnvironment = profile === "yolo" && provider === "opencode"
     ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
     : undefined;
+  const auto = profile === "auto";
   const providerArgs = [
     ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
+    ...(auto ? autoModeArguments(provider, options.thirdPartyModel === true) : []),
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
-    ...(provider === "claude" ? mergeClaudeInlineSettings(agentBrowserArgs) : agentBrowserArgs),
+    // Its sandbox for "auto" joins the same one.
+    ...(provider === "claude"
+      ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
+      : agentBrowserArgs),
     ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {
@@ -282,7 +290,7 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 // to the core's restore rules. Every provider's bypass flag is listed for every provider.
 const CORE_OWNED_FLAGS = new Set<string>([
   ...Object.values(DANGEROUS_ARGUMENTS).flat().filter((argument) => argument.startsWith("-")),
-  "--full-auto", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
+  "--full-auto", "--approve-for-me", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
   "--continue", "--resume", "--session", "--last", "--conversation", "--fork-session"
 ]);
 const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
@@ -292,7 +300,8 @@ const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
   opencode: ["-c", "-s"],
   codex: ["-a", "-s"]
 };
-const CORE_OWNED_WORDS = /dangerously|approval_policy|sandbox_mode|bypass/i;
+// `-c hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust); `approvals_reviewer` is auto's.
+const CORE_OWNED_WORDS = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|bypass|^hooks[.=]/i;
 const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
   codex: ["resume", "fork", "exec"]
 };

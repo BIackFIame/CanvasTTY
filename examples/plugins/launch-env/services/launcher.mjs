@@ -7,7 +7,8 @@ import { createInterface } from "node:readline";
 const send = (message) => process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
 
 // Choices a real plugin would read from its own storage (its accounts, say).
-const PROFILES = [{ value: "work", label: "Work" }, { value: "home", label: "Home" }];
+// "local" stands for an account that runs the agent on another model (an API or a local one).
+const PROFILES = [{ value: "work", label: "Work" }, { value: "home", label: "Home" }, { value: "local", label: "Local model" }];
 
 function prepare({ provider, restoring, options }) {
   if (!options.enabled) return {};
@@ -26,7 +27,10 @@ function prepare({ provider, restoring, options }) {
       CTTY_LAUNCH_EXAMPLE_FILE: "{launchFiles}/note.txt"
     },
     files: [{ relPath: "note.txt", content: `${provider} ${restoring ? "restored" : "started"}\n` }],
-    args: ["--verbose"]
+    args: ["--verbose"],
+    // Another model than the agent's vendor's: its own auto reviewer is that model, so CanvasTTY runs "auto" as
+    // accept-edits for this launch. The mark can only make a launch stricter.
+    ...(profile === "local" ? { thirdPartyModel: true } : {})
   };
 }
 

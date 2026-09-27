@@ -9,6 +9,7 @@ import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
 import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
+import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -244,7 +245,8 @@ export class AgentControlGateway {
     const params = request.params;
     if (request.method === "create") {
       fields(params, ["provider", "cwd", "title", "profile"]);
-      if (!isControlProvider(params.provider) || !["normal", "yolo"].includes(String(params.profile))) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal or yolo launch profile.");
+      if (!isControlProvider(params.provider) || !isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal, yolo or auto launch profile.");
+      if (params.profile === "auto" && !hasAutoMode(params.provider)) throw new ControlError("INVALID_PARAMS", `${params.provider} has no auto mode; use profile normal.`);
       const provider = params.provider;
       const capabilities = controlCapabilities(provider);
       const requestedCwd = string(params.cwd, 4096, "cwd");
@@ -255,7 +257,7 @@ export class AgentControlGateway {
       if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
       if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
-      const session = this.options.terminals.create({ provider, profile: params.profile as "normal" | "yolo", cwd, title,
+      const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
       const terminal = new xterm.Terminal({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);

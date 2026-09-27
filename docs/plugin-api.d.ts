@@ -382,7 +382,8 @@ export type CanvasTTYLaunchField =
 export interface CanvasTTYLaunchContext {
   sessionId: string;
   provider: "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity";
-  profile: "normal" | "yolo";
+  /** "auto" only for agents with a native auto mode (Codex, Claude Code, Grok). */
+  profile: "normal" | "yolo" | "auto";
   role: "agent" | "orchestrator" | "subagent";
   cwd: string;
   parentSessionId?: string;
@@ -396,6 +397,8 @@ export interface CanvasTTYLaunchContext {
   chosen: boolean;
   /** Where the card runs: the chosen or saved environment, or null on this computer. */
   environment: { pluginId: string; kind: string } | null;
+  /** A subagent on this computer in (or below) the folder the person chose for its top-level agent: that real path. */
+  trustedFolder?: string;
 }
 
 /**
@@ -412,6 +415,8 @@ export interface CanvasTTYLaunchContribution {
   args?: string[];
   /** At most 16 files, 256 KB, removed when the process exits. */
   files?: Array<{ relPath: string; content: string }>;
+  /** The agent runs on another model than its vendor's: profile "auto" runs as accept-edits. Allowed in a policy. */
+  thirdPartyModel?: boolean;
   refuse?: { reason: string };
 }
 
@@ -467,7 +472,7 @@ export interface CanvasTTYServiceHostApi {
   "sessions.list"(params: { ownedOnly?: boolean }): { sessions: Array<CanvasTTYSessionSummary & { owned: boolean }> };
   /** Needs `sessions:launch`. An `agent` card through the normal launch pipeline; at most 16 per plugin. */
   "sessions.create"(params: {
-    provider: CanvasTTYProviderId; cwd: string; profile?: "normal" | "yolo"; title?: string;
+    provider: CanvasTTYProviderId; cwd: string; profile?: "normal" | "yolo" | "auto"; title?: string;
     launchOptions?: Record<string, Record<string, boolean | string>>;
     environment?: { pluginId: string; kind: string; options?: Record<string, boolean | string> };
   }): { sessionId: string };

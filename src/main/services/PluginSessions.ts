@@ -78,7 +78,7 @@ interface Subscriber {
 const MAX_OWNED_PER_PLUGIN = 16;
 const MAX_SEND_CHARS = 16_000;
 const MAX_SCREEN_CHARS = 4_000;
-const PROFILES = new Set<LaunchProfileId>(["normal", "yolo"]);
+const PROFILES = new Set<LaunchProfileId>(["normal", "yolo", "auto"]);
 
 /**
  * Session events and plugin-owned session control (EP-4). A service subscribes to card events (metadata only;
@@ -221,7 +221,7 @@ export class PluginSessions {
     if (owned >= MAX_OWNED_PER_PLUGIN) throw new Error(`A plugin can run at most ${MAX_OWNED_PER_PLUGIN} cards of its own.`);
     if (typeof values.provider !== "string" || typeof values.cwd !== "string") throw new Error("provider and cwd are required.");
     const profile = values.profile === undefined ? "normal" : values.profile;
-    if (!PROFILES.has(profile as LaunchProfileId)) throw new Error("profile must be normal or yolo.");
+    if (!PROFILES.has(profile as LaunchProfileId)) throw new Error("profile must be normal, yolo or auto.");
     if (values.title !== undefined && (typeof values.title !== "string" || values.title.length > 80)) {
       throw new Error("title must be text of at most 80 characters.");
     }

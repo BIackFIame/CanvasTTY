@@ -50,6 +50,12 @@ export interface LaunchContext {
   chosen: boolean;
   /** Where the card runs (the chosen or saved environment), or null on this computer. */
   environment: { pluginId: string; kind: string } | null;
+  /**
+   * A subagent on this computer whose folder is the one the person chose for its top-level agent, or inside it: that
+   * folder's real path, which the person already vouched for. A plugin that keeps the agent's own config home may mark
+   * it trusted there for this run's agent; absent otherwise.
+   */
+  trustedFolder?: string;
 }
 
 export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen"> & { options: Record<string, PluginLaunchValues> };
@@ -63,6 +69,8 @@ export type PreparedLaunch =
     secrets: string[];
     /** Env name -> plugin name, to name the plugin when a core variable collides. */
     envSources: Record<string, string>;
+    /** A contributor runs the agent on another model than its vendor's: "auto" becomes accept-edits. */
+    thirdPartyModel: boolean;
     cleanup(): Promise<void>;
   }
   | { ok: false; reason: string };
@@ -239,6 +247,7 @@ export class LaunchPipeline {
     const envSources: Record<string, string> = {};
     const args: string[] = [];
     const secrets: string[] = [];
+    let thirdPartyModel = false;
     for (const answer of answers) {
       if ("refuse" in answer) return refuse(answer.refuse);
     }
@@ -286,8 +295,9 @@ export class LaunchPipeline {
         secrets.push(value);
       }
       args.push(...contribution.args.map(expand));
+      thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
-    return { ok: true, env, args, secrets, envSources, cleanup };
+    return { ok: true, env, args, secrets, envSources, thirdPartyModel, cleanup };
   }
 
   private async ask(
@@ -328,6 +338,8 @@ interface Contribution {
   secretEnv: Record<string, string>;
   args: string[];
   files: Array<{ relPath: string; content: string }>;
+  /** Only ever restricts (auto → accept-edits), so a launch policy may set it too. */
+  thirdPartyModel?: boolean;
   refuse?: string;
 }
 
@@ -335,13 +347,14 @@ interface Contribution {
 function validContribution(value: unknown): Contribution | string {
   if (value === null) return { env: {}, secretEnv: {}, args: [], files: [] };
   if (!isRecord(value)) return "not an object";
-  const unknown = Object.keys(value).find((key) => !["env", "secretEnv", "args", "files", "refuse"].includes(key));
+  const unknown = Object.keys(value).find((key) => !["env", "secretEnv", "args", "files", "thirdPartyModel", "refuse"].includes(key));
   if (unknown) return `unknown key ${unknown.slice(0, 40)}`;
   if (value.refuse !== undefined) {
     const reason = isRecord(value.refuse) ? value.refuse.reason : undefined;
     if (typeof reason !== "string" || reason.trim().length === 0) return "refuse needs a reason";
     return { env: {}, secretEnv: {}, args: [], files: [], refuse: reason.replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, MAX_REASON) };
   }
+  if (value.thirdPartyModel !== undefined && typeof value.thirdPartyModel !== "boolean") return "thirdPartyModel must be true or false";
   const env = stringMap(value.env, MAX_ENV, "env");
   if (typeof env === "string") return env;
   for (const [key, entry] of Object.entries(env)) {
@@ -376,7 +389,7 @@ function validContribution(value: unknown): Contribution | string {
     if (bytes > MAX_FILES_BYTES) return "files exceed 256 KB";
     files.push({ relPath: file.relPath, content: file.content });
   }
-  return { env, secretEnv, args: args as string[], files };
+  return { env, secretEnv, args: args as string[], files, ...(value.thirdPartyModel === true ? { thirdPartyModel: true } : {}) };
 }
 
 /** Env names a plugin may set: valid, not reserved for CanvasTTY or the loader, text values. */

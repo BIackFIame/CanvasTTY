@@ -4,7 +4,8 @@ export type { CanvasLauncherItemId, ProviderId };
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
-export type LaunchProfileId = "normal" | "yolo";
+/** "auto" only for agents with a native auto mode (autoMode.ts); "normal" is the default. */
+export type LaunchProfileId = import("./autoMode.ts").LaunchProfile;
 /**
  * What a session is for, independent of its normal/YOLO profile: an ordinary
  * agent, or an orchestrator that drives other sessions through the local
@@ -299,6 +300,8 @@ export interface SessionMetadata {
   restoreNote?: SessionRestoreNote;
   /** The plugin environment this card runs in (badge text from the plugin's describe). */
   environment?: SessionEnvironmentBadge;
+  /** Profile "auto" runs as accept-edits: a launch contributor put the agent on a third-party model. */
+  autoDowngraded?: true;
 }
 
 export interface SessionSnapshot extends SessionMetadata {

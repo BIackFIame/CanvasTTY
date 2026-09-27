@@ -9,6 +9,7 @@ import type {
   Size
 } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
+import { isLaunchProfile } from "../../shared/autoMode.ts";
 
 export const TERMINAL_SESSION_STORE_VERSION = 2;
 const MAX_PERSISTED_SESSIONS = 64;
@@ -187,7 +188,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     const session = value as Partial<PersistedTerminalSession> & { codexThreadId?: unknown };
     if (!isSessionId(session.id) || ids.has(session.id)) continue;
     if (!PROVIDERS.has(session.provider as ProviderId)) continue;
-    if (session.profile !== "normal" && session.profile !== "yolo") continue;
+    if (!isLaunchProfile(session.profile)) continue;
     if (typeof session.title !== "string" || session.title.trim().length === 0) continue;
     if (typeof session.titleCustomized !== "boolean") continue;
     if (typeof session.cwd !== "string" || session.cwd.length === 0 || session.cwd.length > 4_096) continue;

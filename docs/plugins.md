@@ -199,7 +199,7 @@ Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<plu
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"}}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
 ```
 
 The answer is `null` (nothing to add) or an object with any of:
@@ -210,6 +210,7 @@ The answer is `null` (nothing to add) or an object with any of:
 | `secretEnv` `{ NAME: secretKey }` | 16 names; needs `secrets` | The host reads the plugin's own secret in the main process and sets it. The value never reaches the service or any UI, and is masked as `<redacted:secret>` in text other agents and the control CLI read from this card (observe, result, screen, failure details) |
 | `args` `[string]` | 32, 1024 characters each, no control characters | Appended after CanvasTTY's own arguments, before the resume selection |
 | `files` `[{ relPath, content }]` | 16 files, 256 KB, plain relative paths | Written to a private folder for this run, removed when the process exits; `{launchFiles}` in `env` values and `args` becomes that folder |
+| `thirdPartyModel` `true` | — | The agent runs on another model than its vendor's (an API or Ollama account). Profile `auto` then runs as accept-edits for this launch, and the card says so. A launch policy may set it too: it only ever makes a launch stricter |
 | `refuse` `{ reason }` | 240 characters | The card is not started and shows the reason |
 
 Rules the host enforces, none of which is ever skipped:
@@ -219,6 +220,10 @@ Rules the host enforces, none of which is ever skipped:
 - Claude Code applies only its last `--settings`, so a plugin's inline `--settings` JSON is merged into CanvasTTY's own (objects such as `env` key by key, hook lists appended); one that sets `permissions`, `hooks`, `disableAllHooks`, `sandbox`, `defaultMode` or `apiKeyHelper` is refused.
 - No answer within 5 s, an error, an invalid answer, a missing secret, or a plugin that is disabled, removed or no longer trusted refuses the launch with the reason on the card. The agent is never started without a contribution the person chose. A restored card whose plugin is unavailable comes back stopped with that reason and keeps its record until the plugin returns or the card is closed.
 - A plain terminal takes no launch options.
+
+**Launch profiles.** `profile` is `normal` (the default), `yolo`, or `auto`. `auto` exists only for agents whose CLI has a native auto mode, checked against each CLI's `--help`: Codex `--approve-for-me` (its own reviewer, in its `workspace-write` sandbox), Claude Code `--permission-mode auto` with its sandbox (`{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false}}` merged into the one `--settings`), and Grok `--permission-mode auto` (no Grok sandbox is relied on). Base protection and decision services keep answering in front of it (Codex, Claude Code). When any contributor answers `thirdPartyModel: true`, `auto` becomes the CLI's accept-edits mode in the same sandbox (Codex `--sandbox workspace-write --ask-for-approval on-request`, Claude Code and Grok `--permission-mode acceptEdits`): the native reviewer would be that same model, and a weak model's own classifier is not a safety boundary.
+
+**Trusted folder.** A subagent on this computer whose folder is the one the person chose for its top-level agent, or inside it, gets `"trustedFolder"`: that folder's real path. CanvasTTY itself answers Codex's "Trust this folder?" for it with a per-run `-c projects=…` override (nothing is written to `~/.codex`); a plugin that keeps the agent's own config home (an account's `CLAUDE_CONFIG_DIR`, say) may mark the folder trusted there. Codex also gets per-run trust for the hooks CanvasTTY itself adds (`-c hooks.state=…`), so it does not stop at "Hooks need review"; a project's or the person's own hooks still ask. Plugins cannot pass `-c hooks…`.
 
 **Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. Every `canvastty.launch.prepare` also carries `"environment"`: `{ pluginId, kind }` of the card's environment, or `null` on this computer. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
 

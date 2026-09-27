@@ -178,7 +178,7 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 智能体启动前，宿主向服务发送 `canvastty.launch.prepare` 请求（界面无法发送）：
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"}}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
 ```
 
 应答为 `null`（不添加任何内容）或包含以下任意键的对象：
@@ -189,6 +189,7 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 | `secretEnv` `{ NAME: secretKey }` | 16 个名称；需要 `secrets` | 宿主在主进程中读取插件自身的机密并设置。该值不会到达服务或任何 UI，并在其他智能体和控制 CLI 从该卡片读取的文本中（observe、result、screen、失败详情）显示为 `<redacted:secret>` |
 | `args` `[string]` | 32 个，每个 1024 字符，无控制字符 | 追加在 CanvasTTY 自身参数之后、会话选择之前 |
 | `files` `[{ relPath, content }]` | 16 个文件，256 KB，普通相对路径 | 写入本次运行的私有文件夹，进程退出时删除；`env` 值和 `args` 中的 `{launchFiles}` 替换为该文件夹 |
+| `thirdPartyModel` `true` | — | 智能体运行在非其供应商的模型上（API 或 Ollama 账户）。此次启动中 `auto` 配置档改为“仅接受编辑”，卡片会显示这一点。启动策略也可以设置它：该标记只会让启动更严格 |
 | `refuse` `{ reason }` | 240 字符 | 卡片不启动并显示原因 |
 
 宿主强制执行、从不跳过的规则：
@@ -198,6 +199,10 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 - Claude Code 只应用最后一个 `--settings`，因此插件的内联 `--settings` JSON 会合并进 CanvasTTY 自己的 JSON（`env` 等对象按键合并，hook 列表追加）；若其中设置了 `permissions`、`hooks`、`disableAllHooks`、`sandbox`、`defaultMode` 或 `apiKeyHelper`，启动会被拒绝。
 - 5 秒内无应答、出错、应答无效、缺少机密，或插件被禁用、删除或不再受信任，都会拒绝启动并在卡片上显示原因。智能体绝不会在缺少用户所选贡献的情况下启动。插件不可用的恢复卡片以停止状态返回并显示该原因，记录保留到插件恢复或卡片被关闭。
 - 普通终端不接受启动选项。
+
+**启动配置档。** `profile` 为 `normal`（默认）、`yolo` 或 `auto`。`auto` 仅适用于 CLI 自带自动模式的智能体，均按各 CLI 的 `--help` 核实：Codex `--approve-for-me`（其自身审查，运行于 `workspace-write` 沙箱），Claude Code `--permission-mode auto` 及其沙箱（`{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false}}` 合并进唯一的 `--settings`），以及 Grok `--permission-mode auto`（不依赖 Grok 沙箱）。基础保护和决策服务仍在其前面作答（Codex、Claude Code）。只要任一贡献者回答 `thirdPartyModel: true`，`auto` 就改为同一沙箱中 CLI 的“仅接受编辑”模式（Codex `--sandbox workspace-write --ask-for-approval on-request`，Claude Code 和 Grok `--permission-mode acceptEdits`）：原生审查者将是同一个模型，而弱模型自己的分类器不是安全边界。
+
+**受信任文件夹。** 在本机运行、其文件夹是用户为其顶层智能体选择的文件夹（或位于其中）的子智能体，会收到 `"trustedFolder"`：该文件夹的真实路径。CanvasTTY 会以仅限此次运行的 `-c projects=…` 覆盖替它回答 Codex 的 “Trust this folder?”（不会写入 `~/.codex`）；自行保存智能体配置目录的插件（例如账户的 `CLAUDE_CONFIG_DIR`）可以在那里将该文件夹标记为受信任。Codex 还会获得对 CanvasTTY 自己添加的 hook 的本次运行信任（`-c hooks.state=…`），因此不会停在 “Hooks need review”；项目或用户自己的 hook 仍会询问。插件不能传递 `-c hooks…`。
 
 **启动策略。** 设置 `"policy": true` 后，在该服务适用的智能体每次启动（创建、重启、恢复）而用户没有选择它时，也会以 `"chosen": false` 和空的 `options` 询问它。这样的回答只能是 `null` 或 `refuse`；其他任何回答、5 秒内无回答或出错都会拒绝启动，因此策略绝不会因失败而放行。每个 `canvastty.launch.prepare` 还带有 `"environment"`：卡片环境的 `{ pluginId, kind }`，在本机运行时为 `null`。没有 `fields` 的策略不会显示在启动器中。撤销插件的原生代码信任即移除其策略。
 

@@ -586,7 +586,7 @@ function codexHookArgs(
     ...(coreHooksEnabled ? lifecycleCommands(CODEX_HOOKS, helper, platform) : []),
     ...pluginCommands
   ]);
-  return Object.entries(grouped).flatMap(([event, mappings]) => {
+  const events = Object.entries(grouped).flatMap(([event, mappings]) => {
     const entries = mappings.map((mapping) => {
       const matcher = mapping.matcher ? `matcher=${tomlString(mapping.matcher)},` : "";
       const hook = `type="command",command=${tomlString(mapping.command)},timeout=${mapping.timeout}`;
@@ -594,6 +594,47 @@ function codexHookArgs(
     }).join(",");
     return ["-c", `hooks.${event}=[${entries}]`];
   });
+  return events.length ? [...events, ...codexHookTrustArgs(grouped)] : events;
+}
+
+/** Where Codex files the hooks it reads from `-c` overrides (0.156: "Hooks need review" names this source). */
+const CODEX_SESSION_FLAGS_SOURCE = "/<session-flags>/config.toml";
+
+/**
+ * Codex (0.156) stops a new session at "Hooks need review" until each hook is trusted, and an unattended subagent then
+ * waits for the person. Codex keys a hook's trust by `<source>:<event>:<group>:<handler>` and stores `trusted_hash`, the
+ * SHA-256 of the handler's normalized JSON. CanvasTTY states that trust for the hooks it adds itself (its lifecycle
+ * helper, the decision gate and the runner of plugin hooks the person trusted in CanvasTTY), only for this run, in the
+ * same `-c` layer. A project's or the person's own hooks have other sources, so they, or a changed hook, still ask the
+ * person. Nothing is written to CODEX_HOME.
+ */
+function codexHookTrustArgs(grouped: Record<string, ProviderHookCommand[]>): string[] {
+  const entries = Object.entries(grouped).flatMap(([event, mappings]) => mappings.map((mapping, group) => {
+    const name = event.replace(/(?<=[a-z0-9])([A-Z])/gu, "_$1").toLowerCase();
+    return `${tomlString(`${CODEX_SESSION_FLAGS_SOURCE}:${name}:${group}:0`)}={trusted_hash=${tomlString(codexHookTrustedHash(name, mapping))}}`;
+  }));
+  return ["-c", `hooks.state={${entries.join(",")}}`];
+}
+
+/** Codex's trusted_hash: sorted-key compact JSON of the event, the handler (as Codex fills it in) and the matcher. */
+export function codexHookTrustedHash(eventName: string, mapping: Pick<ProviderHookCommand, "command" | "timeout" | "matcher">): string {
+  const identity = {
+    event_name: eventName,
+    hooks: [{ async: false, command: mapping.command, timeout: mapping.timeout, type: "command" }],
+    ...(mapping.matcher ? { matcher: mapping.matcher } : {})
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+}
+
+/**
+ * Codex asks "Trust this folder?" once per folder. `-c projects={"<dir>"={trust_level="trusted"}}` answers it for exactly
+ * these folders and this run (codex 0.156.1: it keeps config.toml's trusted folders and writes nothing; the dotted
+ * `projects."<dir>".trust_level` override does not skip the question).
+ */
+export function codexTrustArguments(folders: readonly string[]): string[] {
+  const unique = [...new Set(folders.filter((folder) => isAbsolute(folder)))];
+  if (unique.length === 0) return [];
+  return ["-c", `projects={${unique.map((folder) => `${tomlString(folder)}={trust_level="trusted"}`).join(",")}}`];
 }
 
 export function createQwenHookSettings(options: {

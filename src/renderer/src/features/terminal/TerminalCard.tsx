@@ -759,6 +759,11 @@ export function TerminalCard({
           {session.role === "orchestrator" && (
             <span className="terminal-card__role" title={t(locale, "orchestratorRoleNote")}>{t(locale, "roleOrchestrator")}</span>
           )}
+          {session.profile === "auto" && (
+            <span className="terminal-card__role" title={t(locale, session.autoDowngraded ? "autoDowngradedNote" : "autoProfileNote")}>
+              {t(locale, session.autoDowngraded ? "autoDowngraded" : "autoProfile")}
+            </span>
+          )}
           {session.environment && (
             <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
               {session.environment.label}
