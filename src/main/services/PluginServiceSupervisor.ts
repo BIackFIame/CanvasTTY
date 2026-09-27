@@ -59,6 +59,11 @@ export interface PluginServiceSupervisorOptions {
   maxRestarts?: number;
   restartWindowMs?: number;
   maxFrameBytes?: number;
+  /**
+   * Services start only after hostReady(): the host APIs they may call on initialize (sessions, cards, secrets)
+   * must exist first. Without it services start at once.
+   */
+  waitForHost?: boolean;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -135,8 +140,11 @@ export class PluginServiceSupervisor {
   };
   private syncing = Promise.resolve();
   private disposed = false;
+  private readonly hostGate: Promise<void>;
+  private openHost: () => void = () => undefined;
 
   constructor(options: PluginServiceSupervisorOptions) {
+    this.hostGate = options.waitForHost ? new Promise((resolve) => { this.openHost = resolve; }) : Promise.resolve();
     this.options = {
       environment: process.env,
       requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
@@ -145,6 +153,7 @@ export class PluginServiceSupervisor {
       maxRestarts: DEFAULT_MAX_RESTARTS,
       restartWindowMs: DEFAULT_RESTART_WINDOW_MS,
       maxFrameBytes: PLUGIN_SERVICE_MAX_FRAME_BYTES,
+      waitForHost: false,
       ...options
     };
   }
@@ -273,14 +282,22 @@ export class PluginServiceSupervisor {
     this.logs.delete(pluginId);
   }
 
+  /** The host APIs services may call exist now (waitForHost): services start, and the ones waiting start now. */
+  hostReady(): void {
+    this.openHost();
+  }
+
   async dispose(): Promise<void> {
     this.disposed = true;
+    // A start still waiting for the host ends without spawning anything.
+    this.openHost();
     await this.sync([]);
   }
 
   private async start(record: ServiceRecord): Promise<void> {
     const { spec } = record;
     record.restartTimer = null;
+    await this.hostGate;
     if (record.removed || this.disposed) return;
     record.state = "starting";
     try {

@@ -121,6 +121,8 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 
 协议：通过 stdin/stdout 的逐行 JSON-RPC 2.0，每个方向单条消息最多 1 MB。更大的宿主请求会被拒绝，服务输出的超长行会被丢弃并记录。宿主首先发送 `canvastty.initialize` 通知，参数为 `{ apiVersion: 2, pluginId, serviceId, dataDir, locale, hostVersion }`。
 
+应用启动时，只有在服务可能调用的所有宿主 API（`sessions.*`、`cards.setBadge`、`secrets.get` 等）就绪之后、恢复已保存卡片之前，才会启动服务：服务收到 `canvastty.initialize` 后即可调用它们，订阅会话事件的服务会以事件或 `sessions.subscribe` 快照的形式收到恢复的卡片。
+
 来自插件自身界面的请求使用界面选择的方法和参数；以 `canvastty.` 开头的方法名保留给宿主。用 `{"jsonrpc":"2.0","id":…,"result":…}` 或 `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}` 应答。15 秒内未应答的请求以超时错误结束；服务已停止、正在重启或失败时的请求同样返回错误；每个服务同时最多等待 64 个请求。
 
 服务可以回调以下宿主 API（后续扩展点在此基础上扩展；其他方法返回错误 `-32601`）：

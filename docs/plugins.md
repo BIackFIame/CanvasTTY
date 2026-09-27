@@ -142,6 +142,8 @@ Protocol: newline-delimited JSON-RPC 2.0 over stdin/stdout, at most 1 MB per mes
 {"jsonrpc":"2.0","method":"canvastty.initialize","params":{"apiVersion":2,"pluginId":"com.example.service-echo","serviceId":"echo","dataDir":"…/plugin-data/com.example.service-echo","locale":"en","hostVersion":"1.5.2"}}
 ```
 
+At app start, services are started only after every host API they may call (`sessions.*`, `cards.setBadge`, `secrets.get`, …) is ready, and before saved cards are restored: a service can call them as soon as it gets `canvastty.initialize`, and one that subscribes to session events then receives the restored cards as events or in the `sessions.subscribe` snapshot.
+
 Requests from the plugin's own surfaces arrive with the method and params chosen by the surface; method names starting with `canvastty.` are reserved for the host. Answer with `{"jsonrpc":"2.0","id":…,"result":…}` or `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}`. A request unanswered within 15 s fails with a timeout error, as does a request while the service is stopped, restarting, or failed; at most 64 requests wait at once per service.
 
 A service may call back this host API (the base that later extension points add to; anything else is answered with error `-32601`):

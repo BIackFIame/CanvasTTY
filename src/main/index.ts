@@ -282,7 +282,9 @@ async function initializeServices(): Promise<void> {
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
+  // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
+    waitForHost: true,
     command: process.execPath,
     hostVersion: app.getVersion(),
     locale: () => settings.get().locale,
@@ -558,7 +560,10 @@ async function initializeServices(): Promise<void> {
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key)
   }));
-  // Restored cards with launch options or an environment ask their plugin's service, so start services first.
+  // Every host API a service may call exists now (sessions, cards, tools, secrets, launch, environments): services
+  // start, and one that subscribes on initialize does so before the restored cards' events. Restored cards with
+  // launch options or an environment ask their plugin's service, so start services first.
+  pluginServices.hostReady();
   await pluginServicesStarted.catch(() => undefined);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
