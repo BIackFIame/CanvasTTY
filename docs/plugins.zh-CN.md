@@ -196,7 +196,7 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 
 - 多个被选插件并行询问，并按插件 id 顺序合并。两个插件设置同一名称，或插件设置 CanvasTTY 为此次启动设置的名称，会拒绝启动并指明它们。以 `CANVASTTY_`、`ELECTRON_`、`DYLD_`、`LD_` 开头的名称以及 `NODE_OPTIONS`、`PATH`、`TERM`、`COLORTERM` 为保留名称。
 - 绕过审批或选择会话的参数（各服务商的 YOLO 标志、`--permission-mode`、`--sandbox`、`--resume`、`--continue`、`--session` 等）会被拒绝：配置档由用户决定，恢复规则由核心决定。这不是沙箱：受信任的原生代码本来就以你的身份运行。
-- Claude Code 只应用最后一个 `--settings`，因此插件的内联 `--settings` JSON 会合并进 CanvasTTY 自己的 JSON（`env` 等对象按键合并，hook 列表追加）；若其中设置了 `permissions`、`hooks`、`disableAllHooks`、`sandbox`、`defaultMode` 或 `apiKeyHelper`，启动会被拒绝。
+- Claude Code 只应用最后一个 `--settings`，因此插件的内联 `--settings` JSON 会合并进 CanvasTTY 自己的 JSON（`env` 等对象按键合并，hook 列表追加）；若其中设置了 `permissions`、`hooks`、`disableAllHooks`、`sandbox`、`defaultMode` 或 `apiKeyHelper`，启动会被拒绝。`--settings <json>` 与 `--settings=<json>` 两种形式都会检查；设置文件只接受贡献自身的启动文件（`{launchFiles}/…`），CanvasTTY 读取并以同样方式检查后以内联 JSON 传递；其他文件路径一律拒绝。`--bare`、`--safe-mode`、`--allowedTools`、`--permission-prompt-tool` 和 `--permission-prompts` 也只由 CanvasTTY 传递。
 - 5 秒内无应答、出错、应答无效、缺少机密，或插件被禁用、删除或不再受信任，都会拒绝启动并在卡片上显示原因。智能体绝不会在缺少用户所选贡献的情况下启动。插件不可用的恢复卡片以停止状态返回并显示该原因，记录保留到插件恢复或卡片被关闭。
 - 普通终端不接受启动选项。
 

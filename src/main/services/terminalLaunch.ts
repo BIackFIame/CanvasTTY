@@ -239,16 +239,20 @@ function findWindowsNativeCommand(
 
 /**
  * Claude Code 2.1 applies only the last `--settings` it is given (measured with 2.1.281: a hook in an earlier inline
- * JSON never ran). Every inline JSON value is merged into the first one, in order: hook lists are concatenated per
- * event, objects such as `env` are merged key by key (later wins), other keys are replaced. A settings file path is
- * left alone.
+ * JSON never ran). Every inline JSON value, in either form (`--settings <json>` or `--settings=<json>`), is merged
+ * into the first one, in order: hook lists are concatenated per event, objects such as `env` are merged key by key
+ * (later wins), other keys are replaced. A settings file path is left alone; plugins cannot pass one (a settings file
+ * among their launch files is read and checked by the launch pipeline, then passed inline).
  */
-export function mergeClaudeInlineSettings(args: readonly string[]): string[] {
+export function mergeClaudeInlineSettings(given: readonly string[]): string[] {
+  const args = given.flatMap((argument) => argument.startsWith(SETTINGS_EQUALS) && parseInlineSettings(argument.slice(SETTINGS_EQUALS.length))
+    ? ["--settings", argument.slice(SETTINGS_EQUALS.length)]
+    : [argument]);
   const positions: number[] = [];
   for (let index = 0; index < args.length - 1; index++) {
     if (args[index] === "--settings" && parseInlineSettings(args[index + 1]!)) positions.push(index);
   }
-  if (positions.length < 2) return [...args];
+  if (positions.length < 2) return args;
   const merged: Record<string, unknown> = {};
   for (const position of positions) {
     for (const [key, value] of Object.entries(parseInlineSettings(args[position + 1]!)!)) {
@@ -270,7 +274,9 @@ export function mergeClaudeInlineSettings(args: readonly string[]): string[] {
   return next;
 }
 
-function parseInlineSettings(value: string): Record<string, unknown> | null {
+const SETTINGS_EQUALS = "--settings=";
+
+export function parseInlineSettings(value: string): Record<string, unknown> | null {
   if (!value.trimStart().startsWith("{")) return null;
   try {
     const parsed: unknown = JSON.parse(value);
@@ -306,13 +312,27 @@ const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
   codex: ["resume", "fork", "exec"]
 };
 
-/** Claude inline settings keys that decide approvals or the hooks; a plugin's `--settings` may carry e.g. `env` only. */
+/** Claude settings keys that decide approvals, the hooks or the sandbox; a plugin's settings may carry e.g. `env` only. */
 const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper"];
+// Claude 2.1.281 --help: `--bare` and `--safe-mode` skip hooks; `--allowedTools` approves tools without asking;
+// `--permission-prompt-tool` / `--permission-prompts` decide who answers permission prompts.
+const CLAUDE_CORE_OWNED_FLAGS = new Set(["--bare", "--safe-mode", "--allowedTools", "--allowed-tools", "--permission-prompt-tool", "--permission-prompts"]);
+
+/** The core-owned key a plugin's Claude settings object sets, or null. */
+export function claudeCoreSettingsKey(settings: Record<string, unknown>): string | null {
+  return CLAUDE_CORE_SETTINGS.find((key) => key in settings) ?? null;
+}
 
 export function coreOwnedLaunchArgument(provider: ProviderId, argument: string): boolean {
-  const flag = argument.split("=", 1)[0];
-  const inline = provider === "claude" ? parseInlineSettings(argument) : null;
-  if (inline && CLAUDE_CORE_SETTINGS.some((key) => key in inline)) return true;
+  const flag = argument.split("=", 1)[0]!;
+  if (provider === "claude") {
+    if (CLAUDE_CORE_OWNED_FLAGS.has(flag)) return true;
+    // `--settings=<value>` in one argument: inline JSON is checked like a separate value; a file cannot be checked here.
+    const equals = argument.startsWith(SETTINGS_EQUALS);
+    const inline = parseInlineSettings(equals ? argument.slice(SETTINGS_EQUALS.length) : argument);
+    if (equals && !inline) return true;
+    if (inline && claudeCoreSettingsKey(inline)) return true;
+  }
   return CORE_OWNED_FLAGS.has(flag)
     || Boolean(CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag))
     || Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument))

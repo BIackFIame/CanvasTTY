@@ -9,7 +9,7 @@ import type {
   ProviderId,
   SessionRole
 } from "../../shared/contracts.ts";
-import { coreOwnedLaunchArgument } from "./terminalLaunch.ts";
+import { claudeCoreSettingsKey, coreOwnedLaunchArgument, parseInlineSettings } from "./terminalLaunch.ts";
 import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
@@ -257,7 +257,14 @@ export class LaunchPipeline {
       if (context.provider === "terminal" && contribution.args.length > 0) {
         return refuse(`${name} added arguments to a plain terminal, which takes none.`);
       }
-      const forbidden = contribution.args.find((argument) => coreOwnedLaunchArgument(context.provider, argument));
+      // Claude settings are checked as option/value pairs in every form and passed on as one inline JSON each.
+      let contributedArgs = contribution.args;
+      if (context.provider === "claude") {
+        const normalized = claudeSettingsArguments(contribution.args, contribution.files);
+        if (typeof normalized === "string") return refuse(`${name} ${normalized}`);
+        contributedArgs = normalized;
+      }
+      const forbidden = contributedArgs.find((argument) => coreOwnedLaunchArgument(context.provider, argument));
       if (forbidden) return refuse(`${name} added ${forbidden.slice(0, 60)}, which only CanvasTTY may pass.`);
       let filesDirectory: string | null = null;
       if (contribution.files.length > 0) {
@@ -294,7 +301,7 @@ export class LaunchPipeline {
         env[key] = value;
         secrets.push(value);
       }
-      args.push(...contribution.args.map(expand));
+      args.push(...contributedArgs.map(expand));
       thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
     return { ok: true, env, args, secrets, envSources, thirdPartyModel, cleanup };
@@ -390,6 +397,46 @@ function validContribution(value: unknown): Contribution | string {
     files.push({ relPath: file.relPath, content: file.content });
   }
   return { env, secretEnv, args: args as string[], files, ...(value.thirdPartyModel === true ? { thirdPartyModel: true } : {}) };
+}
+
+/**
+ * A contributor's Claude arguments with every `--settings` value as one checked inline JSON: `--settings <json>`,
+ * `--settings=<json>`, or `--settings {launchFiles}/<file>` naming one of its own launch files (read from the
+ * contribution, not from disk). Any other file, a value that is not a JSON object, or core-owned keys (hooks,
+ * permissions, sandbox, …) are refused: Claude keeps only its last `--settings`, so an unchecked one could replace
+ * CanvasTTY's. Returns the problem as text.
+ */
+function claudeSettingsArguments(args: readonly string[], files: Contribution["files"]): string[] | string {
+  const result: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index]!;
+    let value: string | undefined;
+    if (argument === "--settings") {
+      value = args[index + 1];
+      if (value === undefined) return "passes --settings without a value.";
+      index++;
+    } else if (argument.startsWith("--settings=")) {
+      value = argument.slice("--settings=".length);
+    } else {
+      result.push(argument);
+      continue;
+    }
+    const launchFile = value.startsWith(`${LAUNCH_FILES_TOKEN}/`);
+    let settings = launchFile ? null : parseInlineSettings(value);
+    if (!settings && !launchFile && value.trimStart().startsWith("{")) return "passes Claude --settings that is not a JSON object.";
+    if (!settings) {
+      const file = launchFile ? files.find((candidate) => candidate.relPath === value!.slice(LAUNCH_FILES_TOKEN.length + 1)) : undefined;
+      if (!file) {
+        return `passes a Claude settings file CanvasTTY cannot check (${value.slice(0, 80)}); pass the settings as inline JSON or as one of its launch files.`;
+      }
+      settings = parseInlineSettings(file.content);
+      if (!settings) return `passes Claude --settings (${file.relPath}) that is not a JSON object.`;
+    }
+    const key = claudeCoreSettingsKey(settings);
+    if (key) return `sets ${key} in its Claude settings, which only CanvasTTY may set.`;
+    result.push("--settings", JSON.stringify(settings));
+  }
+  return result;
 }
 
 /** Env names a plugin may set: valid, not reserved for CanvasTTY or the loader, text values. */
