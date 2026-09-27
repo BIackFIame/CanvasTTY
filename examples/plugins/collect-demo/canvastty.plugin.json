@@ -1,0 +1,33 @@
+{
+  "apiVersion": 2,
+  "id": "collect-demo",
+  "name": "Collect Demo",
+  "version": "1.0.0",
+  "description": "Minimal agent tool, card action and session events: shows git diff --stat for a worktree card or an orchestrator's subagent.",
+  "author": "CanvasTTY contributors",
+  "permissions": ["tools:agents", "cards:decorate", "sessions:events"],
+  "services": [
+    {
+      "id": "collect",
+      "title": "Diff stat",
+      "description": "Runs git diff --stat in a card's folder for a card action and for orchestrators.",
+      "entry": "services/collect.mjs",
+      "tools": [
+        {
+          "name": "diffstat",
+          "description": "git diff --stat of your own folder, or of one of your subagents' folders when sessionId is given.",
+          "inputSchema": {
+            "type": "object",
+            "properties": { "sessionId": { "type": "string", "description": "A subagent of yours; omit for your own folder." } },
+            "additionalProperties": false
+          },
+          "roles": ["orchestrator"]
+        }
+      ],
+      "cardActions": [
+        { "id": "show-changes", "title": "Show changes", "when": { "environmentKinds": ["worktree"] } }
+      ]
+    }
+  ],
+  "contributions": []
+}

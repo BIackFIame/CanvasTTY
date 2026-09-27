@@ -1,0 +1,28 @@
+{
+  "apiVersion": 2,
+  "id": "com.example.env-worktree",
+  "name": "Worktree Env",
+  "version": "1.0.0",
+  "description": "Minimal session environment: runs a card in its own git worktree, created in the plugin's data folder and removed on close unless you keep it.",
+  "author": "CanvasTTY contributors",
+  "permissions": ["environment:provide"],
+  "services": [
+    {
+      "id": "worktree",
+      "title": "Git worktree",
+      "description": "Creates, reopens and removes git worktrees for cards started in this environment.",
+      "entry": "services/worktree.mjs",
+      "environments": [
+        {
+          "kind": "worktree",
+          "label": "Git worktree",
+          "description": "A branch in its own folder; the project folder stays untouched.",
+          "fields": [
+            { "key": "branch", "label": "Branch (empty: canvastty/<card>)", "kind": "text", "default": "", "maxLength": 80 }
+          ]
+        }
+      ]
+    }
+  ],
+  "contributions": []
+}

@@ -1050,6 +1050,15 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "playlists:read": "permissionPlaylistsRead",
     "playlists:write": "permissionPlaylistsWrite",
     "hermes:hud": "permissionHermesHud",
+    "launch:contribute": "permissionLaunchContribute",
+    "environment:provide": "permissionEnvironmentProvide",
+    "decision:provide": "permissionDecisionProvide",
+    "tools:agents": "permissionToolsAgents",
+    "sessions:events": "permissionSessionsEvents",
+    "sessions:read-screen": "permissionSessionsReadScreen",
+    "sessions:launch": "permissionSessionsLaunch",
+    "sessions:control": "permissionSessionsControl",
+    "cards:decorate": "permissionCardsDecorate",
     network: "permissionNetwork"
   } as const)[permission];
 }

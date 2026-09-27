@@ -14,10 +14,13 @@ export class ProviderSecretsService {
   private readonly root: string;
   private write: Promise<void> = Promise.resolve();
   private readonly encryption: SecretEncryption;
+  /** Every value this process reads or writes is handed here, so no agent reads it back through another card. */
+  private readonly remember: (values: string[]) => void;
 
-  constructor(userDataPath: string, encryption: SecretEncryption) {
+  constructor(userDataPath: string, encryption: SecretEncryption, remember: (values: string[]) => void = () => undefined) {
     this.root = join(userDataPath, "provider-secrets.bin");
     this.encryption = encryption;
+    this.remember = remember;
   }
 
   async load(): Promise<void> {
@@ -34,6 +37,7 @@ export class ProviderSecretsService {
     if (typeof value !== "string" || value.length === 0 || Buffer.byteLength(value) > MAX_SECRET_VALUE_BYTES) {
       throw new Error("Provider secret must be a non-empty string no larger than 16 KB.");
     }
+    this.remember([value]);
     await this.mutate((values) => {
       values[secretId] = value;
     });
@@ -94,6 +98,7 @@ export class ProviderSecretsService {
       if (Buffer.byteLength(plaintext) > MAX_SECRET_PAYLOAD_BYTES) throw new Error("Secret payload is too large.");
       const candidate: unknown = JSON.parse(plaintext);
       if (!isSecretRecord(candidate)) throw new Error("Secret payload is invalid.");
+      this.remember(Object.values(candidate));
       return { ...candidate };
     } catch {
       throw new Error("Provider secrets could not be decrypted.");

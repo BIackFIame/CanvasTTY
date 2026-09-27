@@ -14,6 +14,8 @@ import type {
   InstalledPlugin,
   LaunchProfileId,
   LaunchRole,
+  PluginLaunchValues,
+  SessionEnvironmentChoice,
   LimitsSnapshot,
   Point,
   PluginContribution,
@@ -41,6 +43,7 @@ import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 import { AgentLaunchDialog } from "./features/launcher/AgentLaunchDialog";
+import { environmentOptions } from "./features/launcher/LaunchOptionsSection";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
@@ -72,7 +75,7 @@ interface HomeEditDraft {
 
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
-  restoreTerminalSessions: false,
+  sessionRestoreMode: "off",
   persistCanvasRegions: true,
   persistStickyNotes: true,
   palette: "sage",
@@ -86,6 +89,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
   radialLauncherEnabled: false,
   agentLifecycleHooksEnabled: true,
+  baseProtectionEnabled: true,
   uiScale: DEFAULT_UI_SCALE,
   canvasColor: "sage",
   pattern: "dots",
@@ -208,7 +212,7 @@ export function App(): React.JSX.Element {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const pluginBrowserOpenQueueRef = useRef(new PluginBrowserOpenQueue());
-  const [launchProvider, setLaunchProvider] = useState<AgentProviderId | null>(null);
+  const [launchProvider, setLaunchProvider] = useState<ProviderId | null>(null);
   const [launchPosition, setLaunchPosition] = useState<Point | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
@@ -368,7 +372,9 @@ export function App(): React.JSX.Element {
     profile: LaunchProfileId,
     cwd: string,
     requestedCenter?: Point,
-    role: LaunchRole = "agent"
+    role: LaunchRole = "agent",
+    launchOptions?: Record<string, PluginLaunchValues>,
+    environment?: SessionEnvironmentChoice
   ): Promise<SessionSnapshot> => {
     const currentSettings = settingsRef.current;
     const position = requestedCenter
@@ -391,7 +397,10 @@ export function App(): React.JSX.Element {
       : { position, size: DEFAULT_SESSION_SIZE };
     if (reservation) pendingSessionPlacements.current.push(reservation);
     try {
-      const session = await window.canvasTTY.terminal.create({ provider, profile, cwd, position, role });
+      const session = await window.canvasTTY.terminal.create({
+        provider, profile, cwd, position, role, ...(launchOptions ? { launchOptions } : {}),
+        ...(environment ? { environment } : {})
+      });
       sessionsRef.current = upsertSnapshot(sessionsRef.current, session);
       setSessions((current) => upsertSnapshot(current, session));
       setActiveSessionId(session.id);
@@ -407,13 +416,20 @@ export function App(): React.JSX.Element {
   }, [saveSettings]);
 
   const openTerminal = useCallback(async (position?: Point): Promise<void> => {
+    // With a trusted plugin environment for terminals, ask where it runs; otherwise open at once as always.
+    const installed = await window.canvasTTY.plugins.list().catch(() => plugins);
+    if (environmentOptions(installed, "terminal").length > 0) {
+      setLaunchPosition(position ?? null);
+      setLaunchProvider("terminal");
+      return;
+    }
     try {
       await createSession("terminal", "normal", settings.lastDirectory, position);
       showToast(t(settings.locale, "terminalStarted"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : t(settings.locale, "launchFailed"));
     }
-  }, [createSession, settings.lastDirectory, settings.locale, showToast]);
+  }, [createSession, plugins, settings.lastDirectory, settings.locale, showToast]);
 
   const openAgent = useCallback((provider: AgentProviderId, position?: Point): void => {
     if (!agentAvailability?.[provider]) {
@@ -431,19 +447,21 @@ export function App(): React.JSX.Element {
 
 
   const launchAgent = useCallback(async (
-    provider: AgentProviderId,
+    provider: ProviderId,
     profile: LaunchProfileId,
     cwd: string,
-    role: LaunchRole
+    role: LaunchRole,
+    launchOptions?: Record<string, PluginLaunchValues>,
+    environment?: SessionEnvironmentChoice
   ): Promise<void> => {
-    await createSession(provider, profile, cwd, launchPosition ?? undefined, role);
+    await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions, environment);
     setLaunchPosition(null);
-    showToast(`${t(settings.locale, "sessionStarted")}: ${provider}`);
+    showToast(provider === "terminal" ? t(settings.locale, "terminalStarted") : `${t(settings.locale, "sessionStarted")}: ${provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);
 
-  const restartSession = useCallback(async (id: string): Promise<void> => {
+  const restartSession = useCallback(async (id: string, resume = false): Promise<void> => {
     try {
-      await window.canvasTTY.terminal.restart(id);
+      await window.canvasTTY.terminal.restart(id, { resume });
       showToast(t(settings.locale, "sessionRestarted"));
     } catch (error) {
       showToast(error instanceof Error ? error.message : t(settings.locale, "restartFailed"));
@@ -709,8 +727,8 @@ export function App(): React.JSX.Element {
     setCamera(focusCamera(settings.browserCanvas.position, settings.browserCanvas.size));
   }, [settings.browserCanvas]);
 
-  const disposeSession = useCallback((id: string): void => {
-    void window.canvasTTY.terminal.dispose(id);
+  const disposeSession = useCallback((id: string, keepEnvironmentData?: boolean): void => {
+    void window.canvasTTY.terminal.dispose(id, keepEnvironmentData === undefined ? undefined : { keepEnvironmentData });
     setSessions((current) => current.filter((session) => session.id !== id));
     setActiveSessionId((current) => current === id ? null : current);
     setRenamingSessionId((current) => current === id ? null : current);
@@ -834,6 +852,26 @@ export function App(): React.JSX.Element {
   ): Promise<void> => {
     try {
       const updated = await window.canvasTTY.plugins.setHookEnabled(pluginId, hookId, enabled);
+      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+    } catch (error) {
+      await refreshPlugins().catch(() => undefined);
+      throw error;
+    }
+  }, [refreshPlugins]);
+
+  const setPluginNativeCodeTrusted = useCallback(async (pluginId: string, trusted: boolean): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted);
+      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+    } catch (error) {
+      await refreshPlugins().catch(() => undefined);
+      throw error;
+    }
+  }, [refreshPlugins]);
+
+  const setPluginDecisionsMayAllow = useCallback(async (pluginId: string, allowed: boolean): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed);
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
@@ -1214,6 +1252,8 @@ export function App(): React.JSX.Element {
         onSetPluginModules={setPluginModules}
         onSetPluginEnabled={setPluginEnabled}
         onSetPluginHookEnabled={setPluginHookEnabled}
+        onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
+        onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
         onUninstallPlugin={uninstallPlugin}
         onOpenPluginContribution={openPluginContribution}
         onToggleHomeWidget={toggleHomeWidget}

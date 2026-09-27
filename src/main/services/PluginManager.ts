@@ -27,6 +27,14 @@ import type {
   PluginModule,
   PluginModuleAsset,
   PluginPermission,
+  PluginEnvironmentKind,
+  PluginLaunchField,
+  PluginService,
+  PluginServiceDecide,
+  PluginServiceLaunch,
+  PluginAgentTool,
+  PluginCardAction,
+  PluginCardActionFilter,
   PluginUpdateStatus,
   Size
 } from "../../shared/contracts";
@@ -36,6 +44,13 @@ import {
   PLUGIN_API_VERSION
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
+import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
+import type { LaunchContributor } from "./LaunchPipeline.ts";
+import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
+import type { DecisionService } from "./DecisionHooks.ts";
+import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import type { AgentToolProvider } from "./PluginAgentTools.ts";
+import type { CardActionProvider } from "./PluginCards.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -71,6 +86,8 @@ const MAX_STORAGE_BYTES = 64 * 1024;
 const MAX_MANIFEST_BYTES = 128 * 1024;
 const MAX_RUNTIME_HOOK_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
+const MAX_PLUGIN_SERVICES = 8;
+const PLUGIN_DATA_DIR = "plugin-data";
 const PLUGIN_INPUT_BRIDGE_URL = "canvastty-plugin://host/input-bridge.js";
 const AGENT_PROVIDERS = new Set<AgentProviderId>([
   "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
@@ -106,7 +123,16 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "playlists:read",
   "playlists:write",
   "hermes:hud",
-  "network"
+  "network",
+  "launch:contribute",
+  "environment:provide",
+  "decision:provide",
+  "tools:agents",
+  "sessions:events",
+  "sessions:read-screen",
+  "sessions:launch",
+  "sessions:control",
+  "cards:decorate"
 ]);
 
 interface StoredPluginRecord {
@@ -115,6 +141,10 @@ interface StoredPluginRecord {
   installedAt: number;
   selectedModules?: string[];
   enabledHooks?: string[];
+  /** Service id -> SHA-256 of its entry when the user trusted the plugin's native code. */
+  trustedServices?: Record<string, string>;
+  /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
+  decisionsMayAllow?: boolean;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -162,7 +192,11 @@ export class PluginManager {
   private readonly registryPath: string;
   private readonly versionsPath: string;
   private readonly hookRegistryPath: string;
+  private readonly dataRoot: string;
   private readonly plugins = new Map<string, InstalledPlugin>();
+  /** Plugin id -> service id -> trusted entry SHA-256. Present only while native code is trusted. */
+  private readonly serviceTrust = new Map<string, Record<string, string>>();
+  private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
   private readonly storageWrites = new Map<string, Promise<void>>();
@@ -185,6 +219,7 @@ export class PluginManager {
     this.registryPath = join(userDataPath, REGISTRY_FILE);
     this.versionsPath = join(userDataPath, VERSIONS_FILE);
     this.hookRegistryPath = join(userDataPath, "lifecycle", RUNTIME_HOOK_REGISTRY_FILE);
+    this.dataRoot = join(userDataPath, PLUGIN_DATA_DIR);
     this.downloadRepository = downloadRepository ?? downloadGithubManifest;
     this.downloadFullRepository = downloadRepository ?? downloadGithubRepository;
     this.downloadModuleFiles = downloadModuleFiles;
@@ -227,6 +262,7 @@ export class PluginManager {
     const persistedRuntimeHooks = await readRuntimeHookRegistry(this.hookRegistryPath);
 
     this.plugins.clear();
+    this.serviceTrust.clear();
     for (const [pluginId, record] of Object.entries(registry)) {
       if (!isStoredRecord(record) || !isPluginId(pluginId)) continue;
       try {
@@ -249,8 +285,20 @@ export class PluginManager {
                 active.hooks?.find((hook) => hook.id === hookId)
               )
             ))
-            : []
+            : [],
+          nativeCodeTrusted: false,
+          decisionsMayAllow: false
         });
+        if (record.enabled && record.trustedServices) {
+          const trust = await this.currentServiceTrust(pluginId, active).catch(() => null);
+          // Any difference from what the user trusted (a changed file, another module set) revokes it.
+          if (trust && sameServiceTrust(trust, record.trustedServices)) {
+            this.serviceTrust.set(pluginId, trust);
+            const plugin = this.plugins.get(pluginId)!;
+            plugin.nativeCodeTrusted = true;
+            plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
+          }
+        }
       } catch (error) {
         console.warn(`CanvasTTY plugin ${pluginId} could not be loaded.`, error);
       }
@@ -356,7 +404,9 @@ export class PluginManager {
         enabled: true,
         installedAt: Date.now(),
         selectedModules: modules,
-        enabledHooks: []
+        enabledHooks: [],
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(installed.manifest.id, installed);
       await this.persistRegistry();
@@ -374,14 +424,22 @@ export class PluginManager {
     const plugin = this.requirePlugin(pluginId);
     const wasEnabled = plugin.enabled;
     const previousEnabledHooks = [...plugin.enabledHooks];
+    const previousTrust = this.serviceTrust.get(pluginId);
     plugin.enabled = Boolean(enabled);
-    if (!plugin.enabled || !wasEnabled) plugin.enabledHooks = [];
+    if (!plugin.enabled || !wasEnabled) {
+      plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
+    }
     try {
       await this.persistRegistry();
     } catch (error) {
       if (plugin.enabled) {
         plugin.enabled = wasEnabled;
         plugin.enabledHooks = previousEnabledHooks;
+        if (previousTrust) {
+          this.serviceTrust.set(pluginId, previousTrust);
+          plugin.nativeCodeTrusted = true;
+        }
       }
       await this.persistRegistry().catch(() => undefined);
       throw error;
@@ -411,6 +469,171 @@ export class PluginManager {
     return structuredClone(activePlugin(plugin));
   }
 
+  /**
+   * The separate "Native code" confirmation: lets every service of this plugin run as a process with
+   * the user's OS privileges. It pins each entry's SHA-256; update, module change and disable revoke it.
+   */
+  async setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    const active = activeManifest(plugin.manifest, plugin.selectedModules);
+    if (!active.services?.length) throw new Error("Plugin has no services.");
+    const previous = this.serviceTrust.get(pluginId);
+    if (trusted) {
+      this.serviceTrust.set(pluginId, await this.currentServiceTrust(pluginId, active));
+      plugin.nativeCodeTrusted = true;
+    } else {
+      this.revokeNativeCode(plugin);
+    }
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      if (trusted) {
+        if (previous) this.serviceTrust.set(pluginId, previous);
+        else this.revokeNativeCode(plugin);
+        plugin.nativeCodeTrusted = Boolean(previous);
+      }
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
+  /**
+   * The second confirmation for a decision service: its `allow` answers count (tool calls run without the
+   * agent's own prompt). Needs native code trust; revoked with it (update, module change, disable).
+   */
+  async setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    if (allowed) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!activeManifest(plugin.manifest, plugin.selectedModules).services?.some((service) => service.decide)) {
+        throw new Error("Plugin has no decision service.");
+      }
+    }
+    const previous = plugin.decisionsMayAllow;
+    plugin.decisionsMayAllow = Boolean(allowed);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      plugin.decisionsMayAllow = previous;
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
+  /** Called with the trusted services after every registry change (the supervisor's desired set). */
+  setServiceObserver(observer: ((specs: PluginServiceSpec[]) => Promise<void>) | null): void {
+    this.serviceObserver = observer;
+  }
+
+  trustedServiceSpecs(): PluginServiceSpec[] {
+    const specs: PluginServiceSpec[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      const root = join(this.pluginRoot, plugin.manifest.id);
+      for (const service of manifest.services ?? []) {
+        const sha256 = trust[service.id];
+        if (!sha256) continue;
+        specs.push({
+          pluginId: plugin.manifest.id,
+          serviceId: service.id,
+          root,
+          entryPath: join(root, ...service.entry.split("/")),
+          sha256,
+          dataDir: join(this.dataRoot, plugin.manifest.id),
+          permissions: [...manifest.permissions]
+        });
+      }
+    }
+    return specs;
+  }
+
+  /** Services that may prepare launches now: enabled, native code trusted, `launch:contribute` granted. */
+  launchContributors(): LaunchContributor[] {
+    const contributors: LaunchContributor[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("launch:contribute")) continue;
+      const service = manifest.services?.find((candidate) => candidate.launch && trust[candidate.id]);
+      if (!service?.launch) continue;
+      contributors.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        launch: structuredClone(service.launch),
+        secrets: manifest.permissions.includes("secrets")
+      });
+    }
+    return contributors;
+  }
+
+  /** Services that may place sessions now: enabled, native code trusted, `environment:provide` granted. */
+  environmentProviders(): EnvironmentProvider[] {
+    return this.trustedServicesWith("environment:provide", (service) => service.environments).map(({ plugin, service, name, secrets }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, kinds: structuredClone(service.environments!), secrets
+    }));
+  }
+
+  /** Services that may decide on agents' tool calls now: enabled, native code trusted, `decision:provide` granted. */
+  decisionServices(): DecisionService[] {
+    const services: DecisionService[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("decision:provide")) continue;
+      const service = manifest.services?.find((candidate) => candidate.decide && trust[candidate.id]);
+      if (!service?.decide) continue;
+      services.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        ...(service.decide.appliesTo ? { appliesTo: [...service.decide.appliesTo] } : {}),
+        ...(service.decide.timeoutMs !== undefined ? { timeoutMs: service.decide.timeoutMs } : {}),
+        mayAllow: plugin.decisionsMayAllow
+      });
+    }
+    return services;
+  }
+
+  /** Services whose tools agents may call now: enabled, native code trusted, `tools:agents` granted. */
+  agentToolProviders(): AgentToolProvider[] {
+    return this.trustedServicesWith("tools:agents", (service) => service.tools).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, tools: structuredClone(service.tools!)
+    }));
+  }
+
+  /** Services whose card actions are shown now: enabled, native code trusted, `cards:decorate` granted. */
+  cardActionProviders(): CardActionProvider[] {
+    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    }));
+  }
+
+  private trustedServicesWith(
+    permission: PluginPermission,
+    declares: (service: PluginService) => unknown
+  ): Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> {
+    const found: Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes(permission)) continue;
+      for (const service of manifest.services ?? []) {
+        if (declares(service) && trust[service.id]) {
+          found.push({ plugin: plugin.manifest.id, name: manifest.name, service, secrets: manifest.permissions.includes("secrets") });
+        }
+      }
+    }
+    return found;
+  }
+
   get runtimeHookRegistryPath(): string {
     return this.hookRegistryPath;
   }
@@ -436,8 +659,9 @@ export class PluginManager {
     if (!plugin.manifest.modules?.length) throw new Error("Plugin does not declare optional modules.");
     const selected = normalizeSelectedModules(plugin.manifest, selectedModules);
     if (selected.length !== new Set(selectedModules).size) throw new Error("Plugin module selection is invalid.");
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       await this.persistRegistry();
     }
     const directory = await mkdtemp(join(this.stagingRoot, "modules-"));
@@ -485,8 +709,9 @@ export class PluginManager {
 
   async uninstall(pluginId: string): Promise<void> {
     const plugin = this.requirePlugin(pluginId);
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       try {
         await this.persistRegistry();
       } catch (error) {
@@ -504,6 +729,7 @@ export class PluginManager {
     }
     await rm(join(this.pluginRoot, plugin.manifest.id), { recursive: true, force: true });
     await rm(join(this.storageRoot, `${plugin.manifest.id}.json`), { force: true });
+    await rm(join(this.dataRoot, plugin.manifest.id), { recursive: true, force: true });
   }
 
   async searchGithubPlugins(query: string): Promise<GithubPluginSearchResult[]> {
@@ -698,8 +924,9 @@ export class PluginManager {
 
   private async performPluginUpdate(pluginId: string): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       await this.persistRegistry();
     }
     const sourceUrl = plugin.sourceUrl;
@@ -742,8 +969,10 @@ export class PluginManager {
         enabled: plugin.enabled,
         installedAt: plugin.installedAt,
         selectedModules: selected,
-        // Updated native hook code must be reviewed and trusted again.
-        enabledHooks: []
+        // Updated native hook and service code must be reviewed and trusted again.
+        enabledHooks: [],
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(pluginId, updated);
       await this.persistRegistry();
@@ -822,6 +1051,13 @@ export class PluginManager {
     const contribution = plugin.manifest.contributions.find((candidate) => candidate.id === contributionId);
     if (!contribution) throw new Error("Plugin contribution does not exist.");
     return structuredClone(contribution);
+  }
+
+  assertService(pluginId: string, serviceId: string): void {
+    const plugin = activePlugin(this.requireEnabledPlugin(pluginId));
+    if (!plugin.manifest.services?.some((service) => service.id === serviceId)) {
+      throw new Error("Plugin service does not exist.");
+    }
   }
 
   hasPermission(pluginId: string, permission: PluginPermission): boolean {
@@ -958,7 +1194,10 @@ export class PluginManager {
       enabled: plugin.enabled,
       installedAt: plugin.installedAt,
       selectedModules: plugin.selectedModules,
-      enabledHooks: plugin.enabledHooks
+      enabledHooks: plugin.enabledHooks,
+      ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
+        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
+        : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
     const desiredHookRegistry = this.runtimeHookRegistry();
@@ -967,6 +1206,7 @@ export class PluginManager {
       throw new Error("Enabled plugin hooks exceed the runtime registry limit.");
     }
     const temporaryPath = `${this.registryPath}.tmp`;
+    const services = this.trustedServiceSpecs();
     const write = this.registryWrite.catch(() => undefined).then(async () => {
       const currentHookRegistry = await readRuntimeHookRegistry(this.hookRegistryPath);
       const interimHookRegistry = safeRuntimeHookInterim(currentHookRegistry, desiredHookRegistry);
@@ -982,9 +1222,31 @@ export class PluginManager {
       if (interimHookSnapshot !== hookSnapshot) {
         await writeRuntimeHookRegistry(this.hookRegistryPath, hookSnapshot);
       }
+      // Revocations stop services before the caller replaces or removes their files.
+      await this.serviceObserver?.(services).catch((error: unknown) => {
+        console.warn("CanvasTTY plugin services could not be updated.", error);
+      });
     });
     this.registryWrite = write;
     return write;
+  }
+
+  private revokeNativeCode(plugin: InstalledPlugin): void {
+    plugin.nativeCodeTrusted = false;
+    plugin.decisionsMayAllow = false;
+    this.serviceTrust.delete(plugin.manifest.id);
+  }
+
+  private async currentServiceTrust(pluginId: string, manifest: PluginManifest): Promise<Record<string, string>> {
+    const root = join(this.pluginRoot, pluginId);
+    const trust: Record<string, string> = {};
+    for (const service of manifest.services ?? []) {
+      const path = await containedFile(root, service.entry);
+      const metadata = await stat(path);
+      if (metadata.size > MAX_ASSET_BYTES) throw new Error(`Plugin service entry is too large: ${service.entry}.`);
+      trust[service.id] = createHash("sha256").update(await readFile(path)).digest("hex");
+    }
+    return trust;
   }
 
   private runtimeHookRegistry(): RuntimeHookRegistry {
@@ -1046,10 +1308,14 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   assertOnlyKeys(candidate, [
     "apiVersion", "id", "name", "version", "description", "description.ru", "description.en",
     "icon", "author", "homepage", "settingsContribution", "coreFiles", "modules", "permissions",
-    "contributions", "hooks", "platforms", "minHostVersion"
+    "contributions", "hooks", "services", "platforms", "minHostVersion"
   ], "Plugin manifest");
-  if (candidate.apiVersion !== PLUGIN_API_VERSION) {
-    throw new Error(`Plugin apiVersion must be ${PLUGIN_API_VERSION}.`);
+  if (candidate.apiVersion !== 1 && candidate.apiVersion !== PLUGIN_API_VERSION) {
+    throw new Error(`Plugin apiVersion must be 1 or ${PLUGIN_API_VERSION}.`);
+  }
+  const apiVersion = candidate.apiVersion === 1 ? 1 : PLUGIN_API_VERSION;
+  if (apiVersion === 1 && candidate.services !== undefined) {
+    throw new Error(`Plugin services require apiVersion ${PLUGIN_API_VERSION}.`);
   }
   const id = requiredString(candidate.id, "id", 80);
   if (!isPluginId(id) || id === "host") throw new Error("Plugin id must be a lowercase DNS-style identifier.");
@@ -1101,6 +1367,27 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   const modules = validateModules(candidate.modules);
   const moduleIds = new Set(modules.map((module) => module.id));
   const hooks = validateAgentHooks(candidate.hooks, moduleIds);
+  const services = validateServices(candidate.services, moduleIds);
+  for (const service of services) {
+    const granted = service.module
+      ? modules.find((module) => module.id === service.module)?.permissions
+      : undefined;
+    if (service.launch && !permissions.includes("launch:contribute") && !granted?.includes("launch:contribute")) {
+      throw new Error(`Plugin service ${service.id} contributes to launches and needs the launch:contribute permission.`);
+    }
+    if (service.environments && !permissions.includes("environment:provide") && !granted?.includes("environment:provide")) {
+      throw new Error(`Plugin service ${service.id} provides environments and needs the environment:provide permission.`);
+    }
+    if (service.decide && !permissions.includes("decision:provide") && !granted?.includes("decision:provide")) {
+      throw new Error(`Plugin service ${service.id} decides on tool calls and needs the decision:provide permission.`);
+    }
+    if (service.tools && !permissions.includes("tools:agents") && !granted?.includes("tools:agents")) {
+      throw new Error(`Plugin service ${service.id} offers agent tools and needs the tools:agents permission.`);
+    }
+    if (service.cardActions && !permissions.includes("cards:decorate") && !granted?.includes("cards:decorate")) {
+      throw new Error(`Plugin service ${service.id} adds card actions and needs the cards:decorate permission.`);
+    }
+  }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
     throw new Error("Modular plugins must declare at least one coreFiles asset.");
@@ -1116,8 +1403,8 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   if (!Array.isArray(candidate.contributions) || candidate.contributions.length > 32) {
     throw new Error("Plugin contributions must be an array of at most 32 items.");
   }
-  if (candidate.contributions.length === 0 && hooks.length === 0) {
-    throw new Error("Plugin must declare at least one contribution or agent hook.");
+  if (candidate.contributions.length === 0 && hooks.length === 0 && services.length === 0) {
+    throw new Error("Plugin must declare at least one contribution, agent hook, or service.");
   }
   const contributionIds = new Set<string>();
   const contributions = candidate.contributions.map((value) => {
@@ -1138,7 +1425,7 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   }
 
   return {
-    apiVersion: PLUGIN_API_VERSION,
+    apiVersion,
     id,
     name,
     version,
@@ -1153,6 +1440,7 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     permissions,
     contributions,
     ...(hooks.length ? { hooks } : {}),
+    ...(services.length ? { services } : {}),
     ...(settingsContribution ? { settingsContribution } : {}),
     ...(coreFiles.length ? { coreFiles } : {}),
     ...(modules.length ? { modules } : {})
@@ -1218,6 +1506,268 @@ function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): Plu
       events,
       ...(module ? { module } : {})
     };
+  });
+}
+
+function validateServices(value: unknown, moduleIds: ReadonlySet<string>): PluginService[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PLUGIN_SERVICES) {
+    throw new Error(`Plugin services must contain between 1 and ${MAX_PLUGIN_SERVICES} items.`);
+  }
+  const ids = new Set<string>();
+  const services = value.map((candidate): PluginService => {
+    if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
+    assertOnlyKeys(candidate, [
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions"
+    ], "Plugin service");
+    const id = requiredString(candidate.id, "service id", 64);
+    if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
+    ids.add(id);
+    const title = requiredString(candidate.title, "service title", 80);
+    const description = optionalString(candidate.description, "service description", 240);
+    const entry = assetPath(requiredString(candidate.entry, "service entry", 180));
+    if (![".js", ".mjs", ".cjs"].includes(extname(entry))) {
+      throw new Error("Plugin service entry must be a bundled JavaScript file.");
+    }
+    const module = optionalString(candidate.module, "service module", 64);
+    if (module && (!isContributionId(module) || !moduleIds.has(module))) {
+      throw new Error(`Plugin service references an unknown module: ${module}.`);
+    }
+    const launch = candidate.launch === undefined ? undefined : validateServiceLaunch(candidate.launch);
+    const environments = candidate.environments === undefined ? undefined : validateServiceEnvironments(candidate.environments);
+    const decide = candidate.decide === undefined ? undefined : validateServiceDecide(candidate.decide);
+    const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
+    const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
+    return {
+      id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
+      ...(launch ? { launch } : {}),
+      ...(environments ? { environments } : {}),
+      ...(decide ? { decide } : {}),
+      ...(tools ? { tools } : {}),
+      ...(cardActions ? { cardActions } : {})
+    };
+  });
+  // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
+  const toolNames = services.flatMap((service) => service.tools ?? []).map((tool) => tool.name);
+  if (new Set(toolNames).size !== toolNames.length) throw new Error("Plugin agent tool names must be unique.");
+  const actionIds = services.flatMap((service) => service.cardActions ?? []).map((action) => action.id);
+  if (new Set(actionIds).size !== actionIds.length) throw new Error("Plugin card action ids must be unique.");
+  // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
+  if (services.filter((service) => service.decide).length > 1) {
+    throw new Error("At most one plugin service may decide on tool calls.");
+  }
+  // Saved environment refs name the plugin and kind, so exactly one service answers for each kind (a plugin
+  // may split its kinds over services, for example one per module).
+  const kinds = services.flatMap((service) => service.environments ?? []).map((environment) => environment.kind);
+  if (new Set(kinds).size !== kinds.length) throw new Error("Plugin environment kinds must be unique across its services.");
+  if (kinds.length > MAX_ENVIRONMENT_KINDS) throw new Error(`A plugin may offer at most ${MAX_ENVIRONMENT_KINDS} environment kinds.`);
+  // Launch options are saved per plugin, so one service per plugin answers for them.
+  if (services.filter((service) => service.launch).length > 1) {
+    throw new Error("At most one plugin service may declare launch options.");
+  }
+  return services;
+}
+
+const MAX_LAUNCH_FIELDS = 8;
+const MAX_LAUNCH_TEXT = 200;
+
+function validateServiceLaunch(value: unknown): PluginServiceLaunch {
+  if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
+  assertOnlyKeys(value, ["appliesTo", "fields", "policy"], "Plugin service launch");
+  if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      throw new Error("Plugin launch appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}) };
+}
+
+function validateServiceDecide(value: unknown): PluginServiceDecide {
+  if (!isRecord(value)) throw new Error("Plugin service decide must be an object.");
+  assertOnlyKeys(value, ["events", "appliesTo", "timeoutMs"], "Plugin service decide");
+  if (value.timeoutMs !== undefined && (!Number.isInteger(value.timeoutMs)
+    || (value.timeoutMs as number) < MIN_DECIDE_TIMEOUT_MS || (value.timeoutMs as number) > MAX_DECIDE_TIMEOUT_MS)) {
+    throw new Error(`Plugin decide timeoutMs must be ${MIN_DECIDE_TIMEOUT_MS} to ${MAX_DECIDE_TIMEOUT_MS}.`);
+  }
+  if (!Array.isArray(value.events) || value.events.length === 0 || value.events.some((event) => event !== "pre-tool")) {
+    throw new Error("Plugin decide events must list pre-tool.");
+  }
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      throw new Error("Plugin decide appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  return { events: ["pre-tool"], ...(appliesTo ? { appliesTo } : {}), ...(value.timeoutMs !== undefined ? { timeoutMs: value.timeoutMs as number } : {}) };
+}
+
+const MAX_AGENT_TOOLS = 16;
+const MAX_TOOL_SCHEMA_BYTES = 8 * 1024;
+const SESSION_ROLES = new Set<string>(["orchestrator", "agent", "subagent"]);
+
+function validateServiceTools(value: unknown): PluginAgentTool[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_AGENT_TOOLS) {
+    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items.`);
+  }
+  return value.map((candidate): PluginAgentTool => {
+    if (!isRecord(candidate)) throw new Error("Every plugin agent tool must be an object.");
+    assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles"], "Plugin agent tool");
+    const name = requiredString(candidate.name, "tool name", 40);
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(name)) throw new Error(`Plugin agent tool name is invalid: ${name}.`);
+    const description = requiredString(candidate.description, "tool description", 1_000);
+    const schema = candidate.inputSchema;
+    if (!isRecord(schema) || schema.type !== "object"
+      || Buffer.byteLength(JSON.stringify(schema), "utf8") > MAX_TOOL_SCHEMA_BYTES) {
+      throw new Error(`Plugin agent tool ${name} inputSchema must be a JSON Schema object (type "object") of at most 8 KB.`);
+    }
+    if (schema.properties !== undefined && !isRecord(schema.properties)) throw new Error(`Plugin agent tool ${name} properties must be an object.`);
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) {
+      throw new Error(`Plugin agent tool ${name} required must list property names.`);
+    }
+    if (!Array.isArray(candidate.roles) || candidate.roles.length === 0 || candidate.roles.some((role) => !SESSION_ROLES.has(role as string))) {
+      throw new Error(`Plugin agent tool ${name} roles must list orchestrator, agent or subagent.`);
+    }
+    return { name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])] };
+  });
+}
+
+const MAX_CARD_ACTIONS = 8;
+
+function validateCardActions(value: unknown): PluginCardAction[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CARD_ACTIONS) {
+    throw new Error(`Plugin service cardActions must contain between 1 and ${MAX_CARD_ACTIONS} items.`);
+  }
+  return value.map((candidate): PluginCardAction => {
+    if (!isRecord(candidate)) throw new Error("Every plugin card action must be an object.");
+    assertOnlyKeys(candidate, ["id", "title", "when"], "Plugin card action");
+    const id = requiredString(candidate.id, "card action id", 64);
+    if (!isContributionId(id)) throw new Error(`Plugin card action id is invalid: ${id}.`);
+    const title = requiredString(candidate.title, "card action title", 40);
+    if (candidate.when === undefined) return { id, title };
+    if (!isRecord(candidate.when)) throw new Error(`Plugin card action ${id} when must be an object.`);
+    assertOnlyKeys(candidate.when, ["providers", "environmentKinds", "roles"], "Plugin card action filter");
+    const list = (key: string, valid: (item: unknown) => boolean): string[] | undefined => {
+      const items = (candidate.when as Record<string, unknown>)[key];
+      if (items === undefined) return undefined;
+      if (!Array.isArray(items) || items.length === 0 || items.length > 16 || !items.every(valid)) {
+        throw new Error(`Plugin card action ${id} when.${key} is invalid.`);
+      }
+      return [...new Set(items as string[])];
+    };
+    const providers = list("providers", (item) => PROVIDER_IDS.has(item as string));
+    const environmentKinds = list("environmentKinds", (item) => typeof item === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(item));
+    const roles = list("roles", (item) => SESSION_ROLES.has(item as string));
+    const when: PluginCardActionFilter = {
+      ...(providers ? { providers: providers as PluginCardActionFilter["providers"] } : {}),
+      ...(environmentKinds ? { environmentKinds } : {}),
+      ...(roles ? { roles: roles as PluginCardActionFilter["roles"] } : {})
+    };
+    return { id, title, when };
+  });
+}
+
+const MAX_ENVIRONMENT_KINDS = 8;
+const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDERS]);
+
+function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ENVIRONMENT_KINDS) {
+    throw new Error(`Plugin service environments must contain between 1 and ${MAX_ENVIRONMENT_KINDS} kinds.`);
+  }
+  const kinds = new Set<string>();
+  return value.map((candidate): PluginEnvironmentKind => {
+    if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields"], "Plugin environment");
+    const kind = requiredString(candidate.kind, "environment kind", 32);
+    // Same shape the session store accepts for a saved environment's kind.
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
+      throw new Error(`Plugin environment kind is invalid or duplicated: ${kind}.`);
+    }
+    kinds.add(kind);
+    const label = requiredString(candidate.label, "environment label", 80);
+    const description = optionalString(candidate.description, "environment description", 240);
+    let appliesTo: PluginEnvironmentKind["appliesTo"];
+    if (candidate.appliesTo !== undefined) {
+      if (!Array.isArray(candidate.appliesTo) || candidate.appliesTo.length === 0
+        || candidate.appliesTo.some((provider) => !PROVIDER_IDS.has(provider as string))) {
+        throw new Error(`Plugin environment ${kind} appliesTo must list providers.`);
+      }
+      appliesTo = [...new Set(candidate.appliesTo as NonNullable<PluginEnvironmentKind["appliesTo"]>)];
+    }
+    const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields);
+    return {
+      kind, label, ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
+      ...(fields?.length ? { fields } : {})
+    };
+  });
+}
+
+function validateLaunchFields(value: unknown): PluginLaunchField[] {
+  if (!Array.isArray(value) || value.length > MAX_LAUNCH_FIELDS) {
+    throw new Error(`Plugin launch fields must be an array of at most ${MAX_LAUNCH_FIELDS} items.`);
+  }
+  const keys = new Set<string>();
+  return value.map((field): PluginLaunchField => {
+    if (!isRecord(field)) throw new Error("Every plugin launch field must be an object.");
+    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
+    const key = requiredString(field.key, "launch field key", 40);
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || keys.has(key)) {
+      throw new Error(`Plugin launch field key is invalid or duplicated: ${key}.`);
+    }
+    keys.add(key);
+    const label = requiredString(field.label, "launch field label", 80);
+    if (field.optionsFrom !== undefined && (field.kind !== "select" || field.optionsFrom !== "service")) {
+      throw new Error(`Plugin launch field ${key} optionsFrom must be "service" on a select.`);
+    }
+    if (field.kind === "boolean") {
+      if (field.options !== undefined || field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin launch field ${key} default must be a boolean.`);
+      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
+    }
+    if (field.kind === "select") {
+      if (field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (!Array.isArray(field.options) || field.options.length === 0 || field.options.length > 16) {
+        throw new Error(`Plugin launch field ${key} needs 1 to 16 options.`);
+      }
+      const options = field.options.map((option) => {
+        if (!isRecord(option)) throw new Error(`Plugin launch field ${key} options must be objects.`);
+        assertOnlyKeys(option, ["value", "label"], "Plugin launch option");
+        return {
+          value: requiredString(option.value, "launch option value", MAX_LAUNCH_TEXT),
+          label: requiredString(option.label, "launch option label", 80)
+        };
+      });
+      if (new Set(options.map((option) => option.value)).size !== options.length) throw new Error(`Plugin launch field ${key} repeats an option.`);
+      if (field.default !== undefined && !options.some((option) => option.value === field.default)) {
+        throw new Error(`Plugin launch field ${key} default must be one of its options.`);
+      }
+      return {
+        key, label, kind: "select", options,
+        ...(field.optionsFrom === "service" ? { optionsFrom: "service" as const } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    if (field.kind === "text") {
+      if (field.options !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      const maxLength = field.maxLength === undefined ? MAX_LAUNCH_TEXT : field.maxLength;
+      if (!Number.isInteger(maxLength) || (maxLength as number) < 1 || (maxLength as number) > MAX_LAUNCH_TEXT) {
+        throw new Error(`Plugin launch field ${key} maxLength must be 1 to ${MAX_LAUNCH_TEXT}.`);
+      }
+      if (field.default !== undefined && (typeof field.default !== "string" || field.default.length > (maxLength as number))) {
+        throw new Error(`Plugin launch field ${key} default must be text within maxLength.`);
+      }
+      return {
+        key, label, kind: "text",
+        ...(field.maxLength !== undefined ? { maxLength: maxLength as number } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    throw new Error(`Plugin launch field ${key} kind must be boolean, select or text.`);
   });
 }
 
@@ -1315,6 +1865,7 @@ async function assertManifestAssets(root: string, manifest: PluginManifest): Pro
     if (contribution.icon) await containedFile(root, contribution.icon);
   }
   for (const hook of manifest.hooks ?? []) await containedFile(root, hook.entry);
+  for (const service of manifest.services ?? []) await containedFile(root, service.entry);
 }
 
 async function containedFile(root: string, relativePath: string): Promise<string> {
@@ -2107,6 +2658,12 @@ function assertModularContributionFiles(manifest: PluginManifest): void {
       throw new Error(`Hook entry must belong to its declared module: ${hook.id}.`);
     }
   }
+  for (const service of manifest.services ?? []) {
+    const available = service.module ? moduleFiles.get(service.module) : coreFiles;
+    if (!available?.has(service.entry)) {
+      throw new Error(`Service entry must belong to its declared module: ${service.id}.`);
+    }
+  }
 }
 
 async function materializeModularPackage(
@@ -2138,8 +2695,9 @@ async function materializeModularPackage(
 function activeManifest(manifest: PluginManifest, selectedModules: readonly string[]): PluginManifest {
   const selected = new Set(selectedModules);
   const contributions = manifest.contributions.filter((contribution) => !contribution.module || selected.has(contribution.module));
-  const { settingsContribution, hooks: declaredHooks = [], ...rest } = manifest;
+  const { settingsContribution, hooks: declaredHooks = [], services: declaredServices = [], ...rest } = manifest;
   const hooks = declaredHooks.filter((hook) => !hook.module || selected.has(hook.module));
+  const services = declaredServices.filter((service) => !service.module || selected.has(service.module));
   const permissions = [
     ...manifest.permissions,
     ...(manifest.modules ?? []).filter((module) => selected.has(module.id)).flatMap((module) => module.permissions)
@@ -2149,6 +2707,7 @@ function activeManifest(manifest: PluginManifest, selectedModules: readonly stri
     permissions: [...new Set(permissions)],
     contributions,
     ...(hooks.length ? { hooks } : {}),
+    ...(services.length ? { services } : {}),
     ...(settingsContribution && contributions.some((item) => item.id === settingsContribution)
       ? { settingsContribution }
       : {})
@@ -2387,7 +2946,17 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
     && (value.enabledHooks === undefined || (
       Array.isArray(value.enabledHooks) && value.enabledHooks.every((item) => typeof item === "string")
     ))
+    && (value.trustedServices === undefined || (
+      isRecord(value.trustedServices)
+      && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
+    ))
+    && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
   );
+}
+
+function sameServiceTrust(current: Record<string, string>, stored: Record<string, string>): boolean {
+  const ids = Object.keys(current);
+  return ids.length === Object.keys(stored).length && ids.every((id) => stored[id] === current[id]);
 }
 
 function runtimeHookKey(pluginId: string, hookId: string): string {
@@ -2560,6 +3129,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
   const pending = new Map();
   const listeners = new Set();
   const storageListeners = new Set();
+  const serviceListeners = new Set();
   let nextId = 1;
   const post = (message) => parent.postMessage({ source: "canvastty-plugin", ...message }, "*");
   const request = (method, params = {}) => new Promise((resolve, reject) => {
@@ -2581,6 +3151,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
     if (message.type === "storage-change") {
       storageListeners.forEach((listener) => listener(message.key, message.value));
     }
+    if (message.type === "service-event") serviceListeners.forEach((listener) => listener(message.value));
   });
   window.CanvasTTYPlugin = Object.freeze({
     ready: () => post({ type: "ready" }),
@@ -2612,6 +3183,13 @@ const PLUGIN_SDK_SOURCE = `(() => {
       getState: () => request("hermesHud.getState"),
       open: () => request("hermesHud.open"),
       close: () => request("hermesHud.close")
+    }),
+    service: Object.freeze({
+      request: (serviceId, method, params) => request("service.request", { serviceId, method, params }),
+      onEvent: (listener) => {
+        serviceListeners.add(listener);
+        return () => serviceListeners.delete(listener);
+      }
     }),
     onContext: (listener) => {
       listeners.add(listener);

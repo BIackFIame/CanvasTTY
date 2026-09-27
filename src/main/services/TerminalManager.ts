@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { basename } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, relative, isAbsolute } from "node:path";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
@@ -8,10 +8,12 @@ import type {
   Point,
   ProviderId,
   SessionBounds,
+  SessionEnvironmentChoice,
   SessionRole,
   SessionEvent,
   SessionMetadata,
   SessionRemovedEvent,
+  SessionRestoreMode,
   SessionSnapshot,
   TerminalBufferSnapshot,
   TerminalDataEvent
@@ -27,6 +29,7 @@ import type {
   PreparedAgentBrowserPtyLaunch
 } from "./agent-browser/AgentBrowserBridge.ts";
 import { AGENT_BROWSER_ENV } from "./agent-browser/AgentBrowserBridge.ts";
+import { ORCHESTRATION_TOOL_NAMES } from "../../agent-browser/orchestration-catalog.mjs";
 import type { OrchestrationLaunchCoordinator, PreparedOrchestrationPtyLaunch } from "./agent-browser/OrchestrationBridge.ts";
 import type {
   AgentRuntimeLaunchCoordinator,
@@ -36,7 +39,8 @@ import {
   AGENT_RUNTIME_ENV,
   CAPTURE_ANSWER_ENV,
   CAPTURE_ANSWER_EXPIRES_AT_ENV,
-  CAPTURE_RESULT_ENV
+  CAPTURE_RESULT_ENV,
+  normalizeThreadId
 } from "../../agent-runtime/runtime-protocol.mjs";
 import {
   CONTROL_CLI_ENV,
@@ -44,15 +48,22 @@ import {
   controlEnvironment,
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
-import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
+import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { resolveTerminalLaunch } from "./terminalLaunch.ts";
+import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
+import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
+import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
-  type PersistedTerminalSession,
+  type PersistedEnvironmentRef,
+  type PersistedSessionExtras,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
+import { chooseResume, planSessionRestore, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
 import {
   createProviderLifecycleParser,
@@ -82,14 +93,69 @@ interface ManagedSession {
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
   lifecycle: ProviderLifecycleParser | null;
   awaitingInitialResize: boolean;
-  resumeOnLaunch: boolean;
+  resumeOnLaunch: ResumeRequest;
+  /** The provider's own conversation id, once its hook reported it (or from the saved record). */
+  threadId?: string;
   captureResult: boolean;
+  /**
+   * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
+   * and owning plugin carried into the saved record.
+   */
+  extras: PersistedSessionExtras;
+  /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
+  launchToken: number;
+  /** Removes the current run's plugin files; called when the process exits. */
+  launchCleanup: (() => Promise<void>) | null;
+  /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
+  restoringLaunch: boolean;
+  /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
+  environmentReady: boolean;
+  /** Bumped by every launch the person or the app asks for (create, restart, restore); input waits for one. */
+  launchEpoch: number;
+  /** Input waiting for this launch to start (deliverInput): woken whenever the launch moves on. */
+  launchWaiters: Set<() => void>;
+  /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
+  restored?: boolean;
+  /** What the CLI's own title last showed (Claude: spinner working, «✳» no turn running). */
+  titleState?: "idle" | "working" | "needs_approval";
+  /** How often the agent's lifecycle hooks reported; Claude's title defers to hooks once they have. */
+  hookSignals?: number;
+  /** Set after the person answered a hooked Claude prompt; see settleAnsweredPrompt. */
+  answeredPromptTimer?: ReturnType<typeof setTimeout>;
 }
+
+type EnvironmentService = Pick<EnvironmentRegistry,
+  "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">;
+type LaunchOutcome = "launched" | "failed" | "superseded";
+
+interface PlannedSpawn {
+  command: string;
+  args: string[] | string;
+  cwd: string;
+  /** The full environment the PTY gets. */
+  env: Record<string, string>;
+  /** What CanvasTTY and launch contributors set for this launch (without the person's own environment). */
+  launchEnvironment: Record<string, string>;
+  agentBrowser: PreparedAgentBrowserPtyLaunch | null;
+  agentRuntime: PreparedAgentRuntimePtyLaunch | null;
+  agentOrchestration: PreparedOrchestrationPtyLaunch | null;
+  cleanup(): void;
+}
+/** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
+const QUIT_RELEASE_TIMEOUT_MS = 3_000;
+/** Longer than every plugin step of a launch together (prepare, resume, launch options, wrap). */
+export const LAUNCH_INPUT_WAIT_MS = 60_000;
+
+/** What happened to input handed to deliverInput. */
+export type InputDelivery = { delivered: true } | { delivered: false; reason: string };
+
+type LaunchContribution = Extract<PreparedLaunch, { ok: true }>;
 
 export interface ProviderLifecycleSignal {
   kind: "lifecycle";
   state: "idle" | "working" | "needs_approval";
   requestId?: string;
+  threadId?: string;
 }
 
 /**
@@ -118,8 +184,19 @@ export class TerminalManager {
   private readonly hiddenSinceOffset = new Map<string, number>();
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
+  // Plugin tools a session of this role and agent gets in canvastty_agents (EP-6), read at launch.
+  private pluginToolNames: (role: SessionRole, provider: ProviderId) => string[] = () => [];
+  private launchPipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null = null;
   private sessionStore: TerminalSessionStore | null = null;
-  private sessionPersistenceEnabled = false;
+  private sessionRestoreMode: SessionRestoreMode = "off";
+  // Without the registry a placed session can only come back stopped: it never runs locally.
+  private environments: EnvironmentService | null = null;
+  // Every text an agent reads from another card passes through it (EP-8).
+  private redaction = new SecretRedactionRegistry();
+  // Where each running card was actually started (an environment may move it) and its agent config folder.
+  private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  private quitting = false;
+  private readonly quitReleases: Promise<void>[] = [];
   private suppressPersistence = false;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
@@ -149,37 +226,123 @@ export class TerminalManager {
     this.agentOrchestration = coordinator;
   }
 
-  configureSessionPersistence(store: TerminalSessionStore, enabled: boolean): void {
+  /** Plugin agent tools: a session any of them applies to gets the canvastty_agents bridge. */
+  configureAgentTools(names: ((role: SessionRole, provider: ProviderId) => string[]) | null): void {
+    this.pluginToolNames = names ?? (() => []);
+  }
+
+  /** Plugin launch contributors; without them a session with launch options is never launched. */
+  configureLaunchPipeline(pipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null): void {
+    this.launchPipeline = pipeline;
+  }
+
+  /** Plugin session environments; without them a placed session is never launched. */
+  configureEnvironments(registry: EnvironmentService | null): void {
+    this.environments = registry;
+  }
+
+  /** The app-wide redaction registry (vault keys, plugin secrets); cards add their launch secrets to it. */
+  configureRedaction(registry: SecretRedactionRegistry): void {
+    this.redaction = registry;
+  }
+
+  /** Masks known secrets and key shapes in text another agent reads (observe, result, control screen, failures). */
+  redactSecrets<T extends string | null>(text: T): T {
+    return (text === null ? text : this.redaction.redact(text)) as T;
+  }
+
+  /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
+  decisionContext(id: string): DecisionSession | null {
+    const session = this.sessions.get(id);
+    if (!session || session.metadata.provider === "terminal") return null;
+    const launched = this.launchContexts.get(id);
+    return {
+      provider: session.metadata.provider,
+      role: session.metadata.role ?? "agent",
+      cwd: launched?.cwd ?? session.metadata.cwd,
+      configDirs: launched?.configDir ? [launched.configDir] : []
+    };
+  }
+
+  /**
+   * What plugins may know about a card (EP-4): its metadata, the folder it actually runs in (an environment may
+   * move it) and its environment ref. No screen text.
+   */
+  pluginContext(id: string): {
+    metadata: SessionMetadata; workingDirectory: string; environment: PersistedEnvironmentRef | null; restored: boolean; owner: string | null;
+  } | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    return {
+      metadata: structuredClone(session.metadata),
+      workingDirectory: this.launchContexts.get(id)?.cwd ?? session.metadata.cwd,
+      environment: session.extras.environment ? structuredClone(session.extras.environment) : null,
+      restored: session.restored === true,
+      owner: session.extras.ownerPluginId ?? null
+    };
+  }
+
+  /** Records the plugin that started a card (EP-4); saved with the card so control survives a restore. */
+  setPluginOwner(id: string, pluginId: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.extras.ownerPluginId === pluginId) return;
+    session.extras.ownerPluginId = pluginId;
+    this.schedulePersistence();
+  }
+
+  configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
     this.sessionStore = store;
-    this.sessionPersistenceEnabled = Boolean(enabled);
+    this.sessionRestoreMode = mode;
   }
 
   async restorePersistedSessions(): Promise<void> {
     const store = this.sessionStore;
     if (!store) return;
     const persisted = await store.load();
-    if (!this.sessionPersistenceEnabled) {
+    if (this.sessionRestoreMode === "off") {
       if (persisted.length > 0) await store.clear();
       return;
     }
 
-    // A subagent whose owning session is gone restores as nothing: its
-    // parent's runtime state no longer exists to collect its result.
-    const restorable = persisted.filter((descriptor) => (
-      descriptor.role !== "subagent"
-      || persisted.some((candidate) => candidate.id === descriptor.parentSessionId)
-      || this.sessions.has(descriptor.parentSessionId ?? "")
-    ));
-    for (const descriptor of restorable) this.restorePersistedSession(descriptor);
+    // Environments resume first; a card whose environment stopped comes back
+    // stopped with the plugin's reason and never runs locally instead.
+    const resumed = new Map<string, { ok: true } | { ok: false; reason: string }>();
+    const environments = this.environments;
+    if (environments) {
+      await Promise.all(persisted.map(async (record) => {
+        if (!record.environment || !record.restore || record.lastState !== "running") return;
+        if (!environments.available(record.environment)) return;
+        resumed.set(record.id, await environments.resume(record.environment, record.id));
+      }));
+    }
+    // Then parents come first; a subagent whose owning session is gone restores
+    // as nothing, since its parent's runtime state no longer exists.
+    const steps = planSessionRestore(persisted, this.sessionRestoreMode, {
+      isLiveSession: (id) => this.sessions.has(id),
+      environmentAvailable: (environment, record) => resumed.get(record.id)?.ok ?? this.environmentUsable(environment),
+      launchOptionsAvailable: (options) => this.unavailableLaunchPlugins(options).length === 0
+    });
+    for (const step of steps) this.restorePersistedSession(step, resumed.get(step.record.id));
     await this.persistSessions();
   }
 
-  async setSessionPersistenceEnabled(enabled: boolean): Promise<void> {
-    const next = Boolean(enabled);
-    if (this.sessionPersistenceEnabled === next) return;
-    this.sessionPersistenceEnabled = next;
-    if (next) await this.persistSessions();
-    else await this.sessionStore?.clear();
+  async setSessionRestoreMode(mode: SessionRestoreMode): Promise<void> {
+    if (this.sessionRestoreMode === mode) return;
+    this.sessionRestoreMode = mode;
+    if (mode === "off") await this.sessionStore?.clear();
+    else await this.persistSessions();
+  }
+
+  /** The per-card "Don't restore this card" choice. */
+  setRestore(id: string, restore: boolean): SessionMetadata {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    if (typeof restore !== "boolean") throw new Error("Restore choice is invalid.");
+    if (restore) delete session.metadata.skipRestore;
+    else session.metadata.skipRestore = true;
+    this.emitSession(session.metadata);
+    this.schedulePersistence();
+    return structuredClone(session.metadata);
   }
 
   async shutdown(): Promise<void> {
@@ -187,7 +350,10 @@ export class TerminalManager {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
     this.suppressPersistence = true;
+    // Quitting keeps every environment for the next start; nothing is released as "closed".
+    this.quitting = true;
     this.disposeAll();
+    await Promise.allSettled(this.quitReleases.splice(0));
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
   }
 
@@ -249,6 +415,13 @@ export class TerminalManager {
       throw new Error("Parent terminal session does not exist.");
     }
 
+    const launchOptions = this.launchPipeline
+      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions)
+      : request.launchOptions === undefined ? undefined : failWith("Plugin launch options are not available.");
+    const environmentChoice = this.environments
+      ? this.environments.normalizeChoice(request.provider, request.environment) ?? null
+      : request.environment === undefined ? null : failWith("Plugin environments are not available.");
+
     const id = randomUUID();
     const metadata: SessionMetadata = {
       id,
@@ -269,11 +442,13 @@ export class TerminalManager {
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
-    const launched = awaitMeasuredGrid
+    // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
+    const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
+    const launched = awaitMeasuredGrid || contributed
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
       : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, false, control.captureResult, role,
-        control.answerCaptureGrantExpiresAt);
+        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, null, control.captureResult, role,
+        control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -294,11 +469,22 @@ export class TerminalManager {
         ? createProviderLifecycleParser(request.provider, request.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: false,
-      captureResult: control.captureResult === true
+      resumeOnLaunch: null,
+      captureResult: control.captureResult === true,
+      extras: {
+        ...(launchOptions ? { options: launchOptions } : {}),
+        ...(environmentChoice ? { environmentChoice } : {})
+      },
+      launchToken: 0,
+      launchCleanup: null,
+      restoringLaunch: false,
+      environmentReady: false,
+      launchEpoch: 0,
+      launchWaiters: new Set()
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
+    if (contributed) this.launchContributed(id, session, null, null, control.answerCaptureGrantExpiresAt);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
 
@@ -307,10 +493,38 @@ export class TerminalManager {
     return snapshot(session);
   }
 
-  restart(id: string): SessionSnapshot {
+  restart(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
+    const environment = session.extras.environment;
+    if (environment && !this.environmentUsable(environment)) {
+      // Never run a placed session locally instead of where it belongs.
+      throw new Error(`This card runs in ${environment.label} from plugin ${environment.pluginId}, which is not available. It was not started locally.`);
+    }
+    const pendingChoice = session.extras.environment ? undefined : session.extras.environmentChoice;
+    if (pendingChoice && !this.environments?.available(pendingChoice)) {
+      throw new Error(`${this.pendingEnvironmentReason(pendingChoice)} It was not started locally.`);
+    }
+    const missingPlugins = this.unavailableLaunchPlugins(session.extras.options);
+    if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
+    delete session.extras.heldState;
+    delete session.metadata.restoreNote;
+    // Input queued for the launch that ended never reaches this one.
+    session.launchEpoch += 1;
+    this.wakeLaunchWaiters(session);
+    let resume: ResumeRequest = null;
+    if (options.resume === true && session.metadata.provider !== "terminal") {
+      const peers = [...this.sessions.values()].filter((candidate) => (
+        candidate.metadata.provider === session.metadata.provider && candidate.metadata.cwd === session.metadata.cwd
+      )).length;
+      const chosen = chooseResume(session.metadata.provider, session.threadId, peers);
+      resume = chosen.resume;
+      if (chosen.note) session.metadata.restoreNote = chosen.note;
+    } else {
+      // A plain restart is a new conversation, so the old id must not be resumed later.
+      delete session.threadId;
+    }
 
     if (session.metadata.provider === "grok") {
       session.agentBrowser?.cleanup();
@@ -323,16 +537,34 @@ export class TerminalManager {
         ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
         : null;
       session.awaitingInitialResize = true;
-      session.resumeOnLaunch = false;
+      session.resumeOnLaunch = resume;
       session.metadata.startedAt = Date.now();
       session.metadata.status = initialSessionStatus(session.metadata.provider);
       session.metadata.exitCode = null;
       session.metadata.failureDetails = null;
       this.emitSession(session.metadata);
+      this.schedulePersistence();
       return snapshot(session);
     }
 
     session.agentOrchestration?.cleanup();
+    if (this.contributed(session)) {
+      session.process = null;
+      session.agentBrowser = null;
+      session.agentRuntime = null;
+      session.agentOrchestration = null;
+      session.awaitingInitialResize = false;
+      session.lifecycle = this.lifecycleHooksEnabled
+        ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
+        : null;
+      session.metadata.startedAt = Date.now();
+      session.metadata.status = initialSessionStatus(session.metadata.provider);
+      session.metadata.exitCode = null;
+      session.metadata.failureDetails = null;
+      this.emitSession(session.metadata);
+      this.launchContributed(id, session, resume, "user");
+      return snapshot(session);
+    }
     const launched = this.spawnProcess(
       id,
       session.metadata.provider,
@@ -340,9 +572,12 @@ export class TerminalManager {
       session.metadata.cwd,
       session.cols,
       session.rows,
-      false,
+      resume,
       session.captureResult,
-      session.metadata.role
+      session.metadata.role,
+      undefined,
+      null,
+      session.metadata.parentSessionId
     );
     session.process = launched.process;
     session.agentBrowser = launched.agentBrowser;
@@ -368,6 +603,7 @@ export class TerminalManager {
       if (runtimeStatus) session.metadata.status = runtimeStatus;
     }
     this.emitSession(session.metadata, failureOrigin);
+    this.schedulePersistence();
     return snapshot(session);
   }
 
@@ -375,12 +611,87 @@ export class TerminalManager {
     this.inputChecked(id, data);
   }
 
+  /** The card's launch waits for its plugins (or its measured grid): nothing can be written to it yet. */
+  launchPending(id: string): boolean {
+    const session = this.sessions.get(id);
+    return Boolean(session && session.metadata.exitCode === null && !session.process);
+  }
+
+  /**
+   * The one delivery rule for text another agent, a plugin or a controller sends to a card (spawn_agent's first
+   * prompt, send_to_agent, plugin sessions.send). A running card gets it at once. A card whose launch plugins are
+   * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
+   * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
+   * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
+   * it never reaches a later launch of the card.
+   */
+  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS): Promise<InputDelivery> {
+    const session = this.sessions.get(id);
+    if (!session) return { delivered: false, reason: "The session does not exist." };
+    const epoch = session.launchEpoch;
+    const deadline = Date.now() + waitMs;
+    const waiting = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
+      && session.metadata.exitCode === null && !session.process;
+    while (waiting()) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return { delivered: false, reason: `The session did not start within ${Math.round(waitMs / 1000)} s.` };
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(wake, remaining);
+        function wake(): void {
+          clearTimeout(timer);
+          session!.launchWaiters.delete(wake);
+          resolve();
+        }
+        session.launchWaiters.add(wake);
+      });
+    }
+    if (this.sessions.get(id) !== session) return { delivered: false, reason: "The session was closed before it started." };
+    if (session.launchEpoch !== epoch) return { delivered: false, reason: "The session was restarted before it started." };
+    if (session.metadata.exitCode !== null) {
+      return { delivered: false, reason: session.metadata.failureDetails
+        ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
+        : "The session has already exited." };
+    }
+    return this.inputChecked(id, data)
+      ? { delivered: true }
+      : { delivered: false, reason: "The terminal no longer accepts input." };
+  }
+
+  private wakeLaunchWaiters(session: ManagedSession): void {
+    for (const wake of [...session.launchWaiters]) wake();
+  }
+
   inputChecked(id: string, data: string): boolean {
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process) return false;
     const process = session.process;
-    return tryPtyOperation(() => process.write(data));
+    const written = tryPtyOperation(() => process.write(data));
+    if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
+    return written;
+  }
+
+  /**
+   * A hooked Claude card waits at its permission prompt (needs_approval) and the person answered it. When they declined
+   * (Esc, or "No"), Claude interrupts the turn and runs no Stop hook, and its «✳» title defers to the hooks, so the card
+   * would stay needs_approval while Claude waits at its prompt line. If, a moment later, no hook moved the card on (an
+   * allowed tool reports PostToolUse, a new prompt PermissionRequest) and the title still shows no turn running, the
+   * turn ended: idle.
+   */
+  private settleAnsweredPrompt(id: string, session: ManagedSession): void {
+    if (session.metadata.status !== "needs_approval" || !titleDefersToHooks(session, "idle")) return;
+    if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
+    const hooksBefore = session.hookSignals ?? 0;
+    session.answeredPromptTimer = setTimeout(() => {
+      session.answeredPromptTimer = undefined;
+      if (this.sessions.get(id) !== session || session.metadata.exitCode !== null) return;
+      if (session.metadata.status !== "needs_approval" || session.titleState === "working") return;
+      if ((session.hookSignals ?? 0) !== hooksBefore) return;
+      this.applyProviderSignal(id, { kind: "lifecycle", state: "idle" }, "title");
+    }, ANSWERED_PROMPT_SETTLE_MS);
+    session.answeredPromptTimer.unref?.();
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -428,9 +739,17 @@ export class TerminalManager {
     return structuredClone(session.metadata);
   }
 
-  applyProviderSignal(id: string, signal: ProviderLifecycleSignal): void {
+  /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
+  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): void {
     const session = this.sessions.get(id);
     if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
+    if (source === "hook") session.hookSignals = (session.hookSignals ?? 0) + 1;
+
+    const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
+    if (threadId && threadId !== session.threadId) {
+      session.threadId = threadId;
+      this.schedulePersistence();
+    }
 
     const nextStatus = signal.state;
     if (session.metadata.status === nextStatus) return;
@@ -505,13 +824,24 @@ export class TerminalManager {
     }
   }
 
-  dispose(id: string): void {
+  /**
+   * Closes a card. A card in a plugin environment releases it: `keepEnvironmentData` is the person's
+   * answer to "Keep environment data?" (kept unless they said no). Quitting releases nothing.
+   */
+  dispose(id: string, options: { keepEnvironmentData?: boolean } = {}): void {
     const session = this.sessions.get(id);
     if (!session) return;
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.wakeLaunchWaiters(session);
     this.hiddenSinceOffset.delete(id);
+    this.launchContexts.delete(id);
+    this.redaction.clear(`session:${id}`);
+    session.launchToken += 1;
+    void session.launchCleanup?.().catch(() => undefined);
+    session.launchCleanup = null;
+    if (session.extras.options) void this.launchPipeline?.forgetSession(id).catch(() => undefined);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -520,6 +850,17 @@ export class TerminalManager {
         session.process.kill();
       } catch (error) {
         console.warn(`PTY ${id} could not be killed cleanly.`, error);
+      }
+    }
+    const environment = session.extras.environment;
+    if (environment && this.environments) {
+      if (!this.quitting) {
+        void this.environments.release(environment, id, { keepData: options.keepEnvironmentData !== false, reason: "closed" });
+      } else if (this.sessionRestoreMode === "off") {
+        // Nothing is saved, so the environment will not come back: stop its compute, keep its data.
+        this.quitReleases.push(this.environments.release(environment, id, {
+          keepData: true, reason: "quit", timeoutMs: QUIT_RELEASE_TIMEOUT_MS
+        }));
       }
     }
     this.emit(IPC.terminalRemoved, { id });
@@ -532,7 +873,8 @@ export class TerminalManager {
     }
   }
 
-  private restorePersistedSession(descriptor: PersistedTerminalSession): void {
+  private restorePersistedSession(step: RestoreStep, resumed?: { ok: true } | { ok: false; reason: string }): void {
+    const descriptor = step.record;
     if (this.sessions.has(descriptor.id)) return;
     const metadata: SessionMetadata = {
       id: descriptor.id,
@@ -549,27 +891,74 @@ export class TerminalManager {
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
-      failureDetails: null
+      failureDetails: null,
+      ...(step.note ? { restoreNote: step.note } : {}),
+      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {})
+    };
+    const extras: PersistedSessionExtras = {
+      ...(descriptor.options ? { options: descriptor.options } : {}),
+      ...(descriptor.environment ? { environment: descriptor.environment } : {}),
+      ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
+      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {})
     };
 
     let process: IPty | null = null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
     let agentRuntime: PreparedAgentRuntimePtyLaunch | null = null;
     let agentOrchestration: PreparedOrchestrationPtyLaunch | null = null;
-    let directoryReady = true;
-    try {
-      assertDirectory(descriptor.cwd);
-    } catch (error) {
-      directoryReady = false;
-      metadata.status = "failed";
-      metadata.exitCode = 1;
-      metadata.failureDetails = error instanceof Error ? error.message : String(error);
+    let directoryReady = step.launch !== "stopped";
+    if (step.launch === "stopped") {
+      // A finished card comes back as it ended; a placed card whose environment
+      // is unavailable is held with its reason and keeps its saved state.
+      if (step.note === "environment-unavailable" && descriptor.environment) {
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        metadata.failureDetails = resumed && !resumed.ok
+          ? `Environment stopped: ${resumed.reason}`
+          : this.environments?.unavailableReason(descriptor.environment)
+            ?? `Needs plugin ${descriptor.environment.pluginId} (${descriptor.environment.label}). It was not started locally.`;
+      } else if (step.note === "environment-pending" && extras.environmentChoice) {
+        // The app quit while the plugin prepared it: whatever it prepared then is unknown, so nothing runs
+        // until the person restarts it, which prepares again with the saved options.
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        const choice = extras.environmentChoice;
+        metadata.failureDetails = this.environments?.available(choice)
+          ? `Its environment (${choice.kind} from plugin ${choice.pluginId}) was being prepared when CanvasTTY closed. It was not started locally; Restart prepares it again.`
+          : `${this.pendingEnvironmentReason(choice)} It was not started locally.`;
+      } else if (step.note === "plugin-unavailable" && descriptor.options) {
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        metadata.failureDetails = `Launch refused: ${missingLaunchPlugins(this.unavailableLaunchPlugins(descriptor.options))}`;
+      } else {
+        metadata.exitCode = descriptor.exitCode ?? (descriptor.lastState === "exited" ? 0 : 1);
+        metadata.status = metadata.exitCode === 0 ? "done" : "failed";
+        if (extras.environmentChoice && metadata.status === "failed") {
+          metadata.failureDetails = "Its environment was not prepared, so it was not started locally; Restart prepares it again.";
+        }
+      }
     }
+    if (directoryReady) {
+      try {
+        assertDirectory(descriptor.cwd);
+      } catch (error) {
+        directoryReady = false;
+        metadata.status = "failed";
+        metadata.exitCode = 1;
+        metadata.failureDetails = error instanceof Error ? error.message : String(error);
+      }
+    }
+    const resume: ResumeRequest = step.launch === "stopped" ? null : step.launch;
     const awaitMeasuredGrid = directoryReady
       && descriptor.provider === "grok"
       && this.providerClis.get(descriptor.provider).state === "available";
 
-    if (directoryReady && !awaitMeasuredGrid) {
+    const contributed = directoryReady && !awaitMeasuredGrid
+      && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
+    if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
         const launched = this.spawnProcess(
           descriptor.id,
@@ -578,9 +967,12 @@ export class TerminalManager {
           descriptor.cwd,
           INITIAL_TERMINAL_COLS,
           INITIAL_TERMINAL_ROWS,
-          descriptor.provider !== "terminal",
+          resume,
           false,
-          descriptor.role
+          descriptor.role,
+          undefined,
+          null,
+          descriptor.parentSessionId
         );
         process = launched.process;
         agentBrowser = launched.agentBrowser;
@@ -594,6 +986,11 @@ export class TerminalManager {
       }
     }
 
+    // A card that started (or whose plugins are preparing its launch) comes back tied to
+    // the conversation the plan chose (none for a fresh start); one that did not start
+    // keeps its recorded id for Continue.
+    const started = process !== null || awaitMeasuredGrid || contributed;
+    const threadId = started ? step.threadId : descriptor.threadId;
     const session: ManagedSession = {
       metadata,
       process,
@@ -612,11 +1009,21 @@ export class TerminalManager {
         ? createProviderLifecycleParser(descriptor.provider, descriptor.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: awaitMeasuredGrid && descriptor.provider !== "terminal",
-      captureResult: false
+      resumeOnLaunch: awaitMeasuredGrid ? resume : null,
+      ...(threadId ? { threadId } : {}),
+      captureResult: false,
+      extras,
+      launchToken: 0,
+      launchCleanup: null,
+      restoringLaunch: awaitMeasuredGrid,
+      environmentReady: resumed?.ok === true,
+      restored: true,
+      launchEpoch: 0,
+      launchWaiters: new Set()
     };
     this.sessions.set(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
+    if (contributed) this.launchContributed(descriptor.id, session, resume, "restore", undefined, true);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
     // Restoring re-derives a persisted session's status, so a failure here is
@@ -627,11 +1034,11 @@ export class TerminalManager {
   }
 
   private persistSessions(): Promise<void> {
-    if (!this.sessionPersistenceEnabled || this.suppressPersistence || !this.sessionStore) {
+    if (this.sessionRestoreMode === "off" || this.suppressPersistence || !this.sessionStore) {
       return Promise.resolve();
     }
     return this.sessionStore.replace(
-      [...this.sessions.values()].map((session) => persistedTerminalSession(session.metadata))
+      [...this.sessions.values()].map((session) => persistedTerminalSession(session.metadata, session.threadId, session.extras))
     );
   }
 
@@ -652,8 +1059,13 @@ export class TerminalManager {
   private launchAwaitingSession(id: string, session: ManagedSession): void {
     if (!session.awaitingInitialResize) return;
     session.awaitingInitialResize = false;
-    const resumePrevious = session.resumeOnLaunch;
-    session.resumeOnLaunch = false;
+    const resume = session.resumeOnLaunch;
+    session.resumeOnLaunch = null;
+    if (this.contributed(session)) {
+      this.launchContributed(id, session, resume, null, undefined, session.restoringLaunch);
+      session.restoringLaunch = false;
+      return;
+    }
     try {
       const launched = this.spawnProcess(
         id,
@@ -662,9 +1074,12 @@ export class TerminalManager {
         session.metadata.cwd,
         session.cols,
         session.rows,
-        resumePrevious,
+        resume,
         session.captureResult,
-        session.metadata.role
+        session.metadata.role,
+        undefined,
+        null,
+        session.metadata.parentSessionId
       );
       session.process = launched.process;
       session.agentBrowser = launched.agentBrowser;
@@ -689,6 +1104,7 @@ export class TerminalManager {
       session.metadata.failureDetails = error instanceof Error ? error.message : String(error);
     }
     this.emitSession(session.metadata);
+    this.wakeLaunchWaiters(session);
   }
 
   private spawnProcess(
@@ -698,10 +1114,12 @@ export class TerminalManager {
     cwd: string,
     cols = INITIAL_TERMINAL_COLS,
     rows = INITIAL_TERMINAL_ROWS,
-    resumePrevious = false,
+    resume: ResumeRequest = null,
     captureResult = false,
     role: SessionRole = "agent",
-    answerCaptureGrantExpiresAt?: number
+    answerCaptureGrantExpiresAt?: number,
+    contribution: LaunchContribution | null = null,
+    parentSessionId?: string
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -709,19 +1127,65 @@ export class TerminalManager {
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
     failure: UnavailableProviderCli | null;
   } {
-    const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
-    if (providerCli?.state === "unavailable") {
-      return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: providerCli };
+    const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution,
+      this.personTrustedFolder(parentSessionId, cwd));
+    if ("failure" in planned) {
+      return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: planned.failure };
     }
+    try {
+      const process = this.spawnPty(planned.command, planned.args, {
+        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: planned.env
+      });
+      this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
+      return {
+        process,
+        agentBrowser: planned.agentBrowser,
+        agentRuntime: planned.agentRuntime,
+        agentOrchestration: planned.agentOrchestration,
+        failure: null
+      };
+    } catch (error) {
+      planned.cleanup();
+      throw error;
+    }
+  }
+
+  /** Everything a launch needs short of the PTY, so an environment can wrap it first. */
+  private planSpawn(
+    id: string,
+    provider: ProviderId,
+    profile: CreateSessionRequest["profile"],
+    cwd: string,
+    resume: ResumeRequest,
+    captureResult: boolean,
+    role: SessionRole,
+    answerCaptureGrantExpiresAt: number | undefined,
+    contribution: LaunchContribution | null,
+    trustedFolder?: string
+  ): PlannedSpawn | { failure: UnavailableProviderCli } {
+    const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
+    if (providerCli?.state === "unavailable") return { failure: providerCli };
     const agentRuntime = provider === "terminal"
       ? null
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd,
         ...(captureResult ? { captureResult: true } : {}),
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
-    const agentOrchestration = role === "orchestrator" && this.agentOrchestration?.isEnabled
+    let pluginTools: string[] = [];
+    try {
+      pluginTools = provider === "terminal" ? [] : this.pluginToolNames(role, provider);
+    } catch {
+      // Plugins never block a launch; the session simply gets no plugin tools.
+    }
+    const bridged = role === "orchestrator" || pluginTools.length > 0;
+    const agentOrchestration = bridged && this.agentOrchestration?.isEnabled
       ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id })
       : null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
+    const cleanup = (): void => {
+      agentBrowser?.cleanup();
+      agentRuntime?.cleanup();
+      agentOrchestration?.cleanup();
+    };
     try {
       // omp and pi take no browser bridge, exactly like grok: the adapter chain below
       // ends in the Kimi MCP configuration, which would hand them foreign launch flags.
@@ -735,7 +1199,10 @@ export class TerminalManager {
           terminalSessionId: id,
           provider,
           cwd,
-          ...(role === "orchestrator" ? { includeOrchestration: true } : {})
+          ...(bridged ? {
+            includeOrchestration: true,
+            orchestrationTools: [...(role === "orchestrator" ? ORCHESTRATION_TOOL_NAMES : []), ...pluginTools]
+          } : {})
         }) ?? null;
       const baseEnvironment = terminalEnvironment();
       const browserEnvironment = agentBrowser?.environment ?? {};
@@ -752,30 +1219,296 @@ export class TerminalManager {
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
+      // A Codex subagent in the person's folder is not asked to trust it again (this run only, never ~/.codex).
+      if (provider === "codex" && trustedFolder) providerArgs.push(...codexTrustArguments([trustedFolder]));
+      // Plugin arguments follow the core's own and precede the resume selection.
+      if (contribution) providerArgs.push(...contribution.args);
       const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
         environment: { ...baseEnvironment, ...providerEnvironment },
         ...(providerCli ? { providerCli } : {}),
-        resumePrevious
+        resumePrevious: resume !== null,
+        ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
+        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {})
       });
+      const session = this.sessions.get(id);
+      if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
+      // A plugin may add to the person's environment, never replace what the core sets for this launch.
+      const contributedEnvironment = contribution?.env ?? {};
+      const collision = Object.keys(contributedEnvironment)
+        .find((key) => key in providerEnvironment || key in (launch.environment ?? {}));
+      if (collision) {
+        throw new Error(`Launch refused: ${contribution!.envSources[collision]} sets ${collision}, which CanvasTTY sets for this launch.`);
+      }
+      const launchEnvironment = { ...contributedEnvironment, ...providerEnvironment, ...launch.environment };
       return {
-        process: this.spawnPty(launch.command, launch.args, {
-          name: "xterm-256color",
-          cols,
-          rows,
-          cwd,
-          env: { ...baseEnvironment, ...providerEnvironment, ...launch.environment }
-        }),
+        command: launch.command,
+        args: launch.args,
+        cwd,
+        env: { ...baseEnvironment, ...launchEnvironment },
+        launchEnvironment,
         agentBrowser,
         agentRuntime,
         agentOrchestration,
-        failure: null
+        cleanup
       };
     } catch (error) {
-      agentBrowser?.cleanup();
-      agentRuntime?.cleanup();
-      agentOrchestration?.cleanup();
+      cleanup();
       throw error;
     }
+  }
+
+  /**
+   * For a subagent: the folder the person chose for the top-level agent it descends from, when that agent runs on this
+   * computer, and this subagent's folder is it or inside it. The subagent's own real folder then needs no trust answer
+   * of the person again; unreadable counts as outside.
+   */
+  private personTrustedFolder(parentSessionId: string | undefined, cwd: string): string | undefined {
+    let root: ManagedSession | undefined;
+    for (let depth = 0, next = parentSessionId; next !== undefined && depth < 64; depth++) {
+      root = this.sessions.get(next);
+      if (!root) return undefined;
+      next = root.metadata.parentSessionId;
+    }
+    if (!root || root.extras.environment) return undefined;
+    try {
+      const folder = realpathSync(cwd);
+      const inside = relative(realpathSync(root.metadata.cwd), folder);
+      return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? folder : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private contributed(session: ManagedSession): boolean {
+    return Boolean(session.extras.options) || Boolean(session.extras.environment) || Boolean(session.extras.environmentChoice)
+      || this.policyApplies(session.metadata.provider);
+  }
+
+  /** A trusted plugin's launch policy applies to this agent: its launches wait for the policy's answer. */
+  private policyApplies(provider: ProviderId): boolean {
+    try { return this.launchPipeline?.hasPolicy?.(provider) === true; } catch { return false; }
+  }
+
+  private pendingEnvironmentReason(choice: SessionEnvironmentChoice): string {
+    return `Needs plugin ${choice.pluginId} (${choice.kind}) to prepare its environment; it is disabled, removed, or its native code is not trusted.`;
+  }
+
+  private environmentUsable(environment: PersistedEnvironmentRef): boolean {
+    return this.environments?.available(environment) ?? false;
+  }
+
+  private unavailableLaunchPlugins(options: Record<string, unknown> | undefined): string[] {
+    if (!options) return [];
+    return this.launchPipeline ? this.launchPipeline.unavailable(options) : Object.keys(options).sort();
+  }
+
+  /**
+   * Launches through plugins: the environment is prepared (or resumed), the chosen launch services
+   * contribute, and the environment wraps the command. The card waits until they answer; a refusal,
+   * timeout, error or conflict leaves it failed with the reason, and nothing runs locally instead.
+   */
+  private launchContributed(
+    id: string,
+    session: ManagedSession,
+    resume: ResumeRequest,
+    failureOrigin: FailureOrigin | null,
+    answerCaptureGrantExpiresAt?: number,
+    restoring = false
+  ): void {
+    const token = ++session.launchToken;
+    const { metadata } = session;
+    void this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt)
+      .catch((error: unknown): LaunchOutcome => {
+        metadata.failureDetails = this.redactSecrets(`Launch refused: ${error instanceof Error ? error.message : String(error)}`);
+        return "failed";
+      })
+      .then((outcome) => {
+        if (outcome === "superseded" || this.sessions.get(id) !== session || session.launchToken !== token) return;
+        if (outcome === "failed" && metadata.status !== "failed") {
+          metadata.status = "failed";
+          metadata.exitCode = 1;
+        }
+        this.emitSession(metadata, outcome === "failed" ? failureOrigin : null);
+        this.schedulePersistence();
+      })
+      .finally(() => this.wakeLaunchWaiters(session));
+  }
+
+  private async runContributedLaunch(
+    id: string,
+    session: ManagedSession,
+    token: number,
+    resume: ResumeRequest,
+    restoring: boolean,
+    answerCaptureGrantExpiresAt: number | undefined
+  ): Promise<LaunchOutcome> {
+    const { metadata } = session;
+    const live = (): boolean => this.sessions.get(id) === session && session.launchToken === token && !session.process;
+    const refuse = (reason: string): LaunchOutcome => {
+      // "Launch refused" leads, so the failure summary quotes the reason as the cause.
+      metadata.failureDetails = this.redactSecrets(`Launch refused: ${reason}`);
+      return "failed";
+    };
+    const environments = this.environments;
+
+    // 1. Place a new session where the person chose. The choice stays saved with the card until the plugin has
+    // prepared it, so a card whose preparation was cut short (quit, crash) or failed never restores locally.
+    const choice = session.extras.environmentChoice;
+    if (choice && !session.extras.environment) {
+      if (!environments) return refuse("plugin environments are not available.");
+      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice });
+      if (!live()) {
+        // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
+        // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.
+        if (placed.ok) void environments.release(placed.environment, id, { keepData: false, reason: "closed" });
+        return "superseded";
+      }
+      if (!placed.ok) return refuse(placed.reason);
+      delete session.extras.environmentChoice;
+      session.environmentReady = true;
+      session.extras.environment = placed.environment;
+      metadata.environment = environmentBadge(placed.environment);
+      if (placed.cwd && placed.cwd !== metadata.cwd) {
+        metadata.cwd = placed.cwd;
+        session.lifecycle = this.lifecycleHooksEnabled
+          ? createProviderLifecycleParser(metadata.provider, metadata.cwd)
+          : null;
+      }
+      this.schedulePersistence();
+    }
+
+    // 2. A saved environment resumes before its first launch in this run.
+    const environment = session.extras.environment;
+    if (environment && !session.environmentReady) {
+      if (!environments?.available(environment)) {
+        return refuse(environments?.unavailableReason(environment) ?? `needs plugin ${environment.pluginId}; it was not started locally.`);
+      }
+      const resumed = await environments.resume(environment, id);
+      if (!live()) return "superseded";
+      if (!resumed.ok) return refuse(`environment stopped: ${resumed.reason}`);
+      session.environmentReady = true;
+    }
+
+    // 3. Chosen launch contributors, and the launch policies that apply.
+    let contribution: LaunchContribution | null = null;
+    const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
+    if (session.extras.options || this.policyApplies(metadata.provider)) {
+      const pipeline = this.launchPipeline;
+      if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
+      const placedIn = session.extras.environment;
+      const prepared = await pipeline.prepare({
+        sessionId: id,
+        provider: metadata.provider,
+        profile: metadata.profile,
+        role: metadata.role,
+        cwd: metadata.cwd,
+        ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
+        restoring,
+        resume: resume !== null,
+        options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
+        environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
+        ...(trustedFolder ? { trustedFolder } : {})
+      });
+      if (!live()) {
+        if (prepared.ok) void prepared.cleanup().catch(() => undefined);
+        return "superseded";
+      }
+      if (!prepared.ok) return refuse(prepared.reason);
+      contribution = prepared;
+      this.addLaunchSecrets(session, prepared.secrets);
+    }
+    const dropContribution = (): void => {
+      void contribution?.cleanup().catch(() => undefined);
+    };
+
+    // 4. The host spawns the PTY; an environment only rewrites what is spawned.
+    let planned: PlannedSpawn | { failure: UnavailableProviderCli };
+    try {
+      planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder);
+    } catch (error) {
+      dropContribution();
+      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+      return "failed";
+    }
+    if ("failure" in planned) {
+      dropContribution();
+      applyLaunchFailure(metadata, planned.failure);
+      return "failed";
+    }
+    const abandon = (): void => {
+      planned.cleanup();
+      dropContribution();
+    };
+    let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
+    if (environment && environments) {
+      if (typeof planned.args === "string") {
+        abandon();
+        return refuse("this provider's Windows batch launcher cannot run in a plugin environment.");
+      }
+      const secretValues = new Set(contribution?.secrets ?? []);
+      const secretEnvNames = Object.keys(contribution?.env ?? {}).filter((key) => secretValues.has(contribution!.env[key]!));
+      // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
+      const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
+        .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
+      const wrapped = await environments.wrap(environment, {
+        sessionId: id,
+        provider: metadata.provider,
+        launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
+        secretEnvNames,
+        takenEnv: new Set(Object.keys(planned.launchEnvironment)),
+        path: planned.env.PATH
+      });
+      if (!live()) {
+        abandon();
+        return "superseded";
+      }
+      if (!wrapped.ok) {
+        abandon();
+        return refuse(wrapped.reason);
+      }
+      this.addLaunchSecrets(session, wrapped.secrets);
+      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd, env: { ...planned.env, ...wrapped.env } };
+    }
+    let process: IPty;
+    try {
+      process = this.spawnPty(spawn.command, spawn.args, {
+        name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
+      });
+    } catch (error) {
+      abandon();
+      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+      return "failed";
+    }
+    session.process = process;
+    this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
+    session.agentBrowser = planned.agentBrowser;
+    session.agentRuntime = planned.agentRuntime;
+    session.agentOrchestration = planned.agentOrchestration;
+    session.launchCleanup = contribution?.cleanup ?? null;
+    metadata.status = initialSessionStatus(metadata.provider);
+    metadata.exitCode = null;
+    metadata.failureDetails = null;
+    this.bindProcess(id, session, process);
+    const runtimeStatus = this.agentRuntime?.currentStatus(id);
+    if (runtimeStatus) metadata.status = runtimeStatus;
+    if (environment) this.describeEnvironment(id, session, environment);
+    return "launched";
+  }
+
+  private addLaunchSecrets(session: ManagedSession, secrets: readonly string[]): void {
+    this.redaction.add(`session:${session.metadata.id}`, secrets);
+  }
+
+  /** Refreshes the card badge from the plugin (for example the worktree's current branch). */
+  private describeEnvironment(id: string, session: ManagedSession, environment: PersistedEnvironmentRef): void {
+    void this.environments?.describe(environment, id).then((described) => {
+      if (!described || this.sessions.get(id) !== session || session.extras.environment !== environment) return;
+      environment.label = described.label;
+      session.metadata.environment = { ...environmentBadge(environment), ...(described.detail ? { detail: described.detail } : {}) };
+      this.emitSession(session.metadata);
+      this.schedulePersistence();
+    }).catch(() => undefined);
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
@@ -784,7 +1517,10 @@ export class TerminalManager {
       if (!current || current !== session || current.process !== process) return;
 
       const lifecycleState = current.lifecycle?.push(data);
-      if (lifecycleState) this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState });
+      if (lifecycleState) current.titleState = lifecycleState;
+      if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
+        this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState }, "title");
+      }
       appendScrollback(current, data);
       this.queueOutput(id, current, data);
     });
@@ -798,14 +1534,18 @@ export class TerminalManager {
       current.metadata.status = exitCode === 0 ? "done" : "failed";
       current.metadata.failureDetails = exitCode === 0
         ? null
-        : terminalFailureDetails(current.bufferChunks.slice(current.bufferStart).join(""));
+        : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
       current.agentBrowser?.cleanup();
       current.agentBrowser = null;
       current.agentRuntime?.cleanup();
       current.agentRuntime = null;
       current.agentOrchestration?.cleanup();
       current.agentOrchestration = null;
+      void current.launchCleanup?.().catch(() => undefined);
+      current.launchCleanup = null;
       this.emitSession(current.metadata);
+      // Recorded at the moment of exit, so a finished agent is never relaunched.
+      this.schedulePersistence();
     });
   }
 
@@ -844,6 +1584,38 @@ export function reachesObservers(payload: TerminalDataEvent | SessionEvent | Ses
 /** A manager event the main process forwards to the renderer. */
 export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
   return !("audience" in payload) || payload.audience !== "observers";
+}
+
+function environmentBadge(environment: PersistedEnvironmentRef): NonNullable<SessionMetadata["environment"]> {
+  return { pluginId: environment.pluginId, kind: environment.kind, label: environment.label };
+}
+
+/**
+ * Claude's title shows the same «✳» when its turn ended and while its permission prompt waits, and it can reach main
+ * before or after the hook that tells them apart (Stop, PermissionRequest). Once Claude's hooks have reported for this
+ * card they alone end a turn; the title only reports one starting. Without them (hooks off, or a remote run without a
+ * bridge) the title's idle stands.
+ */
+function titleDefersToHooks(session: ManagedSession, state: "idle" | "working" | "needs_approval"): boolean {
+  return state !== "working" && session.metadata.provider === "claude" && session.hookSignals !== undefined;
+}
+
+/** Keys that answer a prompt: Enter, a lone Esc, or a choice digit. */
+const ANSWERS_PROMPT = /\r|^\u001b$|^[1-9]$/;
+const ANSWERED_PROMPT_SETTLE_MS = 3_000;
+
+/** "auto" ran as accept-edits because a launch contributor marked a third-party model; shown on the card. */
+function setAutoDowngraded(metadata: SessionMetadata, downgraded: boolean): void {
+  if (downgraded) metadata.autoDowngraded = true;
+  else delete metadata.autoDowngraded;
+}
+
+function missingLaunchPlugins(pluginIds: readonly string[]): string {
+  return `needs plugin ${pluginIds.join(", ")} for its launch options; it is disabled, removed, or its native code is not trusted.`;
+}
+
+function failWith(message: string): never {
+  throw new Error(message);
 }
 
 function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProviderCli): void {
@@ -902,7 +1674,8 @@ const SESSION_ROLES = new Set<SessionRole>(["agent", "orchestrator", "subagent"]
 
 function assertCreateRequest(request: CreateSessionRequest): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
-  if (request.profile !== "normal" && request.profile !== "yolo") throw new Error("Unknown launch profile.");
+  if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
+  if (request.profile === "auto" && !hasAutoMode(request.provider)) throw new Error(`${request.provider} has no auto mode; use the normal profile.`);
   if (request.role === "orchestrator" && request.provider === "terminal") throw new Error("A plain terminal cannot be an orchestrator.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");
   if (!isPoint(request.position)) throw new Error("Session position is invalid.");

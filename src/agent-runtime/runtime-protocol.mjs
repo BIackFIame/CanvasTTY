@@ -19,3 +19,58 @@ export const AGENT_RUNTIME_ENV = Object.freeze({
 });
 
 export const RUNTIME_STATES = Object.freeze(["idle", "working", "needs_approval"]);
+
+// A provider's own conversation id, as its lifecycle hook reports it, lets a restored
+// card resume exactly that conversation. It ends up in the provider's argv, so only
+// the shapes those CLIs issue are accepted: canonical UUIDs for Codex threads and
+// Claude sessions (lower-cased), `ses_` tokens for OpenCode sessions.
+const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPENCODE_SESSION_RE = /^ses_[A-Za-z0-9]{1,120}$/;
+
+export function normalizeThreadId(provider, value) {
+  if (typeof value !== "string") return undefined;
+  if (provider === "codex" || provider === "claude") {
+    return CANONICAL_UUID_RE.test(value) ? value.toLowerCase() : undefined;
+  }
+  if (provider === "opencode") return OPENCODE_SESSION_RE.test(value) ? value : undefined;
+  return undefined;
+}
+
+// Decision hooks (permission-gate.mjs): before a matched tool call runs, the agent's PreToolUse hook (Claude Code,
+// Codex, Qwen Code) or OpenCode's CanvasTTY plugin asks CanvasTTY over this socket. The answer is base protection's
+// deny or the plugins' merged verdict. The helper waits at most `helperMs`; the gateway answers within `gatewayMs`.
+export const PERMISSION_GATE = Object.freeze({
+  helperMs: 12_000,
+  gatewayMs: 10_000,
+  hookSeconds: 15,
+  // The tool input travels whole up to this many bytes of JSON; beyond that only a preview and its sha256.
+  toolInputBytes: 40 * 1024,
+  toolInputPreviewChars: 8 * 1024,
+  toolNameChars: 200,
+  messageChars: 1_000
+});
+// Set to "1" for an OpenCode session launched with decision hooks: its plugin then checks each shell and file call.
+export const OPENCODE_DECISIONS_ENV = "CANVASTTY_RUNTIME_DECISIONS";
+// A decision service may ask for more time than the default 3 s (`decide.timeoutMs`, 1-60 s), for example to ask a
+// local model. The session's hook, helper and gateway deadlines are set at launch from the longest such budget and
+// passed to the helper in this variable; without it the defaults above hold.
+export const DECISION_BUDGET_ENV = "CANVASTTY_RUNTIME_DECISION_MS";
+export const DEFAULT_DECIDE_TIMEOUT_MS = 3_000;
+export const MIN_DECIDE_TIMEOUT_MS = 1_000;
+export const MAX_DECIDE_TIMEOUT_MS = 60_000;
+
+/** The gate's deadlines for a decision budget: never below PERMISSION_GATE, each a little longer than the one inside it. */
+export function permissionGateTimings(budgetMs) {
+  const budget = Number.isInteger(budgetMs)
+    ? Math.min(MAX_DECIDE_TIMEOUT_MS, Math.max(DEFAULT_DECIDE_TIMEOUT_MS, budgetMs))
+    : DEFAULT_DECIDE_TIMEOUT_MS;
+  const gatewayMs = Math.max(PERMISSION_GATE.gatewayMs, budget + 2_000);
+  const helperMs = gatewayMs + (PERMISSION_GATE.helperMs - PERMISSION_GATE.gatewayMs);
+  return { budgetMs: budget, gatewayMs, helperMs, hookSeconds: Math.ceil(helperMs / 1_000) + 3 };
+}
+
+/** The helper's wait from its environment: the launch's budget, or the default. */
+export function helperDeadlineMs(env) {
+  const raw = env?.[DECISION_BUDGET_ENV];
+  return permissionGateTimings(typeof raw === "string" && /^\d{1,6}$/.test(raw) ? Number(raw) : undefined).helperMs;
+}

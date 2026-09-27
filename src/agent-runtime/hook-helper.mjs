@@ -40,6 +40,15 @@ const turnId = firstString(
   input?.prompt_id,
   input?.promptId
 );
+// The provider's own conversation id; runtime-client keeps it only in a shape that provider issues.
+const threadId = firstString(
+  input?.session_id,
+  input?.sessionId,
+  input?.thread_id,
+  input?.threadId,
+  input?.conversation_id,
+  input?.conversationId
+);
 const finalAnswer = state === "idle" && event === "Stop" && typeof input?.last_assistant_message === "string"
   ? input.last_assistant_message
   : null;
@@ -55,6 +64,7 @@ await reportLifecycle({
   state,
   event,
   turnId,
+  ...(threadId ? { threadId } : {}),
   ...(result === undefined ? {} : { result }),
   ...(lastAssistantMessage === undefined ? {} : { lastAssistantMessage })
 });

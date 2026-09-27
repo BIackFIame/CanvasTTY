@@ -1,24 +1,37 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   AgentProviderId,
   AppSettings,
   LaunchProfileId,
-  LaunchRole
+  LaunchRole,
+  PluginLaunchValues,
+  ProviderId,
+  SessionEnvironmentChoice
 } from "../../../../shared/contracts";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
+import { LaunchOptionsSection } from "./LaunchOptionsSection";
+import { hasAutoMode } from "../../../../shared/autoMode";
 
 interface AgentLaunchDialogProps {
-  provider: AgentProviderId | null;
+  /** "terminal" opens it only while a plugin environment applies to terminals (folder and Where). */
+  provider: ProviderId | null;
   settings: AppSettings;
   onClose(): void;
   onAcknowledge(provider: AgentProviderId): Promise<void>;
   /** Persists `agentControlEnabled: true`; only ever called from the explicit button. */
   onEnableAgentControl(): Promise<void>;
-  onLaunch(provider: AgentProviderId, profile: LaunchProfileId, cwd: string, role: LaunchRole): Promise<void>;
+  onLaunch(
+    provider: ProviderId,
+    profile: LaunchProfileId,
+    cwd: string,
+    role: LaunchRole,
+    launchOptions?: Record<string, PluginLaunchValues>,
+    environment?: SessionEnvironmentChoice
+  ): Promise<void>;
 }
 
 export function AgentLaunchDialog({
@@ -35,6 +48,10 @@ export function AgentLaunchDialog({
   const [confirmDanger, setConfirmDanger] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [launchOptions, setLaunchOptions] = useState<Record<string, PluginLaunchValues>>({});
+  const changeLaunchOptions = useCallback((options: Record<string, PluginLaunchValues>) => setLaunchOptions(options), []);
+  const [environment, setEnvironment] = useState<SessionEnvironmentChoice | null>(null);
+  const changeEnvironment = useCallback((choice: SessionEnvironmentChoice | null) => setEnvironment(choice), []);
   const locale = settings.locale;
 
   useEffect(() => {
@@ -57,8 +74,9 @@ export function AgentLaunchDialog({
 
   if (!provider) return null;
 
-  const acknowledged = settings.acknowledgedDangerousProfiles.includes(provider);
-  const dangerKey = PROVIDERS[provider].dangerKey!;
+  const isTerminal = provider === "terminal";
+  const acknowledged = isTerminal || settings.acknowledgedDangerousProfiles.includes(provider);
+  const dangerKey = PROVIDERS[provider].dangerKey ?? "confirmLaunch";
   // An orchestrator without the endpoint would be a plain session with a
   // misleading badge, so the launch waits for the explicit enable button.
   const endpointMissing = role === "orchestrator" && !settings.agentControlEnabled;
@@ -107,8 +125,9 @@ export function AgentLaunchDialog({
     setBusy(true);
     setError(null);
     try {
-      if (profile === "yolo" && !acknowledged) await onAcknowledge(provider);
-      await onLaunch(provider, profile, cwd, role);
+      if (profile === "yolo" && !acknowledged && !isTerminal) await onAcknowledge(provider);
+      await onLaunch(provider, profile, cwd, role, Object.keys(launchOptions).length > 0 ? launchOptions : undefined,
+        environment ?? undefined);
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "launchFailed"));
@@ -121,7 +140,7 @@ export function AgentLaunchDialog({
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section className="launch-dialog" role="dialog" aria-modal="true" aria-label={`${t(locale, "launchAgent")}: ${PROVIDERS[provider].label}`}>
+      <section className="launch-dialog" role="dialog" aria-modal="true" aria-label={isTerminal ? t(locale, "launchTerminal") : `${t(locale, "launchAgent")}: ${PROVIDERS[provider].label}`}>
         <div className="launch-dialog__toolbar">
           <button className="launch-dialog__close" type="button" onClick={onClose} aria-label={t(locale, "close")}><UiIcon name="close" size={18} /></button>
         </div>
@@ -144,20 +163,26 @@ export function AgentLaunchDialog({
           </div>
         </div>
 
-        <div className="role-row" role="group" aria-label={t(locale, "launchRole")}>
+        {!isTerminal && <div className="role-row" role="group" aria-label={t(locale, "launchRole")}>
           <button className={role === "agent" ? "profile-button profile-button--active" : "profile-button"} type="button" aria-pressed={role === "agent"} onClick={() => setRole("agent")}>{t(locale, "roleAgent")}</button>
           <button className={role === "orchestrator" ? "profile-button profile-button--active" : "profile-button"} type="button" aria-pressed={role === "orchestrator"} onClick={() => setRole("orchestrator")}>{t(locale, "roleOrchestrator")}</button>
-        </div>
+        </div>}
 
         <div className="profile-row">
+          {!isTerminal && <>
           <button className={profile === "normal" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
             setProfile("normal");
             setConfirmDanger(false);
           }}>{t(locale, "normal")}</button>
+          {hasAutoMode(provider) && <button className={profile === "auto" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
+            setProfile("auto");
+            setConfirmDanger(false);
+          }}>{t(locale, "autoProfile")}</button>}
           <button className={profile === "yolo" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
             setProfile("yolo");
             setConfirmDanger(false);
           }}>{t(locale, "yolo")}</button>
+          </>}
           <button className="launch-submit" type="button" disabled={busy || endpointMissing} onClick={() => void submit()}>
             {busy ? <span className="launch-submit__busy" /> : <UiIcon name="arrow" size={38} />}
           </button>
@@ -177,6 +202,9 @@ export function AgentLaunchDialog({
           </div>
         )}
 
+        <LaunchOptionsSection provider={provider} locale={locale} onChange={changeLaunchOptions} onEnvironmentChange={changeEnvironment} />
+
+        {profile === "auto" && <div className="role-note"><span>{t(locale, "autoProfileNote")}</span></div>}
         {profile === "yolo" && (
           <div className={`danger-note ${confirmDanger ? "danger-note--confirm" : ""}`}>
             <strong>{t(locale, dangerKey)}</strong>

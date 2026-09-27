@@ -1,7 +1,9 @@
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 import type { ProviderId } from "../../shared/contracts.ts";
+import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
+import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
 import {
   providerTerminalBatchCommandLine,
   type ProviderCliResolution
@@ -19,13 +21,18 @@ interface LaunchResolutionOptions {
   fileExists?: (path: string) => boolean;
   providerCli?: ProviderCliResolution;
   resumePrevious?: boolean;
+  resumeThreadId?: string;
+  /** A launch contributor runs the CLI on another model: "auto" becomes accept-edits (autoModeArguments). */
+  thirdPartyModel?: boolean;
 }
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const WINDOWS_NATIVE_EXTENSIONS = [".exe", ".com"];
 
 export function resolveTerminalLaunch(
   provider: ProviderId,
-  profile: "normal" | "yolo",
+  profile: LaunchProfile,
   agentBrowserArgs: string[] = [],
   options: LaunchResolutionOptions = {}
 ): TerminalLaunch {
@@ -48,10 +55,16 @@ export function resolveTerminalLaunch(
   const launchEnvironment = profile === "yolo" && provider === "opencode"
     ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
     : undefined;
+  const auto = profile === "auto";
   const providerArgs = [
     ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
-    ...agentBrowserArgs,
-    ...(options.resumePrevious ? RESUME_ARGUMENTS[provider] : [])
+    ...(auto ? autoModeArguments(provider, options.thirdPartyModel === true) : []),
+    // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
+    // Its sandbox for "auto" joins the same one.
+    ...(provider === "claude"
+      ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
+      : agentBrowserArgs),
+    ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {
     ...providerCli.environment,
@@ -72,11 +85,54 @@ export function resolveTerminalLaunch(
   };
 }
 
+function resolveResumeArguments(
+  provider: Exclude<ProviderId, "terminal">,
+  resumeThreadId?: string
+): string[] {
+  if (provider === "codex") {
+    if (resumeThreadId) {
+      if (!UUID_REGEX.test(resumeThreadId)) {
+        throw new Error(`Invalid Codex thread ID format: "${resumeThreadId}". Expected a canonical UUID.`);
+      }
+      return ["resume", resumeThreadId.toLowerCase()];
+    }
+    return ["resume"];
+  }
+  const byId = RESUME_BY_ID_ARGUMENTS[provider];
+  if (byId && resumeThreadId) {
+    const threadId = normalizeThreadId(provider, resumeThreadId);
+    if (!threadId) throw new Error(`Invalid ${provider} session ID format: "${resumeThreadId}".`);
+    return byId(threadId);
+  }
+  return RESUME_ARGUMENTS[provider];
+}
+
+// The same exact resume for the other CLIs whose hook reports that CLI's own session
+// id, each checked against its --help: `claude -r, --resume [value]`,
+// `opencode -s, --session <id>`. Everything else continues with RESUME_ARGUMENTS.
+const RESUME_BY_ID_ARGUMENTS: Partial<Record<Exclude<ProviderId, "terminal" | "codex">, (id: string) => string[]>> = {
+  claude: (id) => ["--resume", id],
+  opencode: (id) => ["--session", id]
+};
+
+export function canResumeThreadById(provider: ProviderId): boolean {
+  return provider === "codex" || (provider !== "terminal" && RESUME_BY_ID_ARGUMENTS[provider] !== undefined);
+}
+
+/** Without an id, Codex opens its own resume picker, so the person chooses; nothing is guessed. */
+export function resumeWithoutIdOpensPicker(provider: ProviderId): boolean {
+  return provider === "codex";
+}
+
+/** The CLI has a "latest conversation in this folder" flag. */
+export function canResumeLatestConversation(provider: ProviderId): boolean {
+  return provider !== "terminal" && provider !== "codex" && RESUME_ARGUMENTS[provider].length > 0;
+}
+
 // Per-provider instead of a fallthrough: the old `return ["--continue"]` default would
 // have handed an unverified flag to whatever provider was added next. A missing entry is
 // now a compile error.
-const RESUME_ARGUMENTS: Record<Exclude<ProviderId, "terminal">, string[]> = {
-  codex: ["resume", "--last"],
+const RESUME_ARGUMENTS: Record<Exclude<ProviderId, "terminal" | "codex">, string[]> = {
   claude: ["--continue"],
   qwen: ["--continue"],
   kimi: ["--continue"],
@@ -179,4 +235,106 @@ function findWindowsNativeCommand(
     }
   }
   return null;
+}
+
+/**
+ * Claude Code 2.1 applies only the last `--settings` it is given (measured with 2.1.281: a hook in an earlier inline
+ * JSON never ran). Every inline JSON value, in either form (`--settings <json>` or `--settings=<json>`), is merged
+ * into the first one, in order: hook lists are concatenated per event, objects such as `env` are merged key by key
+ * (later wins), other keys are replaced. A settings file path is left alone; plugins cannot pass one (a settings file
+ * among their launch files is read and checked by the launch pipeline, then passed inline).
+ */
+export function mergeClaudeInlineSettings(given: readonly string[]): string[] {
+  const args = given.flatMap((argument) => argument.startsWith(SETTINGS_EQUALS) && parseInlineSettings(argument.slice(SETTINGS_EQUALS.length))
+    ? ["--settings", argument.slice(SETTINGS_EQUALS.length)]
+    : [argument]);
+  const positions: number[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === "--settings" && parseInlineSettings(args[index + 1]!)) positions.push(index);
+  }
+  if (positions.length < 2) return args;
+  const merged: Record<string, unknown> = {};
+  for (const position of positions) {
+    for (const [key, value] of Object.entries(parseInlineSettings(args[position + 1]!)!)) {
+      const current = merged[key];
+      if (key === "hooks" && plainObject(current) && plainObject(value)) {
+        const hooks: Record<string, unknown> = { ...current };
+        for (const [event, list] of Object.entries(value)) {
+          const earlier = hooks[event];
+          hooks[event] = Array.isArray(earlier) && Array.isArray(list) ? [...earlier, ...list] : list;
+        }
+        merged[key] = hooks;
+      } else if (plainObject(current) && plainObject(value)) merged[key] = { ...current, ...value };
+      else merged[key] = value;
+    }
+  }
+  const drop = new Set(positions.slice(1).flatMap((position) => [position, position + 1]));
+  const next = args.filter((_argument, index) => !drop.has(index));
+  next[positions[0]! + 1] = JSON.stringify(merged);
+  return next;
+}
+
+const SETTINGS_EQUALS = "--settings=";
+
+export function parseInlineSettings(value: string): Record<string, unknown> | null {
+  if (!value.trimStart().startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return plainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// What a plugin launch contributor may never append. A trusted plugin already runs as the
+// user, so this is not a sandbox: it keeps an ordinary launch from being turned into an
+// unattended one behind the profile the person chose, and leaves conversation selection
+// to the core's restore rules. Every provider's bypass flag is listed for every provider.
+const CORE_OWNED_FLAGS = new Set<string>([
+  ...Object.values(DANGEROUS_ARGUMENTS).flat().filter((argument) => argument.startsWith("-")),
+  "--full-auto", "--approve-for-me", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
+  "--continue", "--resume", "--session", "--last", "--conversation", "--fork-session"
+]);
+const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
+  claude: ["-c", "-r"],
+  cursor: ["-c", "-r"],
+  qwen: ["-c", "-r", "-y"],
+  opencode: ["-c", "-s"],
+  codex: ["-a", "-s"]
+};
+// `-c hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust); `approvals_reviewer` is auto's.
+const CORE_OWNED_WORDS = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|bypass|^hooks[.=]/i;
+const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
+  codex: ["resume", "fork", "exec"]
+};
+
+/** Claude settings keys that decide approvals, the hooks or the sandbox; a plugin's settings may carry e.g. `env` only. */
+const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper"];
+// Claude 2.1.281 --help: `--bare` and `--safe-mode` skip hooks; `--allowedTools` approves tools without asking;
+// `--permission-prompt-tool` / `--permission-prompts` decide who answers permission prompts.
+const CLAUDE_CORE_OWNED_FLAGS = new Set(["--bare", "--safe-mode", "--allowedTools", "--allowed-tools", "--permission-prompt-tool", "--permission-prompts"]);
+
+/** The core-owned key a plugin's Claude settings object sets, or null. */
+export function claudeCoreSettingsKey(settings: Record<string, unknown>): string | null {
+  return CLAUDE_CORE_SETTINGS.find((key) => key in settings) ?? null;
+}
+
+export function coreOwnedLaunchArgument(provider: ProviderId, argument: string): boolean {
+  const flag = argument.split("=", 1)[0]!;
+  if (provider === "claude") {
+    if (CLAUDE_CORE_OWNED_FLAGS.has(flag)) return true;
+    // `--settings=<value>` in one argument: inline JSON is checked like a separate value; a file cannot be checked here.
+    const equals = argument.startsWith(SETTINGS_EQUALS);
+    const inline = parseInlineSettings(equals ? argument.slice(SETTINGS_EQUALS.length) : argument);
+    if (equals && !inline) return true;
+    if (inline && claudeCoreSettingsKey(inline)) return true;
+  }
+  return CORE_OWNED_FLAGS.has(flag)
+    || Boolean(CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag))
+    || Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument))
+    || CORE_OWNED_WORDS.test(argument);
 }

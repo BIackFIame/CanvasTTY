@@ -16,6 +16,7 @@ import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
+import { DECISION_BUDGET_ENV, OPENCODE_DECISIONS_ENV, permissionGateTimings } from "../../../agent-runtime/runtime-protocol.mjs";
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -76,6 +77,8 @@ export interface ProviderRuntimeLaunchOptions {
   environment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   pluginHooks?: RuntimePluginHookSource;
+  /** The decision hook (permission-gate.mjs); without it decision hooks are never installed. */
+  permissionGate?: RuntimeHookHelperLaunch;
 }
 
 export interface PreparedProviderRuntimeLaunch {
@@ -112,6 +115,12 @@ export class ProviderRuntimeLaunchAdapters {
     if (!isAbsolute(options.openCodePluginPath)) {
       throw new Error("OpenCode lifecycle plugin path must be absolute.");
     }
+    if (options.permissionGate) {
+      validateHelper(options.permissionGate);
+      if (options.permissionGate.args.length !== 1 || !isAbsolute(options.permissionGate.args[0])) {
+        throw new Error("Permission gate must reference one absolute script path.");
+      }
+    }
     if (options.pluginHooks) {
       validateHelper(options.pluginHooks.runner);
       if (!isAbsolute(options.pluginHooks.registryPath)) {
@@ -143,17 +152,29 @@ export class ProviderRuntimeLaunchAdapters {
     );
   }
 
+  /**
+   * `decisions` adds the decision hook: PreToolUse for Claude Code, Codex and Qwen Code, the CanvasTTY plugin's
+   * guard for OpenCode. Without it the arguments are exactly what they were before decision hooks existed.
+   * `decisionBudgetMs` (a decision service's `decide.timeoutMs`) lengthens the hook's deadlines to fit it.
+   */
   prepare(
     provider: AgentProvider,
     terminalSessionId: string,
-    coreHooksEnabled = true
+    coreHooksEnabled = true,
+    decisions = false,
+    decisionBudgetMs?: number
   ): PreparedProviderRuntimeLaunch {
     const pluginRegistrations = this.options.pluginHooks?.list(provider) ?? [];
-    const pluginCommands = this.pluginHookCommands(provider, pluginRegistrations);
+    const gate = decisions && this.decisionsSupported(provider);
+    const pluginCommands = [
+      ...this.pluginHookCommands(provider, pluginRegistrations),
+      ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs) : [])
+    ];
+    const openCodeDecisions = gate && provider === "opencode";
     // Only providers with a hook adapter get lifecycle configuration. Anything else (omp, pi,
     // cursor, minimax, devin, antigravity) must never reach Grok's shared hook overlay.
     const hasHooks = HOOK_PROVIDERS.has(provider)
-      && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && pluginRegistrations.length > 0));
+      && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && (pluginRegistrations.length > 0 || openCodeDecisions)));
     const environment = hasHooks
       ? {
         ...(pluginRegistrations.length > 0 ? {
@@ -191,6 +212,7 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], {
         ...environment,
         ...pluginEnvironment,
+        ...(openCodeDecisions ? { [OPENCODE_DECISIONS_ENV]: "1", ...budgetEnvironment(decisionBudgetMs) } : {}),
         [OPENCODE_CONFIG_CONTENT]: openCodeLifecycleConfig(
           this.environment[OPENCODE_CONFIG_CONTENT],
           this.options.openCodePluginPath
@@ -306,6 +328,11 @@ export class ProviderRuntimeLaunchAdapters {
       this.grokOverlaySignature = null;
       overlay?.cleanup();
     });
+  }
+
+  /** Whether this provider can take the decision hook: Claude Code, Codex, Qwen Code (PreToolUse) and OpenCode. */
+  decisionsSupported(provider: AgentProvider): boolean {
+    return Boolean(this.options.permissionGate) && (provider === "opencode" || Object.hasOwn(DECISION_TOOL_MATCHERS, provider));
   }
 
   private pluginHookCommands(
@@ -483,6 +510,41 @@ const PLUGIN_HOOK_TRIGGERS: Record<AgentProvider, Partial<Record<PluginAgentHook
   antigravity: {}
 };
 
+type DecisionHookProvider = "claude" | "codex" | "qwen";
+
+/**
+ * Tools the decision hook looks at: shells and file writes. Claude and Codex match exact names separated by `|`;
+ * Qwen matches a regular expression on its tool ids.
+ */
+const DECISION_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
+  claude: "Bash|Write|Edit|MultiEdit|NotebookEdit",
+  codex: "Bash|apply_patch|Edit|Write",
+  qwen: "^(run_shell_command|write_file|edit|replace)$"
+};
+
+export function decisionHookCommands(
+  provider: DecisionHookProvider,
+  gate: RuntimeHookHelperLaunch,
+  platform: NodeJS.Platform,
+  decisionBudgetMs?: number
+): ProviderHookCommand[] {
+  validateHelper(gate);
+  const { hookSeconds } = permissionGateTimings(decisionBudgetMs);
+  return [{
+    event: "PreToolUse",
+    matcher: DECISION_TOOL_MATCHERS[provider],
+    command: commandWithEnvironment([gate.command, ...gate.args, "pretool"], { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs) }, platform),
+    // Qwen hook timeouts are milliseconds; Claude's and Codex's are seconds.
+    timeout: provider === "qwen" ? hookSeconds * 1_000 : hookSeconds
+  }];
+}
+
+/** The helper learns a longer decision budget from its environment; the default budget adds nothing. */
+function budgetEnvironment(decisionBudgetMs: number | undefined): Record<string, string> {
+  const { budgetMs } = permissionGateTimings(decisionBudgetMs);
+  return decisionBudgetMs === undefined || budgetMs === permissionGateTimings().budgetMs ? {} : { [DECISION_BUDGET_ENV]: String(budgetMs) };
+}
+
 export function claudeLifecycleArgs(
   helper: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform = process.platform
@@ -524,7 +586,7 @@ function codexHookArgs(
     ...(coreHooksEnabled ? lifecycleCommands(CODEX_HOOKS, helper, platform) : []),
     ...pluginCommands
   ]);
-  return Object.entries(grouped).flatMap(([event, mappings]) => {
+  const events = Object.entries(grouped).flatMap(([event, mappings]) => {
     const entries = mappings.map((mapping) => {
       const matcher = mapping.matcher ? `matcher=${tomlString(mapping.matcher)},` : "";
       const hook = `type="command",command=${tomlString(mapping.command)},timeout=${mapping.timeout}`;
@@ -532,6 +594,47 @@ function codexHookArgs(
     }).join(",");
     return ["-c", `hooks.${event}=[${entries}]`];
   });
+  return events.length ? [...events, ...codexHookTrustArgs(grouped)] : events;
+}
+
+/** Where Codex files the hooks it reads from `-c` overrides (0.156: "Hooks need review" names this source). */
+const CODEX_SESSION_FLAGS_SOURCE = "/<session-flags>/config.toml";
+
+/**
+ * Codex (0.156) stops a new session at "Hooks need review" until each hook is trusted, and an unattended subagent then
+ * waits for the person. Codex keys a hook's trust by `<source>:<event>:<group>:<handler>` and stores `trusted_hash`, the
+ * SHA-256 of the handler's normalized JSON. CanvasTTY states that trust for the hooks it adds itself (its lifecycle
+ * helper, the decision gate and the runner of plugin hooks the person trusted in CanvasTTY), only for this run, in the
+ * same `-c` layer. A project's or the person's own hooks have other sources, so they, or a changed hook, still ask the
+ * person. Nothing is written to CODEX_HOME.
+ */
+function codexHookTrustArgs(grouped: Record<string, ProviderHookCommand[]>): string[] {
+  const entries = Object.entries(grouped).flatMap(([event, mappings]) => mappings.map((mapping, group) => {
+    const name = event.replace(/(?<=[a-z0-9])([A-Z])/gu, "_$1").toLowerCase();
+    return `${tomlString(`${CODEX_SESSION_FLAGS_SOURCE}:${name}:${group}:0`)}={trusted_hash=${tomlString(codexHookTrustedHash(name, mapping))}}`;
+  }));
+  return ["-c", `hooks.state={${entries.join(",")}}`];
+}
+
+/** Codex's trusted_hash: sorted-key compact JSON of the event, the handler (as Codex fills it in) and the matcher. */
+export function codexHookTrustedHash(eventName: string, mapping: Pick<ProviderHookCommand, "command" | "timeout" | "matcher">): string {
+  const identity = {
+    event_name: eventName,
+    hooks: [{ async: false, command: mapping.command, timeout: mapping.timeout, type: "command" }],
+    ...(mapping.matcher ? { matcher: mapping.matcher } : {})
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+}
+
+/**
+ * Codex asks "Trust this folder?" once per folder. `-c projects={"<dir>"={trust_level="trusted"}}` answers it for exactly
+ * these folders and this run (codex 0.156.1: it keeps config.toml's trusted folders and writes nothing; the dotted
+ * `projects."<dir>".trust_level` override does not skip the question).
+ */
+export function codexTrustArguments(folders: readonly string[]): string[] {
+  const unique = [...new Set(folders.filter((folder) => isAbsolute(folder)))];
+  if (unique.length === 0) return [];
+  return ["-c", `projects={${unique.map((folder) => `${tomlString(folder)}={trust_level="trusted"}`).join(",")}}`];
 }
 
 export function createQwenHookSettings(options: {

@@ -1,5 +1,6 @@
 import type {
   AgentProviderId,
+  CreateSessionRequest,
   LaunchProfileId,
   SessionSnapshot
 } from "../../shared/contracts.ts";
@@ -19,8 +20,10 @@ export interface SpawnAgentRequest {
   cwd: string;
   profile?: LaunchProfileId;
   title?: string;
-  /** Prompt written into the new agent's PTY immediately after launch. */
+  /** Prompt written into the new agent's PTY once its launch has started (after its plugins prepared it). */
   initialPrompt?: string;
+  /** Plugin launch options, checked by the launch exactly like the launcher's. */
+  launchOptions?: CreateSessionRequest["launchOptions"];
 }
 
 export interface AgentObservation {
@@ -37,6 +40,17 @@ export interface AgentResult {
   output: string;
 }
 
+/** The agent's launch did not start, so text meant for it was dropped (never queued for a later launch). */
+export class PromptNotDeliveredError extends Error {
+  readonly sessionId: string;
+
+  constructor(sessionId: string, message: string) {
+    super(message);
+    this.name = "PromptNotDeliveredError";
+    this.sessionId = sessionId;
+  }
+}
+
 export class AgentControlService {
   private readonly terminals: TerminalManager;
 
@@ -44,7 +58,12 @@ export class AgentControlService {
     this.terminals = terminals;
   }
 
-  spawn(request: SpawnAgentRequest): SessionSnapshot {
+  /**
+   * Creates the subagent card. With an initial prompt it resolves only once the prompt reached the agent's PTY
+   * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
+   * start; the card stays, so the caller can inspect or cancel it.
+   */
+  spawn(request: SpawnAgentRequest): Promise<SessionSnapshot> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
@@ -69,22 +88,23 @@ export class AgentControlService {
       },
       ...(request.title !== undefined ? { title: request.title } : {}),
       role: "subagent",
-      parentSessionId: parent.id
+      parentSessionId: parent.id,
+      ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {})
     });
-    if (request.initialPrompt !== undefined && request.initialPrompt.length > 0) {
-      this.send(created.id, request.initialPrompt);
-    }
-    return created;
+    if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
+    return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
+      .then(() => this.terminals.list().find((session) => session.id === created.id) ?? created);
   }
 
-  send(sessionId: string, text: string, submit = true): void {
+  /** Validates at once (throws); resolves once the text reached the agent, and rejects when it did not. */
+  send(sessionId: string, text: string, submit = true): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (!capabilities.send) throw new Error(`${session.provider} cannot receive prompts.`);
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
-    this.terminals.input(sessionId, submit ? `${text}\r` : text);
+    return this.deliver(sessionId, submit ? `${text}\r` : text, "text");
   }
 
   status(sessionId: string): SessionSnapshot {
@@ -121,7 +141,8 @@ export class AgentControlService {
     return {
       sessionId: session.id,
       status: session.status,
-      output: tail(this.terminals.readBuffer(sessionId).buffer, maxChars)
+      // The whole buffer is masked first: a cut inside a secret would leave a tail no pattern recognizes.
+      output: tail(this.redact(this.terminals.readBuffer(sessionId).buffer), maxChars)
     };
   }
 
@@ -141,13 +162,26 @@ export class AgentControlService {
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
       exitCode: session.exitCode,
-      output: tail(buffer, MAX_OBSERVE_CHARS)
+      output: tail(this.redact(buffer), MAX_OBSERVE_CHARS)
     };
   }
 
   cancel(sessionId: string): void {
     this.requireSession(sessionId);
     this.terminals.dispose(sessionId);
+  }
+
+  /** Through the terminal manager's one delivery rule: exactly once, into the launch that is starting now. */
+  private async deliver(sessionId: string, data: string, what: "prompt" | "text"): Promise<void> {
+    const delivery = await this.terminals.deliverInput(sessionId, data);
+    if (!delivery.delivered) {
+      throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
+    }
+  }
+
+  /** Plugin launch secrets never reach another agent through observed output. */
+  private redact(text: string): string {
+    return typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text;
   }
 
   private requireSession(sessionId: string): SessionSnapshot {

@@ -4,7 +4,8 @@ export type { CanvasLauncherItemId, ProviderId };
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
-export type LaunchProfileId = "normal" | "yolo";
+/** "auto" only for agents with a native auto mode (autoMode.ts); "normal" is the default. */
+export type LaunchProfileId = import("./autoMode.ts").LaunchProfile;
 /**
  * What a session is for, independent of its normal/YOLO profile: an ordinary
  * agent, or an orchestrator that drives other sessions through the local
@@ -13,6 +14,14 @@ export type LaunchProfileId = "normal" | "yolo";
 export type LaunchRole = "agent" | "orchestrator";
 export type SessionRole = LaunchRole | "subagent";
 export type SessionStatus = "idle" | "working" | "needs_approval" | "unavailable" | "done" | "failed";
+/** Settings → General, "Agent sessions after restart". */
+export type SessionRestoreMode = "off" | "reopen" | "continue";
+/**
+ * Why a restored card is not simply running as before: it started a new
+ * conversation because another card of that CLI shares its folder, or it is
+ * held stopped because the environment it ran in is unavailable.
+ */
+export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable" | "environment-pending" | "plugin-unavailable";
 export type PaletteId = "sage" | "lilac" | "night";
 export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom";
 export type SessionRowColorMode = "monochrome" | "status";
@@ -185,7 +194,7 @@ export interface CameraState extends Point {
 
 export interface AppSettings {
   locale: LocaleId;
-  restoreTerminalSessions: boolean;
+  sessionRestoreMode: SessionRestoreMode;
   persistCanvasRegions: boolean;
   persistStickyNotes: boolean;
   palette: PaletteId;
@@ -198,6 +207,8 @@ export interface AppSettings {
   radialLauncherEnabled: boolean;
   radialLauncherItems: RadialLauncherItemId[];
   agentLifecycleHooksEnabled: boolean;
+  /** Base protection: deny-only hard rules for agents' tool calls (writes outside the folder, sudo, …). */
+  baseProtectionEnabled: boolean;
   uiScale: number;
   canvasColor: CanvasColorId;
   pattern: CanvasPatternId;
@@ -262,6 +273,10 @@ export interface CreateSessionRequest {
   /** Owning session; required for subagents. Cycles are impossible because a
    * parent must already exist when the child is created. */
   parentSessionId?: string;
+  /** Launch options per plugin id; each named plugin's launch service prepares this launch. */
+  launchOptions?: Record<string, PluginLaunchValues>;
+  /** Where the session runs: a plugin environment kind; omitted = this computer. */
+  environment?: SessionEnvironmentChoice;
 }
 
 export interface SessionMetadata {
@@ -280,6 +295,13 @@ export interface SessionMetadata {
   startedAt: number;
   exitCode: number | null;
   failureDetails: string | null;
+  /** Set when the person chose "Don't restore this card". */
+  skipRestore?: boolean;
+  restoreNote?: SessionRestoreNote;
+  /** The plugin environment this card runs in (badge text from the plugin's describe). */
+  environment?: SessionEnvironmentBadge;
+  /** Profile "auto" runs as accept-edits: a launch contributor put the agent on a third-party model. */
+  autoDowngraded?: true;
 }
 
 export interface SessionSnapshot extends SessionMetadata {
@@ -329,7 +351,9 @@ export interface WindowState {
   fullscreen: boolean;
 }
 
-export const PLUGIN_API_VERSION = 1;
+/** Newest manifest apiVersion. Version 1 manifests stay valid; `services` needs version 2. */
+export const PLUGIN_API_VERSION = 2;
+export type PluginApiVersion = 1 | typeof PLUGIN_API_VERSION;
 
 export type PluginPermission =
   | "storage"
@@ -343,7 +367,16 @@ export type PluginPermission =
   | "playlists:read"
   | "playlists:write"
   | "hermes:hud"
-  | "network";
+  | "network"
+  | "launch:contribute"
+  | "environment:provide"
+  | "decision:provide"
+  | "tools:agents"
+  | "sessions:events"
+  | "sessions:read-screen"
+  | "sessions:launch"
+  | "sessions:control"
+  | "cards:decorate";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -399,6 +432,179 @@ export interface PluginAgentHook {
   module?: string;
 }
 
+/**
+ * A long-lived native service: a bundled single-file JavaScript entry that CanvasTTY runs as a
+ * separate supervised process after the user trusts the plugin's native code (apiVersion 2).
+ */
+export interface PluginService {
+  id: string;
+  title: string;
+  description?: string;
+  entry: string;
+  module?: string;
+  /** Launch contribution (`launch:contribute`): options shown in the launcher's Advanced section. */
+  launch?: PluginServiceLaunch;
+  /** Session environments (`environment:provide`): kinds offered in the launcher's "Where" choice. */
+  environments?: PluginEnvironmentKind[];
+  /** Decision hooks (`decision:provide`): answers deny, ask or allow before agents' tool calls run. */
+  decide?: PluginServiceDecide;
+  /** Agent tools (`tools:agents`): listed in the canvastty_agents MCP as `<pluginId>__<name>`. */
+  tools?: PluginAgentTool[];
+  /** Card actions (`cards:decorate`): menu items on matching cards; the host calls `canvastty.cards.invoke`. */
+  cardActions?: PluginCardAction[];
+}
+
+/** A tool a plugin service offers to agents through canvastty_agents. */
+export interface PluginAgentTool {
+  /** `[a-z][a-z0-9_]{0,39}`; agents see `<pluginId>__<name>`. */
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments; its top level is `type: "object"`. At most 8 KB. */
+  inputSchema: Record<string, unknown>;
+  /** Session roles that see the tool. */
+  roles: SessionRole[];
+}
+
+/** Which cards show a plugin's card action; every listed key must match (a missing key matches all). */
+export interface PluginCardActionFilter {
+  providers?: ProviderId[];
+  /** Environment kinds (any plugin's); a card outside an environment never matches. */
+  environmentKinds?: string[];
+  roles?: SessionRole[];
+}
+
+export interface PluginCardAction {
+  id: string;
+  title: string;
+  when?: PluginCardActionFilter;
+}
+
+export type PluginCardTone = "neutral" | "info" | "warn" | "error";
+
+/** Short plain text a plugin shows on a card (no HTML). */
+export interface PluginCardBadge {
+  pluginId: string;
+  text: string;
+  tone: PluginCardTone;
+  tooltip?: string;
+}
+
+export interface PluginCardActionEntry {
+  pluginId: string;
+  pluginName: string;
+  actionId: string;
+  title: string;
+  when?: PluginCardActionFilter;
+}
+
+/** Everything plugins add to cards: badges per session id and the declared actions. */
+export interface PluginCardDecorations {
+  badges: Record<string, PluginCardBadge[]>;
+  actions: PluginCardActionEntry[];
+}
+
+/** What a card action answered, shown as a toast on the card. */
+export interface PluginCardActionResult {
+  message?: string;
+  tone: PluginCardTone;
+}
+
+export type PluginDecisionEvent = "pre-tool";
+
+export interface PluginServiceDecide {
+  /** `pre-tool`: every shell or file-writing tool call, before it runs (YOLO included). */
+  events: PluginDecisionEvent[];
+  /** Agents it decides for; all agents with decision hooks when omitted. */
+  appliesTo?: AgentProviderId[];
+  /** How long CanvasTTY waits for its answer: 1 to 60 s, 3 s when omitted. The agent's call waits as long. */
+  timeoutMs?: number;
+}
+
+/** One place a session can run (a worktree, a container, a remote host), provided by a plugin service. */
+export interface PluginEnvironmentKind {
+  kind: string;
+  label: string;
+  description?: string;
+  /** Providers it applies to, "terminal" included; all when omitted. */
+  appliesTo?: ProviderId[];
+  /** Launcher fields for this kind; values go to `canvastty.environment.prepare` only. */
+  fields?: PluginLaunchField[];
+}
+
+export interface SessionEnvironmentChoice {
+  pluginId: string;
+  kind: string;
+  options?: PluginLaunchValues;
+}
+
+export interface SessionEnvironmentBadge {
+  pluginId: string;
+  kind: string;
+  label: string;
+  detail?: string;
+}
+
+export type PluginLaunchFieldKind = "boolean" | "select" | "text";
+
+/** One launcher option. Values are saved with the session (at most 4 KB per plugin), never secrets. */
+export interface PluginLaunchField {
+  key: string;
+  label: string;
+  kind: PluginLaunchFieldKind;
+  /** `select` only: 1 to 16 choices. */
+  options?: Array<{ value: string; label: string }>;
+  /** `select` only: the launcher also asks the service (`canvastty.launch.options`) for up to 64 more choices, such as
+   * the plugin's own accounts. The saved value is any short text then; the service checks it when it prepares. */
+  optionsFrom?: "service";
+  default?: boolean | string;
+  /** `text` only: at most 200 characters (the default). */
+  maxLength?: number;
+}
+
+export interface PluginServiceLaunch {
+  /** Agents the options apply to; all agents when omitted. */
+  appliesTo?: AgentProviderId[];
+  fields: PluginLaunchField[];
+  /** Also asked, with `chosen: false`, before every launch of those agents where the person did not choose the
+   * plugin; such an answer may only refuse. */
+  policy?: boolean;
+}
+
+/** Field key -> extra choices a service offered for an `optionsFrom: "service"` select. */
+export type PluginLaunchFieldOptions = Record<string, Array<{ value: string; label: string }>>;
+
+/** One plugin's option values for one session, as chosen in the launcher. */
+export type PluginLaunchValues = Record<string, boolean | string>;
+
+export type PluginServiceState = "stopped" | "starting" | "running" | "backoff" | "failed";
+
+export interface PluginServiceStatus {
+  serviceId: string;
+  state: PluginServiceState;
+  restarts: number;
+  lastError?: string;
+}
+
+export interface PluginServiceLogEntry {
+  at: number;
+  serviceId: string;
+  source: "host" | "service" | "stderr" | "stdout";
+  level: "info" | "warn" | "error";
+  message: string;
+}
+
+export interface PluginServiceReport {
+  services: PluginServiceStatus[];
+  log: PluginServiceLogEntry[];
+}
+
+export interface PluginServiceEvent {
+  pluginId: string;
+  serviceId: string;
+  event: string;
+  data: unknown;
+}
+
 export interface PluginHomeWidgetContribution extends PluginContributionBase {
   kind: "home-widget";
   defaultSize: PluginGridSize;
@@ -422,7 +628,7 @@ export type PluginContribution =
   | PluginWindowContribution;
 
 export interface PluginManifest {
-  apiVersion: typeof PLUGIN_API_VERSION;
+  apiVersion: PluginApiVersion;
   id: string;
   name: string;
   version: string;
@@ -444,6 +650,7 @@ export interface PluginManifest {
   permissions: PluginPermission[];
   contributions: PluginContribution[];
   hooks?: PluginAgentHook[];
+  services?: PluginService[];
   settingsContribution?: string;
   coreFiles?: PluginModuleAsset[];
   modules?: PluginModule[];
@@ -487,6 +694,10 @@ export interface InstalledPlugin {
   selectedModules: string[];
   /** Hook ids explicitly trusted by the user. Never populated during install or update. */
   enabledHooks: string[];
+  /** The user trusted this plugin's services to run as native code. Never set by install or update. */
+  nativeCodeTrusted: boolean;
+  /** Its decision service may allow tool calls (a second confirmation); revoked with native code trust. */
+  decisionsMayAllow: boolean;
 }
 
 export interface PluginInstallPreview {
@@ -1110,6 +1321,16 @@ export interface CanvasTTYApi {
     setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin>;
     setEnabled(pluginId: string, enabled: boolean): Promise<InstalledPlugin>;
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
+    setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
+    setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
+    serviceReport(pluginId: string): Promise<PluginServiceReport>;
+    serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
+    onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
+    cardDecorations(): Promise<PluginCardDecorations>;
+    onCardDecorations(listener: (decorations: PluginCardDecorations) => void): () => void;
+    invokeCardAction(pluginId: string, actionId: string, sessionId: string): Promise<PluginCardActionResult>;
+    /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
+    launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;
     openCanvas(pluginId: string, contributionId: string, sourceCanvasInstanceId?: string): Promise<void>;
     openWindow(pluginId: string, contributionId: string): Promise<void>;
@@ -1179,12 +1400,15 @@ export interface CanvasTTYApi {
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
     create(request: CreateSessionRequest): Promise<SessionSnapshot>;
-    restart(id: string): Promise<SessionSnapshot>;
+    /** `resume` continues the card's own conversation instead of starting a new one. */
+    restart(id: string, options?: { resume?: boolean }): Promise<SessionSnapshot>;
     input(id: string, data: string): void;
     resize(id: string, cols: number, rows: number): void;
     setBounds(id: string, bounds: SessionBounds): void;
     rename(id: string, title: string): Promise<SessionMetadata>;
-    dispose(id: string): Promise<void>;
+    setRestore(id: string, restore: boolean): Promise<SessionMetadata>;
+    /** `keepEnvironmentData` answers "Keep environment data?" for a card that runs in a plugin environment. */
+    dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
     onData(listener: (event: TerminalDataEvent) => void): () => void;
@@ -1234,6 +1458,15 @@ export const IPC = {
   pluginsSetModules: "plugins:set-modules",
   pluginsSetEnabled: "plugins:set-enabled",
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
+  pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
+  pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
+  pluginsServiceReport: "plugins:service-report",
+  pluginsServiceRequest: "plugins:service-request",
+  pluginsServiceEvent: "plugins:service-event",
+  pluginsCardDecorations: "plugins:card-decorations",
+  pluginsCardDecorationsChanged: "plugins:card-decorations-changed",
+  pluginsInvokeCardAction: "plugins:invoke-card-action",
+  pluginsLaunchFieldOptions: "plugins:launch-field-options",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",
   pluginsOpenWindow: "plugins:open-window",
@@ -1312,6 +1545,7 @@ export const IPC = {
   terminalResize: "terminal:resize",
   terminalBounds: "terminal:bounds",
   terminalRename: "terminal:rename",
+  terminalSetRestore: "terminal:set-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
   terminalSession: "terminal:session",

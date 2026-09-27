@@ -11,11 +11,14 @@ import {
 import type {
   LocaleId,
   PaletteId,
+  PluginCardActionEntry,
+  PluginCardActionResult,
   Point,
   FocusActivation,
   SessionBounds,
   SessionSnapshot
 } from "../../../../shared/contracts";
+import { usePluginCardDecorations } from "../plugins/cardDecorations";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -66,8 +69,11 @@ interface TerminalCardProps {
   onRename(id: string, title: string): Promise<void>;
   onRenameEnd(): void;
   onBoundsChange(id: string, bounds: SessionBounds): void;
-  onRestart(id: string): Promise<void>;
-  onDispose(id: string): void;
+  onRestart(id: string, resume?: boolean): Promise<void>;
+  /** `keepEnvironmentData` is the answer to "Keep environment data?" for a card in a plugin environment. */
+  onDispose(id: string, keepEnvironmentData?: boolean): void;
+  /** Saving sessions is on, so the per-card "Don't restore" choice applies. */
+  restoreEnabled?: boolean;
   onOpenUrl(url: string): void;
 }
 
@@ -123,7 +129,8 @@ export function TerminalCard({
   onBoundsChange,
   onRestart,
   onDispose,
-  onOpenUrl
+  onOpenUrl,
+  restoreEnabled = false
 }: TerminalCardProps): React.JSX.Element {
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -140,7 +147,7 @@ export function TerminalCard({
   const suppressFocusReport = useRef(false);
   const sessionExited = useRef(session.exitCode !== null);
   sessionExited.current = session.exitCode !== null;
-  const restartAction = useRef<() => Promise<void>>(async () => undefined);
+  const restartAction = useRef<(resume?: boolean) => Promise<void>>(async () => undefined);
   const invertTerminalWheelRef = useRef(invertTerminalWheel);
   invertTerminalWheelRef.current = invertTerminalWheel;
   const captureCanvasWheelRef = useRef(captureCanvasWheelOverWidgets);
@@ -150,6 +157,27 @@ export function TerminalCard({
   const [position, setPosition] = useState(session.position);
   const [size, setSize] = useState(session.size);
   const [restarting, setRestarting] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [noteDismissed, setNoteDismissed] = useState<string | null>(null);
+  const [confirmClose, setConfirmClose] = useState(false);
+  // Plugin badges and actions (EP-7); an action's answer shows as a toast on the card, as plain text.
+  const pluginDecorations = usePluginCardDecorations(session);
+  const [actionRunning, setActionRunning] = useState(false);
+  const [actionToast, setActionToast] = useState<PluginCardActionResult | null>(null);
+  const hasOptions = restoreEnabled || pluginDecorations.actions.length > 0;
+  const runPluginAction = (action: PluginCardActionEntry): void => {
+    setOptionsOpen(false);
+    setActionRunning(true);
+    void window.canvasTTY.plugins.invokeCardAction(action.pluginId, action.actionId, session.id)
+      .then((result) => setActionToast({ tone: result.tone, message: result.message ?? `${action.title}: ${t(locale, "cardActionDone")}` }))
+      .catch((error: unknown) => setActionToast({ tone: "error", message: error instanceof Error ? error.message : String(error) }))
+      .finally(() => setActionRunning(false));
+  };
+  useEffect(() => {
+    if (!actionToast) return;
+    const timer = window.setTimeout(() => setActionToast(null), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [actionToast]);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
   const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
@@ -170,11 +198,11 @@ export function TerminalCard({
   const visibleTitleRef = useRef(visibleTitle);
   visibleTitleRef.current = visibleTitle;
 
-  restartAction.current = async () => {
+  restartAction.current = async (resume = false) => {
     if (restarting || !sessionExited.current) return;
     setRestarting(true);
     try {
-      await onRestart(session.id);
+      await onRestart(session.id, resume);
       const terminal = terminalRef.current;
       if (terminal) window.canvasTTY.terminal.resize(session.id, terminal.cols, terminal.rows);
     } finally {
@@ -731,6 +759,22 @@ export function TerminalCard({
           {session.role === "orchestrator" && (
             <span className="terminal-card__role" title={t(locale, "orchestratorRoleNote")}>{t(locale, "roleOrchestrator")}</span>
           )}
+          {session.profile === "auto" && (
+            <span className="terminal-card__role" title={t(locale, session.autoDowngraded ? "autoDowngradedNote" : "autoProfileNote")}>
+              {t(locale, session.autoDowngraded ? "autoDowngraded" : "autoProfile")}
+            </span>
+          )}
+          {session.environment && (
+            <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
+              {session.environment.label}
+            </span>
+          )}
+          {pluginDecorations.badges.map((badge) => (
+            <span key={badge.pluginId} className={`terminal-card__plugin-badge terminal-card__plugin-badge--${badge.tone}`}
+              title={badge.tooltip ?? badge.pluginId}>
+              {badge.text}
+            </span>
+          ))}
         </div>
         <div className="terminal-card__actions">
           {!summaryMode && (
@@ -756,6 +800,32 @@ export function TerminalCard({
               <UiIcon name={restarting ? "working" : "reload"} size="1.23em" />
             </button>
           )}
+          {session.exitCode !== null && session.provider !== "terminal" && (
+            <button
+              className="terminal-card__action terminal-card__action--continue"
+              type="button"
+              disabled={restarting}
+              onClick={() => void restartAction.current(true)}
+              title={t(locale, "continueSession")}
+              aria-label={t(locale, "continueSession")}
+            >
+              <UiIcon name="arrow" size="1.23em" />
+            </button>
+          )}
+          {hasOptions && (
+            <button
+              className="terminal-card__action terminal-card__action--options"
+              type="button"
+              aria-haspopup="menu"
+              aria-expanded={optionsOpen}
+              disabled={actionRunning}
+              onClick={() => setOptionsOpen((open) => !open)}
+              title={t(locale, "cardOptions")}
+              aria-label={t(locale, "cardOptions")}
+            >
+              <UiIcon name="sliders-horizontal" size="1.23em" />
+            </button>
+          )}
           <button
             className="terminal-card__action terminal-card__action--fullscreen"
             type="button"
@@ -765,10 +835,68 @@ export function TerminalCard({
           >
             <UiIcon name={fullscreen ? "restore" : "maximize"} size="1.23em" />
           </button>
-          <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => onDispose(session.id)} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
+          <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => {
+            // A card in a plugin environment asks once whether its data stays.
+            if (session.environment) setConfirmClose(true);
+            else onDispose(session.id);
+          }} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
         </div>
       </header>
       <div className="terminal-card__surface" ref={terminalHost} />
+      {optionsOpen && hasOptions && (
+        <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
+          {restoreEnabled && (
+            <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
+              <input
+                type="checkbox"
+                autoFocus
+                checked={session.skipRestore === true}
+                onChange={(event) => {
+                  setOptionsOpen(false);
+                  void window.canvasTTY.terminal.setRestore(session.id, !event.target.checked);
+                }}
+              />
+              {t(locale, "cardSkipRestore")}
+            </label>
+          )}
+          {pluginDecorations.actions.map((action, index) => (
+            <button key={`${action.pluginId}:${action.actionId}`} className="terminal-card__menu-action" type="button" role="menuitem"
+              autoFocus={!restoreEnabled && index === 0} title={action.pluginName} onClick={() => runPluginAction(action)}>
+              {action.title}
+            </button>
+          ))}
+        </div>
+      )}
+      {actionToast && !summaryMode && (
+        <div className={`terminal-card__note terminal-card__toast terminal-card__toast--${actionToast.tone}`} role="status">
+          <span>{actionToast.message}</span>
+          <button type="button" onClick={() => setActionToast(null)} aria-label={t(locale, "close")}>
+            <UiIcon name="close" size="1em" />
+          </button>
+        </div>
+      )}
+      {confirmClose && session.environment && (
+        <div className="terminal-card__menu terminal-card__confirm" role="alertdialog" aria-label={t(locale, "environmentKeepTitle")}
+          onKeyDown={(event) => { if (event.key === "Escape") setConfirmClose(false); }}>
+          <strong>{t(locale, "environmentKeepTitle")}</strong>
+          <span>{session.environment.label} · {t(locale, "environmentKeepDetail")}</span>
+          <div className="terminal-card__confirm-actions">
+            <button type="button" autoFocus onClick={() => { setConfirmClose(false); onDispose(session.id, true); }}>{t(locale, "environmentKeep")}</button>
+            <button type="button" onClick={() => { setConfirmClose(false); onDispose(session.id, false); }}>{t(locale, "environmentRemove")}</button>
+            <button type="button" onClick={() => setConfirmClose(false)}>{t(locale, "cancel")}</button>
+          </div>
+        </div>
+      )}
+      {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
+        <div className="terminal-card__note" role="status">
+          <span>{t(locale, session.restoreNote === "fresh-shared-folder" ? "restoreNoteSharedFolder"
+            : session.restoreNote === "plugin-unavailable" ? "restoreNotePlugin"
+              : session.restoreNote === "environment-pending" ? "restoreNoteEnvironmentPending" : "restoreNoteEnvironment")}</span>
+          <button type="button" onClick={() => setNoteDismissed(session.restoreNote ?? null)} aria-label={t(locale, "close")}>
+            <UiIcon name="close" size="1em" />
+          </button>
+        </div>
+      )}
       {searchOpen && !summaryMode && (
         <div className="terminal-card__search" role="search">
           <input
@@ -867,5 +995,5 @@ function compactPath(path: string): string {
 }
 
 function isCardControl(target: EventTarget): boolean {
-  return target instanceof Element && Boolean(target.closest("button, input, .terminal-card__resize-handle"));
+  return target instanceof Element && Boolean(target.closest("button, input, .terminal-card__menu, .terminal-card__note, .terminal-card__resize-handle"));
 }

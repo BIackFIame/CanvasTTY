@@ -133,7 +133,7 @@ test("hierarchy persists and orphan subagents are dropped on restore", async (t)
   const calls = [];
   const first = manager(calls);
   const store = new TerminalSessionStore(directory);
-  first.configureSessionPersistence(store, true);
+  first.configureSessionPersistence(store, "continue");
   const parent = first.create({
     provider: "codex",
     cwd: process.cwd(),
@@ -160,7 +160,7 @@ test("hierarchy persists and orphan subagents are dropped on restore", async (t)
 
   const secondCalls = [];
   const second = manager(secondCalls);
-  second.configureSessionPersistence(new TerminalSessionStore(directory), true);
+  second.configureSessionPersistence(new TerminalSessionStore(directory), "continue");
   await second.restorePersistedSessions();
   const restored = second.list();
   assert.deepEqual(
@@ -178,7 +178,7 @@ test("hierarchy persists and orphan subagents are dropped on restore", async (t)
 
   const thirdCalls = [];
   const third = manager(thirdCalls);
-  third.configureSessionPersistence(new TerminalSessionStore(directory), true);
+  third.configureSessionPersistence(new TerminalSessionStore(directory), "continue");
   await third.restorePersistedSessions();
   assert.deepEqual(third.list().map((session) => session.role), ["agent"]);
   await third.shutdown();

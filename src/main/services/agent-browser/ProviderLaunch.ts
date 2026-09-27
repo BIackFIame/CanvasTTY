@@ -106,7 +106,8 @@ export class ProviderLaunchAdapters {
     this.kimiSupportsPerRunConfig = null;
   }
 
-  prepare(provider: AgentProvider, connectionId: string, options?: { orchestration?: boolean }): PreparedProviderLaunch {
+  /** `orchestrationTools`: the canvastty_agents tools this session may use (default: the core tools). */
+  prepare(provider: AgentProvider, connectionId: string, options?: { orchestration?: boolean; orchestrationTools?: readonly string[] }): PreparedProviderLaunch {
     const providerCli = this.providerClis.get(provider);
     if (providerCli.state === "unavailable") throw new Error(providerCli.diagnostic);
     const orchestrationHelper = orchestrationHelperFor(this.options, options);
@@ -120,14 +121,14 @@ export class ProviderLaunchAdapters {
     }
     if (provider === "codex") {
       return {
-        args: codexMcpArgs(this.options.helper, orchestrationHelper),
+        args: codexMcpArgs(this.options.helper, orchestrationHelper, options?.orchestrationTools),
         environment: {},
         releaseConfiguration() {}
       };
     }
     if (provider === "qwen") {
       return {
-        args: qwenMcpArgs(this.options.helper, orchestrationHelper),
+        args: qwenMcpArgs(this.options.helper, orchestrationHelper, options?.orchestrationTools),
         environment: {},
         releaseConfiguration() {}
       };
@@ -287,7 +288,11 @@ export function claudeMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: S
   ];
 }
 
-export function codexMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: StdioHelperLaunch): string[] {
+export function codexMcpArgs(
+  helper: StdioHelperLaunch,
+  orchestrationHelper?: StdioHelperLaunch,
+  orchestrationTools: readonly string[] = ORCHESTRATION_TOOL_NAMES
+): string[] {
   validateStdioHelperLaunch(helper);
   if (orchestrationHelper) validateStdioHelperLaunch(orchestrationHelper);
   const prefix = `mcp_servers.${MCP_SERVER_NAME}`;
@@ -309,11 +314,11 @@ export function codexMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: St
       `command=${tomlString(orchestrationHelper.command)}`,
       `args=${tomlStringArray(orchestrationHelper.args)}`,
       `env=${tomlStringTable(orchestrationHelper.env ?? {})}`,
-      `env_vars=${tomlStringArray(["CANVASTTY_ORCHESTRATION_ADDRESS", "CANVASTTY_ORCHESTRATION_CAPABILITY", "CANVASTTY_TERMINAL_SESSION_ID"])}`,
+      `env_vars=${tomlStringArray(["CANVASTTY_ORCHESTRATION_ADDRESS", "CANVASTTY_ORCHESTRATION_CAPABILITY", "CANVASTTY_TERMINAL_SESSION_ID", "CANVASTTY_ORCHESTRATION_CONNECTION_ID"])}`,
       "enabled=true",
       "required=false",
       'default_tools_approval_mode="approve"',
-      `enabled_tools=${tomlStringArray([...ORCHESTRATION_TOOL_NAMES])}`,
+      `enabled_tools=${tomlStringArray([...orchestrationTools])}`,
       "disabled_tools=[]"
     ].join(",");
     args.push("-c", `${orchestrationPrefix}={${orchestrationTable}}`);
@@ -321,12 +326,16 @@ export function codexMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: St
   return args;
 }
 
-export function qwenMcpArgs(helper: StdioHelperLaunch, orchestrationHelper?: StdioHelperLaunch): string[] {
+export function qwenMcpArgs(
+  helper: StdioHelperLaunch,
+  orchestrationHelper?: StdioHelperLaunch,
+  orchestrationTools: readonly string[] = ORCHESTRATION_TOOL_NAMES
+): string[] {
   validateStdioHelperLaunch(helper);
   if (orchestrationHelper) validateStdioHelperLaunch(orchestrationHelper);
   const allowedTools = [
     ...APPROVED_BROWSER_TOOL_NAMES.map((tool) => `mcp__${MCP_SERVER_NAME}__${tool}`),
-    ...(orchestrationHelper ? ORCHESTRATION_TOOL_NAMES.map((tool: string) => `mcp__${ORCHESTRATION_MCP_SERVER_NAME}__${tool}`) : [])
+    ...(orchestrationHelper ? orchestrationTools.map((tool: string) => `mcp__${ORCHESTRATION_MCP_SERVER_NAME}__${tool}`) : [])
   ].join(",");
   const config = {
     mcpServers: {

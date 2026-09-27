@@ -9,6 +9,7 @@ import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
 import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
+import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -23,7 +24,11 @@ interface TerminalPort {
   listMetadata(): SessionMetadata[];
   readBuffer(id: string): TerminalBufferSnapshot;
   inputChecked(id: string, text: string): boolean;
+  /** The launch still waits for its plugins: the card cannot take input yet. */
+  launchPending?(id: string): boolean;
   geometry(id: string): { cols: number; rows: number };
+  /** Masks plugin launch secrets in text handed to a controller. */
+  redactSecrets?(text: string): string;
 }
 
 interface ControlRequest {
@@ -242,7 +247,8 @@ export class AgentControlGateway {
     const params = request.params;
     if (request.method === "create") {
       fields(params, ["provider", "cwd", "title", "profile"]);
-      if (!isControlProvider(params.provider) || !["normal", "yolo"].includes(String(params.profile))) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal or yolo launch profile.");
+      if (!isControlProvider(params.provider) || !isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal, yolo or auto launch profile.");
+      if (params.profile === "auto" && !hasAutoMode(params.provider)) throw new ControlError("INVALID_PARAMS", `${params.provider} has no auto mode; use profile normal.`);
       const provider = params.provider;
       const capabilities = controlCapabilities(provider);
       const requestedCwd = string(params.cwd, 4096, "cwd");
@@ -253,7 +259,7 @@ export class AgentControlGateway {
       if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
       if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
-      const session = this.options.terminals.create({ provider, profile: params.profile as "normal" | "yolo", cwd, title,
+      const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
       const terminal = new xterm.Terminal({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
@@ -268,7 +274,7 @@ export class AgentControlGateway {
       fields(params, []);
       return { sessions: this.options.terminals.listMetadata().filter((s) => {
         const owned = this.sessions.get(s.id); return owned?.owner === owner && owned.startedAt === s.startedAt;
-      }).map((s) => ({ ...s, capabilities: controlCapabilities(s.provider) })) };
+      }).map((s) => ({ ...this.redactMetadata(s), capabilities: controlCapabilities(s.provider) })) };
     }
     fields(params, request.method === "send" ? ["sessionId", "text"] : request.method === "result" ? ["sessionId", "after"]
       : request.method === "choose" ? ["sessionId", "choice", "revision"]
@@ -278,14 +284,14 @@ export class AgentControlGateway {
     const metadata = this.options.terminals.listMetadata().find((s) => s.id === id);
     if (!owned || owned.owner !== owner || !metadata) throw new ControlError("SESSION_NOT_FOUND", "No owned session has that ID.");
     if (metadata.startedAt !== owned.startedAt) throw new ControlError("STALE_SESSION", "Session restarted; its old control grant is no longer valid.");
-    if (request.method === "status") return { session: metadata, resultRevision: owned.resultRevision,
+    if (request.method === "status") return { session: this.redactMetadata(metadata), resultRevision: owned.resultRevision,
       turn: owned.turn ? { id: owned.turn.id, state: owned.turn.state } : null };
     if (request.method === "result") {
       const after = params.after === undefined ? 0 : params.after;
       if (!Number.isSafeInteger(after) || Number(after) < 0) throw new ControlError("INVALID_PARAMS", "after must be a non-negative result revision.");
       const fresh = owned.resultRevision > Number(after);
-      return { session: metadata, resultRevision: owned.resultRevision, fresh,
-        turn: fresh ? owned.completedTurn : null };
+      return { session: this.redactMetadata(metadata), resultRevision: owned.resultRevision, fresh,
+        turn: fresh && owned.completedTurn ? this.redactTurn(owned.completedTurn) : null };
     }
     await owned.ready;
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
@@ -297,11 +303,15 @@ export class AgentControlGateway {
       throw new ControlError("STALE_SESSION", "Session restarted; its old control grant is no longer valid.");
     }
     const capabilities = controlCapabilities(fresh.provider);
-    const screen = viewport(owned.terminal);
+    const screen = viewport(owned.terminal, (text) => this.redact(text));
     if (request.method === "screen") return { sessionId: id, text: screen, revision: hash(screen), outputOffset: owned.outputOffset,
       interaction: capabilities.menus ? codexChoices(screen) : null };
     if ((request.method === "choose" || request.method === "dismiss") && !capabilities.menus) {
       throw new ControlError("NOT_SUPPORTED", `Menus are parsed for Codex only; resolve ${fresh.provider} prompts from the desktop and treat screen as the only evidence.`);
+    }
+    // Its launch plugins are still preparing it: nothing can be written yet, and nothing is queued.
+    if (this.options.terminals.launchPending?.(id)) {
+      throw new ControlError("NOT_READY", "The session is still starting (its launch is being prepared); nothing was written. Check status again.");
     }
     if (this.busy.has(id)) throw new ControlError("BUSY", "A control operation is pending for this session.");
     this.busy.add(id);
@@ -352,6 +362,19 @@ export class AgentControlGateway {
       return { sessionId: id, turnId: request.id, resultRevisionBefore: owned.resultRevision, delivery: "written-to-pty" };
     } finally { this.busy.delete(id); }
   }
+
+  private redact(text: string): string {
+    return this.options.terminals.redactSecrets?.(text) ?? text;
+  }
+
+  /** Failure details quote the child's last output: masked like the screen. */
+  private redactMetadata<T extends { failureDetails?: string | null }>(metadata: T): T {
+    return metadata.failureDetails ? { ...metadata, failureDetails: this.redact(metadata.failureDetails) } : metadata;
+  }
+
+  private redactTurn(turn: Turn): Turn {
+    return turn.result ? { ...turn, result: { ...turn.result, text: this.redact(turn.result.text) } } : turn;
+  }
 }
 
 export function codexComposerReady(screen: string): boolean {
@@ -367,11 +390,15 @@ export function codexChoices(screen: string): { revision: string; selected: numb
     options: matches.map((m) => ({ number: Number(m[2]), label: m[3] })) };
 }
 
-function viewport(terminal: import("@xterm/headless").Terminal): string {
+/**
+ * The visible rows, masked with the scrollback above them: a secret the top edge cuts (its head scrolled away) is
+ * masked whole before the rows are selected. Masking can join wrapped rows, so the last `rows` lines are taken after.
+ */
+function viewport(terminal: import("@xterm/headless").Terminal, redact: (text: string) => string): string {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
-  for (let row = buffer.baseY; row < buffer.baseY + terminal.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
-  return lines.join("\n").trim().slice(-24_000);
+  for (let row = 0; row < buffer.baseY + terminal.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
+  return redact(lines.join("\n")).split("\n").slice(-terminal.rows).join("\n").trim().slice(-24_000);
 }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 function string(value: unknown, max: number, name: string): string {

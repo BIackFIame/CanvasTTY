@@ -240,7 +240,7 @@ test("a control write waiting on terminal replay cannot reach a restarted sessio
 
 test("YOLO persists across native restart/restore while stale control grants fail", localSocket, async (t) => {
   const f = await fixture(t);
-  f.terminals.configureSessionPersistence(new TerminalSessionStore(f.root), true);
+  f.terminals.configureSessionPersistence(new TerminalSessionStore(f.root), "continue");
   const { session } = await f.create();
   f.calls[0].pty.exit(1);
   await delay(2);
@@ -251,7 +251,7 @@ test("YOLO persists across native restart/restore while stale control grants fai
   const restoredCalls = [];
   const restored = new TerminalManager(() => {}, registry(), undefined, undefined, true,
     (_command, args) => { restoredCalls.push(args); return { onData() {}, onExit() {}, kill() {}, write() {}, resize() {} }; });
-  restored.configureSessionPersistence(new TerminalSessionStore(f.root), true);
+  restored.configureSessionPersistence(new TerminalSessionStore(f.root), "continue");
   await restored.restorePersistedSessions();
   t.after(() => restored.shutdown());
   assert.ok(restoredCalls[0].includes("--dangerously-bypass-approvals-and-sandbox"));
@@ -413,7 +413,7 @@ function serviceFixture() {
   return { calls, terminals, control };
 }
 
-test("spawn creates a subagent next to its parent and delivers the initial prompt", () => {
+test("spawn creates a subagent next to its parent and delivers the initial prompt", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -421,7 +421,7 @@ test("spawn creates a subagent next to its parent and delivers the initial promp
     profile: "normal",
     position: { x: 100, y: 100 }
   });
-  const child = control.spawn({
+  const child = await control.spawn({
     parentSessionId: parent.id,
     provider: "cursor",
     cwd: process.cwd(),
@@ -463,7 +463,7 @@ test("children lists only that parent's subagents in spawn order", () => {
   terminals.disposeAll();
 });
 
-test("send appends submit unless told otherwise and rejects exited sessions", () => {
+test("send appends submit unless told otherwise and rejects exited sessions", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -471,9 +471,9 @@ test("send appends submit unless told otherwise and rejects exited sessions", ()
     profile: "normal",
     position: { x: 0, y: 0 }
   });
-  const child = control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: process.cwd() });
-  control.send(child.id, "run the tests");
-  control.send(child.id, " --quiet", false);
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: process.cwd() });
+  await control.send(child.id, "run the tests");
+  await control.send(child.id, " --quiet", false);
 
   const sent = [...writes.values()].flat().join("");
   assert.match(sent, /run the tests\r --quiet/u);
@@ -498,7 +498,7 @@ test("observe returns a capped terminal tail and result reflects exit state", ()
   terminals.disposeAll();
 });
 
-test("cancel disposes the subagent and plain terminals are not agents", () => {
+test("cancel disposes the subagent and plain terminals are not agents", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -512,7 +512,7 @@ test("cancel disposes the subagent and plain terminals are not agents", () => {
     profile: "normal",
     position: { x: 0, y: 0 }
   });
-  const child = control.spawn({ parentSessionId: parent.id, provider: "pi", cwd: process.cwd() });
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "pi", cwd: process.cwd() });
   control.cancel(child.id);
   assert.equal(terminals.list().some((session) => session.id === child.id), false);
 
@@ -538,4 +538,27 @@ test("a parent cannot exceed the subagent fan-out cap", () => {
     /16 subagents/u
   );
   terminals.disposeAll();
+});
+
+test("the control CLI screen masks a custom secret the viewport's top edge cuts", localSocket, async (t) => {
+  const { SecretRedactionRegistry } = await import("../src/main/services/safety/SecretRedaction.ts");
+  const secret = "purple-otter-marmalade-sings-loudly";
+  const f = await fixture(t);
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.custom", [secret]);
+  f.terminals.configureRedaction(registry);
+  const { session } = await f.create();
+  const { cols, rows } = f.terminals.geometry(session.id);
+  // The secret wraps: its head ends one row, its tail starts the next; that next row is the viewport's first.
+  const pty = f.calls.at(-1).pty;
+  pty.data(`${"a".repeat(cols - 10)}${secret}\r\n${Array.from({ length: rows - 1 }, (_value, index) => `line ${index}`).join("\r\n")}`);
+  let text = "";
+  for (let i = 0; i < 50 && !text.includes(`line ${rows - 2}`); i++) {
+    await delay(10);
+    ({ text } = await f.request("screen", { sessionId: session.id }));
+  }
+  assert.ok(text.includes(`line ${rows - 2}`) && text.split("\n").length <= rows, "the screen is the current viewport");
+  assert.equal(text.includes(secret.slice(10)), false, "the tail on the top row is masked");
+  assert.equal(/marmalade|loudly/u.test(text), false);
+  assert.match(text, /<redacted:secret>/u, "masked where it stood, as one value");
 });

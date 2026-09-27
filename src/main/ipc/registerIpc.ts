@@ -10,6 +10,7 @@ import type {
   CreateSessionRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
+  PluginLaunchFieldOptions,
   ProviderId,
   ProviderSecretId,
   SessionBounds
@@ -22,6 +23,8 @@ import { providerCliAvailability, type ProviderCliRegistry } from "../services/p
 import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
+import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
+import type { PluginCards } from "../services/PluginCards";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
 import type { ProviderSecretsService } from "../services/ProviderSecretsService";
@@ -48,12 +51,15 @@ interface Dependencies {
   terminals: TerminalManager;
   limits: LimitsService;
   plugins: PluginManager;
+  pluginServices: PluginServiceSupervisor;
+  pluginCards: PluginCards;
   pluginMedia: PluginMediaService;
   pluginSecrets: PluginSecretsService;
   providerSecrets: ProviderSecretsService;
   browser: BrowserService;
   githubAuth: GithubAuthService;
   hermesHud: HermesHudService;
+  launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
   getMainWindow(): BrowserWindow | null;
   applyBrowserSettings(settings: AppSettings): Promise<void> | void;
   setCanvasNavigationShortcutCapture(active: boolean): void;
@@ -80,12 +86,15 @@ export function registerIpc({
   terminals,
   limits,
   plugins,
+  pluginServices,
+  pluginCards,
   pluginMedia,
   pluginSecrets,
   providerSecrets,
   browser,
   githubAuth,
   hermesHud,
+  launchFieldOptions,
   getMainWindow,
   applyBrowserSettings,
   setCanvasNavigationShortcutCapture,
@@ -98,6 +107,13 @@ export function registerIpc({
   updater
 }: Dependencies): (window: BrowserWindow | null) => void {
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
+  // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
+  // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
+  const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
+    const serviceId = stringValue(values.serviceId, "serviceId");
+    plugins.assertService(pluginId, serviceId);
+    return pluginServices.request(pluginId, serviceId, stringValue(values.method, "method"), values.params);
+  };
   const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
     plugins.assertPermission(pluginId, "browser:open");
     await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
@@ -268,11 +284,55 @@ export function registerIpc({
     }
     return plugins.setHookEnabled(pluginId, hookId, enabled);
   });
+  ipcMain.handle(IPC.pluginsSetNativeCodeTrusted, (event, pluginId: string, trusted: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof trusted !== "boolean") throw new Error("Plugin native code state is invalid.");
+    return plugins.setNativeCodeTrusted(pluginId, trusted);
+  });
+  ipcMain.handle(IPC.pluginsSetDecisionsMayAllow, (event, pluginId: string, allowed: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
+    return plugins.setDecisionsMayAllow(pluginId, allowed);
+  });
+  ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");
+    return pluginServices.report(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsServiceRequest, (
+    event,
+    pluginId: string,
+    serviceId: string,
+    method: string,
+    params: unknown
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return requestPluginService(pluginId, { serviceId, method, params });
+  });
+  ipcMain.handle(IPC.pluginsCardDecorations, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginCards.decorations();
+  });
+  ipcMain.handle(IPC.pluginsInvokeCardAction, (event, pluginId: unknown, actionId: unknown, sessionId: unknown) => {
+    // Only the app window's own card menu invokes actions; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof actionId !== "string" || typeof sessionId !== "string") {
+      throw new Error("Card action request is invalid.");
+    }
+    return pluginCards.invoke(pluginId, actionId, sessionId);
+  });
+  ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
+    // Only the app's own launcher asks; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof provider !== "string") throw new Error("Launch option request is invalid.");
+    return launchFieldOptions(pluginId, provider as ProviderId);
+  });
   ipcMain.handle(IPC.pluginsUninstall, async (_event, pluginId: string) => {
     closePluginWindows(pluginId);
     await pluginSecrets.revokeAll(pluginId);
     await pluginMedia.revokeAll(pluginId);
     await plugins.uninstall(pluginId);
+    pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (
     _event,
@@ -486,6 +546,7 @@ export function registerIpc({
         playlistContent(values.content)
       );
     }
+    if (method === "service.request") return requestPluginService(pluginId, values);
     if (method === "window.open") {
       const targetId = stringValue(values.contributionId, "contributionId");
       const target = plugins.contribution(pluginId, targetId);
@@ -617,14 +678,20 @@ export function registerIpc({
     return terminals.readBuffer(id);
   });
   ipcMain.handle(IPC.terminalCreate, (_event, request: CreateSessionRequest) => terminals.create(request));
-  ipcMain.handle(IPC.terminalRestart, (_event, id: string) => terminals.restart(id));
+  ipcMain.handle(IPC.terminalRestart, (_event, id: string, options?: { resume?: unknown }) => (
+    terminals.restart(id, { resume: options?.resume === true })
+  ));
   ipcMain.on(IPC.terminalInput, (_event, id: string, data: string) => terminals.input(id, data));
   ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
     terminals.resize(id, cols, rows);
   });
   ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
   ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
-  ipcMain.handle(IPC.terminalDispose, (_event, id: string) => terminals.dispose(id));
+  ipcMain.handle(IPC.terminalSetRestore, (_event, id: string, restore: boolean) => terminals.setRestore(id, restore));
+  ipcMain.handle(IPC.terminalDispose, (_event, id: string, options?: { keepEnvironmentData?: unknown }) => (
+    // Environment data is kept unless the person explicitly chose Remove.
+    terminals.dispose(id, { keepEnvironmentData: options?.keepEnvironmentData !== false })
+  ));
   // Fire-and-forget, like the other stream-reporting channels: a malformed
   // report is ignored rather than rejecting into the renderer.
   ipcMain.on(IPC.terminalSetVisible, (_event, id: unknown, visible: unknown) => {

@@ -12,6 +12,14 @@ const object = (properties, required = []) => ({
 });
 
 const sessionId = string({ minLength: 1, maxLength: 128 });
+// Plugin launch options, `{ "<pluginId>": { "<field>": value } }`, as a plugin tool hands them out; the launch
+// checks them against each plugin's declared fields exactly like the launcher's.
+const MAX_LAUNCH_OPTIONS_BYTES = 16 * 1024;
+const launchOptions = {
+  type: "object",
+  maxProperties: 16,
+  additionalProperties: { type: "object" }
+};
 const prompt = string({ minLength: 1, maxLength: 65_536 });
 const title = string({ minLength: 1, maxLength: 80 });
 
@@ -26,12 +34,13 @@ function tool(name, description, properties = {}, required = []) {
 export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   tool(
     "spawn_agent",
-    "Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id.",
+    "Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked).",
     {
       provider: string({ minLength: 1, maxLength: 32 }),
       cwd: string({ minLength: 1, maxLength: 4_096 }),
       prompt,
-      title
+      title,
+      launchOptions
     },
     ["provider", "cwd"]
   ),
@@ -71,6 +80,17 @@ export function isApprovedOrchestrationTool(value) {
   return typeof value === "string" && ORCHESTRATION_TOOL_SET.has(value);
 }
 
+// Plugin tools (EP-6) are listed by the host per session as `<pluginId>__<name>`, with the plugin id's dots
+// written as `_` (Anthropic and OpenAI tool names allow only [a-zA-Z0-9_-], at most 64 characters). Plugin ids
+// never contain `_`, so the first `__` separates the two parts. The host checks the arguments against the schema.
+export const MAX_PLUGIN_TOOL_NAME_LENGTH = 64;
+const PLUGIN_TOOL_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?__[a-z][a-z0-9_]*$/;
+
+export function isPluginOrchestrationTool(value) {
+  return typeof value === "string" && value.length <= MAX_PLUGIN_TOOL_NAME_LENGTH
+    && !ORCHESTRATION_TOOL_SET.has(value) && PLUGIN_TOOL_NAME.test(value);
+}
+
 // Mirrors the browser catalog's canonical serializer so bridge digests and
 // payload checks behave identically.
 export function canonicalStringify(value) {
@@ -107,6 +127,15 @@ export function validateOrchestrationArguments(toolName, args) {
     } else if (property.type === "boolean") {
       if (typeof candidate !== "boolean") errors.push(`${key} must be a boolean.`);
       else value[key] = candidate;
+    } else if (property === launchOptions) {
+      const plain = (entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry);
+      if (!plain(candidate) || Object.keys(candidate).length > property.maxProperties
+        || !Object.values(candidate).every((values) => plain(values)
+          && Object.values(values).every((item) => typeof item === "string" || typeof item === "boolean"))) {
+        errors.push(`${key} must map plugin ids to objects of text or true/false values.`);
+      } else if (canonicalStringify(candidate).length > MAX_LAUNCH_OPTIONS_BYTES) {
+        errors.push(`${key} is too large.`);
+      } else value[key] = candidate;
     } else if (property.type === "integer") {
       if (!Number.isInteger(candidate)) errors.push(`${key} must be an integer.`);
       else if (property.minimum !== undefined && candidate < property.minimum) errors.push(`${key} is below the minimum.`);

@@ -17,8 +17,11 @@ import type {
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
   PluginLauncherRequest,
+  PluginServiceEvent,
+  PluginCardDecorations,
   PluginStorageChangeEvent,
   PluginUpdateStatus,
+  ProviderId,
   SessionBounds,
   SessionEvent,
   SessionRemovedEvent,
@@ -97,6 +100,27 @@ const api: CanvasTTYApi = {
     setEnabled: (pluginId: string, enabled: boolean) => ipcRenderer.invoke(IPC.pluginsSetEnabled, pluginId, enabled),
     setHookEnabled: (pluginId: string, hookId: string, enabled: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetHookEnabled, pluginId, hookId, enabled)
+    ),
+    setNativeCodeTrusted: (pluginId: string, trusted: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetNativeCodeTrusted, pluginId, trusted)
+    ),
+    setDecisionsMayAllow: (pluginId: string, allowed: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetDecisionsMayAllow, pluginId, allowed)
+    ),
+    serviceReport: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsServiceReport, pluginId),
+    serviceRequest: (pluginId: string, serviceId: string, method: string, params: unknown) => (
+      ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)
+    ),
+    onServiceEvent: (listener: (event: PluginServiceEvent) => void) => subscribe(IPC.pluginsServiceEvent, listener),
+    cardDecorations: () => ipcRenderer.invoke(IPC.pluginsCardDecorations),
+    onCardDecorations: (listener: (decorations: PluginCardDecorations) => void) => (
+      subscribe(IPC.pluginsCardDecorationsChanged, listener)
+    ),
+    invokeCardAction: (pluginId: string, actionId: string, sessionId: string) => (
+      ipcRenderer.invoke(IPC.pluginsInvokeCardAction, pluginId, actionId, sessionId)
+    ),
+    launchFieldOptions: (pluginId: string, provider: ProviderId) => (
+      ipcRenderer.invoke(IPC.pluginsLaunchFieldOptions, pluginId, provider)
     ),
     uninstall: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsUninstall, pluginId),
     openCanvas: (pluginId: string, contributionId: string, sourceCanvasInstanceId?: string) => (
@@ -188,12 +212,13 @@ const api: CanvasTTYApi = {
     list: () => ipcRenderer.invoke(IPC.terminalList),
     readBuffer: (id: string) => ipcRenderer.invoke(IPC.terminalReadBuffer, id),
     create: (request: CreateSessionRequest) => ipcRenderer.invoke(IPC.terminalCreate, request),
-    restart: (id: string) => ipcRenderer.invoke(IPC.terminalRestart, id),
+    restart: (id: string, options?: { resume?: boolean }) => ipcRenderer.invoke(IPC.terminalRestart, id, options),
     input: (id: string, data: string) => ipcRenderer.send(IPC.terminalInput, id, data),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.send(IPC.terminalResize, id, cols, rows),
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.terminalBounds, id, bounds),
     rename: (id: string, title: string) => ipcRenderer.invoke(IPC.terminalRename, id, title),
-    dispose: (id: string) => ipcRenderer.invoke(IPC.terminalDispose, id),
+    setRestore: (id: string, restore: boolean) => ipcRenderer.invoke(IPC.terminalSetRestore, id, restore),
+    dispose: (id: string, options?: { keepEnvironmentData?: boolean }) => ipcRenderer.invoke(IPC.terminalDispose, id, options),
     setVisible: (id: string, visible: boolean) => ipcRenderer.send(IPC.terminalSetVisible, id, visible),
     onData: (listener: (event: TerminalDataEvent) => void) => subscribe(IPC.terminalData, listener),
     onSession: (listener: (event: SessionEvent) => void) => subscribe(IPC.terminalSession, listener),

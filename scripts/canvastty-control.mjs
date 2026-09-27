@@ -127,7 +127,7 @@ Enable agent orchestration in CanvasTTY Settings → Agents first (or start it
 with --agent-control). Each --client-file owns only the sessions it creates.
 Keep the same private client file across related commands.
 
-create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal]
+create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal|auto]
   provider: codex (default), claude, qwen, kimi, opencode, hermes, grok, omp, pi.
   Only Codex workers report a captured result and expose startup/approval menus
   to choose/dismiss; the create response lists each worker's capabilities.
@@ -144,6 +144,7 @@ Global options: --connection <descriptor> --client-file <private-file>
                 --request-id <id> --json
 
 create defaults to the YOLO profile: full access, no sandbox approvals.
+--profile auto (codex, claude, grok): the CLI's own auto mode in its sandbox.
 No global provider configuration is modified. Scope tasks before sending them.
 After a timeout, inspect status; retry identical input with the SAME request ID.
 `;

@@ -28,6 +28,7 @@ import type {
   PluginCanvasInstance,
   ProviderSecretId,
   RadialLauncherItemId,
+  SessionRestoreMode,
   SessionRowColorMode,
   ShortcutBindings,
   StickyNote,
@@ -63,13 +64,15 @@ import {
 } from "../../shared/canvasNavigation.ts";
 
 const LOCALES = new Set<LocaleId>(["ru", "en"]);
+const SESSION_RESTORE_MODES = new Set<SessionRestoreMode>(["off", "reopen", "continue"]);
 const PALETTES = new Set<PaletteId>(["sage", "lilac", "night"]);
 const HOME_ACCENT_PRESETS = new Set<HomeAccentPresetId>(["classic", "warm", "cool", "mono", "custom"]);
 const SESSION_ROW_COLOR_MODES = new Set<SessionRowColorMode>(["monochrome", "status"]);
 const CANVAS_COLORS = new Set<CanvasColorId>(["sage", "lilac", "night", "sand", "mist", "rose", "slate"]);
 const PATTERNS = new Set<CanvasPatternId>(["dots", "grid", "waves", "diagonal", "rings", "none"]);
 const MEDIA_FITS = new Set<MediaFit>(["cover", "contain"]);
-const SETTINGS_VERSION = 20;
+// 21: the on/off "restoreTerminalSessions" became sessionRestoreMode (off / reopen / continue).
+const SETTINGS_VERSION = 21;
 const GROK_LAUNCHER_SETTINGS_VERSION = 3;
 const EXPANDED_LIMIT_SETTINGS_VERSION = 5;
 const QWEN_SETTINGS_VERSION = 6;
@@ -156,6 +159,7 @@ export class SettingsStore {
         || !("radialLauncherItems" in source)
         || !("radialLauncherEnabled" in source)
         || !("agentLifecycleHooksEnabled" in source)
+        || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
         || !("canvasColor" in source)
         || !("minimapPlacement" in source)
@@ -165,7 +169,7 @@ export class SettingsStore {
         || !("attentionQueueVisible" in source)
         || !("attentionQueuePlacement" in source)
         || !("agentControlEnabled" in source)
-        || !("restoreTerminalSessions" in source)
+        || !("sessionRestoreMode" in source)
         || !("persistCanvasRegions" in source)
         || !("persistStickyNotes" in source)
         || !("canvasRegions" in source)
@@ -299,6 +303,15 @@ export class SettingsStore {
   }
 }
 
+/** The old boolean migrates as it behaved: saved windows continued their conversations. */
+function normalizeSessionRestoreMode(source: Record<string, unknown>, fallback: SessionRestoreMode | undefined): SessionRestoreMode {
+  if (SESSION_RESTORE_MODES.has(source.sessionRestoreMode as SessionRestoreMode)) {
+    return source.sessionRestoreMode as SessionRestoreMode;
+  }
+  if (typeof source.restoreTerminalSessions === "boolean") return source.restoreTerminalSessions ? "continue" : "off";
+  return fallback ?? "off";
+}
+
 function isLegacyDefaultLimitSelection(candidate: unknown[] | null): boolean {
   return candidate !== null
     && candidate.length === LEGACY_LIMIT_PROVIDERS.length
@@ -314,7 +327,7 @@ function isPreQwenDefaultSelection<T extends string>(candidate: unknown[] | null
 function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform): AppSettings {
   return {
     locale: systemLocale.toLowerCase().startsWith("ru") ? "ru" : "en",
-    restoreTerminalSessions: false,
+    sessionRestoreMode: "off",
     persistCanvasRegions: true,
     persistStickyNotes: true,
     palette: "sage",
@@ -327,6 +340,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
     radialLauncherEnabled: false,
     agentLifecycleHooksEnabled: true,
+    baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
     pattern: "dots",
@@ -484,9 +498,7 @@ export function normalizeSettings(
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
-    restoreTerminalSessions: typeof source.restoreTerminalSessions === "boolean"
-      ? source.restoreTerminalSessions
-      : fallback.restoreTerminalSessions ?? false,
+    sessionRestoreMode: normalizeSessionRestoreMode(source as Record<string, unknown>, fallback.sessionRestoreMode),
     persistCanvasRegions: typeof source.persistCanvasRegions === "boolean"
       ? source.persistCanvasRegions
       : fallback.persistCanvasRegions ?? true,
@@ -511,6 +523,10 @@ export function normalizeSettings(
     agentLifecycleHooksEnabled: typeof source.agentLifecycleHooksEnabled === "boolean"
       ? source.agentLifecycleHooksEnabled
       : fallback.agentLifecycleHooksEnabled,
+    // On unless the person turned it off; an install from before it existed gets it on.
+    baseProtectionEnabled: typeof source.baseProtectionEnabled === "boolean"
+      ? source.baseProtectionEnabled
+      : fallback.baseProtectionEnabled ?? true,
     uiScale: normalizeUiScale(source.uiScale, fallback.uiScale ?? DEFAULT_UI_SCALE),
     canvasColor,
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)

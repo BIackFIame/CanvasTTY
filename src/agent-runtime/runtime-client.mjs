@@ -5,13 +5,14 @@ import {
   CAPTURE_ANSWER_EXPIRES_AT_ENV,
   MAX_ANSWER_CHARS,
   MAX_RUNTIME_MESSAGE_BYTES,
+  normalizeThreadId,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "./runtime-protocol.mjs";
 
 const CONNECT_TIMEOUT_MS = 1_000;
 
-export async function reportLifecycle({ state, event, turnId = null, result, lastAssistantMessage }) {
+export async function reportLifecycle({ state, event, turnId = null, threadId, result, lastAssistantMessage }) {
   if (!RUNTIME_STATES.includes(state)) return false;
   if (typeof event !== "string" || event.length === 0 || event.length > 80) return false;
   const address = process.env[AGENT_RUNTIME_ENV.address];
@@ -19,6 +20,8 @@ export async function reportLifecycle({ state, event, turnId = null, result, las
   const provider = process.env[AGENT_RUNTIME_ENV.provider];
   const capabilityToken = process.env[AGENT_RUNTIME_ENV.capabilityToken];
   if (!address || !terminalSessionId || !provider || !capabilityToken) return false;
+
+  const validThreadId = normalizeThreadId(provider, threadId);
 
   const message = {
     v: RUNTIME_PROTOCOL_VERSION,
@@ -29,6 +32,7 @@ export async function reportLifecycle({ state, event, turnId = null, result, las
     state,
     event,
     turnId: normalizedId(turnId),
+    ...(validThreadId !== undefined ? { threadId: validThreadId } : {}),
     ...(result === undefined ? {} : { result })
   };
   const answerCaptureExpiresAt = Number(process.env[CAPTURE_ANSWER_EXPIRES_AT_ENV]);

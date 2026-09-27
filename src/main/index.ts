@@ -9,6 +9,7 @@ import {
   IPC,
   type LocaleId,
   type PluginCanvasRequest,
+  type PluginServiceEvent,
   type SessionStatus,
   type UpdaterState,
   type UpdaterStateEvent
@@ -25,6 +26,14 @@ import {
   type ProviderCliRegistry
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
+import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
+import { LaunchPipeline } from "./services/LaunchPipeline";
+import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
+import { DecisionHooks } from "./services/DecisionHooks";
+import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
+import { PluginAgentTools } from "./services/PluginAgentTools";
+import { PluginSessions } from "./services/PluginSessions";
+import { PluginCards } from "./services/PluginCards";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -122,6 +131,9 @@ let terminalManager: TerminalManager | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
 let pluginManager: PluginManager | null = null;
+let pluginServices: PluginServiceSupervisor | null = null;
+let pluginSessions: PluginSessions | null = null;
+let pluginCards: PluginCards | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
@@ -267,6 +279,59 @@ async function initializeServices(): Promise<void> {
   await settings.load();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
+  // Secrets this app knows are masked in every text one agent reads from another (EP-8).
+  const redaction = new SecretRedactionRegistry();
+  // Trusted plugin services run as separate processes, started the way plugin hooks are.
+  // Services start only once the host APIs they may call on initialize exist (hostReady below).
+  pluginServices = new PluginServiceSupervisor({
+    waitForHost: true,
+    command: process.execPath,
+    hostVersion: app.getVersion(),
+    locale: () => settings.get().locale,
+    host: {
+      storageGet: (pluginId, key) => pluginManager!.storageGet(pluginId, key),
+      storageSet: async (pluginId, key, value) => {
+        await pluginManager!.storageSet(pluginId, key, value);
+        broadcastPluginStorageChange(pluginId, key, value);
+      },
+      emit: (pluginId, serviceId, event, data) => broadcastPluginServiceEvent({ pluginId, serviceId, event, data }),
+      registerSecrets: (pluginId, values) => redaction.add(`plugin:${pluginId}`, values),
+      secretGet: (pluginId, key) => {
+        if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
+        return pluginSecretsService.get(pluginId, key);
+      },
+      sessions: (pluginId, serviceId, method, params, permissions) => pluginSessions?.handle(pluginId, serviceId, method, params, permissions),
+      setBadge: (pluginId, params) => {
+        if (!pluginCards) throw new Error("Cards are not ready yet.");
+        return pluginCards.setBadge(pluginId, params);
+      },
+      stopped: (pluginId, serviceId) => pluginSessions?.serviceStopped(pluginId, serviceId)
+    }
+  });
+  // Base protection runs first; then trusted plugin decision services (EP-5).
+  const decisionHooks = new DecisionHooks({
+    baseProtection: () => settings.get().baseProtectionEnabled,
+    services: () => pluginManager!.decisionServices(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null
+  });
+  pluginManager.setServiceObserver(async (specs) => {
+    await pluginServices!.sync(specs);
+    // Trust changes add or remove card actions and badges.
+    pluginCards?.refresh();
+  });
+  const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
+  // Created before sessions are restored: launch services may resolve the plugin's own secrets.
+  pluginSecretsService = new PluginSecretsService(
+    app.getPath("userData"),
+    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission),
+    {
+      isAvailable: securePluginStorageAvailable,
+      encrypt: (value) => safeStorage.encryptString(value),
+      decrypt: (value) => safeStorage.decryptString(value)
+    }
+  );
+  await pluginSecretsService.load();
 
   canvasNavigationInput = new CanvasNavigationInputController(
     {
@@ -341,7 +406,8 @@ async function initializeServices(): Promise<void> {
         terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
-          ...(signal.turnId ? { requestId: signal.turnId } : {})
+          ...(signal.turnId ? { requestId: signal.turnId } : {}),
+          ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
@@ -353,7 +419,8 @@ async function initializeServices(): Promise<void> {
           );
         }
       },
-      onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId)
+      onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
+      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal)
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
@@ -365,6 +432,9 @@ async function initializeServices(): Promise<void> {
     const pluginHookRunnerPath = app.isPackaged
       ? join(process.resourcesPath, "agent-runtime", "plugin-hook-runner.mjs")
       : join(app.getAppPath(), "src", "agent-runtime", "plugin-hook-runner.mjs");
+    const permissionGatePath = app.isPackaged
+      ? join(process.resourcesPath, "agent-runtime", "permission-gate.mjs")
+      : join(app.getAppPath(), "src", "agent-runtime", "permission-gate.mjs");
     agentRuntimeHelper = {
       command: process.execPath,
       args: [runtimeHelperPath],
@@ -378,6 +448,9 @@ async function initializeServices(): Promise<void> {
       kimiHomeDirectory,
       recoverOnStart: true,
       coreHooksEnabled: settings.get().agentLifecycleHooksEnabled,
+      permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
+      wantsDecisions: (provider) => decisionHooks.wanted(provider),
+      decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
       pluginHooks: {
         runner: {
           command: process.execPath,
@@ -399,6 +472,8 @@ async function initializeServices(): Promise<void> {
     if (reachesObservers(payload)) {
       agentControl?.observe(channel, payload);
       evenG2?.observe(channel, payload);
+      pluginSessions?.observe(channel, payload);
+      if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }
     if (reachesRenderer(payload) && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send(channel, payload);
@@ -429,18 +504,67 @@ async function initializeServices(): Promise<void> {
       notifiedAttentionStatus.delete(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
+  terminalManager.configureRedaction(redaction);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
-  terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().restoreTerminalSessions);
+  terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
 
-  // The orchestration bridge exists only for sessions explicitly launched with
-  // the orchestrator role; interactive sessions never receive capabilities.
+  // Plugin services see card events and control only the cards they start (EP-4).
+  const sessionsForPlugins = new PluginSessions({
+    terminals: terminalManager,
+    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
+  });
+  pluginSessions = sessionsForPlugins;
+  // Plugin tools in canvastty_agents (EP-6), for sessions whose role a tool lists.
+  const pluginTools = new PluginAgentTools({
+    providers: () => pluginManager!.agentToolProviders()
+      .filter((provider) => pluginServices!.running(provider.pluginId, provider.serviceId)),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    caller: (sessionId) => sessionsForPlugins.summary(sessionId),
+    redact: (text) => redaction.redact(text)
+  });
+  // Card badges and actions (EP-7).
+  pluginCards = new PluginCards({
+    providers: () => pluginManager!.cardActionProviders(),
+    trustedPlugins: () => new Set(pluginManager!.trustedServiceSpecs().map((spec) => spec.pluginId)),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    session: (sessionId) => sessionsForPlugins.summary(sessionId),
+    redact: (text) => redaction.redact(text),
+    changed: (decorations) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send(IPC.pluginsCardDecorationsChanged, decorations);
+      }
+    }
+  });
+
+  // The orchestration bridge exists only for sessions launched with the
+  // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
+  // other sessions never receive capabilities.
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager))
+    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools)
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
+  terminalManager.configureAgentTools((role, provider) => pluginTools.names(role, provider));
 
+  const launchPipeline = new LaunchPipeline({
+    contributors: () => pluginManager!.launchContributors(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key),
+    runsRoot: join(userDataPath, "launch-runs")
+  });
+  await launchPipeline.clearRuns().catch(() => undefined);
+  terminalManager.configureLaunchPipeline(launchPipeline);
+  terminalManager.configureEnvironments(new EnvironmentRegistry({
+    providers: () => pluginManager!.environmentProviders(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key)
+  }));
+  // Every host API a service may call exists now (sessions, cards, tools, secrets, launch, environments): services
+  // start, and one that subscribes on initialize does so before the restored cards' events. Restored cards with
+  // launch options or an environment ask their plugin's service, so start services first.
+  pluginServices.hostReady();
+  await pluginServicesStarted.catch(() => undefined);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
   // endpoint"; the start flag / env var force it on for one launch (CI smoke)
@@ -513,21 +637,11 @@ async function initializeServices(): Promise<void> {
     (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission)
   );
   await pluginMediaService.load();
-  pluginSecretsService = new PluginSecretsService(
-    app.getPath("userData"),
-    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission),
-    {
-      isAvailable: securePluginStorageAvailable,
-      encrypt: (value) => safeStorage.encryptString(value),
-      decrypt: (value) => safeStorage.decryptString(value)
-    }
-  );
-  await pluginSecretsService.load();
   providerSecretsService = new ProviderSecretsService(app.getPath("userData"), {
     isAvailable: securePluginStorageAvailable,
     encrypt: (value) => safeStorage.encryptString(value),
     decrypt: (value) => safeStorage.decryptString(value)
-  });
+  }, (values) => redaction.add("vault", values));
   await providerSecretsService.load();
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
@@ -545,12 +659,15 @@ async function initializeServices(): Promise<void> {
     terminals: terminalManager,
     limits: limitsService,
     plugins: pluginManager,
+    pluginServices,
+    pluginCards,
     pluginMedia: pluginMediaService,
     pluginSecrets: pluginSecretsService,
     providerSecrets: providerSecretsService!,
     browser: browserService,
     githubAuth: githubAuth!,
     hermesHud: hermesHudService,
+    launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
@@ -566,7 +683,7 @@ async function initializeServices(): Promise<void> {
         wheelBinding: activeCanvasWheelBinding(next.canvasWheelCaptureMode, next.canvasWheelOverride),
         navigationBinding: next.canvasNavigationOverride
       });
-      await terminalManager?.setSessionPersistenceEnabled(next.restoreTerminalSessions);
+      await terminalManager?.setSessionRestoreMode(next.sessionRestoreMode);
     },
     setCanvasNavigationShortcutCapture: (active) => {
       if (active) browserService?.cancelCanvasNavigationGesture();
@@ -920,6 +1037,7 @@ async function shutdownServices(): Promise<void> {
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
+  if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
 }
 
@@ -981,6 +1099,16 @@ function broadcastPluginStorageChange(pluginId: string, key: string, value: unkn
   for (const [window, ownerPluginId] of pluginWindows) {
     if (ownerPluginId !== pluginId || window.isDestroyed()) continue;
     window.webContents.send(IPC.pluginsStorageChanged, change);
+  }
+}
+
+function broadcastPluginServiceEvent(event: PluginServiceEvent): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC.pluginsServiceEvent, event);
+  }
+  for (const [window, ownerPluginId] of pluginWindows) {
+    if (ownerPluginId !== event.pluginId || window.isDestroyed()) continue;
+    window.webContents.send(IPC.pluginsServiceEvent, event);
   }
 }
 

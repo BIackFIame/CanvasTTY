@@ -1,0 +1,5 @@
+body { margin: 0; font: 600 14px/1.5 system-ui, sans-serif; color: #eef0f6; background: #353442; }
+.echo { display: grid; gap: 10px; padding: 16px; }
+.echo input { padding: 8px 10px; border: 1px solid rgba(255,255,255,.15); border-radius: 10px; color: inherit; background: rgba(255,255,255,.06); font: inherit; }
+.echo button { min-height: 38px; border: 0; border-radius: 10px; color: #30313d; background: #b9d4a8; cursor: pointer; font-weight: 800; }
+.echo output { min-height: 22px; overflow-wrap: anywhere; }

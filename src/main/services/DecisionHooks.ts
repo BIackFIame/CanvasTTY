@@ -1,0 +1,198 @@
+import { join } from "node:path";
+import { homedir } from "node:os";
+import type { AgentProviderId, SessionRole } from "../../shared/contracts.ts";
+import type { RuntimePermissionDecision, RuntimePermissionRequest } from "./agent-runtime/RuntimeGateway.ts";
+import { actionFromHook, checkBaseProtection } from "./safety/baseProtection.ts";
+import { DEFAULT_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+
+/** A trusted plugin service that declared `decide` (PluginManager.decisionServices). */
+export interface DecisionService {
+  pluginId: string;
+  pluginName: string;
+  serviceId: string;
+  /** Agents it decides for; all when omitted. */
+  appliesTo?: AgentProviderId[];
+  /** The person separately let this plugin allow tool calls. Without it an allow counts as no opinion. */
+  mayAllow: boolean;
+  /** Its `decide.timeoutMs`: how long it may take (1-60 s); 3 s when omitted. */
+  timeoutMs?: number;
+}
+
+/** What the core knows about the session a hook call comes from. */
+export interface DecisionSession {
+  provider: AgentProviderId;
+  role: SessionRole;
+  /** The session's working folder: "outside" is measured from here. */
+  cwd: string;
+  /** The agent's own config folders (CLAUDE_CONFIG_DIR of this run), whose plans and memory are not "outside". */
+  configDirs: string[];
+}
+
+export interface DecisionHooksDependencies {
+  baseProtection(): boolean;
+  services(): DecisionService[];
+  call(pluginId: string, serviceId: string, method: "canvastty.decide", params: unknown, timeoutMs: number): Promise<unknown>;
+  session(sessionId: string): DecisionSession | null;
+  home?: string;
+  timeoutMs?: number;
+}
+
+/** What a decision service receives (`canvastty.decide`). */
+export interface DecisionRequest {
+  event: "pre-tool";
+  sessionId: string;
+  provider: AgentProviderId;
+  role: SessionRole;
+  cwd: string;
+  /** The agent's current folder as its CLI reported it, when it did. */
+  agentCwd: string | null;
+  tool: { name: string; kind: "shell" | "edit" | "other"; command: string | null; paths: string[] };
+  /** The tool input as the agent sent it; null when it was over 40 KB (then `truncated`). */
+  input: unknown;
+  truncated: boolean;
+  /** How long CanvasTTY waits for this answer (the service's `decide.timeoutMs`, capped by the session's gate). */
+  budgetMs: number;
+}
+
+type Verdict = "deny" | "ask" | "allow";
+interface Answer { verdict: Verdict | null; reason: string; service: DecisionService }
+
+export const DECIDE_TIMEOUT_MS = DEFAULT_DECIDE_TIMEOUT_MS;
+const MAX_REASON = 500;
+const MAX_SERVICES = 8;
+
+/**
+ * Decision hooks (EP-5). For every shell or file-writing tool call an agent's hook reports, base protection runs
+ * first and its deny is final. Then every trusted decision service that applies answers deny, ask, allow or
+ * nothing, in parallel, within 3 s. Any deny wins; else any ask (a timeout, an error or an unreadable answer is an
+ * ask); else an allow counts only from a plugin the person separately let allow; else no verdict and the agent goes
+ * on as it would without CanvasTTY. Nothing here ever turns a failure into an allow.
+ */
+export class DecisionHooks {
+  private readonly deps: DecisionHooksDependencies;
+
+  constructor(deps: DecisionHooksDependencies) {
+    this.deps = deps;
+  }
+
+  /** Whether a launch of this agent needs the decision hook at all. */
+  wanted(provider: AgentProviderId): boolean {
+    return this.protects() || this.applicable(provider).length > 0;
+  }
+
+  /** The longest wait a decision service of this agent asked for: the session's gate is sized for it at launch. */
+  budgetMs(provider: AgentProviderId): number {
+    return Math.max(DECIDE_TIMEOUT_MS, ...this.applicable(provider).map((service) => this.timeoutFor(service)));
+  }
+
+  private timeoutFor(service: DecisionService): number {
+    return this.deps.timeoutMs ?? service.timeoutMs ?? DECIDE_TIMEOUT_MS;
+  }
+
+  async decide(sessionId: string, request: RuntimePermissionRequest, signal: AbortSignal): Promise<RuntimePermissionDecision> {
+    const session = this.deps.session(sessionId);
+    if (!session) return { behavior: "none" };
+    if (this.protects()) {
+      const home = this.deps.home ?? homedir();
+      const base = checkBaseProtection({
+        toolName: request.toolName,
+        toolInput: request.toolInput,
+        preview: request.toolInputPreview,
+        root: session.cwd,
+        commandCwd: request.cwd,
+        home,
+        agentRoots: [join(home, ".claude"), ...session.configDirs]
+      });
+      if (base) return { behavior: "deny", message: base.message };
+    }
+    const services = this.applicable(session.provider);
+    if (services.length === 0) return { behavior: "none" };
+    const action = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
+    const params: Omit<DecisionRequest, "budgetMs"> = {
+      event: "pre-tool",
+      sessionId,
+      provider: session.provider,
+      role: session.role,
+      cwd: session.cwd,
+      agentCwd: request.cwd,
+      tool: { name: request.toolName, kind: action.kind ?? "other", command: action.command, paths: action.paths },
+      input: request.toolInput,
+      truncated: request.truncated
+    };
+    // A service trusted after this card started gets no more time than the card's gate allows; the signal ends it.
+    const answers = await Promise.all(services.map((service) => {
+      const timeoutMs = this.timeoutFor(service);
+      return this.ask(service, { ...params, budgetMs: timeoutMs }, timeoutMs, signal);
+    }));
+    return mergeDecisions(answers, request.truncated);
+  }
+
+  private protects(): boolean {
+    // A settings read that fails counts as on.
+    try { return this.deps.baseProtection() !== false; } catch { return true; }
+  }
+
+  private applicable(provider: AgentProviderId): DecisionService[] {
+    let services: DecisionService[];
+    try { services = this.deps.services(); } catch { return []; }
+    return services
+      .filter((service) => !service.appliesTo || service.appliesTo.includes(provider))
+      .slice(0, MAX_SERVICES);
+  }
+
+  private async ask(service: DecisionService, params: DecisionRequest, timeoutMs: number, signal: AbortSignal): Promise<Answer> {
+    const late = (reason: string): Answer => ({ verdict: "ask", reason, service });
+    if (signal.aborted) return late("it did not answer in time");
+    let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      const result = await Promise.race([
+        this.deps.call(service.pluginId, service.serviceId, "canvastty.decide", params, timeoutMs),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("did not answer in time")), timeoutMs);
+          onAbort = () => reject(new Error("did not answer in time"));
+          signal.addEventListener("abort", onAbort, { once: true });
+        })
+      ]);
+      return parseAnswer(result, service);
+    } catch (error) {
+      const message = error instanceof Error && /in time/iu.test(error.message) ? "it did not answer in time" : "it could not answer";
+      return late(message);
+    } finally {
+      clearTimeout(timer);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+}
+
+/** `null`, `{}` or `{ verdict: "none" }` is no opinion; anything unreadable is an ask. */
+function parseAnswer(value: unknown, service: DecisionService): Answer {
+  if (value === null || value === undefined) return { verdict: null, reason: "", service };
+  if (typeof value !== "object" || Array.isArray(value)) return { verdict: "ask", reason: "its answer could not be read", service };
+  const record = value as Record<string, unknown>;
+  const reason = typeof record.reason === "string" ? clean(record.reason) : "";
+  if (record.verdict === undefined || record.verdict === "none") return { verdict: null, reason, service };
+  if (record.verdict === "deny" || record.verdict === "ask" || record.verdict === "allow") return { verdict: record.verdict, reason, service };
+  return { verdict: "ask", reason: "its answer could not be read", service };
+}
+
+/** Any deny wins; else any ask; else an allow from a plugin the person let allow; else no verdict. */
+export function mergeDecisions(answers: readonly Answer[], truncated: boolean): RuntimePermissionDecision {
+  const because = (answer: Answer): string => answer.reason ? ` (${answer.reason.replace(/[.!?\s]+$/u, "")})` : "";
+  const deny = answers.find((answer) => answer.verdict === "deny");
+  if (deny) {
+    return { behavior: "deny", message: `CanvasTTY plugin "${deny.service.pluginName}" blocked this tool call${because(deny)}. If it is needed, ask the person.` };
+  }
+  const ask = answers.find((answer) => answer.verdict === "ask");
+  if (ask) return { behavior: "ask", message: `CanvasTTY plugin "${ask.service.pluginName}" asks the person about this tool call${because(ask)}.` };
+  const allow = answers.find((answer) => answer.verdict === "allow" && answer.service.mayAllow);
+  // Cut input is never allowed: the plugin did not see all of it.
+  if (allow && truncated) return { behavior: "ask", message: "The tool input was too large to check in full." };
+  if (allow) return { behavior: "allow", message: `Allowed by CanvasTTY plugin "${allow.service.pluginName}"${because(allow)}.` };
+  return { behavior: "none" };
+}
+
+function clean(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\u0000-\u001F\u007F]+/gu, " ").trim().slice(0, MAX_REASON);
+}

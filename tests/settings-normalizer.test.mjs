@@ -12,7 +12,7 @@ import {
 
 const fallback = {
   locale: "en",
-  restoreTerminalSessions: false,
+  sessionRestoreMode: "off",
   persistCanvasRegions: true,
   persistStickyNotes: true,
   palette: "sage",
@@ -160,7 +160,8 @@ test("terminal restore remains opt-in and canvas regions are bounded and normali
     }]
   }, fallback);
 
-  assert.equal(normalized.restoreTerminalSessions, true);
+  // The old on/off switch continued conversations, so "on" migrates to "continue".
+  assert.equal(normalized.sessionRestoreMode, "continue");
   assert.deepEqual(normalized.canvasRegions, [{
     id: "region-1",
     title: "Backend",
@@ -168,7 +169,11 @@ test("terminal restore remains opt-in and canvas regions are bounded and normali
     position: { x: 20, y: 30 },
     size: { width: 360, height: 3_000 }
   }]);
-  assert.equal(normalizeSettings({ restoreTerminalSessions: "yes" }, fallback).restoreTerminalSessions, false);
+  assert.equal(normalizeSettings({ restoreTerminalSessions: "yes" }, fallback).sessionRestoreMode, "off");
+  assert.equal(normalizeSettings({ restoreTerminalSessions: false }, fallback).sessionRestoreMode, "off");
+  assert.equal(normalizeSettings({ sessionRestoreMode: "reopen", restoreTerminalSessions: true }, fallback).sessionRestoreMode, "reopen");
+  assert.equal(normalizeSettings({ sessionRestoreMode: "later" }, fallback).sessionRestoreMode, "off");
+  assert.equal("restoreTerminalSessions" in normalized, false);
 });
 
 test("colored regions and notes use independent exit persistence gates", async () => {
@@ -419,7 +424,7 @@ test("the Qwen migration does not rerun the older expanded-limit migration", asy
     assert.deepEqual(loaded.homeLimitProviders, ["codex", "claude", "kimi"]);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 20);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, ["codex", "claude", "kimi"]);
   } finally {
@@ -442,7 +447,7 @@ test("the limit-display migration preserves a version-three launcher subset", as
     assert.deepEqual(loaded.homeLimitProviders, fallback.homeLimitProviders);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 20);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, fallback.homeLimitProviders);
   } finally {
@@ -462,7 +467,7 @@ test("the expanded limit migration preserves a curated version-four subset", asy
     assert.deepEqual(loaded.homeLimitProviders, ["kimi"]);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 20);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, ["kimi"]);
   } finally {
@@ -614,7 +619,7 @@ test("existing profiles migrate minimap interaction to click and persist later c
     const store = new SettingsStore(dir, "en");
     assert.equal((await store.load()).minimapInteractionMode, "click");
     let persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 20);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.minimapInteractionMode, "click");
 
     await store.update({ minimapInteractionMode: "drag" });

@@ -30,6 +30,7 @@ import type {
   PluginInstallPreview,
   PluginUpdateStatus,
   RadialLauncherItemId,
+  SessionRestoreMode,
   SessionRowColorMode,
   ShortcutAction,
   UpdaterState,
@@ -77,6 +78,7 @@ import {
 } from "./appearanceSettings";
 import { CanvasNavigationShortcutEditor } from "./CanvasNavigationShortcutEditor";
 import { AgentHooksSettings } from "./AgentHooksSettings";
+import { PluginServicesSettings } from "./PluginServicesSettings";
 import { ProviderSecretsSettings } from "./ProviderSecretsSettings";
 import { ApiProfilesSettings } from "./ApiProfilesSettings";
 import { AboutSettings } from "./AboutSettings";
@@ -133,6 +135,8 @@ interface SettingsPanelProps {
   onSetPluginModules(pluginId: string, selectedModules: string[]): Promise<void>;
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onSetPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<void>;
+  onSetPluginNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
+  onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
@@ -160,6 +164,8 @@ export function SettingsPanel({
   onSetPluginModules,
   onSetPluginEnabled,
   onSetPluginHookEnabled,
+  onSetPluginNativeCodeTrusted,
+  onSetPluginDecisionsMayAllow,
   onUninstallPlugin,
   onOpenPluginContribution,
   onToggleHomeWidget,
@@ -425,9 +431,13 @@ export function SettingsPanel({
                 description={t(locale, "terminalSessionRestoreDescription")}
               >
                 <Segmented
-                  value={settings.restoreTerminalSessions ? "save" : "discard"}
-                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
-                  onChange={(value) => void onChange({ restoreTerminalSessions: value === "save" })}
+                  value={settings.sessionRestoreMode}
+                  options={[
+                    ["off", t(locale, "doNotSave")],
+                    ["reopen", t(locale, "sessionRestoreReopen")],
+                    ["continue", t(locale, "sessionRestoreContinue")]
+                  ]}
+                  onChange={(value) => void onChange({ sessionRestoreMode: value as SessionRestoreMode })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "persistCanvasRegions")}>
@@ -611,11 +621,27 @@ export function SettingsPanel({
                   {agentCliError && <span role="alert">{agentCliError}</span>}
                 </div>
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "baseProtection")}
+                description={t(locale, "baseProtectionDescription")}
+              >
+                <Segmented
+                  value={settings.baseProtectionEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ baseProtectionEnabled: value === "on" })}
+                />
+              </SettingGroup>
               <AgentHooksSettings
                 settings={settings}
                 plugins={plugins}
                 onChange={onChange}
                 onSetPluginHookEnabled={onSetPluginHookEnabled}
+              />
+              <PluginServicesSettings
+                locale={locale}
+                plugins={plugins}
+                onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
+                onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
               />
               <SettingGroup
                 label={t(locale, "agentControlEnabled")}

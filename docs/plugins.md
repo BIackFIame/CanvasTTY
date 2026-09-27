@@ -2,7 +2,7 @@
 
 [English](plugins.md) · [Русский](plugins.ru.md) · [简体中文](plugins.zh-CN.md) · [Docs home](README.md)
 
-CanvasTTY runtime plugins are installed from an HTTPS GitHub repository. A plugin can contribute sandboxed web surfaces and can optionally declare agent hook scripts. Web contributions run without Node.js. Agent hooks are a separate, explicit trust boundary and stay disabled until the user enables each hook in **Settings → Agents → Hooks**.
+CanvasTTY runtime plugins are installed from an HTTPS GitHub repository. A plugin can contribute sandboxed web surfaces and can optionally declare agent hook scripts and long-lived services. Web contributions run without Node.js. Agent hooks and services are native code: a separate, explicit trust boundary that stays off until the user enables each hook in **Settings → Agents → Hooks** and each plugin's services in **Settings → Agents → Extension native code**.
 
 ## Trust model
 
@@ -15,6 +15,7 @@ Installing a plugin is equivalent to allowing third-party browser code to run lo
 - Every privileged SDK method is gated by a manifest permission. Permissions are shown before the user confirms installation.
 - Sandboxed web contributions never receive provider credentials, PTY buffers, working directories, raw provider responses, or filesystem access.
 - Disabling or uninstalling a plugin immediately stops serving its assets and closes its separate windows.
+- Declared services follow the same rule as hooks, per plugin: install never starts them, and update, module changes, disabling, or a changed entry file revokes the confirmation. Services run out of process; no plugin code runs in the CanvasTTY main process.
 - Declared agent hooks are never enabled by install, update, or module changes. Enabling one is equivalent to running that repository's JavaScript as a native application with the current user's OS privileges, access to the provider event payload, and potential access to user-readable configuration or credentials. Updating the plugin, replacing modules, or disabling the plugin revokes every enabled hook so changed code must be trusted again.
 
 CanvasTTY does not embed arbitrary native OS windows. A `window` contribution is a sandboxed CanvasTTY-owned `BrowserWindow`. Native reparenting is not portable or reliable across Wayland, macOS, Windows, DPI modes, popups, and GPU surfaces.
@@ -35,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). A decision service lives in [`examples/plugins/deny-rm`](../examples/plugins/deny-rm). An agent tool, a card action and session events live in [`examples/plugins/collect-demo`](../examples/plugins/collect-demo).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -121,6 +122,273 @@ interface CanvasTTYAgentHookInput {
 
 Hook stdout/stderr is discarded, execution is time-bounded, and CanvasTTY's internal runtime/browser capability tokens are removed from the child environment. This is isolation from host internals, not a sandbox: the hook still has the user's normal filesystem and process privileges.
 
+### Services (apiVersion 2)
+
+A manifest with `"apiVersion": 2` may declare up to 8 `services`. Version 1 manifests stay valid; only `services` needs version 2.
+
+```json
+"services": [
+  { "id": "echo", "title": "Echo", "description": "Echoes requests.", "entry": "services/echo.mjs" }
+]
+```
+
+A service has a stable `id`, a `title`, an optional `description` and `module`, and an `entry` ending in `.js`, `.mjs`, or `.cjs`. The entry must be a bundled single file (for example built with esbuild): the installer runs no build and no `npm install`, and Electron and node-pty are not available to it. In a modular plugin the entry must be integrity-declared by its `module`, or by `coreFiles` when it has none, exactly like hook entries. When the user trusts the plugin's native code, CanvasTTY records the entry's SHA-256 and checks it again before every start; a changed file is never run and the confirmation is revoked on the next launch.
+
+Lifecycle: every service of an enabled, trusted plugin runs as its own process (`process.execPath` with `ELECTRON_RUN_AS_NODE=1`) with the plugin folder as its working directory. The environment is minimal: `PATH`, `HOME`, user, shell, locale, temp and XDG folders, `SSH_AUTH_SOCK`, and the Windows system folders. Provider keys, tokens, `NODE_OPTIONS`, and every `CANVASTTY_*` variable are removed. A service that exits unexpectedly restarts after 1, 2, 4, 8, then 16 s; after more than 5 unexpected exits in 10 minutes it stays failed until its trust is confirmed again. Disabling, uninstalling, updating, changing modules, revoking trust, or quitting CanvasTTY stops it: first a `canvastty.shutdown` notification and closed stdin, then `SIGTERM`, then `SIGKILL`. `<userData>/plugin-data/<pluginId>` is created for the service and removed on uninstall. Its stderr, non-protocol stdout, `log` calls, and lifecycle events go to a bounded per-plugin log (the last 300 entries) shown under the plugin in **Settings → Agents → Extension native code**.
+
+Protocol: newline-delimited JSON-RPC 2.0 over stdin/stdout, at most 1 MB per message in each direction. A larger message from the host is refused; a larger line from the service is dropped and logged. The host first sends a notification:
+
+```json
+{"jsonrpc":"2.0","method":"canvastty.initialize","params":{"apiVersion":2,"pluginId":"com.example.service-echo","serviceId":"echo","dataDir":"…/plugin-data/com.example.service-echo","locale":"en","hostVersion":"1.5.2"}}
+```
+
+At app start, services are started only after every host API they may call (`sessions.*`, `cards.setBadge`, `secrets.get`, …) is ready, and before saved cards are restored: a service can call them as soon as it gets `canvastty.initialize`, and one that subscribes to session events then receives the restored cards as events or in the `sessions.subscribe` snapshot.
+
+Requests from the plugin's own surfaces arrive with the method and params chosen by the surface; method names starting with `canvastty.` are reserved for the host. Answer with `{"jsonrpc":"2.0","id":…,"result":…}` or `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}`. A request unanswered within 15 s fails with a timeout error, as does a request while the service is stopped, restarting, or failed; at most 64 requests wait at once per service.
+
+A service may call back this host API (the base that later extension points add to; anything else is answered with error `-32601`):
+
+| Method | Kind | Gate | Result |
+|:--|:--|:--|:--|
+| `log` `{ level?: "info" \| "warn" \| "error", message }` | request or notification | none | Adds a line to the plugin log |
+| `storage.get` `{ key }` | request | `storage` permission | The same isolated 64 KB storage as `host.storage.get` |
+| `storage.set` `{ key, value }` | request | `storage` permission | Writes it and notifies the plugin's surfaces |
+| `event` `{ event, data }` | notification | none | Delivered to this plugin's live surfaces through `host.service.onEvent` |
+| `redaction.register` `{ values }` | request | none | Up to 32 strings (4096 characters each, 8 or more to count) that CanvasTTY masks in every text one agent reads from another; kept in memory only |
+| `secrets.get` `{ key }` | request | `secrets` permission | The plugin's own secret (the same store as `host.secrets`), or `null`. The value is then masked like `redaction.register` values. For keys a service needs itself (an API key for a model it calls); never send one back to a surface |
+| `sessions.subscribe` / `sessions.list` / `sessions.unsubscribe` | request | `sessions:events` | Card events and the open cards (see [Session events](#session-events-and-plugin-owned-cards-sessions)) |
+| `sessions.create` | request | `sessions:launch` | Starts a card the plugin owns |
+| `sessions.send` / `sessions.stop` | request | `sessions:control` | Only for cards the plugin started |
+| `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
+
+The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
+
+UI channel: sandboxed surfaces call their own plugin's services, and only those:
+
+```js
+const reply = await host.service.request("echo", "echo", { text: "hi" });
+host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
+```
+
+The permission is implicit when the plugin declares a service. The host relays opaque JSON and never adds credentials. A request to a service that is not running (not trusted yet, disabled, restarting, failed) or that times out rejects with an error.
+
+### Launch contributors (`launch:contribute`)
+
+One service per plugin may add a `launch` block. Its fields appear in the agent launcher under **Advanced** once the plugin's native code is trusted; the person turns the plugin on for one launch with **Use _plugin name_** and sets its fields. Only launches where the person chose the plugin, and restarts and restores of those cards, ask the plugin anything.
+
+```json
+"permissions": ["launch:contribute"],
+"services": [{
+  "id": "launcher", "title": "Launch env", "entry": "services/launcher.mjs",
+  "launch": {
+    "appliesTo": ["claude"],
+    "fields": [
+      { "key": "enabled", "label": "Add the variable", "kind": "boolean", "default": true },
+      { "key": "greeting", "label": "Value", "kind": "text", "default": "hello", "maxLength": 60 },
+      { "key": "mode", "label": "Mode", "kind": "select", "default": "plain",
+        "options": [{ "value": "plain", "label": "Plain" }, { "value": "loud", "label": "Loud" }] }
+    ]
+  }
+}]
+```
+
+Up to 8 fields; `kind` is `boolean`, `select` (1–16 options) or `text` (at most 200 characters, or `maxLength`). `appliesTo` lists agent providers; omitted means every agent. The chosen values are checked against the fields, saved in the card's session record (at most 4 KB per plugin), and reused on restart and restore. They are not secret: put keys in the plugin's `secrets`, never in a field.
+
+A `select` with `"optionsFrom": "service"` also lists choices the service offers, such as its own accounts. When the launcher opens, CanvasTTY asks the service `canvastty.launch.options` `{ provider, fields: [keys] }` and waits at most 3 s; the answer `{ "<key>": [{ value, label }] }` adds up to 64 choices per field after the declared ones (which stay required and are all the launcher shows when the service does not answer). Because such a list can change after a card was saved, its value is accepted as any text up to 200 characters without control characters, and `canvastty.launch.prepare` must check it and refuse a value it no longer knows.
+
+Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked). While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
+
+Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
+
+```json
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+```
+
+The answer is `null` (nothing to add) or an object with any of:
+
+| Key | Limit | Effect |
+|:--|:--|:--|
+| `env` `{ NAME: value }` | 32 names, 8 KB per value | Added to the agent's environment |
+| `secretEnv` `{ NAME: secretKey }` | 16 names; needs `secrets` | The host reads the plugin's own secret in the main process and sets it. The value never reaches the service or any UI, and is masked as `<redacted:secret>` in text other agents and the control CLI read from this card (observe, result, screen, failure details) |
+| `args` `[string]` | 32, 1024 characters each, no control characters | Appended after CanvasTTY's own arguments, before the resume selection |
+| `files` `[{ relPath, content }]` | 16 files, 256 KB, plain relative paths | Written to a private folder for this run, removed when the process exits; `{launchFiles}` in `env` values and `args` becomes that folder |
+| `thirdPartyModel` `true` | — | The agent runs on another model than its vendor's (an API or Ollama account). Profile `auto` then runs as accept-edits for this launch, and the card says so. A launch policy may set it too: it only ever makes a launch stricter |
+| `refuse` `{ reason }` | 240 characters | The card is not started and shows the reason |
+
+Rules the host enforces, none of which is ever skipped:
+
+- Several chosen plugins are asked side by side and merged in plugin-id order. Two plugins setting the same name, or a plugin setting a name CanvasTTY sets for this launch, refuses the launch and names them. Names starting with `CANVASTTY_`, `ELECTRON_`, `DYLD_` or `LD_`, and `NODE_OPTIONS`, `PATH`, `TERM`, `COLORTERM`, are reserved.
+- Arguments that bypass approvals or pick a conversation (every provider's YOLO flag, `--permission-mode`, `--sandbox`, `--resume`, `--continue`, `--session`, and the like) are refused: the profile and the restore rules stay the person's and the core's. This is not a sandbox; trusted native code already runs as you.
+- Claude Code applies only its last `--settings`, so a plugin's inline `--settings` JSON is merged into CanvasTTY's own (objects such as `env` key by key, hook lists appended); one that sets `permissions`, `hooks`, `disableAllHooks`, `sandbox`, `defaultMode` or `apiKeyHelper` is refused. Both `--settings <json>` and `--settings=<json>` are checked; a settings file is accepted only as one of the contribution's own launch files (`{launchFiles}/…`), which CanvasTTY reads, checks the same way and passes inline; any other file path is refused. `--bare`, `--safe-mode`, `--allowedTools`, `--permission-prompt-tool` and `--permission-prompts` are CanvasTTY's too.
+- No answer within 5 s, an error, an invalid answer, a missing secret, or a plugin that is disabled, removed or no longer trusted refuses the launch with the reason on the card. The agent is never started without a contribution the person chose. A restored card whose plugin is unavailable comes back stopped with that reason and keeps its record until the plugin returns or the card is closed.
+- A plain terminal takes no launch options.
+
+**Launch profiles.** `profile` is `normal` (the default), `yolo`, or `auto`. `auto` exists only for agents whose CLI has a native auto mode, checked against each CLI's `--help`: Codex `--approve-for-me` (its own reviewer, in its `workspace-write` sandbox), Claude Code `--permission-mode auto` with its sandbox (`{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":false}}` merged into the one `--settings`), and Grok `--permission-mode auto` (no Grok sandbox is relied on). Base protection and decision services keep answering in front of it (Codex, Claude Code). When any contributor answers `thirdPartyModel: true`, `auto` becomes the CLI's accept-edits mode in the same sandbox (Codex `--sandbox workspace-write --ask-for-approval on-request`, Claude Code and Grok `--permission-mode acceptEdits`): the native reviewer would be that same model, and a weak model's own classifier is not a safety boundary.
+
+**Trusted folder.** A subagent on this computer whose folder is the one the person chose for its top-level agent, or inside it, gets `"trustedFolder"`: that folder's real path. CanvasTTY itself answers Codex's "Trust this folder?" for it with a per-run `-c projects=…` override (nothing is written to `~/.codex`); a plugin that keeps the agent's own config home (an account's `CLAUDE_CONFIG_DIR`, say) may mark the folder trusted there. Codex also gets per-run trust for the hooks CanvasTTY itself adds (`-c hooks.state=…`), so it does not stop at "Hooks need review"; a project's or the person's own hooks still ask. Plugins cannot pass `-c hooks…`.
+
+**Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. Every `canvastty.launch.prepare` also carries `"environment"`: `{ pluginId, kind }` of the card's environment, or `null` on this computer. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
+
+```json
+"launch": { "policy": true, "fields": [] }
+```
+
+The full examples are [`examples/plugins/launch-env`](../examples/plugins/launch-env) (options) and [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (a policy that refuses YOLO outside an environment).
+
+### Session environments (`environment:provide`)
+
+An environment is where a card runs: a git worktree, a container, a remote host. A plugin may list up to 8 `environments` kinds, on one service or split over several (for example one service per module); each kind is unique in the plugin and answered by the service that lists it. Once the plugin's native code is trusted, the launcher's **Advanced** section shows **Where** (default **This computer**) with each kind that applies to the provider, and its optional `fields` (same kinds and limits as launch fields). While a kind applies to terminals, **Open terminal** opens the same launcher (folder and Where) instead of opening at once.
+
+```json
+"permissions": ["environment:provide"],
+"services": [{
+  "id": "worktree", "title": "Git worktree", "entry": "services/worktree.mjs",
+  "environments": [{
+    "kind": "worktree", "label": "Git worktree",
+    "description": "A branch in its own folder",
+    "appliesTo": ["terminal", "claude"],
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+  }]
+}]
+```
+
+CanvasTTY keeps the card, the PTY, the saved record and the restore order; the service answers five host-only requests (surfaces cannot send them):
+
+| Request | Params | Answer | Budget |
+|:--|:--|:--|:--|
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` or `{ refuse: { reason } }`. `ref` is opaque JSON of at most 4 KB saved with the card; `label` (80 characters) is the badge; `cwd` (an existing absolute folder) becomes the card's folder | 15 s |
+| `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` or `{ refuse }` | 5 s |
+| `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` or `{ stopped: { reason } }` | 10 s |
+| `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason` (`closed` or `quit`) | ignored | 10 s |
+| `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }` for the card badge and its tooltip | 3 s |
+
+- `prepare` runs once, when the card first starts. `wrap` runs before every start (create, restart, restore) and turns what the host would spawn into what runs inside the environment, for example `ssh -tt host …`, `docker exec -it …`, or the same program in another folder. The host still spawns it with node-pty, so scrollback, status and orchestration work unchanged.
+- `wrap` output is checked: `command` must be an absolute path to an executable file or a bare program name that the host resolves on `PATH`; a command line, a relative path or shell syntax is refused, and nothing runs through a shell. `args` is an array (256 items, 8 KB each, no NUL). `env` and `secretEnv` follow the launch-contributor rules: reserved names are refused, and so is any name CanvasTTY or a launch option already sets for this launch. `secretEnv` values come from the plugin's own secrets (needs `secrets`) and are masked like launch secrets.
+- `wrap` receives the launch's own variables (from CanvasTTY and chosen launch options) without reserved `CANVASTTY_*` names and without secret values; `secretEnvNames` lists names whose values the spawned process gets from the host, so a wrapper can forward them by name (`docker exec -e NAME`).
+- Restore resumes every saved environment first, then starts parents before children. If the plugin is disabled, removed or untrusted, or `resume` answers `stopped`, the card comes back stopped with the reason and keeps its record; Restart asks `resume` again. A card is never started locally instead, and a timeout or error refuses, never falls back.
+- Until `prepare` succeeds, the card's saved record keeps the launcher's choice (plugin, kind, options) instead of a ref. If the app quits while `prepare` runs, the card comes back stopped with that reason and nothing is prepared or started until the person restarts it, which prepares again with the same options; a failed `prepare` is kept the same way. An answer to `prepare` that arrives after its card was closed or restarted, or after the app began quitting, is never used or saved: the host calls `release` with `keepData: false` and `reason: "closed"` right away, as long as it is still running.
+- Closing a card in an environment asks once, "Keep environment data?", then calls `release` with the answer. Quitting releases nothing (the environment comes back with the card); with saving off, quitting calls `release` with `keepData: true` and `reason: "quit"` so compute can stop. The plugin keeps no session list of its own and has no restore logic.
+
+The full example is [`examples/plugins/env-worktree`](../examples/plugins/env-worktree): `prepare` runs `git worktree add` in a folder under the plugin's data directory, `wrap` sets the folder, `resume` checks it still exists, `describe` shows the current branch, and `release` removes the worktree (and the branch it created) unless you keep it.
+
+### Decision hooks (`decision:provide`)
+
+Before a local agent's shell command or file write runs, CanvasTTY can ask a plugin: deny, ask the person, or allow. One service per plugin may declare `decide`:
+
+```json
+"permissions": ["decision:provide"],
+"services": [{
+  "id": "guard", "title": "rm -rf guard", "entry": "services/guard.mjs",
+  "decide": { "events": ["pre-tool"], "appliesTo": ["claude", "codex"], "timeoutMs": 3000 }
+}]
+```
+
+`pre-tool` is every shell and file-writing tool call, before it runs and in every permission mode, YOLO included: Claude Code, Codex and Qwen Code through their `PreToolUse` hook, OpenCode through CanvasTTY's OpenCode plugin (`tool.execute.before`). `appliesTo` limits the agents; all four when omitted. The host sends `canvastty.decide` (host-only) and waits at most `timeoutMs` (1000 to 60000; 3000 when omitted). The agent's call waits as long, so ask for more only when the answer needs it (for example a local model reading the command); CanvasTTY sizes each card's hook for the longest budget of the services that apply when the card starts, and a service trusted later gets no more than its card allows. The request carries the budget as `budgetMs`:
+
+```ts
+interface DecisionRequest {
+  event: "pre-tool";
+  sessionId: string; provider: string; role: "agent" | "orchestrator" | "subagent";
+  cwd: string;                 // the card's working folder
+  agentCwd: string | null;     // the agent's current folder, when its CLI reports it
+  tool: { name: string; kind: "shell" | "edit" | "other"; command: string | null; paths: string[] };
+  input: unknown;              // the tool input as the agent sent it; null when over 40 KB (truncated)
+  truncated: boolean;
+  budgetMs: number;            // how long CanvasTTY waits for this answer
+}
+// answer: { verdict: "deny" | "ask" | "allow", reason?: string } or null for no opinion
+```
+
+How answers combine, in this order:
+
+1. **Base protection** (below) runs first; its deny is final and plugins are not asked.
+2. Any plugin's `deny` wins. The model reads `CanvasTTY plugin "<name>" blocked this tool call (<reason>)`, so write the reason as what to do instead.
+3. Else any `ask`: Claude Code asks the person for this call, whatever its permission mode. A timeout, an error, a stopped service or an unreadable answer counts as `ask`, never as allow.
+4. Else an `allow` counts only from a plugin the person let allow: a second confirmation, **May allow agent actions**, under the plugin in **Settings → Agents → Extension native code**, revoked with its native code trust. Claude Code then runs the call without its own prompt; OpenCode's prompt for that call is answered `once`. An allow never applies to input that was too large to send whole.
+5. Else nothing: the agent goes on exactly as it would without CanvasTTY.
+
+Codex and Qwen Code take only a deny from this hook: for them `ask` and `allow` leave the decision to the CLI's own permission mode. Remote and container sessions are not covered (their hook cannot reach this computer). The hook is installed for agents started while base protection is on or a decision plugin applies, so a plugin trusted later covers new cards only. A CLI runs the call when its hook crashes, so this is a guard, not a sandbox.
+
+The full example is [`examples/plugins/deny-rm`](../examples/plugins/deny-rm): it denies `rm -rf` of anything at the top of the working folder (`rm -rf *`, `rm -rf src`) and has no opinion on everything else. It declares `timeoutMs: 5000` to show the field; it answers at once.
+
+### Agent tools (`tools:agents`)
+
+A service may offer up to 16 `tools` to agents. They appear in the `canvastty_agents` MCP server as `<pluginId>__<name>` (dots in the plugin id become `_`, so `com.example.tools` + `lookup` is `com_example_tools__lookup`; Anthropic and OpenAI allow only letters, digits, `_` and `-` in tool names, at most 64 characters, and a longer name keeps the start of the id plus a short hash), next to CanvasTTY's own orchestration tools, and count as CanvasTTY's own tools: base protection does not check them (it checks shells and file writes only).
+
+```json
+"permissions": ["tools:agents"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "tools": [{
+    "name": "diffstat",
+    "description": "git diff --stat of your own folder, or of one of your subagents' folders.",
+    "inputSchema": { "type": "object", "properties": { "sessionId": { "type": "string" } }, "additionalProperties": false },
+    "roles": ["orchestrator"]
+  }]
+}]
+```
+
+- `name` is `[a-z][a-z0-9_]{0,39}` and unique in the plugin; `inputSchema` is a JSON Schema whose top level is `type: "object"` (at most 8 KB); `roles` lists `orchestrator`, `agent` and/or `subagent`.
+- Only sessions whose role is listed see a tool, and only while the plugin's native code is trusted and the service runs. The list is read when the agent starts, so a plugin trusted later reaches new cards. Orchestrators get the bridge as before; an `agent` or `subagent` card gets it only when a plugin tool lists its role, and then sees only plugin tools, never the core orchestration tools. Plugin tools reach Claude Code, Codex, Qwen Code and OpenCode; Kimi and Hermes share one configuration file between cards and keep the core tools only.
+- A call reaches the service as `canvastty.tools.call` (host-only) with `{ tool, callerSessionId, caller, input }`, where `caller` is the calling card's summary (the same shape as session events). The host checks `input` first: an object, required keys, top-level property types, no extra keys when `additionalProperties` is `false`; deeper checks are the plugin's.
+- Answer `{ content, isError? }`: `content` is text, or any JSON (sent as JSON text). The answer is masked by the redaction registry and cut to 32 K characters; no answer in 15 s, an error or a stopped service is an error result for the agent, never anything more. The caller id is all the host vouches for: a tool that acts on other sessions must check them itself (the example accepts only the caller's own subagents).
+
+### Session events and plugin-owned cards (`sessions:*`)
+
+A service with `sessions:events` calls `sessions.subscribe` `{ ownedOnly? }` (again after every start). The answer lists the open cards; after that the host sends `canvastty.sessions.event` notifications:
+
+```ts
+interface PluginSessionEvent {
+  type: "created" | "restored" | "status" | "exited" | "closed";
+  owned: boolean;              // this plugin started the card
+  session: {
+    id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
+    title: string; status: string; exitCode: number | null; startedAt: number;
+    cwd: string;               // the folder the person chose
+    workingDirectory: string;  // where it actually runs (a worktree environment moves it)
+    environment?: { pluginId: string; kind: string; label: string; ref: unknown };
+  };
+  screen?: string;             // only with sessions:read-screen, on status and exited
+}
+```
+
+Events carry metadata only. With `sessions:read-screen` (the consent text says this is private data), `status` and `exited` events add the last 4000 characters of the card's output as plain text, masked by the redaction registry. `sessions.list` returns the same summaries on demand.
+
+Control follows the agent-control gateway's model: the service is one controller and owns only what it created. Ownership is saved with the card's session record, so a restored card still belongs to the plugin that started it.
+
+| Request | Gate | Effect |
+|:--|:--|:--|
+| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }` |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started. A card whose launch its plugins still prepare gets it once that launch started; `sent` is false when the launch did not start (the text is dropped) |
+| `sessions.stop` `{ sessionId }` | `sessions:control` | Closes a card this plugin started; its environment data is kept |
+
+A foreign or unknown id gets the same error, so a plugin cannot probe other cards. There is no delete and no screen-reading control call.
+
+### Card badges and actions (`cards:decorate`)
+
+A service with `cards:decorate` can put a badge on any card and declare up to 8 `cardActions`:
+
+```json
+"permissions": ["cards:decorate"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "cardActions": [{ "id": "show-changes", "title": "Show changes", "when": { "environmentKinds": ["worktree"] } }]
+}]
+```
+
+- `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`: `text` is at most 24 characters, `tone` is `neutral` (default), `info`, `warn` or `error`, `tooltip` at most 200 characters; `null` removes the plugin's badge. At most 4 plugin badges per card. Badges are plain text, masked like agent text, and disappear with the card or when the plugin's trust is revoked.
+- An action shows in the card's options menu on every card its `when` matches: `providers`, `environmentKinds` (any plugin's environment; a card outside an environment never matches) and `roles`, each optional; every listed key must match. Choosing it sends `canvastty.cards.invoke` `{ actionId, sessionId, session }` (host-only; `session` is the summary above) and waits at most 15 s. Answer `{ message?, tone? }`: the message (plain text, at most 2000 characters, masked) is shown as a toast on the card. A timeout or error shows an error toast.
+- No HTML anywhere: badges, titles and messages are rendered as text.
+
+The full example is [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): the card action **Show changes** on cards in the `worktree` environment (from `env-worktree`) shows `git diff --stat` of the worktree and sets a "N changed" badge, and the tool `collect-demo__diffstat` gives orchestrators the same for their own folder or a subagent's, which it learns about from session events.
+
+### Base protection and redaction (core)
+
+Two safety parts are built in and need no plugin:
+
+- **Base protection** (Settings → Agents, on by default; the person can turn it off) denies, through the same hook, sudo and other elevation, piping downloaded or generated text into a shell, download-and-run, disk and format commands, fork bombs, and writing or deleting outside the working folder: the home folder, other projects and `/tmp` included, and deleting the working folder itself. An agent's own plan and memory folders (`~/.claude/plans`, `~/.claude/projects/<project>/memory`, and the same inside the run's `CLAUDE_CONFIG_DIR`) are not "outside". It only ever denies; each reason tells the model what to do instead (a write to `/tmp` suggests a scratch folder inside the project).
+- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs). Plugin tool answers, `screen` in session events, card badges and card action messages are masked the same way.
+
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
 ## Permissions
@@ -128,8 +396,17 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | Permission | SDK capability | Data boundary |
 |:--|:--|:--|
 | `storage` | `storage.get`, `storage.set` | Isolated JSON storage, 64 KB per plugin |
-| `secrets` | `secrets.get`, `secrets.set`, `secrets.delete` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable |
+| `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; a service's `secrets.get` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable. A trusted service reads its own plugin's secrets only |
 | `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
+| `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
+| `environment:provide` | A service's `environments` and `canvastty.environment.*` | Can create a place for cards the person starts in its environment and change the command, arguments, variables and folder they run with there |
+| `decision:provide` | A service's `decide` and `canvastty.decide` | Sees agents' commands and file writes (with their input) before they run and can block them or ask the person; allowing needs a second confirmation |
+| `tools:agents` | A service's `tools` and `canvastty.tools.call` | Offers tools to agents of the listed roles; receives their arguments and the calling card's summary |
+| `sessions:events` | `sessions.subscribe`, `sessions.list` | Card metadata: provider, role, parent, title, status, folders, environment ref; no screen text |
+| `sessions:read-screen` | `screen` in status and exit events | The end of every card's output (masked): private data |
+| `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch |
+| `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
+| `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |
@@ -185,7 +462,7 @@ if (library) {
 }
 ```
 
-Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, and `hermesHud.*`. `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
+Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, `hermesHud.*`, and `service.request` (see [Services](#services-apiversion-2)). `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
 
 Use `storage` for non-sensitive JSON preferences and `secrets` only for credentials such as OAuth tokens or API keys. Secrets are string-only, limited to 32 keys / 16 KB per value / 64 KB per plugin, removed on uninstall, and never fall back to plaintext storage. A secret call fails explicitly when the operating system cannot provide protected encryption.
 
