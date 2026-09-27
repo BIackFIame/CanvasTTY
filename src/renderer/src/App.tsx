@@ -89,6 +89,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
   radialLauncherEnabled: false,
   agentLifecycleHooksEnabled: true,
+  baseProtectionEnabled: true,
   uiScale: DEFAULT_UI_SCALE,
   canvasColor: "sage",
   pattern: "dots",
@@ -868,6 +869,16 @@ export function App(): React.JSX.Element {
     }
   }, [refreshPlugins]);
 
+  const setPluginDecisionsMayAllow = useCallback(async (pluginId: string, allowed: boolean): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed);
+      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+    } catch (error) {
+      await refreshPlugins().catch(() => undefined);
+      throw error;
+    }
+  }, [refreshPlugins]);
+
   const setPluginModules = useCallback(async (pluginId: string, selectedModules: string[]): Promise<void> => {
     let updated: InstalledPlugin;
     try {
@@ -1242,6 +1253,7 @@ export function App(): React.JSX.Element {
         onSetPluginEnabled={setPluginEnabled}
         onSetPluginHookEnabled={setPluginHookEnabled}
         onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
+        onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
         onUninstallPlugin={uninstallPlugin}
         onOpenPluginContribution={openPluginContribution}
         onToggleHomeWidget={toggleHomeWidget}

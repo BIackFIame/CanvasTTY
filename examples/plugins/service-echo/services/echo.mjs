@@ -21,8 +21,8 @@ async function handle(method, params) {
     return { echo: params, count, serviceId: context?.serviceId ?? null };
   }
   if (method === "token") {
-    // The service reads the plugin's own secret (needs the secrets permission).
-    // Never send it back to a page: answer only whether it is set.
+    // The service reads the plugin's own secret (needs the secrets permission); CanvasTTY masks the value in
+    // everything agents read. Never send it back to a page: answer only whether it is set.
     const token = await callHost("secrets.get", { key: "token" });
     return { set: typeof token === "string" && token.length > 0 };
   }

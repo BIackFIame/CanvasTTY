@@ -206,6 +206,8 @@ export interface AppSettings {
   radialLauncherEnabled: boolean;
   radialLauncherItems: RadialLauncherItemId[];
   agentLifecycleHooksEnabled: boolean;
+  /** Base protection: deny-only hard rules for agents' tool calls (writes outside the folder, sudo, …). */
+  baseProtectionEnabled: boolean;
   uiScale: number;
   canvasColor: CanvasColorId;
   pattern: CanvasPatternId;
@@ -364,7 +366,8 @@ export type PluginPermission =
   | "hermes:hud"
   | "network"
   | "launch:contribute"
-  | "environment:provide";
+  | "environment:provide"
+  | "decision:provide";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -434,6 +437,19 @@ export interface PluginService {
   launch?: PluginServiceLaunch;
   /** Session environments (`environment:provide`): kinds offered in the launcher's "Where" choice. */
   environments?: PluginEnvironmentKind[];
+  /** Decision hooks (`decision:provide`): answers deny, ask or allow before agents' tool calls run. */
+  decide?: PluginServiceDecide;
+}
+
+export type PluginDecisionEvent = "pre-tool";
+
+export interface PluginServiceDecide {
+  /** `pre-tool`: every shell or file-writing tool call, before it runs (YOLO included). */
+  events: PluginDecisionEvent[];
+  /** Agents it decides for; all agents with decision hooks when omitted. */
+  appliesTo?: AgentProviderId[];
+  /** How long CanvasTTY waits for its answer: 1 to 60 s, 3 s when omitted. The agent's call waits as long. */
+  timeoutMs?: number;
 }
 
 /** One place a session can run (a worktree, a container, a remote host), provided by a plugin service. */
@@ -612,6 +628,8 @@ export interface InstalledPlugin {
   enabledHooks: string[];
   /** The user trusted this plugin's services to run as native code. Never set by install or update. */
   nativeCodeTrusted: boolean;
+  /** Its decision service may allow tool calls (a second confirmation); revoked with native code trust. */
+  decisionsMayAllow: boolean;
 }
 
 export interface PluginInstallPreview {
@@ -1236,6 +1254,7 @@ export interface CanvasTTYApi {
     setEnabled(pluginId: string, enabled: boolean): Promise<InstalledPlugin>;
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
     setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
+    setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
@@ -1369,6 +1388,7 @@ export const IPC = {
   pluginsSetEnabled: "plugins:set-enabled",
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
   pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
+  pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",

@@ -1052,6 +1052,7 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "hermes:hud": "permissionHermesHud",
     "launch:contribute": "permissionLaunchContribute",
     "environment:provide": "permissionEnvironmentProvide",
+    "decision:provide": "permissionDecisionProvide",
     network: "permissionNetwork"
   } as const)[permission];
 }

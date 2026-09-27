@@ -10,6 +10,8 @@ import {
   MAX_RUNTIME_MESSAGE_BYTES,
   MAX_RESULT_CHARS,
   normalizeThreadId,
+  PERMISSION_GATE,
+  permissionGateTimings,
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "../../../agent-runtime/runtime-protocol.mjs";
@@ -23,6 +25,10 @@ const AGENT_PROVIDERS = new Set<ProviderId>([
   "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
 ]);
 const MAX_RUNTIME_SESSIONS = 32;
+/** Decision checks in flight, per session and in total; over a cap the call is refused with advice to slow down. */
+const MAX_DECISIONS_PER_SESSION = 8;
+const MAX_DECISIONS_TOTAL = 32;
+const OVERLOADED_MESSAGE = "CanvasTTY is checking too many tool calls from this session at once. Wait a few seconds and run the command again, one at a time.";
 
 export type RuntimeLifecycleState = "idle" | "working" | "needs_approval";
 
@@ -52,6 +58,31 @@ interface RuntimeLease {
   latest: RuntimeLifecycleSignal | null;
   captureResult: boolean;
   answerCaptureGrantExpiresAt: number | null;
+  /** Launched with decision hooks; otherwise permission requests are refused. */
+  decisions: boolean;
+  /** How long a decision may take for this session (sized at launch from the decision services' budgets). */
+  gatewayMs: number;
+  checks: Set<AbortController>;
+}
+
+/** One decision hook call (permission-gate.mjs). The tool input is agent-influenced data, never instructions. */
+export interface RuntimePermissionRequest {
+  requestId: string;
+  provider: Exclude<ProviderId, "terminal">;
+  toolName: string;
+  /** The whole tool input, or null when it was over the bound (then `truncated`, and only a preview). */
+  toolInput: unknown;
+  toolInputPreview: string | null;
+  toolInputSha256: string;
+  truncated: boolean;
+  /** The agent's current folder as its CLI reported it. */
+  cwd: string | null;
+}
+
+/** `none`: no opinion, the CLI goes on as it would without CanvasTTY. */
+export interface RuntimePermissionDecision {
+  behavior: "allow" | "deny" | "ask" | "none";
+  message?: string;
 }
 
 interface ParsedLifecycleMessage {
@@ -73,6 +104,11 @@ export interface RuntimeGatewayOptions {
   windowsPipeHostFactory?: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
   onSignal?(terminalSessionId: string, signal: RuntimeLifecycleSignal): void;
   onAnswerCaptureRevoked?(terminalSessionId: string): void;
+  /**
+   * Decision hooks: answers one tool call. `signal` aborts when the hook's socket closes, the session is revoked or
+   * the gateway's deadline passes; the answer is then `ask`.
+   */
+  onPermissionRequest?(terminalSessionId: string, request: RuntimePermissionRequest, signal: AbortSignal): Promise<RuntimePermissionDecision> | RuntimePermissionDecision;
   now?: () => number;
 }
 
@@ -83,7 +119,9 @@ export class RuntimeGateway {
   private readonly windowsPipeHostFactory: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
   private readonly onSignal: RuntimeGatewayOptions["onSignal"];
   private readonly onAnswerCaptureRevoked: RuntimeGatewayOptions["onAnswerCaptureRevoked"];
+  private readonly onPermissionRequest: RuntimeGatewayOptions["onPermissionRequest"];
   private readonly now: () => number;
+  private readonly checks = new Set<AbortController>();
   private readonly leases = new Map<string, RuntimeLease>();
   private readonly sockets = new Set<AgentGatewaySocket>();
   private server: Server | null = null;
@@ -99,6 +137,7 @@ export class RuntimeGateway {
       ?? ((transportOptions) => new WindowsPipeHostTransport(transportOptions));
     this.onSignal = options.onSignal;
     this.onAnswerCaptureRevoked = options.onAnswerCaptureRevoked;
+    this.onPermissionRequest = options.onPermissionRequest;
     this.now = options.now ?? Date.now;
   }
 
@@ -147,7 +186,9 @@ export class RuntimeGateway {
     terminalSessionId: string,
     provider: Exclude<ProviderId, "terminal">,
     captureResultOrGrantExpiresAt: boolean | number = false,
-    answerCaptureGrantExpiresAt?: number
+    answerCaptureGrantExpiresAt?: number,
+    decisions = false,
+    decisionBudgetMs?: number
   ): RuntimeSessionCapability {
     if (!this.endpoint || (!this.server && !this.windowsTransport?.isRunning)) {
       throw new Error("Agent runtime gateway must be started before launching agents.");
@@ -174,7 +215,10 @@ export class RuntimeGateway {
         && Number.isFinite(grantExpiresAt)
         && grantExpiresAt > this.now()
         ? grantExpiresAt
-        : null
+        : null,
+      decisions,
+      gatewayMs: permissionGateTimings(decisionBudgetMs).gatewayMs,
+      checks: new Set()
     });
     return { address: this.endpoint, terminalSessionId, provider, capabilityToken };
   }
@@ -188,6 +232,7 @@ export class RuntimeGateway {
     if (!lease) return;
     lease.tokenDigest.fill(0);
     this.leases.delete(terminalSessionId);
+    for (const check of lease.checks) check.abort();
     if (lease.answerCaptureGrantExpiresAt !== null) {
       this.onAnswerCaptureRevoked?.(terminalSessionId);
     }
@@ -198,6 +243,7 @@ export class RuntimeGateway {
     this.sockets.clear();
     for (const lease of this.leases.values()) {
       lease.tokenDigest.fill(0);
+      for (const check of lease.checks) check.abort();
       if (lease.answerCaptureGrantExpiresAt !== null) {
         this.onAnswerCaptureRevoked?.(lease.terminalSessionId);
       }
@@ -239,6 +285,8 @@ export class RuntimeGateway {
       handled = true;
       try {
         const value: unknown = JSON.parse(pending.subarray(0, newline).toString("utf8"));
+        // Decision hooks keep the socket open for the answer; every other message is unchanged.
+        if (isPermissionRequest(value)) return this.acceptPermission(socket, value, close);
         if (isAnswerCaptureCheck(value)) {
           const answerCapture = this.answerCaptureIsActive(value);
           socket.write(Buffer.from(`${JSON.stringify({
@@ -334,6 +382,111 @@ export class RuntimeGateway {
     };
     this.onSignal?.(message.terminalSessionId, signal);
   }
+
+  /**
+   * One decision hook call. Authenticated exactly like a lifecycle message, and only for a session launched with
+   * decision hooks. The socket stays open until the answer; a closed socket, a revoke or the gateway deadline
+   * aborts the check, and the answer is then `ask`. Checks are capped per session and in total; over a cap the
+   * call is refused with a message asking the model to slow down (a flood must not slip past the rules).
+   */
+  private acceptPermission(socket: AgentGatewaySocket, value: Record<string, unknown>, close: () => void): void {
+    let request: RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
+    try {
+      request = parsePermissionMessage(value);
+    } catch {
+      return close();
+    }
+    const lease = this.leases.get(request.terminalSessionId);
+    if (!lease || lease.provider !== request.provider) return close();
+    const supplied = digest(request.capabilityToken);
+    const valid = supplied.length === lease.tokenDigest.length && timingSafeEqual(supplied, lease.tokenDigest);
+    supplied.fill(0);
+    if (!valid || !lease.decisions) return close();
+    const { terminalSessionId, capabilityToken: _token, ...forwarded } = request;
+    let answered = false;
+    const answer = (decision: RuntimePermissionDecision): void => {
+      if (answered) return;
+      answered = true;
+      const line = {
+        v: RUNTIME_PROTOCOL_VERSION,
+        type: "permission_decision",
+        requestId: request.requestId,
+        behavior: decision.behavior,
+        ...(decision.message ? { message: decision.message } : {})
+      };
+      try {
+        socket.write(Buffer.from(`${JSON.stringify(line)}\n`, "utf8"));
+      } catch { /* the hook is gone: the CLI goes on without an answer */ }
+      const timeout = setTimeout(close, 1_000);
+      timeout.unref();
+    };
+    if (lease.checks.size >= MAX_DECISIONS_PER_SESSION || this.checks.size >= MAX_DECISIONS_TOTAL) {
+      return answer({ behavior: "deny", message: OVERLOADED_MESSAGE });
+    }
+    const controller = new AbortController();
+    lease.checks.add(controller);
+    this.checks.add(controller);
+    const deadline = setTimeout(() => controller.abort(), lease.gatewayMs);
+    deadline.unref();
+    const settle = (decision: RuntimePermissionDecision): void => {
+      clearTimeout(deadline);
+      lease.checks.delete(controller);
+      this.checks.delete(controller);
+      answer(controller.signal.aborted ? { behavior: "ask" } : enforceDecision(forwarded, decision));
+    };
+    controller.signal.addEventListener("abort", () => settle({ behavior: "ask" }), { once: true });
+    socket.on("close", () => controller.abort());
+    const handler = this.onPermissionRequest;
+    if (!handler) return settle({ behavior: "none" });
+    let pendingAnswer: Promise<RuntimePermissionDecision>;
+    try {
+      pendingAnswer = Promise.resolve(handler(terminalSessionId, forwarded, controller.signal));
+    } catch {
+      return settle({ behavior: "ask" });
+    }
+    pendingAnswer.then(settle, () => settle({ behavior: "ask" }));
+  }
+}
+
+/** What leaves the gateway, whatever the handler said: never an allow of cut input. */
+function enforceDecision(request: RuntimePermissionRequest, decision: RuntimePermissionDecision): RuntimePermissionDecision {
+  if (!decision || !["allow", "deny", "ask", "none"].includes(decision.behavior)) return { behavior: "ask" };
+  if (decision.behavior === "allow" && request.truncated) return { behavior: "ask" };
+  const message = typeof decision.message === "string" ? decision.message.slice(0, PERMISSION_GATE.messageChars) : "";
+  return { behavior: decision.behavior, ...(message ? { message } : {}) };
+}
+
+function isPermissionRequest(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && value.type === "permission_request";
+}
+
+const PERMISSION_KEYS = [
+  "capabilityToken", "cwd", "provider", "requestId", "terminalSessionId", "toolInput",
+  "toolInputPreview", "toolInputSha256", "toolName", "truncated", "type", "v"
+].sort().join(",");
+
+function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string } {
+  if (Object.keys(value).sort().join(",") !== PERMISSION_KEYS) throw new Error("Permission request has an invalid schema.");
+  if (value.v !== RUNTIME_PROTOCOL_VERSION || value.type !== "permission_request") throw new Error("Permission request version is unsupported.");
+  if (
+    typeof value.terminalSessionId !== "string" || !value.terminalSessionId || value.terminalSessionId.length > 160
+    || typeof value.provider !== "string" || !AGENT_PROVIDERS.has(value.provider as ProviderId)
+    || typeof value.capabilityToken !== "string" || value.capabilityToken.length < 32
+    || typeof value.requestId !== "string" || !/^[A-Za-z0-9-]{8,80}$/u.test(value.requestId)
+    || typeof value.toolName !== "string" || !value.toolName || value.toolName.length > PERMISSION_GATE.toolNameChars
+    || typeof value.toolInputSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.toolInputSha256)
+    || typeof value.truncated !== "boolean"
+    || (value.cwd !== null && (typeof value.cwd !== "string" || !value.cwd || value.cwd.length > 4_096))
+    || (value.toolInputPreview !== null && (typeof value.toolInputPreview !== "string" || value.toolInputPreview.length > PERMISSION_GATE.toolInputPreviewChars))
+  ) throw new Error("Permission request fields are invalid.");
+  // Cut input carries only its preview; whole input carries no preview and must match its hash.
+  if (value.truncated ? value.toolInput !== null || value.toolInputPreview === null : value.toolInputPreview !== null) {
+    throw new Error("Permission request input is inconsistent.");
+  }
+  if (!value.truncated && createHash("sha256").update(JSON.stringify(value.toolInput), "utf8").digest("hex") !== value.toolInputSha256) {
+    throw new Error("Permission request input does not match its hash.");
+  }
+  return value as unknown as RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
 }
 
 function isAnswerCaptureCheck(value: unknown): value is Record<string, unknown> {

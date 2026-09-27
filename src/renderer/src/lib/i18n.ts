@@ -120,6 +120,10 @@ const ru = {
   pluginNativeCodeDescription: "Сервисы расширений работают отдельными процессами с правами вашей учётной записи. Установка их не запускает: каждое расширение нужно подтвердить здесь. Обновление, смена модулей или отключение снимают доверие.",
   pluginNativeCodeServices: "Сервисы",
   pluginNativeCodeConfirm: "Проверьте репозиторий расширения. Включение запустит его сервисы как программы с правами вашей учётной записи.",
+  pluginDecisionsMayAllow: "Может разрешать действия агентов",
+  pluginDecisionsMayAllowDescription: "Без этого расширение может только запрещать действия или спрашивать вас; его «разрешить» не учитывается.",
+  pluginDecisionsMayAllowConfirm: "Когда расширение разрешит команду или запись файла, агент выполнит её без своего вопроса к вам. Базовая защита и запреты других расширений всё равно действуют.",
+  pluginDecisionsMayAllowEnable: "Разрешить",
   pluginNativeCodeLog: "Журнал",
   pluginServiceStopped: "остановлен",
   pluginServiceStarting: "запускается",
@@ -287,6 +291,7 @@ const ru = {
   launchWhereLocal: "Этот компьютер",
   launchTerminal: "Открыть терминал",
   permissionEnvironmentProvide: "Может создавать места для сессий, запущенных в его среде (worktree, контейнер, хост), и менять команду, которая там запускается",
+  permissionDecisionProvide: "Видит команды и записи файлов агентов до их выполнения и может запрещать их или спрашивать вас",
   environmentKeepTitle: "Сохранить данные среды?",
   environmentKeepDetail: "«Сохранить» оставит её на диске; «Удалить» удалит её вместе с данными.",
   environmentKeep: "Сохранить",
@@ -646,7 +651,9 @@ const ru = {
   orchestratorEndpointOff: "Эндпоинт оркестрации агентов выключен (Настройки → Агенты). Без него оркестратор не сможет создавать сессии и управлять ими.",
   enableAgentControl: "Включить эндпоинт",
   agentControlEnabled: "Эндпоинт оркестрации агентов",
-  agentControlEnabledDescription: "Локальный эндпоинт только для текущего пользователя, через который встроенный CLI canvastty-control и сессии с ролью «Оркестратор» создают сессии и управляют ими. По умолчанию выключен."
+  agentControlEnabledDescription: "Локальный эндпоинт только для текущего пользователя, через который встроенный CLI canvastty-control и сессии с ролью «Оркестратор» создают сессии и управляют ими. По умолчанию выключен.",
+  baseProtection: "Базовая защита",
+  baseProtectionDescription: "Запрещает агентам (Claude Code, Codex, Qwen Code, OpenCode на этом компьютере) sudo, curl | sh, запуск скачанного, команды для дисков, форк-бомбы и запись или удаление вне рабочей папки, включая /tmp. Только запрещает, ничего не разрешает. Действует для агентов, запущенных после изменения."
 } as const;
 
 const en: Record<keyof typeof ru, string> = {
@@ -769,6 +776,10 @@ const en: Record<keyof typeof ru, string> = {
   pluginNativeCodeDescription: "Extension services run as separate processes with your user account privileges. Installing never starts them: confirm each extension here. An update, a module change or disabling the extension revokes the confirmation.",
   pluginNativeCodeServices: "Services",
   pluginNativeCodeConfirm: "Inspect the extension repository first. Enabling runs its services as programs with your user account privileges.",
+  pluginDecisionsMayAllow: "May allow agent actions",
+  pluginDecisionsMayAllowDescription: "Without this the extension can only block actions or ask you; its allow answers are ignored.",
+  pluginDecisionsMayAllowConfirm: "When the extension allows a command or a file write, the agent runs it without asking you first. Base protection and other extensions' blocks still apply.",
+  pluginDecisionsMayAllowEnable: "Let it allow",
   pluginNativeCodeLog: "Log",
   pluginServiceStopped: "stopped",
   pluginServiceStarting: "starting",
@@ -936,6 +947,7 @@ const en: Record<keyof typeof ru, string> = {
   launchWhereLocal: "This computer",
   launchTerminal: "Open terminal",
   permissionEnvironmentProvide: "Can create places for sessions you start in its environment (a worktree, container or host) and change the command that runs there",
+  permissionDecisionProvide: "Sees agents' commands and file writes before they run and can block them or ask you",
   environmentKeepTitle: "Keep environment data?",
   environmentKeepDetail: "Keep leaves it on disk; Remove deletes it and its data.",
   environmentKeep: "Keep",
@@ -1295,7 +1307,9 @@ const en: Record<keyof typeof ru, string> = {
   orchestratorEndpointOff: "The agent orchestration endpoint is off (Settings → Agents). Without it an orchestrator cannot create or drive sessions.",
   enableAgentControl: "Enable endpoint",
   agentControlEnabled: "Agent orchestration endpoint",
-  agentControlEnabledDescription: "Local, current-user-only endpoint through which the bundled canvastty-control CLI and Orchestrator sessions create and drive sessions. Off by default."
+  agentControlEnabledDescription: "Local, current-user-only endpoint through which the bundled canvastty-control CLI and Orchestrator sessions create and drive sessions. Off by default.",
+  baseProtection: "Base protection",
+  baseProtectionDescription: "Blocks agents (Claude Code, Codex, Qwen Code, OpenCode on this computer) from sudo, curl | sh, running downloads, disk commands, fork bombs, and writing or deleting outside the working folder, /tmp included. It only blocks and never allows. Applies to agents started after a change."
 };
 
 export type TranslationKey = keyof typeof ru;

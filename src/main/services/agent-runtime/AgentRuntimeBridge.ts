@@ -18,11 +18,15 @@ export interface PrepareAgentRuntimeLaunchInput {
   captureResult?: boolean;
   /** Owner-issued, per-session answer-capture grant expiry (Unix milliseconds). */
   answerCaptureGrantExpiresAt?: number;
+  /** Install the decision hook (base protection and plugin decisions); by default `wantsDecisions` says. */
+  decisions?: boolean;
 }
 
 export interface PreparedAgentRuntimePtyLaunch {
   args: string[];
   environment: Record<string, string>;
+  /** The decision hook was installed (the provider has one and the gateway runs). */
+  decisions?: boolean;
   cleanup(): void;
 }
 
@@ -34,41 +38,58 @@ export interface AgentRuntimeLaunchCoordinator {
 export interface AgentRuntimeBridgeOptions extends ProviderRuntimeLaunchOptions {
   recoverOnStart?: boolean;
   coreHooksEnabled?: boolean;
+  /** Whether a launch of this agent needs the decision hook (base protection on, or a decision plugin applies). */
+  wantsDecisions?(provider: Exclude<ProviderId, "terminal">): boolean;
+  /** The longest decision budget for this agent (ms); the session's gate deadlines are sized from it. */
+  decisionBudgetMs?(provider: Exclude<ProviderId, "terminal">): number;
 }
 
 export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
   private readonly gateway: RuntimeGateway;
   private readonly providers: ProviderRuntimeLaunchAdapters;
-  private readonly activeSessions = new Set<string>();
+  /** Running sessions and whether each got the decision hook. */
+  private readonly activeSessions = new Map<string, boolean>();
   private coreHooksEnabled: boolean;
+  private readonly wantsDecisions: AgentRuntimeBridgeOptions["wantsDecisions"];
+  private readonly decisionBudgetMs: AgentRuntimeBridgeOptions["decisionBudgetMs"];
 
   constructor(gateway: RuntimeGateway, options: AgentRuntimeBridgeOptions) {
     this.gateway = gateway;
+    this.wantsDecisions = options.wantsDecisions;
+    this.decisionBudgetMs = options.decisionBudgetMs;
     this.providers = new ProviderRuntimeLaunchAdapters(options);
     this.coreHooksEnabled = options.coreHooksEnabled !== false;
     if (options.recoverOnStart) this.providers.recoverConfigurations();
   }
 
   prepareLaunch(input: PrepareAgentRuntimeLaunchInput): PreparedAgentRuntimePtyLaunch {
-    const capability = this.coreHooksEnabled
+    // The decision hook talks to the gateway over its own capability, with or without agent status hooks.
+    const decisions = (input.decisions ?? this.wantsDecisions?.(input.provider) === true)
+      && this.providers.decisionsSupported(input.provider);
+    let budgetMs: number | undefined;
+    try { budgetMs = decisions ? this.decisionBudgetMs?.(input.provider) : undefined; } catch { budgetMs = undefined; }
+    const capability = this.coreHooksEnabled || decisions
       ? this.gateway.registerSession(
         input.terminalSessionId,
         input.provider,
         input.captureResult === true,
-        isLiveGrant(input.answerCaptureGrantExpiresAt) ? input.answerCaptureGrantExpiresAt : undefined
+        isLiveGrant(input.answerCaptureGrantExpiresAt) ? input.answerCaptureGrantExpiresAt : undefined,
+        decisions,
+        budgetMs
       )
       : null;
     let prepared;
     try {
-      prepared = this.providers.prepare(input.provider, input.terminalSessionId, this.coreHooksEnabled);
+      prepared = this.providers.prepare(input.provider, input.terminalSessionId, this.coreHooksEnabled, decisions, budgetMs);
     } catch (error) {
       if (capability) this.gateway.revokeTerminalSession(input.terminalSessionId);
       throw error;
     }
-    this.activeSessions.add(input.terminalSessionId);
+    this.activeSessions.set(input.terminalSessionId, decisions);
     let cleaned = false;
     return {
       args: prepared.args,
+      decisions,
       environment: {
         ...prepared.environment,
         ...(input.captureResult ? { [CAPTURE_RESULT_ENV]: "1" } : {}),
@@ -105,8 +126,9 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
     if (this.coreHooksEnabled === next) return;
     this.coreHooksEnabled = next;
     if (next) return;
-    for (const terminalSessionId of this.activeSessions) {
-      this.gateway.revokeTerminalSession(terminalSessionId);
+    // A session with the decision hook keeps its lease: its protection must not silently stop.
+    for (const [terminalSessionId, decisions] of this.activeSessions) {
+      if (!decisions) this.gateway.revokeTerminalSession(terminalSessionId);
     }
   }
 }

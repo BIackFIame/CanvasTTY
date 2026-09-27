@@ -29,6 +29,8 @@ import { PluginManager } from "./services/PluginManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
+import { DecisionHooks } from "./services/DecisionHooks";
+import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -272,6 +274,8 @@ async function initializeServices(): Promise<void> {
   await settings.load();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
+  // Secrets this app knows are masked in every text one agent reads from another (EP-8).
+  const redaction = new SecretRedactionRegistry();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   pluginServices = new PluginServiceSupervisor({
     command: process.execPath,
@@ -284,11 +288,19 @@ async function initializeServices(): Promise<void> {
         broadcastPluginStorageChange(pluginId, key, value);
       },
       emit: (pluginId, serviceId, event, data) => broadcastPluginServiceEvent({ pluginId, serviceId, event, data }),
+      registerSecrets: (pluginId, values) => redaction.add(`plugin:${pluginId}`, values),
       secretGet: (pluginId, key) => {
         if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
         return pluginSecretsService.get(pluginId, key);
       }
     }
+  });
+  // Base protection runs first; then trusted plugin decision services (EP-5).
+  const decisionHooks = new DecisionHooks({
+    baseProtection: () => settings.get().baseProtectionEnabled,
+    services: () => pluginManager!.decisionServices(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null
   });
   pluginManager.setServiceObserver((specs) => pluginServices!.sync(specs));
   const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
@@ -390,7 +402,8 @@ async function initializeServices(): Promise<void> {
           );
         }
       },
-      onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId)
+      onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
+      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal)
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
@@ -402,6 +415,9 @@ async function initializeServices(): Promise<void> {
     const pluginHookRunnerPath = app.isPackaged
       ? join(process.resourcesPath, "agent-runtime", "plugin-hook-runner.mjs")
       : join(app.getAppPath(), "src", "agent-runtime", "plugin-hook-runner.mjs");
+    const permissionGatePath = app.isPackaged
+      ? join(process.resourcesPath, "agent-runtime", "permission-gate.mjs")
+      : join(app.getAppPath(), "src", "agent-runtime", "permission-gate.mjs");
     agentRuntimeHelper = {
       command: process.execPath,
       args: [runtimeHelperPath],
@@ -415,6 +431,9 @@ async function initializeServices(): Promise<void> {
       kimiHomeDirectory,
       recoverOnStart: true,
       coreHooksEnabled: settings.get().agentLifecycleHooksEnabled,
+      permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
+      wantsDecisions: (provider) => decisionHooks.wanted(provider),
+      decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
       pluginHooks: {
         runner: {
           command: process.execPath,
@@ -466,6 +485,7 @@ async function initializeServices(): Promise<void> {
       notifiedAttentionStatus.delete(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
+  terminalManager.configureRedaction(redaction);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
 
@@ -569,7 +589,7 @@ async function initializeServices(): Promise<void> {
     isAvailable: securePluginStorageAvailable,
     encrypt: (value) => safeStorage.encryptString(value),
     decrypt: (value) => safeStorage.decryptString(value)
-  });
+  }, (values) => redaction.add("vault", values));
   await providerSecretsService.load();
   protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));

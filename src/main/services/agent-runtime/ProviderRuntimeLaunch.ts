@@ -16,6 +16,7 @@ import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
+import { DECISION_BUDGET_ENV, OPENCODE_DECISIONS_ENV, permissionGateTimings } from "../../../agent-runtime/runtime-protocol.mjs";
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -76,6 +77,8 @@ export interface ProviderRuntimeLaunchOptions {
   environment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   pluginHooks?: RuntimePluginHookSource;
+  /** The decision hook (permission-gate.mjs); without it decision hooks are never installed. */
+  permissionGate?: RuntimeHookHelperLaunch;
 }
 
 export interface PreparedProviderRuntimeLaunch {
@@ -112,6 +115,12 @@ export class ProviderRuntimeLaunchAdapters {
     if (!isAbsolute(options.openCodePluginPath)) {
       throw new Error("OpenCode lifecycle plugin path must be absolute.");
     }
+    if (options.permissionGate) {
+      validateHelper(options.permissionGate);
+      if (options.permissionGate.args.length !== 1 || !isAbsolute(options.permissionGate.args[0])) {
+        throw new Error("Permission gate must reference one absolute script path.");
+      }
+    }
     if (options.pluginHooks) {
       validateHelper(options.pluginHooks.runner);
       if (!isAbsolute(options.pluginHooks.registryPath)) {
@@ -143,17 +152,29 @@ export class ProviderRuntimeLaunchAdapters {
     );
   }
 
+  /**
+   * `decisions` adds the decision hook: PreToolUse for Claude Code, Codex and Qwen Code, the CanvasTTY plugin's
+   * guard for OpenCode. Without it the arguments are exactly what they were before decision hooks existed.
+   * `decisionBudgetMs` (a decision service's `decide.timeoutMs`) lengthens the hook's deadlines to fit it.
+   */
   prepare(
     provider: AgentProvider,
     terminalSessionId: string,
-    coreHooksEnabled = true
+    coreHooksEnabled = true,
+    decisions = false,
+    decisionBudgetMs?: number
   ): PreparedProviderRuntimeLaunch {
     const pluginRegistrations = this.options.pluginHooks?.list(provider) ?? [];
-    const pluginCommands = this.pluginHookCommands(provider, pluginRegistrations);
+    const gate = decisions && this.decisionsSupported(provider);
+    const pluginCommands = [
+      ...this.pluginHookCommands(provider, pluginRegistrations),
+      ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs) : [])
+    ];
+    const openCodeDecisions = gate && provider === "opencode";
     // Only providers with a hook adapter get lifecycle configuration. Anything else (omp, pi,
     // cursor, minimax, devin, antigravity) must never reach Grok's shared hook overlay.
     const hasHooks = HOOK_PROVIDERS.has(provider)
-      && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && pluginRegistrations.length > 0));
+      && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && (pluginRegistrations.length > 0 || openCodeDecisions)));
     const environment = hasHooks
       ? {
         ...(pluginRegistrations.length > 0 ? {
@@ -191,6 +212,7 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], {
         ...environment,
         ...pluginEnvironment,
+        ...(openCodeDecisions ? { [OPENCODE_DECISIONS_ENV]: "1", ...budgetEnvironment(decisionBudgetMs) } : {}),
         [OPENCODE_CONFIG_CONTENT]: openCodeLifecycleConfig(
           this.environment[OPENCODE_CONFIG_CONTENT],
           this.options.openCodePluginPath
@@ -306,6 +328,11 @@ export class ProviderRuntimeLaunchAdapters {
       this.grokOverlaySignature = null;
       overlay?.cleanup();
     });
+  }
+
+  /** Whether this provider can take the decision hook: Claude Code, Codex, Qwen Code (PreToolUse) and OpenCode. */
+  decisionsSupported(provider: AgentProvider): boolean {
+    return Boolean(this.options.permissionGate) && (provider === "opencode" || Object.hasOwn(DECISION_TOOL_MATCHERS, provider));
   }
 
   private pluginHookCommands(
@@ -482,6 +509,41 @@ const PLUGIN_HOOK_TRIGGERS: Record<AgentProvider, Partial<Record<PluginAgentHook
   // Antigravity hook surface is not measured yet either.
   antigravity: {}
 };
+
+type DecisionHookProvider = "claude" | "codex" | "qwen";
+
+/**
+ * Tools the decision hook looks at: shells and file writes. Claude and Codex match exact names separated by `|`;
+ * Qwen matches a regular expression on its tool ids.
+ */
+const DECISION_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
+  claude: "Bash|Write|Edit|MultiEdit|NotebookEdit",
+  codex: "Bash|apply_patch|Edit|Write",
+  qwen: "^(run_shell_command|write_file|edit|replace)$"
+};
+
+export function decisionHookCommands(
+  provider: DecisionHookProvider,
+  gate: RuntimeHookHelperLaunch,
+  platform: NodeJS.Platform,
+  decisionBudgetMs?: number
+): ProviderHookCommand[] {
+  validateHelper(gate);
+  const { hookSeconds } = permissionGateTimings(decisionBudgetMs);
+  return [{
+    event: "PreToolUse",
+    matcher: DECISION_TOOL_MATCHERS[provider],
+    command: commandWithEnvironment([gate.command, ...gate.args, "pretool"], { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs) }, platform),
+    // Qwen hook timeouts are milliseconds; Claude's and Codex's are seconds.
+    timeout: provider === "qwen" ? hookSeconds * 1_000 : hookSeconds
+  }];
+}
+
+/** The helper learns a longer decision budget from its environment; the default budget adds nothing. */
+function budgetEnvironment(decisionBudgetMs: number | undefined): Record<string, string> {
+  const { budgetMs } = permissionGateTimings(decisionBudgetMs);
+  return decisionBudgetMs === undefined || budgetMs === permissionGateTimings().budgetMs ? {} : { [DECISION_BUDGET_ENV]: String(budgetMs) };
+}
 
 export function claudeLifecycleArgs(
   helper: RuntimeHookHelperLaunch,

@@ -29,7 +29,7 @@ node scripts/canvastty-control.mjs interrupt SESSION_ID
 
 Output is JSON; `--json` is accepted explicitly too. Save the returned session ID. For each send, use its returned `resultRevisionBefore` as `result --after`, rather than repeatedly using zero.
 
-`create` defaults to **YOLO** and passes Codex's real `--dangerously-bypass-approvals-and-sandbox` flag. Workers can edit files and run tests. Their global settings are unchanged. Specify `--profile normal` to use the ordinary provider configuration instead. Scope tasks and external actions explicitly: full access is not filesystem isolation. A control API with no deletion command does not prevent a full-access model from deleting files.
+`create` defaults to **YOLO** and passes Codex's real `--dangerously-bypass-approvals-and-sandbox` flag. Workers can edit files and run tests. Their global settings are unchanged. Specify `--profile normal` to use the ordinary provider configuration instead. Scope tasks and external actions explicitly: full access is not filesystem isolation. A control API with no deletion command does not prevent a full-access model from deleting files. Base protection (Settings → Agents, on by default) still refuses elevation, pipes into a shell, disk commands, and writes or deletes outside the working folder before the tool call runs, YOLO included; it is a guard through the agent's own hook, not a sandbox. Screens, results and failure details returned to a controller are masked for known keys and common key shapes.
 
 The backend uses `TerminalManager` and the existing native provider path. `cwd`, title and profile apply at creation. YOLO is retained by ordinary native restart/restore. Creation does not activate a canvas window or request UI focus.
 

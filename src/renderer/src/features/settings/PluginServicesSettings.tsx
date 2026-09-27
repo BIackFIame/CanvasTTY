@@ -11,6 +11,7 @@ interface PluginServicesSettingsProps {
   locale: LocaleId;
   plugins: InstalledPlugin[];
   onSetNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
+  onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
 }
 
 /**
@@ -21,7 +22,8 @@ interface PluginServicesSettingsProps {
 export function PluginServicesSettings({
   locale,
   plugins,
-  onSetNativeCodeTrusted
+  onSetNativeCodeTrusted,
+  onSetDecisionsMayAllow
 }: PluginServicesSettingsProps): React.JSX.Element | null {
   const rows = plugins.filter((plugin) => plugin.manifest.services?.length);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -54,6 +56,19 @@ export function PluginServicesSettings({
     setError(null);
     try {
       await onSetNativeCodeTrusted(plugin.manifest.id, trusted);
+      setConfirming(null);
+    } catch {
+      setError(t(locale, "pluginHookChangeFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const setMayAllow = async (plugin: InstalledPlugin, allowed: boolean): Promise<void> => {
+    setBusy(plugin.manifest.id);
+    setError(null);
+    try {
+      await onSetDecisionsMayAllow(plugin.manifest.id, allowed);
       setConfirming(null);
     } catch {
       setError(t(locale, "pluginHookChangeFailed"));
@@ -110,6 +125,43 @@ export function PluginServicesSettings({
                   );
                 })}
               </dl>
+              {trusted && plugin.manifest.services?.some((service) => service.decide) && (
+                <div className="agent-hooks__row-main">
+                  <span className="agent-hooks__copy">
+                    <strong>{t(locale, "pluginDecisionsMayAllow")}</strong>
+                    <small>{t(locale, "pluginDecisionsMayAllowDescription")}</small>
+                  </span>
+                  <button
+                    className={`agent-hooks__toggle${plugin.decisionsMayAllow ? " agent-hooks__toggle--on" : ""}`}
+                    type="button"
+                    role="switch"
+                    aria-checked={plugin.decisionsMayAllow}
+                    aria-label={`${t(locale, "pluginDecisionsMayAllow")}: ${plugin.manifest.name}`}
+                    disabled={busy !== null}
+                    onClick={() => {
+                      if (plugin.decisionsMayAllow) void setMayAllow(plugin, false);
+                      else setConfirming(`${pluginId}:allow`);
+                    }}
+                  >
+                    <span aria-hidden="true" />
+                    {t(locale, plugin.decisionsMayAllow ? "on" : "off")}
+                  </button>
+                </div>
+              )}
+              {confirming === `${pluginId}:allow` && (
+                <div className="agent-hooks__confirm">
+                  <p>{t(locale, "pluginDecisionsMayAllowConfirm")}</p>
+                  <div>
+                    <button type="button" onClick={() => setConfirming(null)}>{t(locale, "cancel")}</button>
+                    <button
+                      className="agent-hooks__trust"
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void setMayAllow(plugin, true)}
+                    >{t(locale, "pluginDecisionsMayAllowEnable")}</button>
+                  </div>
+                </div>
+              )}
               {!plugin.enabled && <p className="agent-hooks__disabled">{t(locale, "pluginHookDisabledPlugin")}</p>}
               {confirming === pluginId && (
                 <div className="agent-hooks__confirm">

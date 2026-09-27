@@ -1,20 +1,34 @@
 /**
- * Small extension points a model-backed plugin needs (the CanvasTTY Assistant): launch policies (`launch.policy`,
- * asked before every launch with `chosen: false` and the card's environment, refusal only), and `secrets.get` for a service's own
- * secrets. HOME is whatever the test runner's fake HOME is.
+ * Three small extension points a model-backed plugin needs (the CanvasTTY Assistant): a decision service's own
+ * budget (`decide.timeoutMs`, with the session's gate sized at launch), launch policies (`launch.policy`, asked
+ * before every launch with `chosen: false` and the card's environment, refusal only), and `secrets.get` for a
+ * service's own secrets (masked for agents from then on). HOME is whatever the test runner's fake HOME is.
  */
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import {
+  AGENT_RUNTIME_ENV, DECISION_BUDGET_ENV, OPENCODE_DECISIONS_ENV, PERMISSION_GATE, helperDeadlineMs, permissionGateTimings
+} from "../src/agent-runtime/runtime-protocol.mjs";
+import { DecisionHooks } from "../src/main/services/DecisionHooks.ts";
 import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
 import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import { PluginServiceSupervisor } from "../src/main/services/PluginServiceSupervisor.ts";
+import { RuntimeGateway } from "../src/main/services/agent-runtime/RuntimeGateway.ts";
+import { AgentRuntimeBridge } from "../src/main/services/agent-runtime/AgentRuntimeBridge.ts";
+import { ProviderRuntimeLaunchAdapters } from "../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts";
+import { SecretRedactionRegistry } from "../src/main/services/safety/SecretRedaction.ts";
 
+const POSIX = { skip: process.platform === "win32" ? "Unix sockets and POSIX paths." : false };
+const GATE = fileURLToPath(new URL("../src/agent-runtime/permission-gate.mjs", import.meta.url));
 const guardExample = new URL("../examples/plugins/yolo-guard/", import.meta.url);
 const echoExample = new URL("../examples/plugins/service-echo/", import.meta.url);
+const denyExample = new URL("../examples/plugins/deny-rm/", import.meta.url);
 const readJson = async (url) => JSON.parse(await readFile(url, "utf8"));
 const sha256 = (content) => createHash("sha256").update(content).digest("hex");
 const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-points-")));
@@ -31,17 +45,133 @@ const waitFor = async (predicate, timeoutMs = 5_000) => {
   throw new Error("Condition was not met in time.");
 };
 
-test("manifests: launch.policy is a boolean; the examples validate", async () => {
+test("manifests: decide.timeoutMs is 1-60 s, launch.policy is a boolean; the examples validate", async () => {
   const base = (service) => ({
     apiVersion: 2, id: "com.example.points", name: "Points", version: "1.0.0", description: "Test.",
-    permissions: ["launch:contribute"], contributions: [],
+    permissions: ["decision:provide", "launch:contribute"], contributions: [],
     services: [{ id: "svc", title: "Svc", entry: "services/svc.mjs", ...service }]
   });
+  const decide = (timeoutMs) => validatePluginManifest(base({ decide: { events: ["pre-tool"], timeoutMs } })).services[0].decide;
+  assert.equal(decide(45_000).timeoutMs, 45_000);
+  assert.equal(validatePluginManifest(base({ decide: { events: ["pre-tool"] } })).services[0].decide.timeoutMs, undefined);
+  for (const bad of [999, 60_001, 2.5, "10000"]) assert.throws(() => decide(bad), /timeoutMs must be 1000 to 60000/u);
   assert.equal(validatePluginManifest(base({ launch: { policy: true, fields: [] } })).services[0].launch.policy, true);
   assert.equal(validatePluginManifest(base({ launch: { policy: false, fields: [] } })).services[0].launch.policy, undefined);
   assert.throws(() => validatePluginManifest(base({ launch: { policy: "yes", fields: [] } })), /policy must be true or false/u);
   assert.equal(validatePluginManifest(await readJson(new URL("canvastty.plugin.json", guardExample))).services[0].launch.policy, true);
   assert.deepEqual(validatePluginManifest(await readJson(new URL("canvastty.plugin.json", echoExample))).permissions, ["storage", "secrets"]);
+  assert.equal(validatePluginManifest(await readJson(new URL("canvastty.plugin.json", denyExample))).services[0].decide.timeoutMs, 5_000);
+});
+
+test("gate timings: the default budget keeps today's deadlines; a longer one lengthens hook, helper and gateway", () => {
+  assert.deepEqual(permissionGateTimings(), { budgetMs: 3_000, gatewayMs: PERMISSION_GATE.gatewayMs, helperMs: PERMISSION_GATE.helperMs, hookSeconds: PERMISSION_GATE.hookSeconds });
+  assert.deepEqual(permissionGateTimings(45_000), { budgetMs: 45_000, gatewayMs: 47_000, helperMs: 49_000, hookSeconds: 52 });
+  assert.equal(permissionGateTimings(600_000).budgetMs, 60_000, "capped at 60 s");
+  assert.equal(helperDeadlineMs({}), PERMISSION_GATE.helperMs);
+  assert.equal(helperDeadlineMs({ [DECISION_BUDGET_ENV]: "45000" }), 49_000);
+  assert.equal(helperDeadlineMs({ [DECISION_BUDGET_ENV]: "1e9" }), PERMISSION_GATE.helperMs, "garbage is the default");
+});
+
+test("decision services: each gets its own budget and is told it; the session's budget is the longest", async () => {
+  const seen = [];
+  const services = [
+    { pluginId: "slow", pluginName: "Slow", serviceId: "s", mayAllow: false, timeoutMs: 1_500 },
+    { pluginId: "fast", pluginName: "Fast", serviceId: "s", mayAllow: false, appliesTo: ["codex"] }
+  ];
+  const hooks = new DecisionHooks({
+    baseProtection: () => false,
+    services: () => services,
+    call: async (pluginId, _serviceId, _method, params, timeoutMs) => {
+      seen.push({ pluginId, budgetMs: params.budgetMs, timeoutMs });
+      // 400 ms: inside this service's own 1.5 s budget.
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      return { verdict: "deny", reason: "Too slow for the default, fine for its own budget." };
+    },
+    session: () => ({ provider: "claude", role: "agent", cwd: project, configDirs: [] })
+  });
+  assert.equal(hooks.budgetMs("claude"), 3_000, "never below the default");
+  services[0].timeoutMs = 45_000;
+  assert.equal(hooks.budgetMs("claude"), 45_000);
+  assert.equal(hooks.budgetMs("codex"), 45_000);
+  services[0].appliesTo = ["opencode"];
+  assert.equal(hooks.budgetMs("claude"), 3_000);
+  delete services[0].appliesTo;
+  services[0].timeoutMs = 1_500;
+  const decision = await hooks.decide("s1", { requestId: "r", provider: "claude", toolName: "Bash", toolInput: { command: "ls" }, toolInputPreview: null, toolInputSha256: "x", truncated: false, cwd: null }, new AbortController().signal);
+  assert.equal(decision.behavior, "deny");
+  assert.deepEqual(seen, [{ pluginId: "slow", budgetMs: 1_500, timeoutMs: 1_500 }]);
+});
+
+test("launch: the hook, the helper's environment and the gateway follow the session's decision budget", async (t) => {
+  const runtimeDirectory = await mkdtemp(join(tmpdir(), "canvastty-points-launch-"));
+  t.after(() => rm(runtimeDirectory, { recursive: true, force: true }));
+  const helper = { command: "/opt/CanvasTTY", args: ["/opt/CanvasTTY/hook-helper.mjs"], env: { ELECTRON_RUN_AS_NODE: "1" } };
+  const permissionGate = { command: "/opt/CanvasTTY", args: ["/opt/CanvasTTY/permission-gate.mjs"], env: { ELECTRON_RUN_AS_NODE: "1" } };
+  const options = { helper, runtimeDirectory, openCodePluginPath: "/opt/CanvasTTY/opencode-plugin.mjs", permissionGate,
+    kimiHomeDirectory: join(runtimeDirectory, "kimi"), hermesHomeDirectory: join(runtimeDirectory, "hermes"), grokHomeDirectory: join(runtimeDirectory, "grok") };
+  const adapters = new ProviderRuntimeLaunchAdapters(options);
+  const plain = JSON.parse(adapters.prepare("claude", "t1", false, true).args[1]).hooks.PreToolUse[0].hooks[0];
+  assert.equal(plain.timeout, PERMISSION_GATE.hookSeconds);
+  assert.doesNotMatch(plain.command, new RegExp(DECISION_BUDGET_ENV, "u"), "the default budget changes nothing");
+  const long = JSON.parse(adapters.prepare("claude", "t1", false, true, 45_000).args[1]).hooks.PreToolUse[0].hooks[0];
+  assert.equal(long.timeout, 52);
+  assert.match(long.command, new RegExp(`${DECISION_BUDGET_ENV}='45000'`, "u"));
+  const qwen = adapters.prepare("qwen", "t2", false, true, 45_000);
+  assert.equal(JSON.parse(await readFile(qwen.environment.QWEN_CODE_SYSTEM_SETTINGS_PATH, "utf8")).hooks.PreToolUse[0].hooks[0].timeout, 52_000);
+  qwen.releaseConfiguration();
+  const opencode = adapters.prepare("opencode", "t3", false, true, 45_000).environment;
+  assert.equal(opencode[OPENCODE_DECISIONS_ENV], "1");
+  assert.equal(opencode[DECISION_BUDGET_ENV], "45000");
+
+  const registered = [];
+  const gateway = {
+    registerSession: (...args) => { registered.push(args); return { address: "/tmp/x.sock", terminalSessionId: args[0], provider: args[1], capabilityToken: "c".repeat(40) }; },
+    revokeTerminalSession: () => undefined,
+    currentStatus: () => null
+  };
+  const bridge = new AgentRuntimeBridge(gateway, { ...options, coreHooksEnabled: false, wantsDecisions: () => true, decisionBudgetMs: () => 45_000 });
+  bridge.prepareLaunch({ terminalSessionId: "a", provider: "claude", cwd: project });
+  assert.equal(registered[0][5], 45_000, "the gateway learns the session's budget");
+});
+
+function runGate(capability, input, env = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [GATE, "pretool"], {
+      env: {
+        PATH: process.env.PATH, HOME: root, ...env,
+        [AGENT_RUNTIME_ENV.address]: capability.address,
+        [AGENT_RUNTIME_ENV.terminalSessionId]: capability.terminalSessionId,
+        [AGENT_RUNTIME_ENV.provider]: "claude",
+        [AGENT_RUNTIME_ENV.capabilityToken]: capability.capabilityToken
+      },
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.on("close", () => resolve(stdout.trim() ? JSON.parse(stdout) : null));
+    child.stdin.end(JSON.stringify(input));
+  });
+}
+
+test("end to end: a session sized for a longer budget waits past the default deadlines for its answer", { ...POSIX, timeout: 30_000 }, async (t) => {
+  const runtime = await mkdtemp(join(tmpdir(), "canvastty-points-gw-"));
+  const gateway = new RuntimeGateway({
+    runtimeDirectory: runtime,
+    // Answers after 11 s: past the default gateway (10 s) and within a 15 s budget's (17 s) and helper's (19 s).
+    onPermissionRequest: async () => { await new Promise((resolve) => setTimeout(resolve, 11_000)); return { behavior: "deny", message: "Declined after a long look." }; }
+  });
+  await gateway.start();
+  t.after(async () => { await gateway.close(); await rm(runtime, { recursive: true, force: true }); });
+  const call = { tool_name: "Bash", tool_input: { command: "ls" } };
+  const sized = gateway.registerSession("sized", "claude", false, undefined, true, 15_000);
+  const plain = gateway.registerSession("plain", "claude", false, undefined, true);
+  const [long, short] = await Promise.all([
+    runGate(sized, call, { [DECISION_BUDGET_ENV]: "15000" }),
+    runGate(plain, call)
+  ]);
+  assert.equal(long.hookSpecificOutput.permissionDecision, "deny");
+  assert.equal(long.hookSpecificOutput.permissionDecisionReason, "Declined after a long look.");
+  assert.equal(short.hookSpecificOutput.permissionDecision, "ask", "the default gate asks when the answer is late");
 });
 
 test("launch policies: asked with chosen false and the environment for every agent launch; they may only refuse", async (t) => {
@@ -112,17 +242,19 @@ test("the yolo-guard example refuses YOLO outside an environment over JSON-RPC",
   assert.equal(await call({ ...context, profile: "normal", environment: null }), null);
 });
 
-test("secrets.get: a service reads its own plugin's secret only with the permission", async (t) => {
+test("secrets.get: a service reads its own plugin's secret with the permission; the value is masked for agents", async (t) => {
   const source = await readFile(new URL("services/echo.mjs", echoExample), "utf8");
   const dir = join(root, "echo");
   await mkdir(dir, { recursive: true });
   await writeFile(join(dir, "echo.mjs"), source);
+  const redaction = new SecretRedactionRegistry();
   const asked = [];
   const secrets = new Map([["com.example.service-echo/token", "echo-token-value-9d2f41"]]);
   const supervisor = new PluginServiceSupervisor({
     command: process.execPath, hostVersion: "9.9.9", locale: () => "en", stopGraceMs: 300,
     host: {
       storageGet: async () => null, storageSet: async () => undefined, emit: () => undefined,
+      registerSecrets: (pluginId, values) => redaction.add(`plugin:${pluginId}`, values),
       secretGet: async (pluginId, key) => { asked.push(`${pluginId}/${key}`); return secrets.get(`${pluginId}/${key}`) ?? null; }
     }
   });
@@ -135,6 +267,7 @@ test("secrets.get: a service reads its own plugin's secret only with the permiss
   await waitFor(() => supervisor.report("com.example.service-echo").services[0]?.state === "running");
   assert.deepEqual(await supervisor.request("com.example.service-echo", "echo", "token", null), { set: true });
   assert.deepEqual(asked, ["com.example.service-echo/token"], "bound to the service's own plugin");
+  assert.equal(redaction.redact("agent printed echo-token-value-9d2f41"), "agent printed <redacted:secret>");
   secrets.delete("com.example.service-echo/token");
   assert.deepEqual(await supervisor.request("com.example.service-echo", "echo", "token", null), { set: false });
 });

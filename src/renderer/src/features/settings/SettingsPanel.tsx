@@ -136,6 +136,7 @@ interface SettingsPanelProps {
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onSetPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<void>;
   onSetPluginNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
+  onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
@@ -164,6 +165,7 @@ export function SettingsPanel({
   onSetPluginEnabled,
   onSetPluginHookEnabled,
   onSetPluginNativeCodeTrusted,
+  onSetPluginDecisionsMayAllow,
   onUninstallPlugin,
   onOpenPluginContribution,
   onToggleHomeWidget,
@@ -619,6 +621,16 @@ export function SettingsPanel({
                   {agentCliError && <span role="alert">{agentCliError}</span>}
                 </div>
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "baseProtection")}
+                description={t(locale, "baseProtectionDescription")}
+              >
+                <Segmented
+                  value={settings.baseProtectionEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ baseProtectionEnabled: value === "on" })}
+                />
+              </SettingGroup>
               <AgentHooksSettings
                 settings={settings}
                 plugins={plugins}
@@ -629,6 +641,7 @@ export function SettingsPanel({
                 locale={locale}
                 plugins={plugins}
                 onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
+                onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
               />
               <SettingGroup
                 label={t(locale, "agentControlEnabled")}

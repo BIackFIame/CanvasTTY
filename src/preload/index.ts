@@ -103,6 +103,9 @@ const api: CanvasTTYApi = {
     setNativeCodeTrusted: (pluginId: string, trusted: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetNativeCodeTrusted, pluginId, trusted)
     ),
+    setDecisionsMayAllow: (pluginId: string, allowed: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetDecisionsMayAllow, pluginId, allowed)
+    ),
     serviceReport: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsServiceReport, pluginId),
     serviceRequest: (pluginId: string, serviceId: string, method: string, params: unknown) => (
       ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)

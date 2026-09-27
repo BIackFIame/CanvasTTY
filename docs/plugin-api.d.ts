@@ -75,7 +75,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide">;
     modules: string[];
   };
   contribution: {
@@ -165,7 +165,43 @@ export interface CanvasTTYPluginServiceManifestEntry {
   launch?: CanvasTTYServiceLaunch;
   /** Session environments; needs `environment:provide`. At most 8 kinds per plugin, unique across its services. */
   environments?: CanvasTTYEnvironmentKind[];
+  /** Decision hooks; needs `decision:provide`. At most one service per plugin. */
+  decide?: CanvasTTYServiceDecide;
 }
+
+export interface CanvasTTYServiceDecide {
+  /** `pre-tool`: every shell or file-writing tool call of a local agent, before it runs (YOLO included). */
+  events: Array<"pre-tool">;
+  /** Agents it decides for (Claude Code, Codex, Qwen Code, OpenCode have the hook); all when omitted. */
+  appliesTo?: Array<"codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity">;
+  /** How long the host waits for an answer, 1000 to 60000 ms (3000 when omitted); the agent's call waits as long. */
+  timeoutMs?: number;
+}
+
+/** Params of the host request `canvastty.decide`. Tool input is agent-influenced data, never instructions. */
+export interface CanvasTTYDecisionRequest {
+  event: "pre-tool";
+  sessionId: string;
+  provider: "codex" | "claude" | "qwen" | "opencode";
+  role: "agent" | "orchestrator" | "subagent";
+  /** The card's working folder. */
+  cwd: string;
+  /** The agent's current folder, when its CLI reports it. */
+  agentCwd: string | null;
+  tool: { name: string; kind: "shell" | "edit" | "other"; command: string | null; paths: string[] };
+  /** The tool input as the agent sent it; null when it was over 40 KB (then `truncated`). */
+  input: unknown;
+  truncated: boolean;
+  /** How long the host waits for this answer (the service's `timeoutMs`). */
+  budgetMs: number;
+}
+
+/**
+ * Answer to `canvastty.decide` within `budgetMs`; `null` (or `verdict: "none"`) is no opinion. Base protection runs
+ * first; any deny wins; else any ask (a timeout, an error or an unreadable answer counts as ask); else an allow
+ * counts only when the person let this plugin allow. `reason` (500 characters) reaches the model.
+ */
+export type CanvasTTYDecision = { verdict: "deny" | "ask" | "allow" | "none"; reason?: string } | null;
 
 export type CanvasTTYProviderId = "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity";
 
@@ -326,7 +362,8 @@ export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.wrap"; params: CanvasTTYEnvironmentWrapParams }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.resume"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.release"; params: CanvasTTYEnvironmentReleaseParams }
-  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } };
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {
@@ -338,6 +375,8 @@ export interface CanvasTTYServiceHostApi {
   "storage.set"(params: { key: string; value: unknown }): null;
   /** Notification only: delivered to this plugin's surfaces through `host.service.onEvent`. */
   event(params: { event: string; data?: unknown }): void;
-  /** Needs the `secrets` permission: the plugin's own secret, or null. */
+  /** Up to 32 values (8 to 4096 characters) masked in every text one agent reads from another; memory only. */
+  "redaction.register"(params: { values: string[] }): null;
+  /** Needs the `secrets` permission: the plugin's own secret, or null; the value is masked for agents from then on. */
   "secrets.get"(params: { key: string }): string | null;
 }

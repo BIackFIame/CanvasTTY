@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). A decision service lives in [`examples/plugins/deny-rm`](../examples/plugins/deny-rm).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -152,7 +152,8 @@ A service may call back this host API (the base that later extension points add 
 | `storage.get` `{ key }` | request | `storage` permission | The same isolated 64 KB storage as `host.storage.get` |
 | `storage.set` `{ key, value }` | request | `storage` permission | Writes it and notifies the plugin's surfaces |
 | `event` `{ event, data }` | notification | none | Delivered to this plugin's live surfaces through `host.service.onEvent` |
-| `secrets.get` `{ key }` | request | `secrets` permission | The plugin's own secret (the same store as `host.secrets`), or `null`. For keys a service needs itself (an API key for a model it calls); never send one back to a surface |
+| `redaction.register` `{ values }` | request | none | Up to 32 strings (4096 characters each, 8 or more to count) that CanvasTTY masks in every text one agent reads from another; kept in memory only |
+| `secrets.get` `{ key }` | request | `secrets` permission | The plugin's own secret (the same store as `host.secrets`), or `null`. The value is then masked like `redaction.register` values. For keys a service needs itself (an API key for a model it calls); never send one back to a surface |
 
 The host binds every call to the service's own plugin; a service cannot name another plugin, read another plugin's secrets, or reach sessions. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
@@ -258,6 +259,53 @@ CanvasTTY keeps the card, the PTY, the saved record and the restore order; the s
 
 The full example is [`examples/plugins/env-worktree`](../examples/plugins/env-worktree): `prepare` runs `git worktree add` in a folder under the plugin's data directory, `wrap` sets the folder, `resume` checks it still exists, `describe` shows the current branch, and `release` removes the worktree (and the branch it created) unless you keep it.
 
+### Decision hooks (`decision:provide`)
+
+Before a local agent's shell command or file write runs, CanvasTTY can ask a plugin: deny, ask the person, or allow. One service per plugin may declare `decide`:
+
+```json
+"permissions": ["decision:provide"],
+"services": [{
+  "id": "guard", "title": "rm -rf guard", "entry": "services/guard.mjs",
+  "decide": { "events": ["pre-tool"], "appliesTo": ["claude", "codex"], "timeoutMs": 3000 }
+}]
+```
+
+`pre-tool` is every shell and file-writing tool call, before it runs and in every permission mode, YOLO included: Claude Code, Codex and Qwen Code through their `PreToolUse` hook, OpenCode through CanvasTTY's OpenCode plugin (`tool.execute.before`). `appliesTo` limits the agents; all four when omitted. The host sends `canvastty.decide` (host-only) and waits at most `timeoutMs` (1000 to 60000; 3000 when omitted). The agent's call waits as long, so ask for more only when the answer needs it (for example a local model reading the command); CanvasTTY sizes each card's hook for the longest budget of the services that apply when the card starts, and a service trusted later gets no more than its card allows. The request carries the budget as `budgetMs`:
+
+```ts
+interface DecisionRequest {
+  event: "pre-tool";
+  sessionId: string; provider: string; role: "agent" | "orchestrator" | "subagent";
+  cwd: string;                 // the card's working folder
+  agentCwd: string | null;     // the agent's current folder, when its CLI reports it
+  tool: { name: string; kind: "shell" | "edit" | "other"; command: string | null; paths: string[] };
+  input: unknown;              // the tool input as the agent sent it; null when over 40 KB (truncated)
+  truncated: boolean;
+  budgetMs: number;            // how long CanvasTTY waits for this answer
+}
+// answer: { verdict: "deny" | "ask" | "allow", reason?: string } or null for no opinion
+```
+
+How answers combine, in this order:
+
+1. **Base protection** (below) runs first; its deny is final and plugins are not asked.
+2. Any plugin's `deny` wins. The model reads `CanvasTTY plugin "<name>" blocked this tool call (<reason>)`, so write the reason as what to do instead.
+3. Else any `ask`: Claude Code asks the person for this call, whatever its permission mode. A timeout, an error, a stopped service or an unreadable answer counts as `ask`, never as allow.
+4. Else an `allow` counts only from a plugin the person let allow: a second confirmation, **May allow agent actions**, under the plugin in **Settings → Agents → Extension native code**, revoked with its native code trust. Claude Code then runs the call without its own prompt; OpenCode's prompt for that call is answered `once`. An allow never applies to input that was too large to send whole.
+5. Else nothing: the agent goes on exactly as it would without CanvasTTY.
+
+Codex and Qwen Code take only a deny from this hook: for them `ask` and `allow` leave the decision to the CLI's own permission mode. Remote and container sessions are not covered (their hook cannot reach this computer). The hook is installed for agents started while base protection is on or a decision plugin applies, so a plugin trusted later covers new cards only. A CLI runs the call when its hook crashes, so this is a guard, not a sandbox.
+
+The full example is [`examples/plugins/deny-rm`](../examples/plugins/deny-rm): it denies `rm -rf` of anything at the top of the working folder (`rm -rf *`, `rm -rf src`) and has no opinion on everything else. It declares `timeoutMs: 5000` to show the field; it answers at once.
+
+### Base protection and redaction (core)
+
+Two safety parts are built in and need no plugin:
+
+- **Base protection** (Settings → Agents, on by default; the person can turn it off) denies, through the same hook, sudo and other elevation, piping downloaded or generated text into a shell, download-and-run, disk and format commands, fork bombs, and writing or deleting outside the working folder: the home folder, other projects and `/tmp` included, and deleting the working folder itself. An agent's own plan and memory folders (`~/.claude/plans`, `~/.claude/projects/<project>/memory`, and the same inside the run's `CLAUDE_CONFIG_DIR`) are not "outside". It only ever denies; each reason tells the model what to do instead (a write to `/tmp` suggests a scratch folder inside the project).
+- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs).
+
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
 ## Permissions
@@ -269,6 +317,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
 | `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
 | `environment:provide` | A service's `environments` and `canvastty.environment.*` | Can create a place for cards the person starts in its environment and change the command, arguments, variables and folder they run with there |
+| `decision:provide` | A service's `decide` and `canvastty.decide` | Sees agents' commands and file writes (with their input) before they run and can block them or ask the person; allowing needs a second confirmation |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |

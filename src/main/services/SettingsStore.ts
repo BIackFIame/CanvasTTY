@@ -159,6 +159,7 @@ export class SettingsStore {
         || !("radialLauncherItems" in source)
         || !("radialLauncherEnabled" in source)
         || !("agentLifecycleHooksEnabled" in source)
+        || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
         || !("canvasColor" in source)
         || !("minimapPlacement" in source)
@@ -339,6 +340,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
     radialLauncherEnabled: false,
     agentLifecycleHooksEnabled: true,
+    baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
     pattern: "dots",
@@ -521,6 +523,10 @@ export function normalizeSettings(
     agentLifecycleHooksEnabled: typeof source.agentLifecycleHooksEnabled === "boolean"
       ? source.agentLifecycleHooksEnabled
       : fallback.agentLifecycleHooksEnabled,
+    // On unless the person turned it off; an install from before it existed gets it on.
+    baseProtectionEnabled: typeof source.baseProtectionEnabled === "boolean"
+      ? source.baseProtectionEnabled
+      : fallback.baseProtectionEnabled ?? true,
     uiScale: normalizeUiScale(source.uiScale, fallback.uiScale ?? DEFAULT_UI_SCALE),
     canvasColor,
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)

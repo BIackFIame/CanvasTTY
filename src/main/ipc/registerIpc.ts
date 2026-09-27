@@ -286,6 +286,11 @@ export function registerIpc({
     if (typeof pluginId !== "string" || typeof trusted !== "boolean") throw new Error("Plugin native code state is invalid.");
     return plugins.setNativeCodeTrusted(pluginId, trusted);
   });
+  ipcMain.handle(IPC.pluginsSetDecisionsMayAllow, (event, pluginId: string, allowed: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
+    return plugins.setDecisionsMayAllow(pluginId, allowed);
+  });
   ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");

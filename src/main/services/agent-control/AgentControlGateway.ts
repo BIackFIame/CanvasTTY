@@ -270,7 +270,7 @@ export class AgentControlGateway {
       fields(params, []);
       return { sessions: this.options.terminals.listMetadata().filter((s) => {
         const owned = this.sessions.get(s.id); return owned?.owner === owner && owned.startedAt === s.startedAt;
-      }).map((s) => ({ ...s, capabilities: controlCapabilities(s.provider) })) };
+      }).map((s) => ({ ...this.redactMetadata(s), capabilities: controlCapabilities(s.provider) })) };
     }
     fields(params, request.method === "send" ? ["sessionId", "text"] : request.method === "result" ? ["sessionId", "after"]
       : request.method === "choose" ? ["sessionId", "choice", "revision"]
@@ -280,13 +280,13 @@ export class AgentControlGateway {
     const metadata = this.options.terminals.listMetadata().find((s) => s.id === id);
     if (!owned || owned.owner !== owner || !metadata) throw new ControlError("SESSION_NOT_FOUND", "No owned session has that ID.");
     if (metadata.startedAt !== owned.startedAt) throw new ControlError("STALE_SESSION", "Session restarted; its old control grant is no longer valid.");
-    if (request.method === "status") return { session: metadata, resultRevision: owned.resultRevision,
+    if (request.method === "status") return { session: this.redactMetadata(metadata), resultRevision: owned.resultRevision,
       turn: owned.turn ? { id: owned.turn.id, state: owned.turn.state } : null };
     if (request.method === "result") {
       const after = params.after === undefined ? 0 : params.after;
       if (!Number.isSafeInteger(after) || Number(after) < 0) throw new ControlError("INVALID_PARAMS", "after must be a non-negative result revision.");
       const fresh = owned.resultRevision > Number(after);
-      return { session: metadata, resultRevision: owned.resultRevision, fresh,
+      return { session: this.redactMetadata(metadata), resultRevision: owned.resultRevision, fresh,
         turn: fresh && owned.completedTurn ? this.redactTurn(owned.completedTurn) : null };
     }
     await owned.ready;
@@ -357,6 +357,11 @@ export class AgentControlGateway {
 
   private redact(text: string): string {
     return this.options.terminals.redactSecrets?.(text) ?? text;
+  }
+
+  /** Failure details quote the child's last output: masked like the screen. */
+  private redactMetadata<T extends { failureDetails?: string | null }>(metadata: T): T {
+    return metadata.failureDetails ? { ...metadata, failureDetails: this.redact(metadata.failureDetails) } : metadata;
   }
 
   private redactTurn(turn: Turn): Turn {

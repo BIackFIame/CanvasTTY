@@ -29,6 +29,8 @@ export interface PluginServiceHost {
   storageGet(pluginId: string, key: string): Promise<unknown>;
   storageSet(pluginId: string, key: string, value: unknown): Promise<void>;
   emit(pluginId: string, serviceId: string, event: string, data: unknown): void;
+  /** Adds values to the redaction registry: they are masked in every text another agent reads. */
+  registerSecrets?(pluginId: string, values: string[]): void;
   /** One of the plugin's own secrets (already checked for `secrets`), or null when it is not set. */
   secretGet?(pluginId: string, key: string): Promise<string | null>;
 }
@@ -466,7 +468,18 @@ export class PluginServiceSupervisor {
       if (!spec.permissions.includes("secrets")) throw new Error("Plugin does not have the secrets permission.");
       if (typeof values.key !== "string") throw new Error("Plugin secret key is invalid.");
       const value = await this.options.host.secretGet(spec.pluginId, values.key);
+      // A secret a service read is masked in everything agents read from then on, like launch secrets.
+      if (typeof value === "string" && value.length >= 8) this.options.host.registerSecrets?.(spec.pluginId, [value]);
       return value;
+    }
+    if (method === "redaction.register") {
+      // Only ever hides text; any service may use it. Values stay in memory and are never logged.
+      if (!Array.isArray(values.values) || values.values.length > 32
+        || values.values.some((value) => typeof value !== "string" || value.length > 4_096)) {
+        throw new Error("Redaction values must be at most 32 strings of up to 4096 characters.");
+      }
+      this.options.host.registerSecrets?.(spec.pluginId, values.values as string[]);
+      return null;
     }
     throw new UnknownMethodError(`Unknown host method: ${method.slice(0, 80)}.`);
   }

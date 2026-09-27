@@ -48,6 +48,8 @@ import {
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
 import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
+import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { resolveTerminalLaunch } from "./terminalLaunch.ts";
@@ -97,8 +99,6 @@ interface ManagedSession {
   extras: PersistedSessionExtras;
   /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
   launchToken: number;
-  /** Plugin `secretEnv` values this card was started with; masked until the card closes. */
-  launchSecrets: string[];
   /** Removes the current run's plugin files; called when the process exits. */
   launchCleanup: (() => Promise<void>) | null;
   /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
@@ -130,7 +130,6 @@ interface PlannedSpawn {
 const QUIT_RELEASE_TIMEOUT_MS = 3_000;
 
 type LaunchContribution = Extract<PreparedLaunch, { ok: true }>;
-const SECRET_MARKER = "<redacted:secret>";
 
 export interface ProviderLifecycleSignal {
   kind: "lifecycle";
@@ -170,6 +169,10 @@ export class TerminalManager {
   private sessionRestoreMode: SessionRestoreMode = "off";
   // Without the registry a placed session can only come back stopped: it never runs locally.
   private environments: EnvironmentService | null = null;
+  // Every text an agent reads from another card passes through it (EP-8).
+  private redaction = new SecretRedactionRegistry();
+  // Where each running card was actually started (an environment may move it) and its agent config folder.
+  private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
   private suppressPersistence = false;
@@ -211,14 +214,27 @@ export class TerminalManager {
     this.environments = registry;
   }
 
-  /** Masks every plugin launch secret of an open card in text an agent or the companion reads. */
+  /** The app-wide redaction registry (vault keys, plugin secrets); cards add their launch secrets to it. */
+  configureRedaction(registry: SecretRedactionRegistry): void {
+    this.redaction = registry;
+  }
+
+  /** Masks known secrets and key shapes in text another agent reads (observe, result, control screen, failures). */
   redactSecrets<T extends string | null>(text: T): T {
-    if (text === null) return text;
-    let result: string = text;
-    for (const session of this.sessions.values()) {
-      for (const secret of session.launchSecrets) result = result.split(secret).join(SECRET_MARKER);
-    }
-    return result as T;
+    return (text === null ? text : this.redaction.redact(text)) as T;
+  }
+
+  /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
+  decisionContext(id: string): DecisionSession | null {
+    const session = this.sessions.get(id);
+    if (!session || session.metadata.provider === "terminal") return null;
+    const launched = this.launchContexts.get(id);
+    return {
+      provider: session.metadata.provider,
+      role: session.metadata.role ?? "agent",
+      cwd: launched?.cwd ?? session.metadata.cwd,
+      configDirs: launched?.configDir ? [launched.configDir] : []
+    };
   }
 
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
@@ -404,7 +420,6 @@ export class TerminalManager {
       captureResult: control.captureResult === true,
       extras: launchOptions ? { options: launchOptions } : {},
       launchToken: 0,
-      launchSecrets: [],
       launchCleanup: null,
       restoringLaunch: false,
       environmentChoice,
@@ -676,6 +691,8 @@ export class TerminalManager {
     this.flushOutput(id, session);
     this.sessions.delete(id);
     this.hiddenSinceOffset.delete(id);
+    this.launchContexts.delete(id);
+    this.redaction.clear(`session:${id}`);
     session.launchToken += 1;
     void session.launchCleanup?.().catch(() => undefined);
     session.launchCleanup = null;
@@ -834,7 +851,6 @@ export class TerminalManager {
       captureResult: false,
       extras,
       launchToken: 0,
-      launchSecrets: [],
       launchCleanup: null,
       restoringLaunch: awaitMeasuredGrid,
       environmentChoice: null,
@@ -946,10 +962,12 @@ export class TerminalManager {
       return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: planned.failure };
     }
     try {
+      const process = this.spawnPty(planned.command, planned.args, {
+        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: planned.env
+      });
+      this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
       return {
-        process: this.spawnPty(planned.command, planned.args, {
-          name: "xterm-256color", cols, rows, cwd: planned.cwd, env: planned.env
-        }),
+        process,
         agentBrowser: planned.agentBrowser,
         agentRuntime: planned.agentRuntime,
         agentOrchestration: planned.agentOrchestration,
@@ -1245,6 +1263,7 @@ export class TerminalManager {
       return "failed";
     }
     session.process = process;
+    this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
     session.agentBrowser = planned.agentBrowser;
     session.agentRuntime = planned.agentRuntime;
     session.agentOrchestration = planned.agentOrchestration;
@@ -1260,9 +1279,7 @@ export class TerminalManager {
   }
 
   private addLaunchSecrets(session: ManagedSession, secrets: readonly string[]): void {
-    session.launchSecrets = [...new Set([...session.launchSecrets, ...secrets])]
-      .filter((secret) => secret.length >= 4)
-      .slice(-64);
+    this.redaction.add(`session:${session.metadata.id}`, secrets);
   }
 
   /** Refreshes the card badge from the plugin (for example the worktree's current branch). */

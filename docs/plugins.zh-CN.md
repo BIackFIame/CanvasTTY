@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。会话环境（git worktree）示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)。
+不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。会话环境（git worktree）示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)。决策服务示例见 [`examples/plugins/deny-rm`](../examples/plugins/deny-rm)。
 编辑器工具可以使用 [manifest JSON Schema](canvastty-plugin.schema.json) 和 [SDK TypeScript 声明](plugin-api.d.ts)。
 
 ## Manifest v1
@@ -131,7 +131,8 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `storage.get` `{ key }` | 请求 | `storage` 权限 | 与 `host.storage.get` 相同的隔离 64 KB 存储 |
 | `storage.set` `{ key, value }` | 请求 | `storage` 权限 | 写入并通知插件界面 |
 | `event` `{ event, data }` | 通知 | 无 | 通过 `host.service.onEvent` 发送给该插件的活动界面 |
-| `secrets.get` `{ key }` | 请求 | `secrets` 权限 | 插件自己的机密（与 `host.secrets` 同一存储），或 `null`。用于服务自身需要的密钥（例如它调用的模型的 API 密钥）；绝不要把它发回界面 |
+| `redaction.register` `{ values }` | 请求 | 无 | 最多 32 个字符串（每个最多 4096 字符，8 字符以上才生效），CanvasTTY 会在一个 agent 读取另一个 agent 的所有文本中遮蔽它们；只保存在内存中 |
+| `secrets.get` `{ key }` | 请求 | `secrets` 权限 | 插件自己的机密（与 `host.secrets` 同一存储），或 `null`。之后该值会像 `redaction.register` 的值一样被遮蔽。用于服务自身需要的密钥（例如它调用的模型的 API 密钥）；绝不要把它发回界面 |
 
 宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件、读取其他插件的机密或访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
@@ -237,6 +238,53 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 
 完整示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)：`prepare` 在插件数据目录下的文件夹中运行 `git worktree add`，`wrap` 设置文件夹，`resume` 检查它仍然存在，`describe` 显示当前分支，`release` 删除该 worktree（以及它创建的分支），除非你选择保留。
 
+### 决策 hook（`decision:provide`）
+
+在本地 agent 运行 shell 命令或写入文件之前，CanvasTTY 可以询问插件：拒绝、询问用户或允许。每个插件最多一个服务可以声明 `decide`：
+
+```json
+"permissions": ["decision:provide"],
+"services": [{
+  "id": "guard", "title": "rm -rf guard", "entry": "services/guard.mjs",
+  "decide": { "events": ["pre-tool"], "appliesTo": ["claude", "codex"], "timeoutMs": 3000 }
+}]
+```
+
+`pre-tool` 指每一次 shell 和写文件的工具调用，在运行之前，并且适用于所有权限模式（包括 YOLO）：Claude Code、Codex 和 Qwen Code 通过它们的 `PreToolUse` hook，OpenCode 通过 CanvasTTY 的 OpenCode 插件（`tool.execute.before`）。`appliesTo` 限定 agent；省略时为全部四个。主机发送 `canvastty.decide`（仅主机可发），最多等待 `timeoutMs`（1000 到 60000；省略时 3000）。agent 的调用会等待同样长的时间，所以只有在回答确实需要时才申请更长时间（例如让本地模型阅读命令）；CanvasTTY 在卡片启动时按适用服务中最长的预算设置该卡片的 hook，之后才被信任的服务所得时间不超过卡片允许的范围。请求以 `budgetMs` 携带该预算：
+
+```ts
+interface DecisionRequest {
+  event: "pre-tool";
+  sessionId: string; provider: string; role: "agent" | "orchestrator" | "subagent";
+  cwd: string;                 // 卡片的工作文件夹
+  agentCwd: string | null;     // agent 当前所在文件夹（CLI 报告时）
+  tool: { name: string; kind: "shell" | "edit" | "other"; command: string | null; paths: string[] };
+  input: unknown;              // agent 发送的原始工具输入；超过 40 KB 时为 null（truncated）
+  truncated: boolean;
+  budgetMs: number;            // CanvasTTY 等待这个回答的时长
+}
+// 回答：{ verdict: "deny" | "ask" | "allow", reason?: string }，或 null 表示没有意见
+```
+
+回答按以下顺序合并：
+
+1. 先运行**基础保护**（见下文）；它的拒绝是最终结果，不再询问插件。
+2. 任何插件的 `deny` 优先。模型读到 `CanvasTTY plugin "<name>" blocked this tool call (<reason>)`，所以请在原因中写明应当改做什么。
+3. 否则任何 `ask`：无论权限模式如何，Claude Code 都会就此调用询问用户。超时、错误、服务已停止或无法读取的回答都算 `ask`，绝不算允许。
+4. 否则只有用户授权可以允许的插件，其 `allow` 才算数：在**设置 → Agents → Extension native code**中该插件下的第二个确认**May allow agent actions**，随原生代码信任一起撤销。之后 Claude Code 不经自身提示直接运行该调用；OpenCode 对该调用的询问以 `once` 回答。输入过大、无法完整发送时，允许永不生效。
+5. 否则什么都不做：agent 照常继续，就像没有 CanvasTTY 一样。
+
+Codex 和 Qwen Code 只接受此 hook 的拒绝：对它们来说，`ask` 和 `allow` 把决定留给 CLI 自身的权限模式。远程和容器会话不在覆盖范围内（它们的 hook 无法连回本机）。只有在基础保护开启或有决策插件适用时启动的 agent 才会安装此 hook，因此之后才信任的插件只对新卡片生效。hook 崩溃时 CLI 会照常运行该调用，所以这是一道防护，而不是沙箱。
+
+完整示例见 [`examples/plugins/deny-rm`](../examples/plugins/deny-rm)：它拒绝对工作文件夹顶层任何内容执行 `rm -rf`（`rm -rf *`、`rm -rf src`），对其他一切不表态。它声明了 `timeoutMs: 5000` 以展示该字段；它会立即回答。
+
+### 基础保护与密钥遮蔽（核心）
+
+两项安全功能内置，无需插件：
+
+- **基础保护**（设置 → Agents → Base protection，默认开启；用户可以关闭）通过同一个 hook 拒绝：sudo 及其他提权、把下载或生成的文本管道给 shell、下载后直接运行、磁盘和格式化命令、fork 炸弹，以及在工作文件夹之外写入或删除（包括主目录、其他项目和 `/tmp`），以及删除工作文件夹本身。agent 自己的计划和记忆文件夹（`~/.claude/plans`、`~/.claude/projects/<project>/memory`，以及本次运行 `CLAUDE_CONFIG_DIR` 中的相同位置）不算"外部"。它只会拒绝；每条原因都告诉模型应当改做什么（写入 `/tmp` 时建议在项目内建立临时文件夹）。
+- **密钥遮蔽**：CanvasTTY 从一个 agent 交给另一个 agent 的所有文本（`observe_agent`、`get_agent_result`，以及 control CLI 的 `screen`、`result` 和失败详情）都会被遮蔽：CanvasTTY 保存的服务商密钥、启动时的 `secretEnv` 值、服务通过 `redaction.register` 注册的值（包括被终端折行拆开的情况），以及常见密钥形式（`sk-…`、GitHub、Slack、AWS、Google、JWT、`Bearer …`、`"apiKey": "…"`、PEM 私钥、长随机串）。
+
 host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一插件的所有活动界面——画布卡片、HOME 小组件和独立窗口——从而避免轮询。
 
 ## 权限
@@ -248,6 +296,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `sessions:read` | `sessions.list` | 仅限 ID、服务商、标题、状态、开始时间、退出码 |
 | `launch:contribute` | 服务的 `launch` 块和 `canvastty.launch.prepare` | 可以为用户以其选项启动的智能体添加环境变量、参数和文件；设置 `policy` 后可以拒绝任何智能体启动 |
 | `environment:provide` | 服务的 `environments` 和 `canvastty.environment.*` | 可以为用户在其环境中启动的卡片创建运行位置，并更改它们在那里运行的命令、参数、变量和文件夹 |
+| `decision:provide` | 服务的 `decide` 和 `canvastty.decide` | 在 agent 的命令和文件写入运行之前看到它们（含输入），可以拒绝或询问用户；允许需要第二次确认 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |

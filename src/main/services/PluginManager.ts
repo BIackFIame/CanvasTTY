@@ -30,6 +30,7 @@ import type {
   PluginEnvironmentKind,
   PluginLaunchField,
   PluginService,
+  PluginServiceDecide,
   PluginServiceLaunch,
   PluginUpdateStatus,
   Size
@@ -43,6 +44,8 @@ import { isValidSemver } from "../../shared/hostVersion.ts";
 import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
 import type { LaunchContributor } from "./LaunchPipeline.ts";
 import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
+import type { DecisionService } from "./DecisionHooks.ts";
+import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -117,7 +120,8 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "hermes:hud",
   "network",
   "launch:contribute",
-  "environment:provide"
+  "environment:provide",
+  "decision:provide"
 ]);
 
 interface StoredPluginRecord {
@@ -128,6 +132,8 @@ interface StoredPluginRecord {
   enabledHooks?: string[];
   /** Service id -> SHA-256 of its entry when the user trusted the plugin's native code. */
   trustedServices?: Record<string, string>;
+  /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
+  decisionsMayAllow?: boolean;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -269,14 +275,17 @@ export class PluginManager {
               )
             ))
             : [],
-          nativeCodeTrusted: false
+          nativeCodeTrusted: false,
+          decisionsMayAllow: false
         });
         if (record.enabled && record.trustedServices) {
           const trust = await this.currentServiceTrust(pluginId, active).catch(() => null);
           // Any difference from what the user trusted (a changed file, another module set) revokes it.
           if (trust && sameServiceTrust(trust, record.trustedServices)) {
             this.serviceTrust.set(pluginId, trust);
-            this.plugins.get(pluginId)!.nativeCodeTrusted = true;
+            const plugin = this.plugins.get(pluginId)!;
+            plugin.nativeCodeTrusted = true;
+            plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
           }
         }
       } catch (error) {
@@ -385,7 +394,8 @@ export class PluginManager {
         installedAt: Date.now(),
         selectedModules: modules,
         enabledHooks: [],
-        nativeCodeTrusted: false
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(installed.manifest.id, installed);
       await this.persistRegistry();
@@ -477,6 +487,30 @@ export class PluginManager {
     return structuredClone(activePlugin(plugin));
   }
 
+  /**
+   * The second confirmation for a decision service: its `allow` answers count (tool calls run without the
+   * agent's own prompt). Needs native code trust; revoked with it (update, module change, disable).
+   */
+  async setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    if (allowed) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!activeManifest(plugin.manifest, plugin.selectedModules).services?.some((service) => service.decide)) {
+        throw new Error("Plugin has no decision service.");
+      }
+    }
+    const previous = plugin.decisionsMayAllow;
+    plugin.decisionsMayAllow = Boolean(allowed);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      plugin.decisionsMayAllow = previous;
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
   /** Called with the trusted services after every registry change (the supervisor's desired set). */
   setServiceObserver(observer: ((specs: PluginServiceSpec[]) => Promise<void>) | null): void {
     this.serviceObserver = observer;
@@ -532,6 +566,28 @@ export class PluginManager {
     return this.trustedServicesWith("environment:provide", (service) => service.environments).map(({ plugin, service, name, secrets }) => ({
       pluginId: plugin, pluginName: name, serviceId: service.id, kinds: structuredClone(service.environments!), secrets
     }));
+  }
+
+  /** Services that may decide on agents' tool calls now: enabled, native code trusted, `decision:provide` granted. */
+  decisionServices(): DecisionService[] {
+    const services: DecisionService[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("decision:provide")) continue;
+      const service = manifest.services?.find((candidate) => candidate.decide && trust[candidate.id]);
+      if (!service?.decide) continue;
+      services.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        ...(service.decide.appliesTo ? { appliesTo: [...service.decide.appliesTo] } : {}),
+        ...(service.decide.timeoutMs !== undefined ? { timeoutMs: service.decide.timeoutMs } : {}),
+        mayAllow: plugin.decisionsMayAllow
+      });
+    }
+    return services;
   }
 
   private trustedServicesWith(
@@ -890,7 +946,8 @@ export class PluginManager {
         selectedModules: selected,
         // Updated native hook and service code must be reviewed and trusted again.
         enabledHooks: [],
-        nativeCodeTrusted: false
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(pluginId, updated);
       await this.persistRegistry();
@@ -1114,7 +1171,7 @@ export class PluginManager {
       selectedModules: plugin.selectedModules,
       enabledHooks: plugin.enabledHooks,
       ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
-        ? { trustedServices: { ...this.serviceTrust.get(id)! } }
+        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
         : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
@@ -1151,6 +1208,7 @@ export class PluginManager {
 
   private revokeNativeCode(plugin: InstalledPlugin): void {
     plugin.nativeCodeTrusted = false;
+    plugin.decisionsMayAllow = false;
     this.serviceTrust.delete(plugin.manifest.id);
   }
 
@@ -1295,6 +1353,9 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     if (service.environments && !permissions.includes("environment:provide") && !granted?.includes("environment:provide")) {
       throw new Error(`Plugin service ${service.id} provides environments and needs the environment:provide permission.`);
     }
+    if (service.decide && !permissions.includes("decision:provide") && !granted?.includes("decision:provide")) {
+      throw new Error(`Plugin service ${service.id} decides on tool calls and needs the decision:provide permission.`);
+    }
   }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
@@ -1425,7 +1486,7 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   const ids = new Set<string>();
   const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
-    assertOnlyKeys(candidate, ["id", "title", "description", "entry", "module", "launch", "environments"], "Plugin service");
+    assertOnlyKeys(candidate, ["id", "title", "description", "entry", "module", "launch", "environments", "decide"], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
     ids.add(id);
@@ -1441,12 +1502,18 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     }
     const launch = candidate.launch === undefined ? undefined : validateServiceLaunch(candidate.launch);
     const environments = candidate.environments === undefined ? undefined : validateServiceEnvironments(candidate.environments);
+    const decide = candidate.decide === undefined ? undefined : validateServiceDecide(candidate.decide);
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
-      ...(environments ? { environments } : {})
+      ...(environments ? { environments } : {}),
+      ...(decide ? { decide } : {})
     };
   });
+  // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
+  if (services.filter((service) => service.decide).length > 1) {
+    throw new Error("At most one plugin service may decide on tool calls.");
+  }
   // Saved environment refs name the plugin and kind, so exactly one service answers for each kind (a plugin
   // may split its kinds over services, for example one per module).
   const kinds = services.flatMap((service) => service.environments ?? []).map((environment) => environment.kind);
@@ -1475,6 +1542,27 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
   return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}) };
+}
+
+function validateServiceDecide(value: unknown): PluginServiceDecide {
+  if (!isRecord(value)) throw new Error("Plugin service decide must be an object.");
+  assertOnlyKeys(value, ["events", "appliesTo", "timeoutMs"], "Plugin service decide");
+  if (value.timeoutMs !== undefined && (!Number.isInteger(value.timeoutMs)
+    || (value.timeoutMs as number) < MIN_DECIDE_TIMEOUT_MS || (value.timeoutMs as number) > MAX_DECIDE_TIMEOUT_MS)) {
+    throw new Error(`Plugin decide timeoutMs must be ${MIN_DECIDE_TIMEOUT_MS} to ${MAX_DECIDE_TIMEOUT_MS}.`);
+  }
+  if (!Array.isArray(value.events) || value.events.length === 0 || value.events.some((event) => event !== "pre-tool")) {
+    throw new Error("Plugin decide events must list pre-tool.");
+  }
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      throw new Error("Plugin decide appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  return { events: ["pre-tool"], ...(appliesTo ? { appliesTo } : {}), ...(value.timeoutMs !== undefined ? { timeoutMs: value.timeoutMs as number } : {}) };
 }
 
 const MAX_ENVIRONMENT_KINDS = 8;
@@ -2755,6 +2843,7 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       isRecord(value.trustedServices)
       && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
+    && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
   );
 }
 
