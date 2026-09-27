@@ -18,6 +18,7 @@ import type {
   PluginCanvasRequest,
   PluginLauncherRequest,
   PluginServiceEvent,
+  PluginCardDecorations,
   PluginStorageChangeEvent,
   PluginUpdateStatus,
   ProviderId,
@@ -111,6 +112,13 @@ const api: CanvasTTYApi = {
       ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)
     ),
     onServiceEvent: (listener: (event: PluginServiceEvent) => void) => subscribe(IPC.pluginsServiceEvent, listener),
+    cardDecorations: () => ipcRenderer.invoke(IPC.pluginsCardDecorations),
+    onCardDecorations: (listener: (decorations: PluginCardDecorations) => void) => (
+      subscribe(IPC.pluginsCardDecorationsChanged, listener)
+    ),
+    invokeCardAction: (pluginId: string, actionId: string, sessionId: string) => (
+      ipcRenderer.invoke(IPC.pluginsInvokeCardAction, pluginId, actionId, sessionId)
+    ),
     launchFieldOptions: (pluginId: string, provider: ProviderId) => (
       ipcRenderer.invoke(IPC.pluginsLaunchFieldOptions, pluginId, provider)
     ),

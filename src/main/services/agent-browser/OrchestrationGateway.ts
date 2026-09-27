@@ -21,6 +21,8 @@ import {
   orchestrationBridgeError,
   parseOrchestrationClientMessage
 } from "./orchestration-protocol.ts";
+import { ORCHESTRATION_TOOL_DEFINITIONS } from "../../../agent-browser/orchestration-catalog.mjs";
+import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
 
 const CAPABILITY_TTL_MS = 60_000;
 
@@ -248,6 +250,10 @@ export class OrchestrationGateway {
         connection.controllers.get(parsed.id)?.abort();
         return;
       }
+      if (parsed.type === "list_tools") {
+        this.listTools(connection, parsed.id);
+        return;
+      }
       await this.dispatch(connection, parsed.id, parsed.tool, parsed.arguments);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
@@ -294,6 +300,16 @@ export class OrchestrationGateway {
       heartbeatExpiryMs: this.heartbeatExpiryMs,
       reconnectToken
     });
+  }
+
+  private listTools(connection: Connection, id: string): void {
+    let tools: McpToolDefinition[];
+    try {
+      tools = this.handler.listTools?.(connection.lease!.terminalSessionId) ?? [...ORCHESTRATION_TOOL_DEFINITIONS];
+    } catch {
+      tools = [];
+    }
+    this.send(connection, { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "response", id, result: { tools } });
   }
 
   private async dispatch(

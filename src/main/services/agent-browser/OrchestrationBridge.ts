@@ -36,7 +36,8 @@ export class OrchestrationBridge implements OrchestrationLaunchCoordinator {
       environment: {
         [ORCHESTRATION_ENV.address]: capability.address,
         [ORCHESTRATION_ENV.capabilityToken]: capability.capabilityToken,
-        [ORCHESTRATION_ENV.terminalSessionId]: capability.terminalSessionId
+        [ORCHESTRATION_ENV.terminalSessionId]: capability.terminalSessionId,
+        [ORCHESTRATION_ENV.connectionId]: capability.connectionId
       },
       cleanup: () => {
         if (cleaned) return;

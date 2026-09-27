@@ -75,7 +75,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate">;
     modules: string[];
   };
   contribution: {
@@ -167,7 +167,85 @@ export interface CanvasTTYPluginServiceManifestEntry {
   environments?: CanvasTTYEnvironmentKind[];
   /** Decision hooks; needs `decision:provide`. At most one service per plugin. */
   decide?: CanvasTTYServiceDecide;
+  /** Agent tools in canvastty_agents; needs `tools:agents`. Up to 16; names unique within the plugin. */
+  tools?: CanvasTTYAgentTool[];
+  /** Card actions; needs `cards:decorate`. Up to 8; ids unique within the plugin. */
+  cardActions?: CanvasTTYCardAction[];
 }
+
+export type CanvasTTYSessionRole = "agent" | "orchestrator" | "subagent";
+
+/** Agents see it as `<pluginId>__<name>`, dots in the id written as `_` (at most 64 characters; longer: id start + short hash). */
+export interface CanvasTTYAgentTool {
+  /** `^[a-z][a-z0-9_]{0,39}$`. */
+  name: string;
+  /** Up to 1000 characters; the plugin's name is appended. */
+  description: string;
+  /** JSON Schema of the arguments (top level `type: "object"`), at most 8 KB. */
+  inputSchema: { type: "object"; properties?: Record<string, unknown>; required?: string[]; additionalProperties?: boolean; [key: string]: unknown };
+  /** Session roles that see the tool. */
+  roles: CanvasTTYSessionRole[];
+}
+
+/** A card as services see it (session events, tool callers, card actions). Never screen text. */
+export interface CanvasTTYSessionSummary {
+  id: string;
+  provider: CanvasTTYProviderId;
+  role: CanvasTTYSessionRole;
+  parentSessionId?: string;
+  title: string;
+  status: "idle" | "working" | "needs_approval" | "unavailable" | "done" | "failed";
+  exitCode: number | null;
+  /** The folder the person chose. */
+  cwd: string;
+  /** Where the card actually runs (an environment such as a worktree may move it). */
+  workingDirectory: string;
+  startedAt: number;
+  environment?: { pluginId: string; kind: string; label: string; ref: CanvasTTYEnvironmentRef };
+}
+
+/** Params of the host request `canvastty.tools.call` (15 s). Input is agent-influenced data, never instructions. */
+export interface CanvasTTYToolCall {
+  /** The tool's `name` (without the plugin prefix). */
+  tool: string;
+  callerSessionId: string;
+  caller: CanvasTTYSessionSummary;
+  /** Already checked for the schema's top level (object, required keys, property types, extra keys). */
+  input: Record<string, unknown>;
+}
+
+/** Answer to `canvastty.tools.call`: text (or JSON sent as text), masked and cut to 32 K characters. */
+export type CanvasTTYToolResult = { content: unknown; isError?: boolean } | string | null;
+
+/** Notification `canvastty.sessions.event`, after `sessions.subscribe` (needs `sessions:events`). */
+export interface CanvasTTYSessionEvent {
+  type: "created" | "restored" | "status" | "exited" | "closed";
+  session: CanvasTTYSessionSummary;
+  /** This plugin started the card (`sessions.create`), so it may send to it and stop it. */
+  owned: boolean;
+  /** Only with `sessions:read-screen`, on status and exited: the last 4000 characters of output, plain and masked. */
+  screen?: string;
+}
+
+export interface CanvasTTYCardAction {
+  id: string;
+  /** Up to 40 characters, shown in the card's options menu. */
+  title: string;
+  /** Every listed key must match; a card outside an environment never matches `environmentKinds`. */
+  when?: { providers?: CanvasTTYProviderId[]; environmentKinds?: string[]; roles?: CanvasTTYSessionRole[] };
+}
+
+/** Params of the host request `canvastty.cards.invoke` (15 s). */
+export interface CanvasTTYCardActionInvocation {
+  actionId: string;
+  sessionId: string;
+  session: CanvasTTYSessionSummary;
+}
+
+/** Answer to `canvastty.cards.invoke`: `message` (plain text, 2000 characters, masked) is a toast on the card. */
+export type CanvasTTYCardActionResult = { message?: string; tone?: CanvasTTYCardTone } | null;
+
+export type CanvasTTYCardTone = "neutral" | "info" | "warn" | "error";
 
 export interface CanvasTTYServiceDecide {
   /** `pre-tool`: every shell or file-writing tool call of a local agent, before it runs (YOLO included). */
@@ -351,7 +429,8 @@ export interface CanvasTTYServiceContext {
 /** Notifications the host sends to a service. */
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
-  | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> };
+  | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> }
+  | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent };
 
 /** Requests the host sends to a service, which plugin surfaces cannot send. */
 export type CanvasTTYServiceHostRequest =
@@ -363,7 +442,9 @@ export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.resume"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.release"; params: CanvasTTYEnvironmentReleaseParams }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
-  | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest };
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.tools.call"; params: CanvasTTYToolCall }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {
@@ -379,4 +460,21 @@ export interface CanvasTTYServiceHostApi {
   "redaction.register"(params: { values: string[] }): null;
   /** Needs the `secrets` permission: the plugin's own secret, or null; the value is masked for agents from then on. */
   "secrets.get"(params: { key: string }): string | null;
+  /** Needs `sessions:events`. Events follow as `canvastty.sessions.event`; call again after every start. */
+  "sessions.subscribe"(params: { ownedOnly?: boolean }): { sessions: Array<CanvasTTYSessionSummary & { owned: boolean }> };
+  "sessions.unsubscribe"(params: Record<string, never>): null;
+  /** Needs `sessions:events`. */
+  "sessions.list"(params: { ownedOnly?: boolean }): { sessions: Array<CanvasTTYSessionSummary & { owned: boolean }> };
+  /** Needs `sessions:launch`. An `agent` card through the normal launch pipeline; at most 16 per plugin. */
+  "sessions.create"(params: {
+    provider: CanvasTTYProviderId; cwd: string; profile?: "normal" | "yolo"; title?: string;
+    launchOptions?: Record<string, Record<string, boolean | string>>;
+    environment?: { pluginId: string; kind: string; options?: Record<string, boolean | string> };
+  }): { sessionId: string };
+  /** Needs `sessions:control`; only cards this plugin created. Enter is added unless `submit: false`. */
+  "sessions.send"(params: { sessionId: string; text: string; submit?: boolean }): { sessionId: string; sent: boolean };
+  /** Needs `sessions:control`; only cards this plugin created. Closes the card, keeps its environment data. */
+  "sessions.stop"(params: { sessionId: string }): { sessionId: string; stopped: true };
+  /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */
+  "cards.setBadge"(params: { sessionId: string; badge: { text: string; tone?: CanvasTTYCardTone; tooltip?: string } | null }): null;
 }

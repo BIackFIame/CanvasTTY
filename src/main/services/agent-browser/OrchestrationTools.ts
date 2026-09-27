@@ -1,6 +1,10 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
+import type { ProviderId, SessionRole } from "../../../shared/contracts.ts";
 import type { AgentControlService, SpawnAgentRequest } from "../AgentControlService.ts";
+import type { PluginAgentTools } from "../PluginAgentTools.ts";
+import { ORCHESTRATION_TOOL_DEFINITIONS, isPluginOrchestrationTool } from "../../../agent-browser/orchestration-catalog.mjs";
+import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
 
 /**
  * The only bridge between the orchestration MCP surface and session control.
@@ -10,13 +14,30 @@ import type { AgentControlService, SpawnAgentRequest } from "../AgentControlServ
  */
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
+  private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
 
-  constructor(control: AgentControlService) {
+  constructor(control: AgentControlService, plugins: Pick<PluginAgentTools, "list" | "call"> | null = null) {
     this.control = control;
+    this.plugins = plugins;
+  }
+
+  /** Orchestrators see the core tools; every role sees the plugin tools that list it (EP-6). */
+  listTools(sessionId: string): McpToolDefinition[] {
+    const session = this.control.status(sessionId);
+    return [
+      ...(session.role === "orchestrator" ? ORCHESTRATION_TOOL_DEFINITIONS : []),
+      ...(this.plugins?.list(session.role, session.provider) ?? [])
+    ];
   }
 
   async execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>> {
     try {
+      const session = this.control.status(sessionId);
+      if (isPluginOrchestrationTool(request.tool)) return await this.plugin(sessionId, session, request);
+      // Plugin tools may reach other roles' sessions through the same bridge; the core tools never do.
+      if (session.role !== "orchestrator") {
+        throw orchestrationBridgeError("INVALID_REQUEST", "Only orchestrator sessions can use CanvasTTY's agent tools.", false);
+      }
       switch (request.tool) {
         case "spawn_agent":
           return this.spawn(sessionId, request.arguments);
@@ -40,6 +61,22 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         error instanceof Error ? error.message : "Orchestration command failed.",
         true
       );
+    }
+  }
+
+  private async plugin(
+    sessionId: string,
+    session: { role: SessionRole; provider: ProviderId },
+    request: OrchestrationRequest
+  ): Promise<Record<string, unknown>> {
+    if (!this.plugins?.list(session.role, session.provider).some((tool) => tool.name === request.tool)) {
+      throw orchestrationBridgeError("INVALID_REQUEST", "That plugin tool is not available to this session.", false);
+    }
+    try {
+      const result = await this.plugins.call(sessionId, session.role, request.tool, request.arguments);
+      return { pluginTool: true, text: result.content, isError: result.isError };
+    } catch (error) {
+      throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : "The plugin tool failed.", false);
     }
   }
 

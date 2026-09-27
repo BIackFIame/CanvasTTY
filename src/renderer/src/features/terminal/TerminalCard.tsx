@@ -11,11 +11,14 @@ import {
 import type {
   LocaleId,
   PaletteId,
+  PluginCardActionEntry,
+  PluginCardActionResult,
   Point,
   FocusActivation,
   SessionBounds,
   SessionSnapshot
 } from "../../../../shared/contracts";
+import { usePluginCardDecorations } from "../plugins/cardDecorations";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -157,6 +160,24 @@ export function TerminalCard({
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [noteDismissed, setNoteDismissed] = useState<string | null>(null);
   const [confirmClose, setConfirmClose] = useState(false);
+  // Plugin badges and actions (EP-7); an action's answer shows as a toast on the card, as plain text.
+  const pluginDecorations = usePluginCardDecorations(session);
+  const [actionRunning, setActionRunning] = useState(false);
+  const [actionToast, setActionToast] = useState<PluginCardActionResult | null>(null);
+  const hasOptions = restoreEnabled || pluginDecorations.actions.length > 0;
+  const runPluginAction = (action: PluginCardActionEntry): void => {
+    setOptionsOpen(false);
+    setActionRunning(true);
+    void window.canvasTTY.plugins.invokeCardAction(action.pluginId, action.actionId, session.id)
+      .then((result) => setActionToast({ tone: result.tone, message: result.message ?? `${action.title}: ${t(locale, "cardActionDone")}` }))
+      .catch((error: unknown) => setActionToast({ tone: "error", message: error instanceof Error ? error.message : String(error) }))
+      .finally(() => setActionRunning(false));
+  };
+  useEffect(() => {
+    if (!actionToast) return;
+    const timer = window.setTimeout(() => setActionToast(null), 20_000);
+    return () => window.clearTimeout(timer);
+  }, [actionToast]);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
   const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
@@ -743,6 +764,12 @@ export function TerminalCard({
               {session.environment.label}
             </span>
           )}
+          {pluginDecorations.badges.map((badge) => (
+            <span key={badge.pluginId} className={`terminal-card__plugin-badge terminal-card__plugin-badge--${badge.tone}`}
+              title={badge.tooltip ?? badge.pluginId}>
+              {badge.text}
+            </span>
+          ))}
         </div>
         <div className="terminal-card__actions">
           {!summaryMode && (
@@ -780,12 +807,13 @@ export function TerminalCard({
               <UiIcon name="arrow" size="1.23em" />
             </button>
           )}
-          {restoreEnabled && (
+          {hasOptions && (
             <button
               className="terminal-card__action terminal-card__action--options"
               type="button"
               aria-haspopup="menu"
               aria-expanded={optionsOpen}
+              disabled={actionRunning}
               onClick={() => setOptionsOpen((open) => !open)}
               title={t(locale, "cardOptions")}
               aria-label={t(locale, "cardOptions")}
@@ -810,20 +838,36 @@ export function TerminalCard({
         </div>
       </header>
       <div className="terminal-card__surface" ref={terminalHost} />
-      {optionsOpen && restoreEnabled && (
+      {optionsOpen && hasOptions && (
         <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
-          <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
-            <input
-              type="checkbox"
-              autoFocus
-              checked={session.skipRestore === true}
-              onChange={(event) => {
-                setOptionsOpen(false);
-                void window.canvasTTY.terminal.setRestore(session.id, !event.target.checked);
-              }}
-            />
-            {t(locale, "cardSkipRestore")}
-          </label>
+          {restoreEnabled && (
+            <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
+              <input
+                type="checkbox"
+                autoFocus
+                checked={session.skipRestore === true}
+                onChange={(event) => {
+                  setOptionsOpen(false);
+                  void window.canvasTTY.terminal.setRestore(session.id, !event.target.checked);
+                }}
+              />
+              {t(locale, "cardSkipRestore")}
+            </label>
+          )}
+          {pluginDecorations.actions.map((action, index) => (
+            <button key={`${action.pluginId}:${action.actionId}`} className="terminal-card__menu-action" type="button" role="menuitem"
+              autoFocus={!restoreEnabled && index === 0} title={action.pluginName} onClick={() => runPluginAction(action)}>
+              {action.title}
+            </button>
+          ))}
+        </div>
+      )}
+      {actionToast && !summaryMode && (
+        <div className={`terminal-card__note terminal-card__toast terminal-card__toast--${actionToast.tone}`} role="status">
+          <span>{actionToast.message}</span>
+          <button type="button" onClick={() => setActionToast(null)} aria-label={t(locale, "close")}>
+            <UiIcon name="close" size="1em" />
+          </button>
         </div>
       )}
       {confirmClose && session.environment && (

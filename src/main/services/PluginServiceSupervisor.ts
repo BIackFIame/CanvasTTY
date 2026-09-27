@@ -33,6 +33,15 @@ export interface PluginServiceHost {
   registerSecrets?(pluginId: string, values: string[]): void;
   /** One of the plugin's own secrets (already checked for `secrets`), or null when it is not set. */
   secretGet?(pluginId: string, key: string): Promise<string | null>;
+  /**
+   * Session events and plugin-owned session control (`sessions.*`, EP-4). Returns undefined for a method it
+   * does not know. `permissions` are the plugin's active manifest permissions; it checks them per method.
+   */
+  sessions?(pluginId: string, serviceId: string, method: string, params: unknown, permissions: readonly PluginPermission[]): unknown;
+  /** `cards.setBadge` (EP-7), already checked for `cards:decorate`. */
+  setBadge?(pluginId: string, params: unknown): unknown;
+  /** The service process ended (stopped, crashed or removed): its subscriptions end with it. */
+  stopped?(pluginId: string, serviceId: string): void;
 }
 
 export interface PluginServiceSupervisorOptions {
@@ -176,6 +185,20 @@ export class PluginServiceSupervisor {
     return this.send(pluginId, serviceId, method, params, this.options.requestTimeoutMs);
   }
 
+  /** A host notification (`canvastty.*`, no answer); false when the service is not running. */
+  notify(pluginId: string, serviceId: string, method: `canvastty.${string}`, params: unknown): boolean {
+    const record = this.services.get(serviceKey(pluginId, serviceId));
+    if (!record?.child || record.state !== "running") return false;
+    let frame: string;
+    try {
+      frame = JSON.stringify({ jsonrpc: "2.0", method, params: params === undefined ? null : params });
+    } catch {
+      return false;
+    }
+    if (Buffer.byteLength(frame, "utf8") >= this.options.maxFrameBytes) return false;
+    return this.write(record, frame);
+  }
+
   /** A host-initiated call (`canvastty.*`, which plugin surfaces cannot send) with its own time budget. */
   hostCall(pluginId: string, serviceId: string, method: `canvastty.${string}`, params: unknown, timeoutMs: number): Promise<unknown> {
     return this.send(pluginId, serviceId, method, params, Math.min(timeoutMs, this.options.requestTimeoutMs));
@@ -212,6 +235,12 @@ export class PluginServiceSupervisor {
         reject(new Error("Plugin service is not running."));
       }
     });
+  }
+
+  /** The service is running (or starting): what it declares may be offered now. */
+  running(pluginId: string, serviceId: string): boolean {
+    const state = this.services.get(serviceKey(pluginId, serviceId))?.state;
+    return state === "running" || state === "starting";
   }
 
   report(pluginId: string): PluginServiceReport {
@@ -322,6 +351,7 @@ export class PluginServiceSupervisor {
   ): void {
     if (record.child !== child) return;
     record.child = null;
+    this.options.host.stopped?.(record.spec.pluginId, record.spec.serviceId);
     for (const [id, pending] of record.pending) {
       clearTimeout(pending.timer);
       pending.reject(new Error("Plugin service stopped."));
@@ -480,6 +510,14 @@ export class PluginServiceSupervisor {
       }
       this.options.host.registerSecrets?.(spec.pluginId, values.values as string[]);
       return null;
+    }
+    if (method === "cards.setBadge" && this.options.host.setBadge) {
+      if (!spec.permissions.includes("cards:decorate")) throw new Error("Plugin does not have the cards:decorate permission.");
+      return this.options.host.setBadge(spec.pluginId, params);
+    }
+    if (method.startsWith("sessions.") && this.options.host.sessions) {
+      const result = this.options.host.sessions(spec.pluginId, spec.serviceId, method, params, spec.permissions);
+      if (result !== undefined) return result;
     }
     throw new UnknownMethodError(`Unknown host method: ${method.slice(0, 80)}.`);
   }

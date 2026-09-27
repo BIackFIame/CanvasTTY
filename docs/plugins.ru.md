@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-Рабочий пример sandboxed web-поверхностей без привилегированного хука: [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). Минимальный сервис с canvas-приложением, которое его вызывает: [`examples/plugins/service-echo`](../examples/plugins/service-echo). Launch contributor: [`examples/plugins/launch-env`](../examples/plugins/launch-env), политика запуска: [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). Среда сессии (git worktree): [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). Сервис решений: [`examples/plugins/deny-rm`](../examples/plugins/deny-rm).
+Рабочий пример sandboxed web-поверхностей без привилегированного хука: [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). Минимальный сервис с canvas-приложением, которое его вызывает: [`examples/plugins/service-echo`](../examples/plugins/service-echo). Launch contributor: [`examples/plugins/launch-env`](../examples/plugins/launch-env), политика запуска: [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). Среда сессии (git worktree): [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). Сервис решений: [`examples/plugins/deny-rm`](../examples/plugins/deny-rm). Инструмент для агентов, действие на окне и события сессий: [`examples/plugins/collect-demo`](../examples/plugins/collect-demo).
 Для IDE доступны [JSON Schema manifest](canvastty-plugin.schema.json) и [TypeScript declarations SDK](plugin-api.d.ts).
 
 ## Manifest v1
@@ -135,8 +135,12 @@ Script запускается отдельным процессом из кат�
 | `event` `{ event, data }` | уведомление | нет | Доставляется открытым поверхностям плагина через `host.service.onEvent` |
 | `redaction.register` `{ values }` | запрос | нет | До 32 строк (до 4096 символов, учитываются от 8), которые CanvasTTY маскирует во всём тексте, который один агент читает у другого; хранятся только в памяти |
 | `secrets.get` `{ key }` | запрос | разрешение `secrets` | Собственный секрет плагина (то же хранилище, что `host.secrets`) или `null`. Значение затем маскируется, как значения `redaction.register`. Для ключей, которые нужны самому сервису (API-ключ модели, которую он вызывает); никогда не отправляйте его обратно на страницу |
+| `sessions.subscribe` / `sessions.list` / `sessions.unsubscribe` | запрос | `sessions:events` | События окон и список открытых окон (см. «События сессий») |
+| `sessions.create` | запрос | `sessions:launch` | Запускает окно, которым владеет плагин |
+| `sessions.send` / `sessions.stop` | запрос | `sessions:control` | Только для окон, запущенных этим плагином |
+| `cards.setBadge` `{ sessionId, badge }` | запрос | `cards:decorate` | Короткая текстовая метка на любом окне (см. «Метки и действия на окнах») |
 
-Хост привязывает каждый вызов к плагину самого сервиса: сервис не может назвать другой плагин, прочитать секреты другого плагина или получить доступ к сессиям. Пример [`service-echo`](../examples/plugins/service-echo) сохраняет токен со своей страницы через `host.secrets.set`, а его сервис читает его через `secrets.get` и отвечает только, задан ли он.
+Хост привязывает каждый вызов к плагину самого сервиса: сервис не может назвать другой плагин или прочитать секреты другого плагина, а к сессиям обращается только через разрешения `sessions:*` ниже. Пример [`service-echo`](../examples/plugins/service-echo) сохраняет токен со своей страницы через `host.secrets.set`, а его сервис читает его через `secrets.get` и отвечает только, задан ли он.
 
 Канал UI: sandboxed-поверхности обращаются только к сервисам своего плагина:
 
@@ -280,12 +284,83 @@ Codex и Qwen Code принимают от этого хука только за
 
 Полный пример: [`examples/plugins/deny-rm`](../examples/plugins/deny-rm): запрещает `rm -rf` чего-либо на верхнем уровне рабочей папки (`rm -rf *`, `rm -rf src`) и не имеет мнения обо всём остальном. Он объявляет `timeoutMs: 5000`, чтобы показать поле; отвечает сразу.
 
+### Инструменты для агентов (`tools:agents`)
+
+Сервис может предложить агентам до 16 `tools`. Они появляются в MCP-сервере `canvastty_agents` как `<pluginId>__<name>` (точки в id плагина становятся `_`: `com.example.tools` + `lookup` — это `com_example_tools__lookup`; Anthropic и OpenAI допускают в именах инструментов только буквы, цифры, `_` и `-`, не длиннее 64 символов, а у более длинного имени остаётся начало id и короткий хеш) рядом с собственными инструментами оркестрации CanvasTTY и считаются инструментами самого CanvasTTY: базовая защита их не проверяет (она проверяет только shell и запись файлов).
+
+```json
+"permissions": ["tools:agents"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "tools": [{
+    "name": "diffstat",
+    "description": "git diff --stat вашей папки или папки одного из ваших субагентов.",
+    "inputSchema": { "type": "object", "properties": { "sessionId": { "type": "string" } }, "additionalProperties": false },
+    "roles": ["orchestrator"]
+  }]
+}]
+```
+
+- `name` — `[a-z][a-z0-9_]{0,39}`, уникальное в плагине; `inputSchema` — JSON Schema с `type: "object"` на верхнем уровне (до 8 КБ); `roles` — `orchestrator`, `agent` и/или `subagent`.
+- Инструмент видят только сессии с указанной ролью и только пока нативному коду плагина доверяют и сервис работает. Список читается при запуске агента, поэтому плагин, которому доверились позже, появится в новых окнах. Оркестраторы получают мост как раньше; окно `agent` или `subagent` получает его, только если какой-то инструмент плагина указывает его роль, и видит тогда только инструменты плагинов, никогда — основные инструменты оркестрации. Инструменты плагинов доступны Claude Code, Codex, Qwen Code и OpenCode; Kimi и Hermes используют один файл настроек на все окна и получают только основные инструменты.
+- Вызов приходит сервису как `canvastty.tools.call` (только от хоста) с `{ tool, callerSessionId, caller, input }`, где `caller` — сводка вызывающего окна (та же форма, что в событиях сессий). Хост сначала проверяет `input`: объект, обязательные ключи, типы свойств верхнего уровня, отсутствие лишних ключей при `additionalProperties: false`; более глубокие проверки — дело плагина.
+- Ответ — `{ content, isError? }`: `content` — текст или любой JSON (отправляется как JSON-текст). Ответ маскируется реестром секретов и обрезается до 32 тыс. символов; отсутствие ответа за 15 с, ошибка или остановленный сервис дают агенту результат-ошибку и ничего больше. Хост ручается только за id вызывающего: инструмент, который работает с другими сессиями, должен проверять их сам (пример принимает только собственных субагентов вызывающего).
+
+### События сессий и окна плагина (`sessions:*`)
+
+Сервис с `sessions:events` вызывает `sessions.subscribe` `{ ownedOnly? }` (заново после каждого запуска). Ответ содержит открытые окна; дальше хост присылает уведомления `canvastty.sessions.event`:
+
+```ts
+interface PluginSessionEvent {
+  type: "created" | "restored" | "status" | "exited" | "closed";
+  owned: boolean;              // окно запустил этот плагин
+  session: {
+    id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
+    title: string; status: string; exitCode: number | null; startedAt: number;
+    cwd: string;               // папка, которую выбрал человек
+    workingDirectory: string;  // где окно работает на самом деле (среда worktree его переносит)
+    environment?: { pluginId: string; kind: string; label: string; ref: unknown };
+  };
+  screen?: string;             // только с sessions:read-screen, в status и exited
+}
+```
+
+События содержат только метаданные. С `sessions:read-screen` (в тексте согласия сказано, что это личные данные) события `status` и `exited` добавляют последние 4000 символов вывода окна обычным текстом, замаскированным реестром секретов. `sessions.list` возвращает те же сводки по запросу.
+
+Управление устроено как в шлюзе agent-control: сервис — один контроллер и владеет только тем, что создал. Владение сохраняется в записи сессии окна, поэтому восстановленное окно по-прежнему принадлежит плагину, который его запустил.
+
+| Запрос | Условие | Действие |
+|:--|:--|:--|
+| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | Запускает окно `agent` через обычный конвейер запуска (включая опции запуска и среды; отказ показывается на окне). Окно видимо и никогда не забирает фокус. Не больше 16 на плагин. Ответ `{ sessionId }` |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Вводит текст (с Enter, если не `submit: false`) в окно, запущенное этим плагином |
+| `sessions.stop` `{ sessionId }` | `sessions:control` | Закрывает окно, запущенное этим плагином; данные его среды сохраняются |
+
+Чужой или неизвестный id получает одну и ту же ошибку, поэтому плагин не может прощупывать другие окна. Удаления и чтения экрана через управление нет.
+
+### Метки и действия на окнах (`cards:decorate`)
+
+Сервис с `cards:decorate` может поставить метку на любое окно и объявить до 8 `cardActions`:
+
+```json
+"permissions": ["cards:decorate"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "cardActions": [{ "id": "show-changes", "title": "Show changes", "when": { "environmentKinds": ["worktree"] } }]
+}]
+```
+
+- `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`: `text` до 24 символов, `tone` — `neutral` (по умолчанию), `info`, `warn` или `error`, `tooltip` до 200 символов; `null` убирает метку плагина. Не больше 4 меток плагинов на окно. Метки — обычный текст, маскируются как текст агентов и исчезают вместе с окном или при снятии доверия к плагину.
+- Действие появляется в меню параметров окна на каждом окне, которое подходит под `when`: `providers`, `environmentKinds` (среда любого плагина; окно без среды никогда не подходит) и `roles`, каждое необязательно; должны совпасть все указанные. Выбор отправляет `canvastty.cards.invoke` `{ actionId, sessionId, session }` (только от хоста; `session` — сводка выше) и ждёт не больше 15 с. Ответ — `{ message?, tone? }`: сообщение (обычный текст, до 2000 символов, замаскированный) показывается всплывающим уведомлением на окне. Таймаут или ошибка показывают уведомление об ошибке.
+- Никакого HTML: метки, заголовки и сообщения выводятся как текст.
+
+Полный пример — [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): действие **Show changes** на окнах в среде `worktree` (из `env-worktree`) показывает `git diff --stat` worktree и ставит метку «N changed», а инструмент `collect-demo__diffstat` даёт оркестраторам то же для своей папки или папки субагента, о котором плагин узнаёт из событий сессий.
+
 ### Базовая защита и скрытие секретов (ядро)
 
 Две части безопасности встроены и не требуют плагина:
 
 - **Базовая защита** (Настройки → Агенты, включена по умолчанию; человек может её выключить) через тот же хук запрещает sudo и другое повышение прав, передачу скачанного или сгенерированного текста в shell, скачивание с запуском, команды для дисков и форматирования, форк-бомбы, а также запись и удаление вне рабочей папки — включая домашнюю папку, другие проекты и `/tmp` — и удаление самой рабочей папки. Собственные папки планов и памяти агента (`~/.claude/plans`, `~/.claude/projects/<project>/memory` и то же внутри `CLAUDE_CONFIG_DIR` запуска) не считаются «вне». Она только запрещает; каждая причина говорит модели, что сделать вместо этого (для записи в `/tmp` — завести временную папку внутри проекта).
-- **Скрытие секретов**: весь текст, который CanvasTTY передаёт от одного агента другому (`observe_agent`, `get_agent_result`, `screen`, `result` и детали ошибок в control CLI), маскируется: ключи провайдеров, которые хранит CanvasTTY, значения `secretEnv` запуска, значения, зарегистрированные сервисом через `redaction.register`, в том числе перенесённые терминалом на несколько строк, а также типичные формы ключей (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, приватные ключи PEM, длинные случайные строки).
+- **Скрытие секретов**: весь текст, который CanvasTTY передаёт от одного агента другому (`observe_agent`, `get_agent_result`, `screen`, `result` и детали ошибок в control CLI), маскируется: ключи провайдеров, которые хранит CanvasTTY, значения `secretEnv` запуска, значения, зарегистрированные сервисом через `redaction.register`, в том числе перенесённые терминалом на несколько строк, а также типичные формы ключей (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, приватные ключи PEM, длинные случайные строки). Так же маскируются ответы инструментов плагинов, `screen` в событиях сессий, метки на окнах и сообщения действий.
 
 host.onStorageChange(listener) сообщает всем открытым поверхностям того же плагина — canvas cards, HOME widgets и отдельным окнам — об изменениях через host.storage.set, поэтому нескольким поверхностям не требуется постоянный polling.
 
@@ -299,6 +374,12 @@ host.onStorageChange(listener) сообщает всем открытым пов
 | `launch:contribute` | Блок `launch` сервиса и `canvastty.launch.prepare` | Может добавлять переменные окружения, аргументы и файлы агентам, запущенным с его опцией; с `policy` может отказать любому запуску агента |
 | `environment:provide` | `environments` сервиса и `canvastty.environment.*` | Может создавать место для окон, запущенных в его среде, и менять команду, аргументы, переменные и папку, с которыми они там работают |
 | `decision:provide` | `decide` сервиса и `canvastty.decide` | Видит команды и записи файлов агентов (с их вводом) до выполнения и может запрещать их или спрашивать человека; для разрешения нужно второе подтверждение |
+| `tools:agents` | `tools` сервиса и `canvastty.tools.call` | Предлагает инструменты агентам указанных ролей; получает их аргументы и сводку вызывающего окна |
+| `sessions:events` | `sessions.subscribe`, `sessions.list` | Метаданные окон: провайдер, роль, родитель, заголовок, статус, папки, ref среды; без текста экрана |
+| `sessions:read-screen` | `screen` в событиях status и exited | Конец вывода каждого окна (замаскированный): личные данные |
+| `sessions:launch` | `sessions.create` | Запускает видимые окна агентов через обычный запуск |
+| `sessions:control` | `sessions.send`, `sessions.stop` | Вводит текст и закрывает только окна, запущенные плагином |
+| `cards:decorate` | `cards.setBadge`, `cardActions` сервиса, `canvastty.cards.invoke` | Текстовые метки на окнах и действия в их меню |
 | `limits:read` | `limits.get` | Тот же очищенный `LimitsSnapshot`, который использует HOME |
 | `launcher:open` | `launcher.open` | Открывает штатную Focus Card или запуск терминала; не обходит пользовательский выбор |
 | `external:open` | `external.open` | Передаёт ОС только явную HTTP(S)-ссылку |

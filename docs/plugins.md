@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). A decision service lives in [`examples/plugins/deny-rm`](../examples/plugins/deny-rm).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard). A session environment (git worktree) lives in [`examples/plugins/env-worktree`](../examples/plugins/env-worktree). A decision service lives in [`examples/plugins/deny-rm`](../examples/plugins/deny-rm). An agent tool, a card action and session events live in [`examples/plugins/collect-demo`](../examples/plugins/collect-demo).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -154,8 +154,12 @@ A service may call back this host API (the base that later extension points add 
 | `event` `{ event, data }` | notification | none | Delivered to this plugin's live surfaces through `host.service.onEvent` |
 | `redaction.register` `{ values }` | request | none | Up to 32 strings (4096 characters each, 8 or more to count) that CanvasTTY masks in every text one agent reads from another; kept in memory only |
 | `secrets.get` `{ key }` | request | `secrets` permission | The plugin's own secret (the same store as `host.secrets`), or `null`. The value is then masked like `redaction.register` values. For keys a service needs itself (an API key for a model it calls); never send one back to a surface |
+| `sessions.subscribe` / `sessions.list` / `sessions.unsubscribe` | request | `sessions:events` | Card events and the open cards (see [Session events](#session-events-and-plugin-owned-cards-sessions)) |
+| `sessions.create` | request | `sessions:launch` | Starts a card the plugin owns |
+| `sessions.send` / `sessions.stop` | request | `sessions:control` | Only for cards the plugin started |
+| `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
 
-The host binds every call to the service's own plugin; a service cannot name another plugin, read another plugin's secrets, or reach sessions. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
+The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
 UI channel: sandboxed surfaces call their own plugin's services, and only those:
 
@@ -299,12 +303,83 @@ Codex and Qwen Code take only a deny from this hook: for them `ask` and `allow` 
 
 The full example is [`examples/plugins/deny-rm`](../examples/plugins/deny-rm): it denies `rm -rf` of anything at the top of the working folder (`rm -rf *`, `rm -rf src`) and has no opinion on everything else. It declares `timeoutMs: 5000` to show the field; it answers at once.
 
+### Agent tools (`tools:agents`)
+
+A service may offer up to 16 `tools` to agents. They appear in the `canvastty_agents` MCP server as `<pluginId>__<name>` (dots in the plugin id become `_`, so `com.example.tools` + `lookup` is `com_example_tools__lookup`; Anthropic and OpenAI allow only letters, digits, `_` and `-` in tool names, at most 64 characters, and a longer name keeps the start of the id plus a short hash), next to CanvasTTY's own orchestration tools, and count as CanvasTTY's own tools: base protection does not check them (it checks shells and file writes only).
+
+```json
+"permissions": ["tools:agents"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "tools": [{
+    "name": "diffstat",
+    "description": "git diff --stat of your own folder, or of one of your subagents' folders.",
+    "inputSchema": { "type": "object", "properties": { "sessionId": { "type": "string" } }, "additionalProperties": false },
+    "roles": ["orchestrator"]
+  }]
+}]
+```
+
+- `name` is `[a-z][a-z0-9_]{0,39}` and unique in the plugin; `inputSchema` is a JSON Schema whose top level is `type: "object"` (at most 8 KB); `roles` lists `orchestrator`, `agent` and/or `subagent`.
+- Only sessions whose role is listed see a tool, and only while the plugin's native code is trusted and the service runs. The list is read when the agent starts, so a plugin trusted later reaches new cards. Orchestrators get the bridge as before; an `agent` or `subagent` card gets it only when a plugin tool lists its role, and then sees only plugin tools, never the core orchestration tools. Plugin tools reach Claude Code, Codex, Qwen Code and OpenCode; Kimi and Hermes share one configuration file between cards and keep the core tools only.
+- A call reaches the service as `canvastty.tools.call` (host-only) with `{ tool, callerSessionId, caller, input }`, where `caller` is the calling card's summary (the same shape as session events). The host checks `input` first: an object, required keys, top-level property types, no extra keys when `additionalProperties` is `false`; deeper checks are the plugin's.
+- Answer `{ content, isError? }`: `content` is text, or any JSON (sent as JSON text). The answer is masked by the redaction registry and cut to 32 K characters; no answer in 15 s, an error or a stopped service is an error result for the agent, never anything more. The caller id is all the host vouches for: a tool that acts on other sessions must check them itself (the example accepts only the caller's own subagents).
+
+### Session events and plugin-owned cards (`sessions:*`)
+
+A service with `sessions:events` calls `sessions.subscribe` `{ ownedOnly? }` (again after every start). The answer lists the open cards; after that the host sends `canvastty.sessions.event` notifications:
+
+```ts
+interface PluginSessionEvent {
+  type: "created" | "restored" | "status" | "exited" | "closed";
+  owned: boolean;              // this plugin started the card
+  session: {
+    id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
+    title: string; status: string; exitCode: number | null; startedAt: number;
+    cwd: string;               // the folder the person chose
+    workingDirectory: string;  // where it actually runs (a worktree environment moves it)
+    environment?: { pluginId: string; kind: string; label: string; ref: unknown };
+  };
+  screen?: string;             // only with sessions:read-screen, on status and exited
+}
+```
+
+Events carry metadata only. With `sessions:read-screen` (the consent text says this is private data), `status` and `exited` events add the last 4000 characters of the card's output as plain text, masked by the redaction registry. `sessions.list` returns the same summaries on demand.
+
+Control follows the agent-control gateway's model: the service is one controller and owns only what it created. Ownership is saved with the card's session record, so a restored card still belongs to the plugin that started it.
+
+| Request | Gate | Effect |
+|:--|:--|:--|
+| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }` |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started |
+| `sessions.stop` `{ sessionId }` | `sessions:control` | Closes a card this plugin started; its environment data is kept |
+
+A foreign or unknown id gets the same error, so a plugin cannot probe other cards. There is no delete and no screen-reading control call.
+
+### Card badges and actions (`cards:decorate`)
+
+A service with `cards:decorate` can put a badge on any card and declare up to 8 `cardActions`:
+
+```json
+"permissions": ["cards:decorate"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "cardActions": [{ "id": "show-changes", "title": "Show changes", "when": { "environmentKinds": ["worktree"] } }]
+}]
+```
+
+- `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`: `text` is at most 24 characters, `tone` is `neutral` (default), `info`, `warn` or `error`, `tooltip` at most 200 characters; `null` removes the plugin's badge. At most 4 plugin badges per card. Badges are plain text, masked like agent text, and disappear with the card or when the plugin's trust is revoked.
+- An action shows in the card's options menu on every card its `when` matches: `providers`, `environmentKinds` (any plugin's environment; a card outside an environment never matches) and `roles`, each optional; every listed key must match. Choosing it sends `canvastty.cards.invoke` `{ actionId, sessionId, session }` (host-only; `session` is the summary above) and waits at most 15 s. Answer `{ message?, tone? }`: the message (plain text, at most 2000 characters, masked) is shown as a toast on the card. A timeout or error shows an error toast.
+- No HTML anywhere: badges, titles and messages are rendered as text.
+
+The full example is [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): the card action **Show changes** on cards in the `worktree` environment (from `env-worktree`) shows `git diff --stat` of the worktree and sets a "N changed" badge, and the tool `collect-demo__diffstat` gives orchestrators the same for their own folder or a subagent's, which it learns about from session events.
+
 ### Base protection and redaction (core)
 
 Two safety parts are built in and need no plugin:
 
 - **Base protection** (Settings → Agents, on by default; the person can turn it off) denies, through the same hook, sudo and other elevation, piping downloaded or generated text into a shell, download-and-run, disk and format commands, fork bombs, and writing or deleting outside the working folder: the home folder, other projects and `/tmp` included, and deleting the working folder itself. An agent's own plan and memory folders (`~/.claude/plans`, `~/.claude/projects/<project>/memory`, and the same inside the run's `CLAUDE_CONFIG_DIR`) are not "outside". It only ever denies; each reason tells the model what to do instead (a write to `/tmp` suggests a scratch folder inside the project).
-- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs).
+- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs). Plugin tool answers, `screen` in session events, card badges and card action messages are masked the same way.
 
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
@@ -318,6 +393,12 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
 | `environment:provide` | A service's `environments` and `canvastty.environment.*` | Can create a place for cards the person starts in its environment and change the command, arguments, variables and folder they run with there |
 | `decision:provide` | A service's `decide` and `canvastty.decide` | Sees agents' commands and file writes (with their input) before they run and can block them or ask the person; allowing needs a second confirmation |
+| `tools:agents` | A service's `tools` and `canvastty.tools.call` | Offers tools to agents of the listed roles; receives their arguments and the calling card's summary |
+| `sessions:events` | `sessions.subscribe`, `sessions.list` | Card metadata: provider, role, parent, title, status, folders, environment ref; no screen text |
+| `sessions:read-screen` | `screen` in status and exit events | The end of every card's output (masked): private data |
+| `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch |
+| `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
+| `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |

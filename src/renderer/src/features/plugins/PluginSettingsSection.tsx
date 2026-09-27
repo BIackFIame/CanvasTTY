@@ -1053,6 +1053,12 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "launch:contribute": "permissionLaunchContribute",
     "environment:provide": "permissionEnvironmentProvide",
     "decision:provide": "permissionDecisionProvide",
+    "tools:agents": "permissionToolsAgents",
+    "sessions:events": "permissionSessionsEvents",
+    "sessions:read-screen": "permissionSessionsReadScreen",
+    "sessions:launch": "permissionSessionsLaunch",
+    "sessions:control": "permissionSessionsControl",
+    "cards:decorate": "permissionCardsDecorate",
     network: "permissionNetwork"
   } as const)[permission];
 }

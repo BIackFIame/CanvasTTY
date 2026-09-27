@@ -32,6 +32,9 @@ import type {
   PluginService,
   PluginServiceDecide,
   PluginServiceLaunch,
+  PluginAgentTool,
+  PluginCardAction,
+  PluginCardActionFilter,
   PluginUpdateStatus,
   Size
 } from "../../shared/contracts";
@@ -46,6 +49,8 @@ import type { LaunchContributor } from "./LaunchPipeline.ts";
 import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
 import type { DecisionService } from "./DecisionHooks.ts";
 import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import type { AgentToolProvider } from "./PluginAgentTools.ts";
+import type { CardActionProvider } from "./PluginCards.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -121,7 +126,13 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "network",
   "launch:contribute",
   "environment:provide",
-  "decision:provide"
+  "decision:provide",
+  "tools:agents",
+  "sessions:events",
+  "sessions:read-screen",
+  "sessions:launch",
+  "sessions:control",
+  "cards:decorate"
 ]);
 
 interface StoredPluginRecord {
@@ -588,6 +599,20 @@ export class PluginManager {
       });
     }
     return services;
+  }
+
+  /** Services whose tools agents may call now: enabled, native code trusted, `tools:agents` granted. */
+  agentToolProviders(): AgentToolProvider[] {
+    return this.trustedServicesWith("tools:agents", (service) => service.tools).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, tools: structuredClone(service.tools!)
+    }));
+  }
+
+  /** Services whose card actions are shown now: enabled, native code trusted, `cards:decorate` granted. */
+  cardActionProviders(): CardActionProvider[] {
+    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    }));
   }
 
   private trustedServicesWith(
@@ -1356,6 +1381,12 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     if (service.decide && !permissions.includes("decision:provide") && !granted?.includes("decision:provide")) {
       throw new Error(`Plugin service ${service.id} decides on tool calls and needs the decision:provide permission.`);
     }
+    if (service.tools && !permissions.includes("tools:agents") && !granted?.includes("tools:agents")) {
+      throw new Error(`Plugin service ${service.id} offers agent tools and needs the tools:agents permission.`);
+    }
+    if (service.cardActions && !permissions.includes("cards:decorate") && !granted?.includes("cards:decorate")) {
+      throw new Error(`Plugin service ${service.id} adds card actions and needs the cards:decorate permission.`);
+    }
   }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
@@ -1486,7 +1517,9 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   const ids = new Set<string>();
   const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
-    assertOnlyKeys(candidate, ["id", "title", "description", "entry", "module", "launch", "environments", "decide"], "Plugin service");
+    assertOnlyKeys(candidate, [
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions"
+    ], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
     ids.add(id);
@@ -1503,13 +1536,22 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     const launch = candidate.launch === undefined ? undefined : validateServiceLaunch(candidate.launch);
     const environments = candidate.environments === undefined ? undefined : validateServiceEnvironments(candidate.environments);
     const decide = candidate.decide === undefined ? undefined : validateServiceDecide(candidate.decide);
+    const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
+    const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
       ...(environments ? { environments } : {}),
-      ...(decide ? { decide } : {})
+      ...(decide ? { decide } : {}),
+      ...(tools ? { tools } : {}),
+      ...(cardActions ? { cardActions } : {})
     };
   });
+  // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
+  const toolNames = services.flatMap((service) => service.tools ?? []).map((tool) => tool.name);
+  if (new Set(toolNames).size !== toolNames.length) throw new Error("Plugin agent tool names must be unique.");
+  const actionIds = services.flatMap((service) => service.cardActions ?? []).map((action) => action.id);
+  if (new Set(actionIds).size !== actionIds.length) throw new Error("Plugin card action ids must be unique.");
   // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
   if (services.filter((service) => service.decide).length > 1) {
     throw new Error("At most one plugin service may decide on tool calls.");
@@ -1563,6 +1605,71 @@ function validateServiceDecide(value: unknown): PluginServiceDecide {
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
   return { events: ["pre-tool"], ...(appliesTo ? { appliesTo } : {}), ...(value.timeoutMs !== undefined ? { timeoutMs: value.timeoutMs as number } : {}) };
+}
+
+const MAX_AGENT_TOOLS = 16;
+const MAX_TOOL_SCHEMA_BYTES = 8 * 1024;
+const SESSION_ROLES = new Set<string>(["orchestrator", "agent", "subagent"]);
+
+function validateServiceTools(value: unknown): PluginAgentTool[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_AGENT_TOOLS) {
+    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items.`);
+  }
+  return value.map((candidate): PluginAgentTool => {
+    if (!isRecord(candidate)) throw new Error("Every plugin agent tool must be an object.");
+    assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles"], "Plugin agent tool");
+    const name = requiredString(candidate.name, "tool name", 40);
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(name)) throw new Error(`Plugin agent tool name is invalid: ${name}.`);
+    const description = requiredString(candidate.description, "tool description", 1_000);
+    const schema = candidate.inputSchema;
+    if (!isRecord(schema) || schema.type !== "object"
+      || Buffer.byteLength(JSON.stringify(schema), "utf8") > MAX_TOOL_SCHEMA_BYTES) {
+      throw new Error(`Plugin agent tool ${name} inputSchema must be a JSON Schema object (type "object") of at most 8 KB.`);
+    }
+    if (schema.properties !== undefined && !isRecord(schema.properties)) throw new Error(`Plugin agent tool ${name} properties must be an object.`);
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) {
+      throw new Error(`Plugin agent tool ${name} required must list property names.`);
+    }
+    if (!Array.isArray(candidate.roles) || candidate.roles.length === 0 || candidate.roles.some((role) => !SESSION_ROLES.has(role as string))) {
+      throw new Error(`Plugin agent tool ${name} roles must list orchestrator, agent or subagent.`);
+    }
+    return { name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])] };
+  });
+}
+
+const MAX_CARD_ACTIONS = 8;
+
+function validateCardActions(value: unknown): PluginCardAction[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CARD_ACTIONS) {
+    throw new Error(`Plugin service cardActions must contain between 1 and ${MAX_CARD_ACTIONS} items.`);
+  }
+  return value.map((candidate): PluginCardAction => {
+    if (!isRecord(candidate)) throw new Error("Every plugin card action must be an object.");
+    assertOnlyKeys(candidate, ["id", "title", "when"], "Plugin card action");
+    const id = requiredString(candidate.id, "card action id", 64);
+    if (!isContributionId(id)) throw new Error(`Plugin card action id is invalid: ${id}.`);
+    const title = requiredString(candidate.title, "card action title", 40);
+    if (candidate.when === undefined) return { id, title };
+    if (!isRecord(candidate.when)) throw new Error(`Plugin card action ${id} when must be an object.`);
+    assertOnlyKeys(candidate.when, ["providers", "environmentKinds", "roles"], "Plugin card action filter");
+    const list = (key: string, valid: (item: unknown) => boolean): string[] | undefined => {
+      const items = (candidate.when as Record<string, unknown>)[key];
+      if (items === undefined) return undefined;
+      if (!Array.isArray(items) || items.length === 0 || items.length > 16 || !items.every(valid)) {
+        throw new Error(`Plugin card action ${id} when.${key} is invalid.`);
+      }
+      return [...new Set(items as string[])];
+    };
+    const providers = list("providers", (item) => PROVIDER_IDS.has(item as string));
+    const environmentKinds = list("environmentKinds", (item) => typeof item === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(item));
+    const roles = list("roles", (item) => SESSION_ROLES.has(item as string));
+    const when: PluginCardActionFilter = {
+      ...(providers ? { providers: providers as PluginCardActionFilter["providers"] } : {}),
+      ...(environmentKinds ? { environmentKinds } : {}),
+      ...(roles ? { roles: roles as PluginCardActionFilter["roles"] } : {})
+    };
+    return { id, title, when };
+  });
 }
 
 const MAX_ENVIRONMENT_KINDS = 8;

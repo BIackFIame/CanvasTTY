@@ -1116,6 +1116,16 @@ button { border: 0; }
 .terminal-card__search button:hover { color: white; background: rgba(255,255,255,.16); }
 .terminal-card__menu { position: absolute; z-index: 18; top: calc(var(--card-header-height) + 6px); right: 10px; padding: 6px 8px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; color: white; background: rgba(28,30,40,.96); box-shadow: var(--shadow-md); font-size: 12px; font-weight: 700; }
 .terminal-card__menu label { display: flex; align-items: center; gap: 8px; padding: 4px 2px; cursor: pointer; }
+.terminal-card__menu-action { display: block; width: 100%; padding: 5px 4px; border-radius: 6px; color: inherit; background: transparent; font: inherit; text-align: left; cursor: pointer; }
+.terminal-card__menu-action:hover, .terminal-card__menu-action:focus-visible { background: rgba(255,255,255,.1); }
+.terminal-card__plugin-badge { flex: 0 0 auto; min-width: 0; max-width: 14em; overflow: hidden; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.14); font: 700 .7em var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.terminal-card__plugin-badge--info { background: color-mix(in srgb, #5b9cf5 38%, transparent); }
+.terminal-card__plugin-badge--warn { background: color-mix(in srgb, #e5a33a 42%, transparent); }
+.terminal-card__plugin-badge--error { background: color-mix(in srgb, #e5534b 46%, transparent); }
+.terminal-card__toast { top: calc(var(--card-header-height) + 6px); bottom: auto; max-height: 60%; overflow: auto; }
+.terminal-card__toast span { white-space: pre-wrap; font-family: var(--font-mono); font-weight: 600; }
+.terminal-card__toast--error { box-shadow: inset 3px 0 0 #e5534b, var(--shadow-md); }
+.terminal-card__toast--warn { box-shadow: inset 3px 0 0 #e5a33a, var(--shadow-md); }
 .terminal-card__note { position: absolute; z-index: 17; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 9px; color: white; background: rgba(28,30,40,.94); box-shadow: var(--shadow-md); font-size: 12px; font-weight: 650; line-height: 1.35; }
 .terminal-card__note span { flex: 1; min-width: 0; }
 .terminal-card__note button { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: rgba(255,255,255,.78); background: rgba(255,255,255,.07); cursor: pointer; }

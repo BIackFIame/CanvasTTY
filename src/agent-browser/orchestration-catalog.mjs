@@ -80,6 +80,17 @@ export function isApprovedOrchestrationTool(value) {
   return typeof value === "string" && ORCHESTRATION_TOOL_SET.has(value);
 }
 
+// Plugin tools (EP-6) are listed by the host per session as `<pluginId>__<name>`, with the plugin id's dots
+// written as `_` (Anthropic and OpenAI tool names allow only [a-zA-Z0-9_-], at most 64 characters). Plugin ids
+// never contain `_`, so the first `__` separates the two parts. The host checks the arguments against the schema.
+export const MAX_PLUGIN_TOOL_NAME_LENGTH = 64;
+const PLUGIN_TOOL_NAME = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?__[a-z][a-z0-9_]*$/;
+
+export function isPluginOrchestrationTool(value) {
+  return typeof value === "string" && value.length <= MAX_PLUGIN_TOOL_NAME_LENGTH
+    && !ORCHESTRATION_TOOL_SET.has(value) && PLUGIN_TOOL_NAME.test(value);
+}
+
 // Mirrors the browser catalog's canonical serializer so bridge digests and
 // payload checks behave identically.
 export function canonicalStringify(value) {

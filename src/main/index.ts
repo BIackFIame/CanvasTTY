@@ -31,6 +31,9 @@ import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
 import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
+import { PluginAgentTools } from "./services/PluginAgentTools";
+import { PluginSessions } from "./services/PluginSessions";
+import { PluginCards } from "./services/PluginCards";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -129,6 +132,8 @@ let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
 let pluginManager: PluginManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
+let pluginSessions: PluginSessions | null = null;
+let pluginCards: PluginCards | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
@@ -292,7 +297,13 @@ async function initializeServices(): Promise<void> {
       secretGet: (pluginId, key) => {
         if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
         return pluginSecretsService.get(pluginId, key);
-      }
+      },
+      sessions: (pluginId, serviceId, method, params, permissions) => pluginSessions?.handle(pluginId, serviceId, method, params, permissions),
+      setBadge: (pluginId, params) => {
+        if (!pluginCards) throw new Error("Cards are not ready yet.");
+        return pluginCards.setBadge(pluginId, params);
+      },
+      stopped: (pluginId, serviceId) => pluginSessions?.serviceStopped(pluginId, serviceId)
     }
   });
   // Base protection runs first; then trusted plugin decision services (EP-5).
@@ -302,7 +313,11 @@ async function initializeServices(): Promise<void> {
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null
   });
-  pluginManager.setServiceObserver((specs) => pluginServices!.sync(specs));
+  pluginManager.setServiceObserver(async (specs) => {
+    await pluginServices!.sync(specs);
+    // Trust changes add or remove card actions and badges.
+    pluginCards?.refresh();
+  });
   const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
   // Created before sessions are restored: launch services may resolve the plugin's own secrets.
   pluginSecretsService = new PluginSecretsService(
@@ -455,6 +470,8 @@ async function initializeServices(): Promise<void> {
     if (reachesObservers(payload)) {
       agentControl?.observe(channel, payload);
       evenG2?.observe(channel, payload);
+      pluginSessions?.observe(channel, payload);
+      if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }
     if (reachesRenderer(payload) && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.send(channel, payload);
@@ -489,14 +506,44 @@ async function initializeServices(): Promise<void> {
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
 
-  // The orchestration bridge exists only for sessions explicitly launched with
-  // the orchestrator role; interactive sessions never receive capabilities.
+  // Plugin services see card events and control only the cards they start (EP-4).
+  const sessionsForPlugins = new PluginSessions({
+    terminals: terminalManager,
+    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
+  });
+  pluginSessions = sessionsForPlugins;
+  // Plugin tools in canvastty_agents (EP-6), for sessions whose role a tool lists.
+  const pluginTools = new PluginAgentTools({
+    providers: () => pluginManager!.agentToolProviders()
+      .filter((provider) => pluginServices!.running(provider.pluginId, provider.serviceId)),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    caller: (sessionId) => sessionsForPlugins.summary(sessionId),
+    redact: (text) => redaction.redact(text)
+  });
+  // Card badges and actions (EP-7).
+  pluginCards = new PluginCards({
+    providers: () => pluginManager!.cardActionProviders(),
+    trustedPlugins: () => new Set(pluginManager!.trustedServiceSpecs().map((spec) => spec.pluginId)),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    session: (sessionId) => sessionsForPlugins.summary(sessionId),
+    redact: (text) => redaction.redact(text),
+    changed: (decorations) => {
+      if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
+        mainWindow.webContents.send(IPC.pluginsCardDecorationsChanged, decorations);
+      }
+    }
+  });
+
+  // The orchestration bridge exists only for sessions launched with the
+  // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
+  // other sessions never receive capabilities.
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager))
+    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools)
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
+  terminalManager.configureAgentTools((role, provider) => pluginTools.names(role, provider));
 
   const launchPipeline = new LaunchPipeline({
     contributors: () => pluginManager!.launchContributors(),
@@ -608,6 +655,7 @@ async function initializeServices(): Promise<void> {
     limits: limitsService,
     plugins: pluginManager,
     pluginServices,
+    pluginCards,
     pluginMedia: pluginMediaService,
     pluginSecrets: pluginSecretsService,
     providerSecrets: providerSecretsService!,

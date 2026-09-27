@@ -24,6 +24,7 @@ import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
 import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
+import type { PluginCards } from "../services/PluginCards";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
 import type { ProviderSecretsService } from "../services/ProviderSecretsService";
@@ -51,6 +52,7 @@ interface Dependencies {
   limits: LimitsService;
   plugins: PluginManager;
   pluginServices: PluginServiceSupervisor;
+  pluginCards: PluginCards;
   pluginMedia: PluginMediaService;
   pluginSecrets: PluginSecretsService;
   providerSecrets: ProviderSecretsService;
@@ -85,6 +87,7 @@ export function registerIpc({
   limits,
   plugins,
   pluginServices,
+  pluginCards,
   pluginMedia,
   pluginSecrets,
   providerSecrets,
@@ -305,6 +308,18 @@ export function registerIpc({
   ) => {
     assertMainRenderer(event, getMainWindow);
     return requestPluginService(pluginId, { serviceId, method, params });
+  });
+  ipcMain.handle(IPC.pluginsCardDecorations, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginCards.decorations();
+  });
+  ipcMain.handle(IPC.pluginsInvokeCardAction, (event, pluginId: unknown, actionId: unknown, sessionId: unknown) => {
+    // Only the app window's own card menu invokes actions; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof actionId !== "string" || typeof sessionId !== "string") {
+      throw new Error("Card action request is invalid.");
+    }
+    return pluginCards.invoke(pluginId, actionId, sessionId);
   });
   ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
     // Only the app's own launcher asks; plugin surfaces cannot reach this channel.

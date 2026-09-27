@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。会话环境（git worktree）示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)。决策服务示例见 [`examples/plugins/deny-rm`](../examples/plugins/deny-rm)。
+不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。会话环境（git worktree）示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)。决策服务示例见 [`examples/plugins/deny-rm`](../examples/plugins/deny-rm)。agent 工具、卡片动作和会话事件示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)。
 编辑器工具可以使用 [manifest JSON Schema](canvastty-plugin.schema.json) 和 [SDK TypeScript 声明](plugin-api.d.ts)。
 
 ## Manifest v1
@@ -133,8 +133,12 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `event` `{ event, data }` | 通知 | 无 | 通过 `host.service.onEvent` 发送给该插件的活动界面 |
 | `redaction.register` `{ values }` | 请求 | 无 | 最多 32 个字符串（每个最多 4096 字符，8 字符以上才生效），CanvasTTY 会在一个 agent 读取另一个 agent 的所有文本中遮蔽它们；只保存在内存中 |
 | `secrets.get` `{ key }` | 请求 | `secrets` 权限 | 插件自己的机密（与 `host.secrets` 同一存储），或 `null`。之后该值会像 `redaction.register` 的值一样被遮蔽。用于服务自身需要的密钥（例如它调用的模型的 API 密钥）；绝不要把它发回界面 |
+| `sessions.subscribe` / `sessions.list` / `sessions.unsubscribe` | 请求 | `sessions:events` | 卡片事件和当前打开的卡片（见“会话事件”） |
+| `sessions.create` | 请求 | `sessions:launch` | 启动一张归插件所有的卡片 |
+| `sessions.send` / `sessions.stop` | 请求 | `sessions:control` | 仅限该插件启动的卡片 |
+| `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
 
-宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件、读取其他插件的机密或访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
+宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件或读取其他插件的机密，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
 UI 通道：sandboxed 界面只能调用自身插件的服务：
 
@@ -278,12 +282,83 @@ Codex 和 Qwen Code 只接受此 hook 的拒绝：对它们来说，`ask` 和 `a
 
 完整示例见 [`examples/plugins/deny-rm`](../examples/plugins/deny-rm)：它拒绝对工作文件夹顶层任何内容执行 `rm -rf`（`rm -rf *`、`rm -rf src`），对其他一切不表态。它声明了 `timeoutMs: 5000` 以展示该字段；它会立即回答。
 
+### Agent 工具（`tools:agents`）
+
+服务最多可以向 agent 提供 16 个 `tools`。它们以 `<pluginId>__<name>` 的名字（插件 id 中的点写作 `_`，例如 `com.example.tools` + `lookup` 即 `com_example_tools__lookup`；Anthropic 和 OpenAI 的工具名只允许字母、数字、`_` 和 `-`，最多 64 个字符，更长的名字保留 id 开头并加上一个短哈希）出现在 `canvastty_agents` MCP 服务器中，与 CanvasTTY 自身的编排工具并列，并被视为 CanvasTTY 自己的工具：基础保护不检查它们（它只检查 shell 和文件写入）。
+
+```json
+"permissions": ["tools:agents"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "tools": [{
+    "name": "diffstat",
+    "description": "你自己文件夹或某个子 agent 文件夹的 git diff --stat。",
+    "inputSchema": { "type": "object", "properties": { "sessionId": { "type": "string" } }, "additionalProperties": false },
+    "roles": ["orchestrator"]
+  }]
+}]
+```
+
+- `name` 为 `[a-z][a-z0-9_]{0,39}`，在插件内唯一；`inputSchema` 是顶层为 `type: "object"` 的 JSON Schema（最多 8 KB）；`roles` 列出 `orchestrator`、`agent` 和/或 `subagent`。
+- 只有角色被列出的会话能看到工具，而且仅在插件原生代码受信任且服务运行时。列表在 agent 启动时读取，因此之后才信任的插件只出现在新卡片中。编排器照常获得桥接；`agent` 或 `subagent` 卡片只有在某个插件工具列出其角色时才获得桥接，此时只看到插件工具，永远看不到核心编排工具。插件工具可用于 Claude Code、Codex、Qwen Code 和 OpenCode；Kimi 和 Hermes 在所有卡片间共用一个配置文件，只保留核心工具。
+- 调用以 `canvastty.tools.call`（仅宿主可发）到达服务，参数为 `{ tool, callerSessionId, caller, input }`，其中 `caller` 是调用方卡片的摘要（与会话事件相同的结构）。宿主先检查 `input`：必须是对象、必需键存在、顶层属性类型正确，`additionalProperties` 为 `false` 时不允许多余键；更深的检查由插件负责。
+- 回答 `{ content, isError? }`：`content` 是文本或任意 JSON（以 JSON 文本发送）。回答经过密钥遮蔽注册表处理并截断到 32K 字符；15 s 内未回答、出错或服务已停止时，agent 得到错误结果，仅此而已。宿主只担保调用方 id：操作其他会话的工具必须自己检查（示例只接受调用方自己的子 agent）。
+
+### 会话事件与插件拥有的卡片（`sessions:*`）
+
+具有 `sessions:events` 的服务调用 `sessions.subscribe` `{ ownedOnly? }`（每次启动后都要重新调用）。回答列出当前打开的卡片；之后宿主发送 `canvastty.sessions.event` 通知：
+
+```ts
+interface PluginSessionEvent {
+  type: "created" | "restored" | "status" | "exited" | "closed";
+  owned: boolean;              // 该卡片由本插件启动
+  session: {
+    id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
+    title: string; status: string; exitCode: number | null; startedAt: number;
+    cwd: string;               // 用户选择的文件夹
+    workingDirectory: string;  // 实际运行的位置（worktree 环境会移动它）
+    environment?: { pluginId: string; kind: string; label: string; ref: unknown };
+  };
+  screen?: string;             // 仅在具有 sessions:read-screen 时，出现在 status 和 exited 中
+}
+```
+
+事件只包含元数据。具有 `sessions:read-screen`（同意文本说明这是私人数据）时，`status` 和 `exited` 事件会附带卡片输出的最后 4000 个字符，为纯文本并经过密钥遮蔽。`sessions.list` 按需返回同样的摘要。
+
+控制方式与 agent-control 网关相同：服务是一个控制者，只拥有它创建的卡片。所有权随卡片的会话记录保存，因此恢复后的卡片仍属于启动它的插件。
+
+| 请求 | 条件 | 效果 |
+|:--|:--|:--|
+| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | 通过常规启动流程启动一张 `agent` 卡片（包括启动选项和环境；拒绝原因显示在卡片上）。卡片可见且从不抢占焦点。每个插件最多 16 张。回答 `{ sessionId }` |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | 向本插件启动的卡片输入文本（除非 `submit: false`，否则带回车） |
+| `sessions.stop` `{ sessionId }` | `sessions:control` | 关闭本插件启动的卡片；保留其环境数据 |
+
+他人的或未知的 id 得到相同的错误，因此插件无法探测其他卡片。没有删除操作，也没有读取屏幕的控制调用。
+
+### 卡片标记与动作（`cards:decorate`）
+
+具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 8 个 `cardActions`：
+
+```json
+"permissions": ["cards:decorate"],
+"services": [{
+  "id": "collect", "title": "Diff stat", "entry": "services/collect.mjs",
+  "cardActions": [{ "id": "show-changes", "title": "Show changes", "when": { "environmentKinds": ["worktree"] } }]
+}]
+```
+
+- `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`：`text` 最多 24 个字符，`tone` 为 `neutral`（默认）、`info`、`warn` 或 `error`，`tooltip` 最多 200 个字符；`null` 移除该插件的标记。每张卡片最多 4 个插件标记。标记是纯文本，像 agent 文本一样被遮蔽，并随卡片关闭或插件信任撤销而消失。
+- 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session }`（仅宿主可发；`session` 为上面的摘要），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
+- 任何地方都没有 HTML：标记、标题和消息都按文本渲染。
+
+完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。
+
 ### 基础保护与密钥遮蔽（核心）
 
 两项安全功能内置，无需插件：
 
 - **基础保护**（设置 → Agents → Base protection，默认开启；用户可以关闭）通过同一个 hook 拒绝：sudo 及其他提权、把下载或生成的文本管道给 shell、下载后直接运行、磁盘和格式化命令、fork 炸弹，以及在工作文件夹之外写入或删除（包括主目录、其他项目和 `/tmp`），以及删除工作文件夹本身。agent 自己的计划和记忆文件夹（`~/.claude/plans`、`~/.claude/projects/<project>/memory`，以及本次运行 `CLAUDE_CONFIG_DIR` 中的相同位置）不算"外部"。它只会拒绝；每条原因都告诉模型应当改做什么（写入 `/tmp` 时建议在项目内建立临时文件夹）。
-- **密钥遮蔽**：CanvasTTY 从一个 agent 交给另一个 agent 的所有文本（`observe_agent`、`get_agent_result`，以及 control CLI 的 `screen`、`result` 和失败详情）都会被遮蔽：CanvasTTY 保存的服务商密钥、启动时的 `secretEnv` 值、服务通过 `redaction.register` 注册的值（包括被终端折行拆开的情况），以及常见密钥形式（`sk-…`、GitHub、Slack、AWS、Google、JWT、`Bearer …`、`"apiKey": "…"`、PEM 私钥、长随机串）。
+- **密钥遮蔽**：CanvasTTY 从一个 agent 交给另一个 agent 的所有文本（`observe_agent`、`get_agent_result`，以及 control CLI 的 `screen`、`result` 和失败详情）都会被遮蔽：CanvasTTY 保存的服务商密钥、启动时的 `secretEnv` 值、服务通过 `redaction.register` 注册的值（包括被终端折行拆开的情况），以及常见密钥形式（`sk-…`、GitHub、Slack、AWS、Google、JWT、`Bearer …`、`"apiKey": "…"`、PEM 私钥、长随机串）。插件工具的回答、会话事件中的 `screen`、卡片标记和卡片动作消息也以同样方式遮蔽。
 
 host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一插件的所有活动界面——画布卡片、HOME 小组件和独立窗口——从而避免轮询。
 
@@ -297,6 +372,12 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `launch:contribute` | 服务的 `launch` 块和 `canvastty.launch.prepare` | 可以为用户以其选项启动的智能体添加环境变量、参数和文件；设置 `policy` 后可以拒绝任何智能体启动 |
 | `environment:provide` | 服务的 `environments` 和 `canvastty.environment.*` | 可以为用户在其环境中启动的卡片创建运行位置，并更改它们在那里运行的命令、参数、变量和文件夹 |
 | `decision:provide` | 服务的 `decide` 和 `canvastty.decide` | 在 agent 的命令和文件写入运行之前看到它们（含输入），可以拒绝或询问用户；允许需要第二次确认 |
+| `tools:agents` | 服务的 `tools` 和 `canvastty.tools.call` | 向所列角色的 agent 提供工具；接收其参数和调用方卡片的摘要 |
+| `sessions:events` | `sessions.subscribe`、`sessions.list` | 卡片元数据：服务商、角色、父级、标题、状态、文件夹、环境 ref；不含屏幕文本 |
+| `sessions:read-screen` | status 和 exited 事件中的 `screen` | 每张卡片输出的末尾（已遮蔽）：私人数据 |
+| `sessions:launch` | `sessions.create` | 通过常规启动流程启动可见的 agent 卡片 |
+| `sessions:control` | `sessions.send`、`sessions.stop` | 只能向本插件启动的卡片输入文本并关闭它们 |
+| `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |

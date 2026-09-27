@@ -367,7 +367,13 @@ export type PluginPermission =
   | "network"
   | "launch:contribute"
   | "environment:provide"
-  | "decision:provide";
+  | "decision:provide"
+  | "tools:agents"
+  | "sessions:events"
+  | "sessions:read-screen"
+  | "sessions:launch"
+  | "sessions:control"
+  | "cards:decorate";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -439,6 +445,65 @@ export interface PluginService {
   environments?: PluginEnvironmentKind[];
   /** Decision hooks (`decision:provide`): answers deny, ask or allow before agents' tool calls run. */
   decide?: PluginServiceDecide;
+  /** Agent tools (`tools:agents`): listed in the canvastty_agents MCP as `<pluginId>__<name>`. */
+  tools?: PluginAgentTool[];
+  /** Card actions (`cards:decorate`): menu items on matching cards; the host calls `canvastty.cards.invoke`. */
+  cardActions?: PluginCardAction[];
+}
+
+/** A tool a plugin service offers to agents through canvastty_agents. */
+export interface PluginAgentTool {
+  /** `[a-z][a-z0-9_]{0,39}`; agents see `<pluginId>__<name>`. */
+  name: string;
+  description: string;
+  /** JSON Schema of the arguments; its top level is `type: "object"`. At most 8 KB. */
+  inputSchema: Record<string, unknown>;
+  /** Session roles that see the tool. */
+  roles: SessionRole[];
+}
+
+/** Which cards show a plugin's card action; every listed key must match (a missing key matches all). */
+export interface PluginCardActionFilter {
+  providers?: ProviderId[];
+  /** Environment kinds (any plugin's); a card outside an environment never matches. */
+  environmentKinds?: string[];
+  roles?: SessionRole[];
+}
+
+export interface PluginCardAction {
+  id: string;
+  title: string;
+  when?: PluginCardActionFilter;
+}
+
+export type PluginCardTone = "neutral" | "info" | "warn" | "error";
+
+/** Short plain text a plugin shows on a card (no HTML). */
+export interface PluginCardBadge {
+  pluginId: string;
+  text: string;
+  tone: PluginCardTone;
+  tooltip?: string;
+}
+
+export interface PluginCardActionEntry {
+  pluginId: string;
+  pluginName: string;
+  actionId: string;
+  title: string;
+  when?: PluginCardActionFilter;
+}
+
+/** Everything plugins add to cards: badges per session id and the declared actions. */
+export interface PluginCardDecorations {
+  badges: Record<string, PluginCardBadge[]>;
+  actions: PluginCardActionEntry[];
+}
+
+/** What a card action answered, shown as a toast on the card. */
+export interface PluginCardActionResult {
+  message?: string;
+  tone: PluginCardTone;
 }
 
 export type PluginDecisionEvent = "pre-tool";
@@ -1258,6 +1323,9 @@ export interface CanvasTTYApi {
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
+    cardDecorations(): Promise<PluginCardDecorations>;
+    onCardDecorations(listener: (decorations: PluginCardDecorations) => void): () => void;
+    invokeCardAction(pluginId: string, actionId: string, sessionId: string): Promise<PluginCardActionResult>;
     /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
     launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;
@@ -1392,6 +1460,9 @@ export const IPC = {
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",
+  pluginsCardDecorations: "plugins:card-decorations",
+  pluginsCardDecorationsChanged: "plugins:card-decorations-changed",
+  pluginsInvokeCardAction: "plugins:invoke-card-action",
   pluginsLaunchFieldOptions: "plugins:launch-field-options",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",

@@ -55,6 +55,8 @@ export interface PersistedTerminalSession {
   options?: Record<string, unknown>;
   /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
   environment?: PersistedEnvironmentRef;
+  /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
+  ownerPluginId?: string;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
@@ -135,7 +137,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "ownerPluginId"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -164,7 +166,8 @@ export function persistedTerminalSession(
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
     restore: metadata.skipRestore !== true,
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
-    ...(extras.environment ? { environment: structuredClone(extras.environment) } : {})
+    ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
+    ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {})
   };
 }
 
@@ -232,7 +235,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(lastState !== "running" ? { exitCode } : {}),
       restore: session.restore !== false,
       ...(options ? { options } : {}),
-      ...(environment ? { environment } : {})
+      ...(environment ? { environment } : {}),
+      ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {})
     });
     ids.add(session.id);
   }

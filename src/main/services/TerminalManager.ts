@@ -29,6 +29,7 @@ import type {
   PreparedAgentBrowserPtyLaunch
 } from "./agent-browser/AgentBrowserBridge.ts";
 import { AGENT_BROWSER_ENV } from "./agent-browser/AgentBrowserBridge.ts";
+import { ORCHESTRATION_TOOL_NAMES } from "../../agent-browser/orchestration-catalog.mjs";
 import type { OrchestrationLaunchCoordinator, PreparedOrchestrationPtyLaunch } from "./agent-browser/OrchestrationBridge.ts";
 import type {
   AgentRuntimeLaunchCoordinator,
@@ -95,7 +96,7 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
-  /** Plugin options and environment ref carried into the saved record. */
+  /** Plugin options, environment ref and owning plugin carried into the saved record. */
   extras: PersistedSessionExtras;
   /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
   launchToken: number;
@@ -107,6 +108,8 @@ interface ManagedSession {
   environmentChoice: SessionEnvironmentChoice | null;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
+  /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
+  restored?: boolean;
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
@@ -164,6 +167,8 @@ export class TerminalManager {
   private readonly hiddenSinceOffset = new Map<string, number>();
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
+  // Plugin tools a session of this role and agent gets in canvastty_agents (EP-6), read at launch.
+  private pluginToolNames: (role: SessionRole, provider: ProviderId) => string[] = () => [];
   private launchPipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null = null;
   private sessionStore: TerminalSessionStore | null = null;
   private sessionRestoreMode: SessionRestoreMode = "off";
@@ -204,6 +209,11 @@ export class TerminalManager {
     this.agentOrchestration = coordinator;
   }
 
+  /** Plugin agent tools: a session any of them applies to gets the canvastty_agents bridge. */
+  configureAgentTools(names: ((role: SessionRole, provider: ProviderId) => string[]) | null): void {
+    this.pluginToolNames = names ?? (() => []);
+  }
+
   /** Plugin launch contributors; without them a session with launch options is never launched. */
   configureLaunchPipeline(pipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null): void {
     this.launchPipeline = pipeline;
@@ -235,6 +245,32 @@ export class TerminalManager {
       cwd: launched?.cwd ?? session.metadata.cwd,
       configDirs: launched?.configDir ? [launched.configDir] : []
     };
+  }
+
+  /**
+   * What plugins may know about a card (EP-4): its metadata, the folder it actually runs in (an environment may
+   * move it) and its environment ref. No screen text.
+   */
+  pluginContext(id: string): {
+    metadata: SessionMetadata; workingDirectory: string; environment: PersistedEnvironmentRef | null; restored: boolean; owner: string | null;
+  } | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    return {
+      metadata: structuredClone(session.metadata),
+      workingDirectory: this.launchContexts.get(id)?.cwd ?? session.metadata.cwd,
+      environment: session.extras.environment ? structuredClone(session.extras.environment) : null,
+      restored: session.restored === true,
+      owner: session.extras.ownerPluginId ?? null
+    };
+  }
+
+  /** Records the plugin that started a card (EP-4); saved with the card so control survives a restore. */
+  setPluginOwner(id: string, pluginId: string): void {
+    const session = this.sessions.get(id);
+    if (!session || session.extras.ownerPluginId === pluginId) return;
+    session.extras.ownerPluginId = pluginId;
+    this.schedulePersistence();
   }
 
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
@@ -752,7 +788,8 @@ export class TerminalManager {
     };
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
-      ...(descriptor.environment ? { environment: descriptor.environment } : {})
+      ...(descriptor.environment ? { environment: descriptor.environment } : {}),
+      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {})
     };
 
     let process: IPty | null = null;
@@ -854,7 +891,8 @@ export class TerminalManager {
       launchCleanup: null,
       restoringLaunch: awaitMeasuredGrid,
       environmentChoice: null,
-      environmentReady: resumed?.ok === true
+      environmentReady: resumed?.ok === true,
+      restored: true
     };
     this.sessions.set(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
@@ -998,7 +1036,14 @@ export class TerminalManager {
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd,
         ...(captureResult ? { captureResult: true } : {}),
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
-    const agentOrchestration = role === "orchestrator" && this.agentOrchestration?.isEnabled
+    let pluginTools: string[] = [];
+    try {
+      pluginTools = provider === "terminal" ? [] : this.pluginToolNames(role, provider);
+    } catch {
+      // Plugins never block a launch; the session simply gets no plugin tools.
+    }
+    const bridged = role === "orchestrator" || pluginTools.length > 0;
+    const agentOrchestration = bridged && this.agentOrchestration?.isEnabled
       ? this.agentOrchestration.prepareLaunch({ terminalSessionId: id })
       : null;
     let agentBrowser: PreparedAgentBrowserPtyLaunch | null = null;
@@ -1020,7 +1065,10 @@ export class TerminalManager {
           terminalSessionId: id,
           provider,
           cwd,
-          ...(role === "orchestrator" ? { includeOrchestration: true } : {})
+          ...(bridged ? {
+            includeOrchestration: true,
+            orchestrationTools: [...(role === "orchestrator" ? ORCHESTRATION_TOOL_NAMES : []), ...pluginTools]
+          } : {})
         }) ?? null;
       const baseEnvironment = terminalEnvironment();
       const browserEnvironment = agentBrowser?.environment ?? {};

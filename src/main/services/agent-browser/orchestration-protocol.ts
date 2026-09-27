@@ -2,8 +2,10 @@ import {
   MAX_ORCHESTRATION_PAYLOAD_BYTES,
   canonicalStringify,
   isApprovedOrchestrationTool,
+  isPluginOrchestrationTool,
   validateOrchestrationArguments
 } from "../../../agent-browser/orchestration-catalog.mjs";
+import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
 
 export const ORCHESTRATION_BRIDGE_PROTOCOL_VERSION = 1 as const;
 export const ORCHESTRATION_HEARTBEAT_INTERVAL_MS = 5_000;
@@ -16,7 +18,9 @@ export const MAX_INFLIGHT_ORCHESTRATION_COMMANDS = 4;
 export const ORCHESTRATION_ENV = Object.freeze({
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
   capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
-  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID"
+  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID",
+  // The gateway checks it on authenticate, so the helper must get the one the capability was issued for.
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID"
 });
 
 export type OrchestrationToolName =
@@ -29,7 +33,8 @@ export type OrchestrationToolName =
 
 export interface OrchestrationRequest {
   id: string;
-  tool: OrchestrationToolName;
+  /** A core tool, or a plugin tool `<pluginId>__<name>` (EP-6). */
+  tool: OrchestrationToolName | string;
   arguments: Record<string, unknown>;
 }
 
@@ -41,6 +46,8 @@ export type OrchestrationResult =
  * wrapped by a scoping adapter, never called directly by the protocol. */
 export interface OrchestrationCommandHandler {
   execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>>;
+  /** The tools this session sees (core tools for orchestrators, plugin tools by role). */
+  listTools?(sessionId: string): McpToolDefinition[];
 }
 
 export interface OrchestrationCapability {
@@ -63,8 +70,15 @@ export interface OrchestrationRequestMessage {
   v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
   type: "request";
   id: string;
-  tool: OrchestrationToolName;
+  tool: OrchestrationToolName | string;
   arguments: Record<string, unknown>;
+}
+
+/** Asks which tools this session sees; answered with a response `{ tools }`. */
+export interface OrchestrationListToolsMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "list_tools";
+  id: string;
 }
 
 export interface OrchestrationHeartbeatMessage {
@@ -82,6 +96,7 @@ export interface OrchestrationCancelMessage {
 export type OrchestrationClientMessage =
   | AuthenticateOrchestrationMessage
   | OrchestrationRequestMessage
+  | OrchestrationListToolsMessage
   | OrchestrationHeartbeatMessage
   | OrchestrationCancelMessage;
 
@@ -173,9 +188,19 @@ export function parseOrchestrationClientMessage(
     };
   }
 
+  if (type === "list_tools") {
+    assertExactKeys(object, ["v", "type", "id"]);
+    return { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type, id: requiredString(object, "id", 128) };
+  }
+
   if (type === "request") {
     assertExactKeys(object, ["v", "type", "id", "tool", "arguments"]);
     const id = requiredString(object, "id", 128);
+    if (isPluginOrchestrationTool(object.tool)) {
+      // The host checks plugin tool arguments against the plugin's own schema.
+      const args = object.arguments === undefined ? {} : strictObject(object.arguments, "arguments");
+      return { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type, id, tool: object.tool as string, arguments: args };
+    }
     if (!isApprovedOrchestrationTool(object.tool)) {
       throw orchestrationProtocolError("Unsupported orchestration tool.");
     }
