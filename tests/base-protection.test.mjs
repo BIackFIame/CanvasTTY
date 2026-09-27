@@ -154,3 +154,37 @@ test("failures never deny or allow anything: unreadable input is no opinion", ()
   assert.equal(check("Bash", { command: 42 }), null);
   assert.equal(checkBaseProtection({ toolName: "Bash", toolInput: { command: "sudo ls" }, root: "\u0000bad", home }).rule, "elevation");
 });
+
+test("git with -C another repository: mutating forms are writes or deletes outside; read-only forms stay allowed (parsed, never run)", () => {
+  const other = `git -C ${outside}`;
+  const DENY_GIT = [
+    [`${other} stash`, "write-outside"], [`${other} stash pop`, "write-outside"], [`${other} stash apply stash@{0}`, "write-outside"],
+    [`${other} stash push -m wip`, "write-outside"], [`${other} stash clear`, "delete-outside"], [`${other} stash drop`, "delete-outside"],
+    [`${other} pull`, "write-outside"], [`${other} pull --rebase origin main`, "write-outside"], [`${other} fetch origin`, "write-outside"],
+    [`${other} push origin main`, "write-outside"],
+    [`${other} branch -D feature`, "delete-outside"], [`${other} branch --delete feature`, "delete-outside"], [`${other} branch -m old new`, "write-outside"],
+    [`${other} branch feature`, "write-outside"], [`${other} branch -f main HEAD~3`, "write-outside"],
+    [`${other} tag -d v1.0`, "delete-outside"], [`${other} tag v1.1`, "write-outside"], [`${other} tag -a v2 -m release`, "write-outside"],
+    [`${other} config user.email x@example.invalid`, "write-outside"], [`${other} config --unset core.hooksPath`, "write-outside"],
+    [`${other} config --add remote.origin.fetch x`, "write-outside"], [`${other} config set user.name x`, "write-outside"],
+    [`${other} config core.hooksPath /tmp/hooks`, "write-outside"],
+    [`${other} remote add evil https://example.com/x.git`, "write-outside"], [`${other} remote remove origin`, "delete-outside"],
+    [`${other} remote set-url origin https://example.com/x.git`, "write-outside"],
+    [`${other} reflog expire --expire=now --all`, "delete-outside"], [`${other} reflog delete HEAD@{1}`, "delete-outside"],
+    [`git --work-tree=${outside} stash pop`, "write-outside"], [`git --git-dir ${outside}/.git stash clear`, "delete-outside"]
+  ];
+  for (const [command, expected] of DENY_GIT) assert.equal(rule(shell(command)), expected, command);
+  for (const command of [
+    `${other} status`, `${other} log --oneline -5`, `${other} diff`, `${other} show HEAD`, `${other} stash list`, `${other} stash show -p`,
+    `${other} branch`, `${other} branch -a`, `${other} branch -vv`, `${other} branch --list 'feat*'`, `${other} branch --show-current`,
+    `${other} branch --contains HEAD`, `${other} tag`, `${other} tag -l 'v*'`, `${other} tag --list`, `${other} tag --contains HEAD`,
+    `${other} config --get user.name`, `${other} config user.name`, `${other} config --list`, `${other} config -l --show-origin`,
+    `${other} config get user.name`, `${other} config list`, `${other} config --get-regexp remote`,
+    `${other} remote`, `${other} remote -v`, `${other} remote show origin`, `${other} remote get-url origin`,
+    `${other} reflog`, `${other} reflog show HEAD`, `${other} fetch --dry-run`, `${other} ls-remote origin`, `${other} rev-parse HEAD`
+  ]) assert.equal(rule(shell(command)), null, command);
+  // Inside the working folder every form stays as it was: no outside fact.
+  for (const command of ["git stash pop", "git stash clear", "git pull", "git branch -D x", "git tag -d v1", "git config user.name x", "git -C src stash clear"]) {
+    assert.equal(rule(shell(command)), null, command);
+  }
+});

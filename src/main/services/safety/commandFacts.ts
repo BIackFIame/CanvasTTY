@@ -155,7 +155,8 @@ const COPIERS = new Set(['cp', 'install', 'ln', 'copy', 'xcopy', 'robocopy', 'co
 const MOVERS = new Set(['mv', 'move', 'move-item', 'mi', 'ren', 'rename', 'rename-item', 'rni']);
 const CREATORS = new Set(['touch', 'mkdir', 'md', 'truncate', 'tee', 'new-item', 'ni', 'set-content', 'add-content', 'ac', 'out-file', 'mkfifo', 'mktemp', 'gzip', 'gunzip', 'bzip2', 'xz', 'unxz', 'zstd']);
 const MODE_CHANGERS = new Set(['chmod', 'chown', 'chgrp', 'chattr', 'setfacl', 'attrib', 'icacls', 'takeown']);
-const GIT_READ = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'blame', 'grep', 'describe', 'shortlog', 'reflog', 'cat-file', 'ls-tree', 'merge-base', 'count-objects', 'var', 'help', 'version', 'annotate', 'name-rev', 'show-ref', 'for-each-ref', 'check-ignore', 'fetch', 'ls-remote', 'branch', 'tag', 'remote', 'config', 'stash', 'push', 'pull']);
+/** Git subcommands with no form that changes a repository. Those with both kinds of forms are judged by gitEffect. */
+const GIT_READ = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-files', 'blame', 'grep', 'describe', 'shortlog', 'cat-file', 'ls-tree', 'merge-base', 'count-objects', 'var', 'help', 'version', 'annotate', 'name-rev', 'show-ref', 'for-each-ref', 'check-ignore', 'ls-remote']);
 const WINDOWS_BUILTINS = new Set(['del', 'erase', 'rd', 'copy', 'xcopy', 'robocopy', 'move', 'ren', 'rename', 'format', 'cipher', 'attrib', 'icacls', 'takeown', 'mklink', 'md', 'mkdir', 'rmdir']);
 
 /** A program's name for the tables: basename, lower case, without a Windows executable suffix. */
@@ -492,7 +493,10 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
   for (; i < args.length; i++) {
     const arg = args[i]!;
     if (arg === '-C') { dir = args[i + 1] ? resolveTarget(argWords[i + 1]!, cwd, acc.ctx).abs : null; i++; continue; }
-    if (arg === '-c' || arg === '--git-dir' || arg === '--work-tree' || arg === '--namespace' || arg === '--exec-path') { i++; continue; }
+    // The repository another --work-tree or --git-dir names is changed exactly like one -C names.
+    if (arg === '--work-tree' || arg === '--git-dir') { dir = args[i + 1] ? resolveTarget(argWords[i + 1]!, cwd, acc.ctx).abs : null; i++; continue; }
+    if (arg.startsWith('--work-tree=') || arg.startsWith('--git-dir=')) { dir = resolveTarget(arg.slice(arg.indexOf('=') + 1), cwd, acc.ctx).abs; continue; }
+    if (arg === '-c' || arg === '--namespace' || arg === '--exec-path') { i++; continue; }
     if (arg.startsWith('-')) continue;
     break;
   }
@@ -503,6 +507,12 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
   // `git -C <folder outside>` that changes or cleans that repository changes files outside.
   const other = dir !== cwd && dir !== null ? resolveTarget(dir, cwd, acc.ctx) : null;
   const elsewhere = other?.where === 'outside' ? { ...other, root: false } : null;
+  const effect = gitEffect(sub, rest);
+  if (effect === 'read') return;
+  if (effect === 'delete') {
+    if (elsewhere) acc.deletes.push(elsewhere);
+    return;
+  }
   if (sub === 'clean' || sub === 'rm') {
     for (const word of restWords.filter(word => !word.text.startsWith('-'))) acc.deletes.push(resolveTarget(word, dir, acc.ctx, true));
     if (elsewhere) acc.deletes.push(elsewhere);
@@ -520,6 +530,65 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
     return;
   }
   if (elsewhere) acc.writes.push(elsewhere);
+}
+
+/** Flags whose next word is their value, per subcommand, so a value is never taken for a name. */
+const GIT_VALUE_FLAGS: Record<string, readonly string[]> = {
+  branch: ['--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--format', '--sort', '--column'],
+  tag: ['--contains', '--no-contains', '--merged', '--no-merged', '--points-at', '--format', '--sort', '--column', '-m', '--message', '-F', '--file', '-u', '--local-user', '--cleanup'],
+  config: ['-f', '--file', '--blob', '--type', '--default', '--comment']
+};
+
+/**
+ * For the subcommands that have read-only and changing forms: whether this form reads, changes ('write') or
+ * deletes ('delete': saved stashes, branches, tags, remotes, reflog entries) the repository; null for any other
+ * subcommand (then the caller's own rules apply). Parsed only; nothing is run.
+ */
+function gitEffect(sub: string, rest: readonly string[]): 'read' | 'write' | 'delete' | null {
+  const values = new Set(GIT_VALUE_FLAGS[sub] ?? []);
+  const positional: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    if (values.has(arg)) { i++; continue; }
+    if (!arg.startsWith('-')) positional.push(arg);
+  }
+  const has = (...flags: string[]): boolean => rest.some(arg => flags.some(flag => arg === flag || flag.startsWith('--') && arg.startsWith(`${flag}=`)));
+  switch (sub) {
+    case 'stash': {
+      const action = positional[0];
+      if (action === 'list' || action === 'show') return 'read';
+      return action === 'drop' || action === 'clear' ? 'delete' : 'write';
+    }
+    case 'pull': return 'write';
+    case 'fetch':
+    case 'push': return has('--dry-run') ? 'read' : 'write';
+    case 'branch':
+      if (has('-d', '-D', '--delete')) return 'delete';
+      if (has('-m', '-M', '--move', '-c', '-C', '--copy', '-u', '--set-upstream-to', '--unset-upstream', '--edit-description', '-f', '--force', '-t', '--track')) return 'write';
+      return positional.length > 0 && !has('-l', '--list') ? 'write' : 'read';
+    case 'tag':
+      if (has('-d', '--delete')) return 'delete';
+      if (has('-a', '--annotate', '-s', '--sign', '-u', '--local-user', '-f', '--force', '-m', '--message', '-F', '--file')) return 'write';
+      return positional.length > 0 && !has('-l', '--list', '-v', '--verify') ? 'write' : 'read';
+    case 'config': {
+      const action = positional[0];
+      if (action === 'get' || action === 'list') return 'read';
+      if (action === 'set' || action === 'unset' || action === 'rename-section' || action === 'remove-section' || action === 'edit') return 'write';
+      if (has('--add', '--unset', '--unset-all', '--replace-all', '--rename-section', '--remove-section', '-e', '--edit')) return 'write';
+      if (has('--get', '--get-all', '--get-regexp', '--get-urlmatch', '--get-color', '--get-colorbool', '-l', '--list')) return 'read';
+      return positional.length >= 2 ? 'write' : 'read';
+    }
+    case 'remote': {
+      const action = positional[0];
+      if (action === undefined || action === 'show' || action === 'get-url') return 'read';
+      return action === 'remove' || action === 'rm' ? 'delete' : 'write';
+    }
+    case 'reflog': {
+      const action = positional[0];
+      return action === 'expire' || action === 'delete' ? 'delete' : 'read';
+    }
+    default: return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
