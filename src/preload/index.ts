@@ -20,6 +20,7 @@ import type {
   PluginServiceEvent,
   PluginStorageChangeEvent,
   PluginUpdateStatus,
+  ProviderId,
   SessionBounds,
   SessionEvent,
   SessionRemovedEvent,
@@ -107,6 +108,9 @@ const api: CanvasTTYApi = {
       ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)
     ),
     onServiceEvent: (listener: (event: PluginServiceEvent) => void) => subscribe(IPC.pluginsServiceEvent, listener),
+    launchFieldOptions: (pluginId: string, provider: ProviderId) => (
+      ipcRenderer.invoke(IPC.pluginsLaunchFieldOptions, pluginId, provider)
+    ),
     uninstall: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsUninstall, pluginId),
     openCanvas: (pluginId: string, contributionId: string, sourceCanvasInstanceId?: string) => (
       ipcRenderer.invoke(IPC.pluginsOpenCanvas, pluginId, contributionId, sourceCanvasInstanceId)

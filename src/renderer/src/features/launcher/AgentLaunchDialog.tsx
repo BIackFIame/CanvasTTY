@@ -1,15 +1,17 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   AgentProviderId,
   AppSettings,
   LaunchProfileId,
-  LaunchRole
+  LaunchRole,
+  PluginLaunchValues
 } from "../../../../shared/contracts";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
+import { LaunchOptionsSection } from "./LaunchOptionsSection";
 
 interface AgentLaunchDialogProps {
   provider: AgentProviderId | null;
@@ -18,7 +20,13 @@ interface AgentLaunchDialogProps {
   onAcknowledge(provider: AgentProviderId): Promise<void>;
   /** Persists `agentControlEnabled: true`; only ever called from the explicit button. */
   onEnableAgentControl(): Promise<void>;
-  onLaunch(provider: AgentProviderId, profile: LaunchProfileId, cwd: string, role: LaunchRole): Promise<void>;
+  onLaunch(
+    provider: AgentProviderId,
+    profile: LaunchProfileId,
+    cwd: string,
+    role: LaunchRole,
+    launchOptions?: Record<string, PluginLaunchValues>
+  ): Promise<void>;
 }
 
 export function AgentLaunchDialog({
@@ -35,6 +43,8 @@ export function AgentLaunchDialog({
   const [confirmDanger, setConfirmDanger] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [launchOptions, setLaunchOptions] = useState<Record<string, PluginLaunchValues>>({});
+  const changeLaunchOptions = useCallback((options: Record<string, PluginLaunchValues>) => setLaunchOptions(options), []);
   const locale = settings.locale;
 
   useEffect(() => {
@@ -108,7 +118,7 @@ export function AgentLaunchDialog({
     setError(null);
     try {
       if (profile === "yolo" && !acknowledged) await onAcknowledge(provider);
-      await onLaunch(provider, profile, cwd, role);
+      await onLaunch(provider, profile, cwd, role, Object.keys(launchOptions).length > 0 ? launchOptions : undefined);
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "launchFailed"));
@@ -176,6 +186,8 @@ export function AgentLaunchDialog({
             )}
           </div>
         )}
+
+        <LaunchOptionsSection provider={provider} locale={locale} onChange={changeLaunchOptions} />
 
         {profile === "yolo" && (
           <div className={`danger-note ${confirmDanger ? "danger-note--confirm" : ""}`}>

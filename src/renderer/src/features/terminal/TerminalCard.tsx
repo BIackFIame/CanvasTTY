@@ -817,7 +817,8 @@ export function TerminalCard({
       )}
       {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
         <div className="terminal-card__note" role="status">
-          <span>{t(locale, session.restoreNote === "fresh-shared-folder" ? "restoreNoteSharedFolder" : "restoreNoteEnvironment")}</span>
+          <span>{t(locale, session.restoreNote === "fresh-shared-folder" ? "restoreNoteSharedFolder"
+            : session.restoreNote === "plugin-unavailable" ? "restoreNotePlugin" : "restoreNoteEnvironment")}</span>
           <button type="button" onClick={() => setNoteDismissed(session.restoreNote ?? null)} aria-label={t(locale, "close")}>
             <UiIcon name="close" size="1em" />
           </button>

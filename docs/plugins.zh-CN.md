@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。
+不包含特权 hook 的 sandboxed web surface 端到端示例见 [`examples/plugins/studio-kit`](../examples/plugins/studio-kit)。调用自身服务的最小 canvas 应用示例见 [`examples/plugins/service-echo`](../examples/plugins/service-echo)。启动贡献者示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)，启动策略示例见 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)。
 编辑器工具可以使用 [manifest JSON Schema](canvastty-plugin.schema.json) 和 [SDK TypeScript 声明](plugin-api.d.ts)。
 
 ## Manifest v1
@@ -144,6 +144,64 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 
 插件声明服务即隐含该权限。宿主只转发不透明的 JSON，从不附加凭据。对未运行（尚未信任、已禁用、重启中、失败）的服务的请求或超时请求会返回错误。
 
+### 启动贡献者（`launch:contribute`）
+
+每个插件最多一个服务可以声明 `launch` 块。插件的原生代码被信任后，其字段出现在智能体启动对话框的 **Advanced（高级）** 部分；用户通过 **Use _插件名_** 为一次启动启用该插件并填写字段。只有选择了该插件的启动，以及这些卡片的重启和恢复，才会询问插件。
+
+```json
+"permissions": ["launch:contribute"],
+"services": [{
+  "id": "launcher", "title": "Launch env", "entry": "services/launcher.mjs",
+  "launch": {
+    "appliesTo": ["claude"],
+    "fields": [
+      { "key": "enabled", "label": "Add the variable", "kind": "boolean", "default": true },
+      { "key": "greeting", "label": "Value", "kind": "text", "default": "hello", "maxLength": 60 },
+      { "key": "mode", "label": "Mode", "kind": "select", "default": "plain",
+        "options": [{ "value": "plain", "label": "Plain" }, { "value": "loud", "label": "Loud" }] }
+    ]
+  }
+}]
+```
+
+最多 8 个字段；`kind` 为 `boolean`、`select`（1–16 个选项）或 `text`（最多 200 个字符或 `maxLength`）。`appliesTo` 列出适用的智能体服务商，省略表示所有智能体。所选值按字段校验，保存在卡片的会话记录中（每个插件最多 4 KB），并在重启和恢复时复用。它们不是机密：密钥应放在插件的 `secrets` 中，而不是字段里。
+
+带 `"optionsFrom": "service"` 的 `select` 还会列出服务提供的选项，例如插件自己的账户。启动器打开时，CanvasTTY 向服务发送 `canvastty.launch.options` `{ provider, fields: [键] }`，最多等待 3 秒；回答 `{ "<键>": [{ value, label }] }` 在声明的选项之后为每个字段追加最多 64 个选项（声明的选项仍然必需，服务未回答时启动器只显示它们）。由于此类列表可能在卡片保存后变化，其值接受为不含控制字符、最多 200 个字符的任意文本，`canvastty.launch.prepare` 必须检查该值，并拒绝已不存在的选项。
+
+编排器可以把同样的值作为 `launchOptions`（`{ "<pluginId>": { "<键>": 值 } }`）传给 `spawn_agent`，校验方式与启动器相同；插件工具可以给出这些值（例如它选定的账户）。
+
+智能体启动前，宿主向服务发送 `canvastty.launch.prepare` 请求（界面无法发送）：
+
+```json
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"}}
+```
+
+应答为 `null`（不添加任何内容）或包含以下任意键的对象：
+
+| 键 | 限制 | 作用 |
+|:--|:--|:--|
+| `env` `{ NAME: value }` | 32 个名称，每个值 8 KB | 加入智能体的环境变量 |
+| `secretEnv` `{ NAME: secretKey }` | 16 个名称；需要 `secrets` | 宿主在主进程中读取插件自身的机密并设置。该值不会到达服务或任何 UI，并在其他智能体和控制 CLI 从该卡片读取的文本中（observe、result、screen、失败详情）显示为 `<redacted:secret>` |
+| `args` `[string]` | 32 个，每个 1024 字符，无控制字符 | 追加在 CanvasTTY 自身参数之后、会话选择之前 |
+| `files` `[{ relPath, content }]` | 16 个文件，256 KB，普通相对路径 | 写入本次运行的私有文件夹，进程退出时删除；`env` 值和 `args` 中的 `{launchFiles}` 替换为该文件夹 |
+| `refuse` `{ reason }` | 240 字符 | 卡片不启动并显示原因 |
+
+宿主强制执行、从不跳过的规则：
+
+- 多个被选插件并行询问，并按插件 id 顺序合并。两个插件设置同一名称，或插件设置 CanvasTTY 为此次启动设置的名称，会拒绝启动并指明它们。以 `CANVASTTY_`、`ELECTRON_`、`DYLD_`、`LD_` 开头的名称以及 `NODE_OPTIONS`、`PATH`、`TERM`、`COLORTERM` 为保留名称。
+- 绕过审批或选择会话的参数（各服务商的 YOLO 标志、`--permission-mode`、`--sandbox`、`--resume`、`--continue`、`--session` 等）会被拒绝：配置档由用户决定，恢复规则由核心决定。这不是沙箱：受信任的原生代码本来就以你的身份运行。
+- Claude Code 只应用最后一个 `--settings`，因此插件的内联 `--settings` JSON 会合并进 CanvasTTY 自己的 JSON（`env` 等对象按键合并，hook 列表追加）；若其中设置了 `permissions`、`hooks`、`disableAllHooks`、`sandbox`、`defaultMode` 或 `apiKeyHelper`，启动会被拒绝。
+- 5 秒内无应答、出错、应答无效、缺少机密，或插件被禁用、删除或不再受信任，都会拒绝启动并在卡片上显示原因。智能体绝不会在缺少用户所选贡献的情况下启动。插件不可用的恢复卡片以停止状态返回并显示该原因，记录保留到插件恢复或卡片被关闭。
+- 普通终端不接受启动选项。
+
+**启动策略。** 设置 `"policy": true` 后，在该服务适用的智能体每次启动（创建、重启、恢复）而用户没有选择它时，也会以 `"chosen": false` 和空的 `options` 询问它。这样的回答只能是 `null` 或 `refuse`；其他任何回答、5 秒内无回答或出错都会拒绝启动，因此策略绝不会因失败而放行。没有 `fields` 的策略不会显示在启动器中。撤销插件的原生代码信任即移除其策略。
+
+```json
+"launch": { "policy": true, "fields": [] }
+```
+
+完整示例见 [`examples/plugins/launch-env`](../examples/plugins/launch-env)（选项）和 [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard)（拒绝 YOLO 启动的策略）。
+
 host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一插件的所有活动界面——画布卡片、HOME 小组件和独立窗口——从而避免轮询。
 
 ## 权限
@@ -153,6 +211,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `storage` | `storage.get`、`storage.set` | 隔离的 JSON 存储，每个插件 64 KB |
 | `secrets` | `secrets.get`、`secrets.set`、`secrets.delete`；服务的 `secrets.get` | 通过 Electron `safeStorage` 加密的字符串机密；操作系统没有受保护存储时会明确失败。受信任的服务只能读取自身插件的机密 |
 | `sessions:read` | `sessions.list` | 仅限 ID、服务商、标题、状态、开始时间、退出码 |
+| `launch:contribute` | 服务的 `launch` 块和 `canvastty.launch.prepare` | 可以为用户以其选项启动的智能体添加环境变量、参数和文件；设置 `policy` 后可以拒绝任何智能体启动 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |

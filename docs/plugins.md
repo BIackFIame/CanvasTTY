@@ -36,7 +36,7 @@ windows/focus.js
 hooks/audit.mjs
 ```
 
-An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo).
+An end-to-end sandboxed web-surface example (without a privileged hook) lives in [`examples/plugins/studio-kit`](../examples/plugins/studio-kit). A minimal service with a canvas app that calls it lives in [`examples/plugins/service-echo`](../examples/plugins/service-echo). A launch contributor lives in [`examples/plugins/launch-env`](../examples/plugins/launch-env), and a launch policy in [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard).
 Editor tooling can use the [manifest JSON Schema](canvastty-plugin.schema.json) and [SDK TypeScript declarations](plugin-api.d.ts).
 
 ## Manifest v1
@@ -165,6 +165,64 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 
 The permission is implicit when the plugin declares a service. The host relays opaque JSON and never adds credentials. A request to a service that is not running (not trusted yet, disabled, restarting, failed) or that times out rejects with an error.
 
+### Launch contributors (`launch:contribute`)
+
+One service per plugin may add a `launch` block. Its fields appear in the agent launcher under **Advanced** once the plugin's native code is trusted; the person turns the plugin on for one launch with **Use _plugin name_** and sets its fields. Only launches where the person chose the plugin, and restarts and restores of those cards, ask the plugin anything.
+
+```json
+"permissions": ["launch:contribute"],
+"services": [{
+  "id": "launcher", "title": "Launch env", "entry": "services/launcher.mjs",
+  "launch": {
+    "appliesTo": ["claude"],
+    "fields": [
+      { "key": "enabled", "label": "Add the variable", "kind": "boolean", "default": true },
+      { "key": "greeting", "label": "Value", "kind": "text", "default": "hello", "maxLength": 60 },
+      { "key": "mode", "label": "Mode", "kind": "select", "default": "plain",
+        "options": [{ "value": "plain", "label": "Plain" }, { "value": "loud", "label": "Loud" }] }
+    ]
+  }
+}]
+```
+
+Up to 8 fields; `kind` is `boolean`, `select` (1–16 options) or `text` (at most 200 characters, or `maxLength`). `appliesTo` lists agent providers; omitted means every agent. The chosen values are checked against the fields, saved in the card's session record (at most 4 KB per plugin), and reused on restart and restore. They are not secret: put keys in the plugin's `secrets`, never in a field.
+
+A `select` with `"optionsFrom": "service"` also lists choices the service offers, such as its own accounts. When the launcher opens, CanvasTTY asks the service `canvastty.launch.options` `{ provider, fields: [keys] }` and waits at most 3 s; the answer `{ "<key>": [{ value, label }] }` adds up to 64 choices per field after the declared ones (which stay required and are all the launcher shows when the service does not answer). Because such a list can change after a card was saved, its value is accepted as any text up to 200 characters without control characters, and `canvastty.launch.prepare` must check it and refuse a value it no longer knows.
+
+Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked).
+
+Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
+
+```json
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"}}
+```
+
+The answer is `null` (nothing to add) or an object with any of:
+
+| Key | Limit | Effect |
+|:--|:--|:--|
+| `env` `{ NAME: value }` | 32 names, 8 KB per value | Added to the agent's environment |
+| `secretEnv` `{ NAME: secretKey }` | 16 names; needs `secrets` | The host reads the plugin's own secret in the main process and sets it. The value never reaches the service or any UI, and is masked as `<redacted:secret>` in text other agents and the control CLI read from this card (observe, result, screen, failure details) |
+| `args` `[string]` | 32, 1024 characters each, no control characters | Appended after CanvasTTY's own arguments, before the resume selection |
+| `files` `[{ relPath, content }]` | 16 files, 256 KB, plain relative paths | Written to a private folder for this run, removed when the process exits; `{launchFiles}` in `env` values and `args` becomes that folder |
+| `refuse` `{ reason }` | 240 characters | The card is not started and shows the reason |
+
+Rules the host enforces, none of which is ever skipped:
+
+- Several chosen plugins are asked side by side and merged in plugin-id order. Two plugins setting the same name, or a plugin setting a name CanvasTTY sets for this launch, refuses the launch and names them. Names starting with `CANVASTTY_`, `ELECTRON_`, `DYLD_` or `LD_`, and `NODE_OPTIONS`, `PATH`, `TERM`, `COLORTERM`, are reserved.
+- Arguments that bypass approvals or pick a conversation (every provider's YOLO flag, `--permission-mode`, `--sandbox`, `--resume`, `--continue`, `--session`, and the like) are refused: the profile and the restore rules stay the person's and the core's. This is not a sandbox; trusted native code already runs as you.
+- Claude Code applies only its last `--settings`, so a plugin's inline `--settings` JSON is merged into CanvasTTY's own (objects such as `env` key by key, hook lists appended); one that sets `permissions`, `hooks`, `disableAllHooks`, `sandbox`, `defaultMode` or `apiKeyHelper` is refused.
+- No answer within 5 s, an error, an invalid answer, a missing secret, or a plugin that is disabled, removed or no longer trusted refuses the launch with the reason on the card. The agent is never started without a contribution the person chose. A restored card whose plugin is unavailable comes back stopped with that reason and keeps its record until the plugin returns or the card is closed.
+- A plain terminal takes no launch options.
+
+**Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
+
+```json
+"launch": { "policy": true, "fields": [] }
+```
+
+The full examples are [`examples/plugins/launch-env`](../examples/plugins/launch-env) (options) and [`examples/plugins/yolo-guard`](../examples/plugins/yolo-guard) (a policy that refuses YOLO launches).
+
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
 ## Permissions
@@ -174,6 +232,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `storage` | `storage.get`, `storage.set` | Isolated JSON storage, 64 KB per plugin |
 | `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; a service's `secrets.get` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable. A trusted service reads its own plugin's secrets only |
 | `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
+| `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |

@@ -1,6 +1,6 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
-import type { AgentControlService } from "../AgentControlService.ts";
+import type { AgentControlService, SpawnAgentRequest } from "../AgentControlService.ts";
 
 /**
  * The only bridge between the orchestration MCP surface and session control.
@@ -49,7 +49,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       provider: args.provider as never,
       cwd: args.cwd as string,
       ...(args.title !== undefined ? { title: args.title as string } : {}),
-      ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {})
+      ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
+      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {})
     });
     return {
       sessionId: created.id,

@@ -1,5 +1,6 @@
 import type {
   AgentProviderId,
+  CreateSessionRequest,
   LaunchProfileId,
   SessionSnapshot
 } from "../../shared/contracts.ts";
@@ -21,6 +22,8 @@ export interface SpawnAgentRequest {
   title?: string;
   /** Prompt written into the new agent's PTY immediately after launch. */
   initialPrompt?: string;
+  /** Plugin launch options, checked by the launch exactly like the launcher's. */
+  launchOptions?: CreateSessionRequest["launchOptions"];
 }
 
 export interface AgentObservation {
@@ -69,7 +72,8 @@ export class AgentControlService {
       },
       ...(request.title !== undefined ? { title: request.title } : {}),
       role: "subagent",
-      parentSessionId: parent.id
+      parentSessionId: parent.id,
+      ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {})
     });
     if (request.initialPrompt !== undefined && request.initialPrompt.length > 0) {
       this.send(created.id, request.initialPrompt);
@@ -121,7 +125,7 @@ export class AgentControlService {
     return {
       sessionId: session.id,
       status: session.status,
-      output: tail(this.terminals.readBuffer(sessionId).buffer, maxChars)
+      output: this.redact(tail(this.terminals.readBuffer(sessionId).buffer, maxChars))
     };
   }
 
@@ -141,13 +145,18 @@ export class AgentControlService {
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
       exitCode: session.exitCode,
-      output: tail(buffer, MAX_OBSERVE_CHARS)
+      output: this.redact(tail(buffer, MAX_OBSERVE_CHARS))
     };
   }
 
   cancel(sessionId: string): void {
     this.requireSession(sessionId);
     this.terminals.dispose(sessionId);
+  }
+
+  /** Plugin launch secrets never reach another agent through observed output. */
+  private redact(text: string): string {
+    return typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text;
   }
 
   private requireSession(sessionId: string): SessionSnapshot {

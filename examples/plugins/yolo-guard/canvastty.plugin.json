@@ -1,0 +1,19 @@
+{
+  "apiVersion": 2,
+  "id": "com.example.yolo-guard",
+  "name": "YOLO Guard",
+  "version": "1.0.0",
+  "description": "Minimal launch policy: refuses every YOLO agent launch. It has no launcher options; CanvasTTY asks it before every agent launch.",
+  "author": "CanvasTTY contributors",
+  "permissions": ["launch:contribute"],
+  "services": [
+    {
+      "id": "guard",
+      "title": "YOLO guard",
+      "description": "Answers the launch policy for every agent launch.",
+      "entry": "services/guard.mjs",
+      "launch": { "policy": true, "fields": [] }
+    }
+  ],
+  "contributions": []
+}

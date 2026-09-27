@@ -14,6 +14,7 @@ import type {
   InstalledPlugin,
   LaunchProfileId,
   LaunchRole,
+  PluginLaunchValues,
   LimitsSnapshot,
   Point,
   PluginContribution,
@@ -368,7 +369,8 @@ export function App(): React.JSX.Element {
     profile: LaunchProfileId,
     cwd: string,
     requestedCenter?: Point,
-    role: LaunchRole = "agent"
+    role: LaunchRole = "agent",
+    launchOptions?: Record<string, PluginLaunchValues>
   ): Promise<SessionSnapshot> => {
     const currentSettings = settingsRef.current;
     const position = requestedCenter
@@ -391,7 +393,9 @@ export function App(): React.JSX.Element {
       : { position, size: DEFAULT_SESSION_SIZE };
     if (reservation) pendingSessionPlacements.current.push(reservation);
     try {
-      const session = await window.canvasTTY.terminal.create({ provider, profile, cwd, position, role });
+      const session = await window.canvasTTY.terminal.create({
+        provider, profile, cwd, position, role, ...(launchOptions ? { launchOptions } : {})
+      });
       sessionsRef.current = upsertSnapshot(sessionsRef.current, session);
       setSessions((current) => upsertSnapshot(current, session));
       setActiveSessionId(session.id);
@@ -434,9 +438,10 @@ export function App(): React.JSX.Element {
     provider: AgentProviderId,
     profile: LaunchProfileId,
     cwd: string,
-    role: LaunchRole
+    role: LaunchRole,
+    launchOptions?: Record<string, PluginLaunchValues>
   ): Promise<void> => {
-    await createSession(provider, profile, cwd, launchPosition ?? undefined, role);
+    await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions);
     setLaunchPosition(null);
     showToast(`${t(settings.locale, "sessionStarted")}: ${provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);

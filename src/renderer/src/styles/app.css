@@ -1162,3 +1162,10 @@ button { border: 0; }
 .settings-updates__button--primary:hover { background: var(--primary-hover); }
 .settings-updates__button:disabled { opacity: .5; cursor: not-allowed; }
 @media (prefers-reduced-motion: reduce) { .settings-updates__card[data-tone="busy"] .settings-updates__icon { animation: none; } }
+
+.launch-advanced { margin-top: 12px; padding: 10px 14px; border-radius: 12px; color: var(--text-dark); background: rgba(255,255,255,.34); font-size: 12px; }
+.launch-advanced summary { cursor: pointer; font-weight: 600; }
+.launch-advanced__plugin { margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; border: 0; }
+.launch-advanced__use, .launch-advanced__field { display: flex; align-items: center; gap: 8px; }
+.launch-advanced__field { padding-left: 22px; }
+.launch-advanced__field input[type="text"], .launch-advanced__field select { flex: 1; min-width: 0; padding: 4px 8px; border: 0; border-radius: 8px; font: inherit; }

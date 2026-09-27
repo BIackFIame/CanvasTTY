@@ -27,6 +27,7 @@ import {
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
+import { LaunchPipeline } from "./services/LaunchPipeline";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
@@ -289,7 +290,18 @@ async function initializeServices(): Promise<void> {
     }
   });
   pluginManager.setServiceObserver((specs) => pluginServices!.sync(specs));
-  void pluginServices.sync(pluginManager.trustedServiceSpecs());
+  const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
+  // Created before sessions are restored: launch services may resolve the plugin's own secrets.
+  pluginSecretsService = new PluginSecretsService(
+    app.getPath("userData"),
+    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission),
+    {
+      isAvailable: securePluginStorageAvailable,
+      encrypt: (value) => safeStorage.encryptString(value),
+      decrypt: (value) => safeStorage.decryptString(value)
+    }
+  );
+  await pluginSecretsService.load();
 
   canvasNavigationInput = new CanvasNavigationInputController(
     {
@@ -465,6 +477,16 @@ async function initializeServices(): Promise<void> {
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
 
+  const launchPipeline = new LaunchPipeline({
+    contributors: () => pluginManager!.launchContributors(),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key),
+    runsRoot: join(userDataPath, "launch-runs")
+  });
+  await launchPipeline.clearRuns().catch(() => undefined);
+  terminalManager.configureLaunchPipeline(launchPipeline);
+  // Restored cards with launch options ask their plugin's service, so start services first.
+  await pluginServicesStarted.catch(() => undefined);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
   // endpoint"; the start flag / env var force it on for one launch (CI smoke)
@@ -537,16 +559,6 @@ async function initializeServices(): Promise<void> {
     (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission)
   );
   await pluginMediaService.load();
-  pluginSecretsService = new PluginSecretsService(
-    app.getPath("userData"),
-    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission),
-    {
-      isAvailable: securePluginStorageAvailable,
-      encrypt: (value) => safeStorage.encryptString(value),
-      decrypt: (value) => safeStorage.decryptString(value)
-    }
-  );
-  await pluginSecretsService.load();
   providerSecretsService = new ProviderSecretsService(app.getPath("userData"), {
     isAvailable: securePluginStorageAvailable,
     encrypt: (value) => safeStorage.encryptString(value),
@@ -576,6 +588,7 @@ async function initializeServices(): Promise<void> {
     browser: browserService,
     githubAuth: githubAuth!,
     hermesHud: hermesHudService,
+    launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);

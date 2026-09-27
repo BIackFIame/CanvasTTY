@@ -24,6 +24,8 @@ interface TerminalPort {
   readBuffer(id: string): TerminalBufferSnapshot;
   inputChecked(id: string, text: string): boolean;
   geometry(id: string): { cols: number; rows: number };
+  /** Masks plugin launch secrets in text handed to a controller. */
+  redactSecrets?(text: string): string;
 }
 
 interface ControlRequest {
@@ -285,7 +287,7 @@ export class AgentControlGateway {
       if (!Number.isSafeInteger(after) || Number(after) < 0) throw new ControlError("INVALID_PARAMS", "after must be a non-negative result revision.");
       const fresh = owned.resultRevision > Number(after);
       return { session: metadata, resultRevision: owned.resultRevision, fresh,
-        turn: fresh ? owned.completedTurn : null };
+        turn: fresh && owned.completedTurn ? this.redactTurn(owned.completedTurn) : null };
     }
     await owned.ready;
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
@@ -297,7 +299,7 @@ export class AgentControlGateway {
       throw new ControlError("STALE_SESSION", "Session restarted; its old control grant is no longer valid.");
     }
     const capabilities = controlCapabilities(fresh.provider);
-    const screen = viewport(owned.terminal);
+    const screen = this.redact(viewport(owned.terminal));
     if (request.method === "screen") return { sessionId: id, text: screen, revision: hash(screen), outputOffset: owned.outputOffset,
       interaction: capabilities.menus ? codexChoices(screen) : null };
     if ((request.method === "choose" || request.method === "dismiss") && !capabilities.menus) {
@@ -351,6 +353,14 @@ export class AgentControlGateway {
       }
       return { sessionId: id, turnId: request.id, resultRevisionBefore: owned.resultRevision, delivery: "written-to-pty" };
     } finally { this.busy.delete(id); }
+  }
+
+  private redact(text: string): string {
+    return this.options.terminals.redactSecrets?.(text) ?? text;
+  }
+
+  private redactTurn(turn: Turn): Turn {
+    return turn.result ? { ...turn, result: { ...turn.result, text: this.redact(turn.result.text) } } : turn;
   }
 }
 

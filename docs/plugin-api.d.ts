@@ -75,7 +75,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute">;
     modules: string[];
   };
   contribution: {
@@ -161,6 +161,63 @@ export interface CanvasTTYPluginServiceManifestEntry {
   /** `.js`, `.mjs` or `.cjs` inside the plugin; integrity-declared in modular plugins. */
   entry: string;
   module?: string;
+  /** Launch contributor; needs `launch:contribute`. At most one service per plugin. */
+  launch?: CanvasTTYServiceLaunch;
+}
+
+export interface CanvasTTYServiceLaunch {
+  /** Agent providers the options apply to; every agent when omitted. */
+  appliesTo?: Array<"codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity">;
+  /** At most 8, shown in the agent launcher under Advanced (a policy with none is not shown). */
+  fields: CanvasTTYLaunchField[];
+  /** Also asked before every launch of these agents where the person did not choose the plugin (`chosen: false`);
+   * such an answer may only refuse, and no answer refuses too. */
+  policy?: boolean;
+}
+
+export type CanvasTTYLaunchField =
+  | { key: string; label: string; kind: "boolean"; default?: boolean }
+  | {
+    key: string; label: string; kind: "select"; options: Array<{ value: string; label: string }>; default?: string;
+    /** The launcher also asks `canvastty.launch.options` (3 s) for up to 64 more choices; the saved value is then any
+     * text up to 200 characters, which `canvastty.launch.prepare` must check. */
+    optionsFrom?: "service";
+  }
+  | { key: string; label: string; kind: "text"; maxLength?: number; default?: string };
+
+/** Params of the host request `canvastty.launch.prepare`: launches that chose this plugin, and with `policy` every agent launch. */
+export interface CanvasTTYLaunchContext {
+  sessionId: string;
+  provider: "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" | "cursor" | "minimax" | "devin" | "antigravity";
+  profile: "normal" | "yolo";
+  role: "agent" | "orchestrator" | "subagent";
+  cwd: string;
+  parentSessionId?: string;
+  /** The app is bringing back a saved card. */
+  restoring: boolean;
+  /** The agent continues an earlier conversation. */
+  resume: boolean;
+  /** This plugin's values for this card, checked against its fields; empty when `chosen` is false. */
+  options: Record<string, boolean | string>;
+  /** The person chose this plugin for the launch; false for a policy check, whose answer may only refuse. */
+  chosen: boolean;
+}
+
+/**
+ * Answer to `canvastty.launch.prepare` (or `null`). Answer within 5 s: a timeout, error or invalid
+ * answer refuses the launch. Conflicting names between plugins, reserved names and approval or
+ * conversation arguments refuse it as well.
+ */
+export interface CanvasTTYLaunchContribution {
+  /** At most 32; values up to 8 KB. `{launchFiles}` becomes this run's folder of `files`. */
+  env?: Record<string, string>;
+  /** Env name -> the plugin's own secret key (needs `secrets`); the host sets the value and masks it. */
+  secretEnv?: Record<string, string>;
+  /** At most 32, appended after CanvasTTY's own arguments. */
+  args?: string[];
+  /** At most 16 files, 256 KB, removed when the process exits. */
+  files?: Array<{ relPath: string; content: string }>;
+  refuse?: { reason: string };
 }
 
 /** Params of the first host notification, `canvastty.initialize`. */
@@ -178,6 +235,12 @@ export interface CanvasTTYServiceContext {
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
   | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> };
+
+/** Requests the host sends to a service, which plugin surfaces cannot send. */
+export type CanvasTTYServiceHostRequest =
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.launch.prepare"; params: CanvasTTYLaunchContext }
+  /** Answer `{ "<field key>": [{ value, label }] }` (at most 64 per field) within 3 s. */
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.launch.options"; params: { provider: CanvasTTYLaunchContext["provider"]; fields: string[] } };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {

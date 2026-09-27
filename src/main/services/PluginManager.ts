@@ -27,7 +27,9 @@ import type {
   PluginModule,
   PluginModuleAsset,
   PluginPermission,
+  PluginLaunchField,
   PluginService,
+  PluginServiceLaunch,
   PluginUpdateStatus,
   Size
 } from "../../shared/contracts";
@@ -38,6 +40,7 @@ import {
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
 import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
+import type { LaunchContributor } from "./LaunchPipeline.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -110,7 +113,8 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "playlists:read",
   "playlists:write",
   "hermes:hud",
-  "network"
+  "network",
+  "launch:contribute"
 ]);
 
 interface StoredPluginRecord {
@@ -497,6 +501,27 @@ export class PluginManager {
       }
     }
     return specs;
+  }
+
+  /** Services that may prepare launches now: enabled, native code trusted, `launch:contribute` granted. */
+  launchContributors(): LaunchContributor[] {
+    const contributors: LaunchContributor[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("launch:contribute")) continue;
+      const service = manifest.services?.find((candidate) => candidate.launch && trust[candidate.id]);
+      if (!service?.launch) continue;
+      contributors.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        launch: structuredClone(service.launch),
+        secrets: manifest.permissions.includes("secrets")
+      });
+    }
+    return contributors;
   }
 
   get runtimeHookRegistryPath(): string {
@@ -1231,6 +1256,14 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   const moduleIds = new Set(modules.map((module) => module.id));
   const hooks = validateAgentHooks(candidate.hooks, moduleIds);
   const services = validateServices(candidate.services, moduleIds);
+  for (const service of services) {
+    const granted = service.module
+      ? modules.find((module) => module.id === service.module)?.permissions
+      : undefined;
+    if (service.launch && !permissions.includes("launch:contribute") && !granted?.includes("launch:contribute")) {
+      throw new Error(`Plugin service ${service.id} contributes to launches and needs the launch:contribute permission.`);
+    }
+  }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
     throw new Error("Modular plugins must declare at least one coreFiles asset.");
@@ -1358,9 +1391,9 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     throw new Error(`Plugin services must contain between 1 and ${MAX_PLUGIN_SERVICES} items.`);
   }
   const ids = new Set<string>();
-  return value.map((candidate) => {
+  const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
-    assertOnlyKeys(candidate, ["id", "title", "description", "entry", "module"], "Plugin service");
+    assertOnlyKeys(candidate, ["id", "title", "description", "entry", "module", "launch"], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
     ids.add(id);
@@ -1374,8 +1407,96 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     if (module && (!isContributionId(module) || !moduleIds.has(module))) {
       throw new Error(`Plugin service references an unknown module: ${module}.`);
     }
-    return { id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}) };
+    const launch = candidate.launch === undefined ? undefined : validateServiceLaunch(candidate.launch);
+    return {
+      id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
+      ...(launch ? { launch } : {})
+    };
   });
+  // Launch options are saved per plugin, so one service per plugin answers for them.
+  if (services.filter((service) => service.launch).length > 1) {
+    throw new Error("At most one plugin service may declare launch options.");
+  }
+  return services;
+}
+
+const MAX_LAUNCH_FIELDS = 8;
+const MAX_LAUNCH_TEXT = 200;
+
+function validateServiceLaunch(value: unknown): PluginServiceLaunch {
+  if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
+  assertOnlyKeys(value, ["appliesTo", "fields", "policy"], "Plugin service launch");
+  if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      throw new Error("Plugin launch appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  if (!Array.isArray(value.fields) || value.fields.length > MAX_LAUNCH_FIELDS) {
+    throw new Error(`Plugin launch fields must be an array of at most ${MAX_LAUNCH_FIELDS} items.`);
+  }
+  const keys = new Set<string>();
+  const fields = value.fields.map((field): PluginLaunchField => {
+    if (!isRecord(field)) throw new Error("Every plugin launch field must be an object.");
+    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
+    const key = requiredString(field.key, "launch field key", 40);
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || keys.has(key)) {
+      throw new Error(`Plugin launch field key is invalid or duplicated: ${key}.`);
+    }
+    keys.add(key);
+    const label = requiredString(field.label, "launch field label", 80);
+    if (field.optionsFrom !== undefined && (field.kind !== "select" || field.optionsFrom !== "service")) {
+      throw new Error(`Plugin launch field ${key} optionsFrom must be "service" on a select.`);
+    }
+    if (field.kind === "boolean") {
+      if (field.options !== undefined || field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin launch field ${key} default must be a boolean.`);
+      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
+    }
+    if (field.kind === "select") {
+      if (field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (!Array.isArray(field.options) || field.options.length === 0 || field.options.length > 16) {
+        throw new Error(`Plugin launch field ${key} needs 1 to 16 options.`);
+      }
+      const options = field.options.map((option) => {
+        if (!isRecord(option)) throw new Error(`Plugin launch field ${key} options must be objects.`);
+        assertOnlyKeys(option, ["value", "label"], "Plugin launch option");
+        return {
+          value: requiredString(option.value, "launch option value", MAX_LAUNCH_TEXT),
+          label: requiredString(option.label, "launch option label", 80)
+        };
+      });
+      if (new Set(options.map((option) => option.value)).size !== options.length) throw new Error(`Plugin launch field ${key} repeats an option.`);
+      if (field.default !== undefined && !options.some((option) => option.value === field.default)) {
+        throw new Error(`Plugin launch field ${key} default must be one of its options.`);
+      }
+      return {
+        key, label, kind: "select", options,
+        ...(field.optionsFrom === "service" ? { optionsFrom: "service" as const } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    if (field.kind === "text") {
+      if (field.options !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      const maxLength = field.maxLength === undefined ? MAX_LAUNCH_TEXT : field.maxLength;
+      if (!Number.isInteger(maxLength) || (maxLength as number) < 1 || (maxLength as number) > MAX_LAUNCH_TEXT) {
+        throw new Error(`Plugin launch field ${key} maxLength must be 1 to ${MAX_LAUNCH_TEXT}.`);
+      }
+      if (field.default !== undefined && (typeof field.default !== "string" || field.default.length > (maxLength as number))) {
+        throw new Error(`Plugin launch field ${key} default must be text within maxLength.`);
+      }
+      return {
+        key, label, kind: "text",
+        ...(field.maxLength !== undefined ? { maxLength: maxLength as number } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    throw new Error(`Plugin launch field ${key} kind must be boolean, select or text.`);
+  });
+  return { ...(appliesTo ? { appliesTo } : {}), fields, ...(value.policy === true ? { policy: true } : {}) };
 }
 
 function validateContribution(value: unknown): PluginContribution {

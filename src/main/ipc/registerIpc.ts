@@ -10,6 +10,7 @@ import type {
   CreateSessionRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
+  PluginLaunchFieldOptions,
   ProviderId,
   ProviderSecretId,
   SessionBounds
@@ -56,6 +57,7 @@ interface Dependencies {
   browser: BrowserService;
   githubAuth: GithubAuthService;
   hermesHud: HermesHudService;
+  launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
   getMainWindow(): BrowserWindow | null;
   applyBrowserSettings(settings: AppSettings): Promise<void> | void;
   setCanvasNavigationShortcutCapture(active: boolean): void;
@@ -89,6 +91,7 @@ export function registerIpc({
   browser,
   githubAuth,
   hermesHud,
+  launchFieldOptions,
   getMainWindow,
   applyBrowserSettings,
   setCanvasNavigationShortcutCapture,
@@ -297,6 +300,12 @@ export function registerIpc({
   ) => {
     assertMainRenderer(event, getMainWindow);
     return requestPluginService(pluginId, { serviceId, method, params });
+  });
+  ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
+    // Only the app's own launcher asks; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof provider !== "string") throw new Error("Launch option request is invalid.");
+    return launchFieldOptions(pluginId, provider as ProviderId);
   });
   ipcMain.handle(IPC.pluginsUninstall, async (_event, pluginId: string) => {
     closePluginWindows(pluginId);

@@ -20,7 +20,7 @@ export type SessionRestoreMode = "off" | "reopen" | "continue";
  * conversation because another card of that CLI shares its folder, or it is
  * held stopped because the environment it ran in is unavailable.
  */
-export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable";
+export type SessionRestoreNote = "fresh-shared-folder" | "environment-unavailable" | "plugin-unavailable";
 export type PaletteId = "sage" | "lilac" | "night";
 export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom";
 export type SessionRowColorMode = "monochrome" | "status";
@@ -270,6 +270,8 @@ export interface CreateSessionRequest {
   /** Owning session; required for subagents. Cycles are impossible because a
    * parent must already exist when the child is created. */
   parentSessionId?: string;
+  /** Launch options per plugin id; each named plugin's launch service prepares this launch. */
+  launchOptions?: Record<string, PluginLaunchValues>;
 }
 
 export interface SessionMetadata {
@@ -356,7 +358,8 @@ export type PluginPermission =
   | "playlists:read"
   | "playlists:write"
   | "hermes:hud"
-  | "network";
+  | "network"
+  | "launch:contribute";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -422,7 +425,41 @@ export interface PluginService {
   description?: string;
   entry: string;
   module?: string;
+  /** Launch contribution (`launch:contribute`): options shown in the launcher's Advanced section. */
+  launch?: PluginServiceLaunch;
 }
+
+export type PluginLaunchFieldKind = "boolean" | "select" | "text";
+
+/** One launcher option. Values are saved with the session (at most 4 KB per plugin), never secrets. */
+export interface PluginLaunchField {
+  key: string;
+  label: string;
+  kind: PluginLaunchFieldKind;
+  /** `select` only: 1 to 16 choices. */
+  options?: Array<{ value: string; label: string }>;
+  /** `select` only: the launcher also asks the service (`canvastty.launch.options`) for up to 64 more choices, such as
+   * the plugin's own accounts. The saved value is any short text then; the service checks it when it prepares. */
+  optionsFrom?: "service";
+  default?: boolean | string;
+  /** `text` only: at most 200 characters (the default). */
+  maxLength?: number;
+}
+
+export interface PluginServiceLaunch {
+  /** Agents the options apply to; all agents when omitted. */
+  appliesTo?: AgentProviderId[];
+  fields: PluginLaunchField[];
+  /** Also asked, with `chosen: false`, before every launch of those agents where the person did not choose the
+   * plugin; such an answer may only refuse. */
+  policy?: boolean;
+}
+
+/** Field key -> extra choices a service offered for an `optionsFrom: "service"` select. */
+export type PluginLaunchFieldOptions = Record<string, Array<{ value: string; label: string }>>;
+
+/** One plugin's option values for one session, as chosen in the launcher. */
+export type PluginLaunchValues = Record<string, boolean | string>;
 
 export type PluginServiceState = "stopped" | "starting" | "running" | "backoff" | "failed";
 
@@ -1171,6 +1208,8 @@ export interface CanvasTTYApi {
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
+    /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
+    launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;
     openCanvas(pluginId: string, contributionId: string, sourceCanvasInstanceId?: string): Promise<void>;
     openWindow(pluginId: string, contributionId: string): Promise<void>;
@@ -1301,6 +1340,7 @@ export const IPC = {
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",
+  pluginsLaunchFieldOptions: "plugins:launch-field-options",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",
   pluginsOpenWindow: "plugins:open-window",

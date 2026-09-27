@@ -168,10 +168,19 @@ export class PluginServiceSupervisor {
 
   /** Sends a request from the plugin's own UI to its own service. */
   request(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown> {
-    const record = this.services.get(serviceKey(pluginId, serviceId));
     if (typeof method !== "string" || !/^[A-Za-z0-9_.:/-]{1,80}$/.test(method) || method.startsWith(HOST_METHOD_PREFIX)) {
       return Promise.reject(new Error("Plugin service method is invalid."));
     }
+    return this.send(pluginId, serviceId, method, params, this.options.requestTimeoutMs);
+  }
+
+  /** A host-initiated call (`canvastty.*`, which plugin surfaces cannot send) with its own time budget. */
+  hostCall(pluginId: string, serviceId: string, method: `canvastty.${string}`, params: unknown, timeoutMs: number): Promise<unknown> {
+    return this.send(pluginId, serviceId, method, params, Math.min(timeoutMs, this.options.requestTimeoutMs));
+  }
+
+  private send(pluginId: string, serviceId: string, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+    const record = this.services.get(serviceKey(pluginId, serviceId));
     if (!record || !record.child || (record.state !== "running" && record.state !== "starting")) {
       return Promise.reject(new Error("Plugin service is not running."));
     }
@@ -192,7 +201,7 @@ export class PluginServiceSupervisor {
       const timer = setTimeout(() => {
         record.pending.delete(id);
         reject(new Error("Plugin service request timed out."));
-      }, this.options.requestTimeoutMs);
+      }, timeoutMs);
       timer.unref();
       record.pending.set(id, { resolve, reject, timer });
       if (!this.write(record, frame)) {

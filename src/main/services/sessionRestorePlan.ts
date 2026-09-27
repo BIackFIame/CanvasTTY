@@ -47,6 +47,8 @@ export function planSessionRestore(
   context: {
     isLiveSession(id: string): boolean;
     environmentAvailable(environment: PersistedEnvironmentRef): boolean;
+    /** False when a plugin named in the saved launch options cannot prepare launches now. */
+    launchOptionsAvailable?(options: Record<string, unknown>): boolean;
   }
 ): RestoreStep[] {
   if (mode === "off") return [];
@@ -75,6 +77,10 @@ export function planSessionRestore(
     const recorded = record.threadId ? { threadId: record.threadId } : {};
     if (record.environment && !context.environmentAvailable(record.environment)) {
       return { record, launch: "stopped", note: "environment-unavailable", ...recorded };
+    }
+    // Never launch without the contribution the person chose: hold the card with its reason.
+    if (record.options && context.launchOptionsAvailable?.(record.options) === false) {
+      return { record, launch: "stopped", note: "plugin-unavailable", ...recorded };
     }
     if (record.lastState !== "running") return { record, launch: "stopped", ...recorded };
     if (record.provider === "terminal" || mode === "reopen") return { record, launch: null };

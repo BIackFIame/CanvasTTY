@@ -50,6 +50,7 @@ import { mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeL
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { resolveTerminalLaunch } from "./terminalLaunch.ts";
+import type { LaunchPipeline, PreparedLaunch } from "./LaunchPipeline.ts";
 import {
   persistedTerminalSession,
   type PersistedEnvironmentRef,
@@ -92,7 +93,18 @@ interface ManagedSession {
   captureResult: boolean;
   /** Plugin options and environment ref carried into the saved record. */
   extras: PersistedSessionExtras;
+  /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
+  launchToken: number;
+  /** Plugin `secretEnv` values this card was started with; masked until the card closes. */
+  launchSecrets: string[];
+  /** Removes the current run's plugin files; called when the process exits. */
+  launchCleanup: (() => Promise<void>) | null;
+  /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
+  restoringLaunch: boolean;
 }
+
+type LaunchContribution = Extract<PreparedLaunch, { ok: true }>;
+const SECRET_MARKER = "<redacted:secret>";
 
 export interface ProviderLifecycleSignal {
   kind: "lifecycle";
@@ -127,6 +139,7 @@ export class TerminalManager {
   private readonly hiddenSinceOffset = new Map<string, number>();
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
+  private launchPipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null = null;
   private sessionStore: TerminalSessionStore | null = null;
   private sessionRestoreMode: SessionRestoreMode = "off";
   // No environment provider exists in core yet, so a placed session can only
@@ -161,6 +174,21 @@ export class TerminalManager {
     this.agentOrchestration = coordinator;
   }
 
+  /** Plugin launch contributors; without them a session with launch options is never launched. */
+  configureLaunchPipeline(pipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null): void {
+    this.launchPipeline = pipeline;
+  }
+
+  /** Masks every plugin launch secret of an open card in text an agent or the companion reads. */
+  redactSecrets<T extends string | null>(text: T): T {
+    if (text === null) return text;
+    let result: string = text;
+    for (const session of this.sessions.values()) {
+      for (const secret of session.launchSecrets) result = result.split(secret).join(SECRET_MARKER);
+    }
+    return result as T;
+  }
+
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
     this.sessionStore = store;
     this.sessionRestoreMode = mode;
@@ -179,7 +207,8 @@ export class TerminalManager {
     // nothing, since its parent's runtime state no longer exists.
     const steps = planSessionRestore(persisted, this.sessionRestoreMode, {
       isLiveSession: (id) => this.sessions.has(id),
-      environmentAvailable: (environment) => this.environmentAvailable(environment)
+      environmentAvailable: (environment) => this.environmentAvailable(environment),
+      launchOptionsAvailable: (options) => this.unavailableLaunchPlugins(options).length === 0
     });
     for (const step of steps) this.restorePersistedSession(step);
     await this.persistSessions();
@@ -271,6 +300,10 @@ export class TerminalManager {
       throw new Error("Parent terminal session does not exist.");
     }
 
+    const launchOptions = this.launchPipeline
+      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions)
+      : request.launchOptions === undefined ? undefined : failWith("Plugin launch options are not available.");
+
     const id = randomUUID();
     const metadata: SessionMetadata = {
       id,
@@ -291,7 +324,9 @@ export class TerminalManager {
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
-    const launched = awaitMeasuredGrid
+    // With launch options or a launch policy the plugins answer first; the card waits and launches when they do.
+    const contributed = (Boolean(launchOptions) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
+    const launched = awaitMeasuredGrid || contributed
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
       : this.spawnProcess(id, request.provider, request.profile, request.cwd,
         INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, null, control.captureResult, role,
@@ -318,10 +353,15 @@ export class TerminalManager {
       awaitingInitialResize: awaitMeasuredGrid,
       resumeOnLaunch: null,
       captureResult: control.captureResult === true,
-      extras: {}
+      extras: launchOptions ? { options: launchOptions } : {},
+      launchToken: 0,
+      launchSecrets: [],
+      launchCleanup: null,
+      restoringLaunch: false
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
+    if (contributed) this.launchContributed(id, session, null, null, control.answerCaptureGrantExpiresAt);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
 
@@ -339,6 +379,8 @@ export class TerminalManager {
       // Never run a placed session locally instead of where it belongs.
       throw new Error(`This card runs in ${environment.label} from plugin ${environment.pluginId}, which is not available. It was not started locally.`);
     }
+    const missingPlugins = this.unavailableLaunchPlugins(session.extras.options);
+    if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
     delete session.extras.heldState;
     delete session.metadata.restoreNote;
     let resume: ResumeRequest = null;
@@ -376,6 +418,23 @@ export class TerminalManager {
     }
 
     session.agentOrchestration?.cleanup();
+    if (this.contributed(session)) {
+      session.process = null;
+      session.agentBrowser = null;
+      session.agentRuntime = null;
+      session.agentOrchestration = null;
+      session.awaitingInitialResize = false;
+      session.lifecycle = this.lifecycleHooksEnabled
+        ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
+        : null;
+      session.metadata.startedAt = Date.now();
+      session.metadata.status = initialSessionStatus(session.metadata.provider);
+      session.metadata.exitCode = null;
+      session.metadata.failureDetails = null;
+      this.emitSession(session.metadata);
+      this.launchContributed(id, session, resume, "user");
+      return snapshot(session);
+    }
     const launched = this.spawnProcess(
       id,
       session.metadata.provider,
@@ -562,6 +621,10 @@ export class TerminalManager {
     this.flushOutput(id, session);
     this.sessions.delete(id);
     this.hiddenSinceOffset.delete(id);
+    session.launchToken += 1;
+    void session.launchCleanup?.().catch(() => undefined);
+    session.launchCleanup = null;
+    if (session.extras.options) void this.launchPipeline?.forgetSession(id).catch(() => undefined);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -621,6 +684,11 @@ export class TerminalManager {
         metadata.status = "failed";
         metadata.exitCode = descriptor.exitCode ?? 1;
         metadata.failureDetails = `Needs plugin ${descriptor.environment.pluginId} (${descriptor.environment.label}).`;
+      } else if (step.note === "plugin-unavailable" && descriptor.options) {
+        extras.heldState = descriptor.lastState;
+        metadata.status = "failed";
+        metadata.exitCode = descriptor.exitCode ?? 1;
+        metadata.failureDetails = `Launch refused: ${missingLaunchPlugins(this.unavailableLaunchPlugins(descriptor.options))}`;
       } else {
         metadata.exitCode = descriptor.exitCode ?? (descriptor.lastState === "exited" ? 0 : 1);
         metadata.status = metadata.exitCode === 0 ? "done" : "failed";
@@ -641,7 +709,9 @@ export class TerminalManager {
       && descriptor.provider === "grok"
       && this.providerClis.get(descriptor.provider).state === "available";
 
-    if (directoryReady && !awaitMeasuredGrid) {
+    const contributed = directoryReady && !awaitMeasuredGrid
+      && (Boolean(extras.options) || this.policyApplies(descriptor.provider));
+    if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
         const launched = this.spawnProcess(
           descriptor.id,
@@ -666,9 +736,10 @@ export class TerminalManager {
       }
     }
 
-    // A card that started comes back tied to the conversation the plan chose (none for
-    // a fresh start); one that did not start keeps its recorded id for Continue.
-    const started = process !== null || awaitMeasuredGrid;
+    // A card that started (or whose plugins are preparing its launch) comes back tied to
+    // the conversation the plan chose (none for a fresh start); one that did not start
+    // keeps its recorded id for Continue.
+    const started = process !== null || awaitMeasuredGrid || contributed;
     const threadId = started ? step.threadId : descriptor.threadId;
     const session: ManagedSession = {
       metadata,
@@ -691,10 +762,15 @@ export class TerminalManager {
       resumeOnLaunch: awaitMeasuredGrid ? resume : null,
       ...(threadId ? { threadId } : {}),
       captureResult: false,
-      extras
+      extras,
+      launchToken: 0,
+      launchSecrets: [],
+      launchCleanup: null,
+      restoringLaunch: awaitMeasuredGrid
     };
     this.sessions.set(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
+    if (contributed) this.launchContributed(descriptor.id, session, resume, "restore", undefined, true);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
     // Restoring re-derives a persisted session's status, so a failure here is
@@ -732,6 +808,11 @@ export class TerminalManager {
     session.awaitingInitialResize = false;
     const resume = session.resumeOnLaunch;
     session.resumeOnLaunch = null;
+    if (this.contributed(session)) {
+      this.launchContributed(id, session, resume, null, undefined, session.restoringLaunch);
+      session.restoringLaunch = false;
+      return;
+    }
     try {
       const launched = this.spawnProcess(
         id,
@@ -779,7 +860,8 @@ export class TerminalManager {
     resume: ResumeRequest = null,
     captureResult = false,
     role: SessionRole = "agent",
-    answerCaptureGrantExpiresAt?: number
+    answerCaptureGrantExpiresAt?: number,
+    contribution: LaunchContribution | null = null
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -830,19 +912,28 @@ export class TerminalManager {
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
+      // Plugin arguments follow the core's own and precede the resume selection.
+      if (contribution) providerArgs.push(...contribution.args);
       const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
         environment: { ...baseEnvironment, ...providerEnvironment },
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {})
       });
+      // A plugin may add to the person's environment, never replace what the core sets for this launch.
+      const contributedEnvironment = contribution?.env ?? {};
+      const collision = Object.keys(contributedEnvironment)
+        .find((key) => key in providerEnvironment || key in (launch.environment ?? {}));
+      if (collision) {
+        throw new Error(`Launch refused: ${contribution!.envSources[collision]} sets ${collision}, which CanvasTTY sets for this launch.`);
+      }
       return {
         process: this.spawnPty(launch.command, launch.args, {
           name: "xterm-256color",
           cols,
           rows,
           cwd,
-          env: { ...baseEnvironment, ...providerEnvironment, ...launch.environment }
+          env: { ...baseEnvironment, ...contributedEnvironment, ...providerEnvironment, ...launch.environment }
         }),
         agentBrowser,
         agentRuntime,
@@ -855,6 +946,100 @@ export class TerminalManager {
       agentOrchestration?.cleanup();
       throw error;
     }
+  }
+
+  private contributed(session: ManagedSession): boolean {
+    return Boolean(session.extras.options) || this.policyApplies(session.metadata.provider);
+  }
+
+  /** A trusted plugin's launch policy applies to this agent: its launches wait for the policy's answer. */
+  private policyApplies(provider: ProviderId): boolean {
+    try { return this.launchPipeline?.hasPolicy?.(provider) === true; } catch { return false; }
+  }
+
+  private unavailableLaunchPlugins(options: Record<string, unknown> | undefined): string[] {
+    if (!options) return [];
+    return this.launchPipeline ? this.launchPipeline.unavailable(options) : Object.keys(options).sort();
+  }
+
+  /**
+   * Launches through the chosen plugins' launch services. The card waits until they answer; a
+   * refusal, timeout, error or conflict leaves it failed with the reason, and nothing runs.
+   */
+  private launchContributed(
+    id: string,
+    session: ManagedSession,
+    resume: ResumeRequest,
+    failureOrigin: FailureOrigin | null,
+    answerCaptureGrantExpiresAt?: number,
+    restoring = false
+  ): void {
+    const token = ++session.launchToken;
+    const { metadata } = session;
+    const pipeline = this.launchPipeline;
+    const preparing: Promise<PreparedLaunch> = pipeline
+      ? pipeline.prepare({
+        sessionId: id,
+        provider: metadata.provider,
+        profile: metadata.profile,
+        role: metadata.role,
+        cwd: metadata.cwd,
+        ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
+        restoring,
+        resume: resume !== null,
+        options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>
+      })
+      : Promise.resolve({ ok: false, reason: missingLaunchPlugins(Object.keys(session.extras.options ?? {})) });
+    void preparing.catch((error: unknown): PreparedLaunch => ({
+      ok: false,
+      reason: `Launch preparation failed: ${error instanceof Error ? error.message : String(error)}`
+    })).then((prepared) => {
+      if (this.sessions.get(id) !== session || session.launchToken !== token || session.process) {
+        if (prepared.ok) void prepared.cleanup().catch(() => undefined);
+        return;
+      }
+      let failed = false;
+      if (!prepared.ok) {
+        failed = true;
+        // "Launch refused" leads, so the failure summary quotes the reason as the cause.
+        metadata.failureDetails = this.redactSecrets(`Launch refused: ${prepared.reason}`);
+      } else {
+        session.launchSecrets = [...new Set([...session.launchSecrets, ...prepared.secrets])]
+          .filter((secret) => secret.length >= 4)
+          .slice(-64);
+        try {
+          const launched = this.spawnProcess(id, metadata.provider, metadata.profile, metadata.cwd,
+            session.cols, session.rows, resume, session.captureResult, metadata.role, answerCaptureGrantExpiresAt, prepared);
+          session.process = launched.process;
+          session.agentBrowser = launched.agentBrowser;
+          session.agentRuntime = launched.agentRuntime;
+          session.agentOrchestration = launched.agentOrchestration;
+          if (launched.failure) {
+            failed = true;
+            void prepared.cleanup().catch(() => undefined);
+            applyLaunchFailure(metadata, launched.failure);
+          } else {
+            session.launchCleanup = prepared.cleanup;
+            metadata.status = initialSessionStatus(metadata.provider);
+            metadata.exitCode = null;
+            metadata.failureDetails = null;
+            if (launched.process) this.bindProcess(id, session, launched.process);
+            const runtimeStatus = this.agentRuntime?.currentStatus(id);
+            if (runtimeStatus) metadata.status = runtimeStatus;
+          }
+        } catch (error) {
+          failed = true;
+          void prepared.cleanup().catch(() => undefined);
+          metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+        }
+      }
+      if (failed && metadata.status !== "failed") {
+        metadata.status = "failed";
+        metadata.exitCode = 1;
+      }
+      this.emitSession(metadata, failed ? failureOrigin : null);
+      this.schedulePersistence();
+    });
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
@@ -877,13 +1062,15 @@ export class TerminalManager {
       current.metadata.status = exitCode === 0 ? "done" : "failed";
       current.metadata.failureDetails = exitCode === 0
         ? null
-        : terminalFailureDetails(current.bufferChunks.slice(current.bufferStart).join(""));
+        : this.redactSecrets(terminalFailureDetails(current.bufferChunks.slice(current.bufferStart).join("")));
       current.agentBrowser?.cleanup();
       current.agentBrowser = null;
       current.agentRuntime?.cleanup();
       current.agentRuntime = null;
       current.agentOrchestration?.cleanup();
       current.agentOrchestration = null;
+      void current.launchCleanup?.().catch(() => undefined);
+      current.launchCleanup = null;
       this.emitSession(current.metadata);
       // Recorded at the moment of exit, so a finished agent is never relaunched.
       this.schedulePersistence();
@@ -925,6 +1112,14 @@ export function reachesObservers(payload: TerminalDataEvent | SessionEvent | Ses
 /** A manager event the main process forwards to the renderer. */
 export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
   return !("audience" in payload) || payload.audience !== "observers";
+}
+
+function missingLaunchPlugins(pluginIds: readonly string[]): string {
+  return `needs plugin ${pluginIds.join(", ")} for its launch options; it is disabled, removed, or its native code is not trusted.`;
+}
+
+function failWith(message: string): never {
+  throw new Error(message);
 }
 
 function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProviderCli): void {

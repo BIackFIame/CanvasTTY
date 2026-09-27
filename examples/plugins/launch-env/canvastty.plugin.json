@@ -1,0 +1,29 @@
+{
+  "apiVersion": 2,
+  "id": "com.example.launch-env",
+  "name": "Launch Env",
+  "version": "1.0.0",
+  "description": "Minimal launch contributor: when its launcher option is on, the agent starts with an extra environment variable, a file and one argument. Its Profile choices come from the service.",
+  "author": "CanvasTTY contributors",
+  "permissions": ["launch:contribute"],
+  "services": [
+    {
+      "id": "launcher",
+      "title": "Launch env",
+      "description": "Prepares launches of agents started with this plugin's option.",
+      "entry": "services/launcher.mjs",
+      "launch": {
+        "appliesTo": ["claude"],
+        "fields": [
+          { "key": "enabled", "label": "Set CTTY_LAUNCH_EXAMPLE and add --verbose", "kind": "boolean", "default": true },
+          { "key": "greeting", "label": "Value", "kind": "text", "default": "hello", "maxLength": 60 },
+          { "key": "mode", "label": "Mode", "kind": "select", "default": "plain",
+            "options": [{ "value": "plain", "label": "Plain" }, { "value": "loud", "label": "Loud" }] },
+          { "key": "profile", "label": "Profile", "kind": "select", "default": "none", "optionsFrom": "service",
+            "options": [{ "value": "none", "label": "No profile" }] }
+        ]
+      }
+    }
+  ],
+  "contributions": []
+}

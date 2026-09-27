@@ -54,7 +54,8 @@ export function resolveTerminalLaunch(
     : undefined;
   const providerArgs = [
     ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
-    ...agentBrowserArgs,
+    // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
+    ...(provider === "claude" ? mergeClaudeInlineSettings(agentBrowserArgs) : agentBrowserArgs),
     ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {
@@ -226,4 +227,85 @@ function findWindowsNativeCommand(
     }
   }
   return null;
+}
+
+/**
+ * Claude Code 2.1 applies only the last `--settings` it is given (measured with 2.1.281: a hook in an earlier inline
+ * JSON never ran). Every inline JSON value is merged into the first one, in order: hook lists are concatenated per
+ * event, objects such as `env` are merged key by key (later wins), other keys are replaced. A settings file path is
+ * left alone.
+ */
+export function mergeClaudeInlineSettings(args: readonly string[]): string[] {
+  const positions: number[] = [];
+  for (let index = 0; index < args.length - 1; index++) {
+    if (args[index] === "--settings" && parseInlineSettings(args[index + 1]!)) positions.push(index);
+  }
+  if (positions.length < 2) return [...args];
+  const merged: Record<string, unknown> = {};
+  for (const position of positions) {
+    for (const [key, value] of Object.entries(parseInlineSettings(args[position + 1]!)!)) {
+      const current = merged[key];
+      if (key === "hooks" && plainObject(current) && plainObject(value)) {
+        const hooks: Record<string, unknown> = { ...current };
+        for (const [event, list] of Object.entries(value)) {
+          const earlier = hooks[event];
+          hooks[event] = Array.isArray(earlier) && Array.isArray(list) ? [...earlier, ...list] : list;
+        }
+        merged[key] = hooks;
+      } else if (plainObject(current) && plainObject(value)) merged[key] = { ...current, ...value };
+      else merged[key] = value;
+    }
+  }
+  const drop = new Set(positions.slice(1).flatMap((position) => [position, position + 1]));
+  const next = args.filter((_argument, index) => !drop.has(index));
+  next[positions[0]! + 1] = JSON.stringify(merged);
+  return next;
+}
+
+function parseInlineSettings(value: string): Record<string, unknown> | null {
+  if (!value.trimStart().startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return plainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function plainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+// What a plugin launch contributor may never append. A trusted plugin already runs as the
+// user, so this is not a sandbox: it keeps an ordinary launch from being turned into an
+// unattended one behind the profile the person chose, and leaves conversation selection
+// to the core's restore rules. Every provider's bypass flag is listed for every provider.
+const CORE_OWNED_FLAGS = new Set<string>([
+  ...Object.values(DANGEROUS_ARGUMENTS).flat().filter((argument) => argument.startsWith("-")),
+  "--full-auto", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
+  "--continue", "--resume", "--session", "--last", "--conversation", "--fork-session"
+]);
+const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
+  claude: ["-c", "-r"],
+  cursor: ["-c", "-r"],
+  qwen: ["-c", "-r", "-y"],
+  opencode: ["-c", "-s"],
+  codex: ["-a", "-s"]
+};
+const CORE_OWNED_WORDS = /dangerously|approval_policy|sandbox_mode|bypass/i;
+const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
+  codex: ["resume", "fork", "exec"]
+};
+
+/** Claude inline settings keys that decide approvals or the hooks; a plugin's `--settings` may carry e.g. `env` only. */
+const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper"];
+
+export function coreOwnedLaunchArgument(provider: ProviderId, argument: string): boolean {
+  const flag = argument.split("=", 1)[0];
+  const inline = provider === "claude" ? parseInlineSettings(argument) : null;
+  if (inline && CLAUDE_CORE_SETTINGS.some((key) => key in inline)) return true;
+  return CORE_OWNED_FLAGS.has(flag)
+    || Boolean(CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag))
+    || Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument))
+    || CORE_OWNED_WORDS.test(argument);
 }
