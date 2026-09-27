@@ -303,7 +303,7 @@ export class AgentControlGateway {
       throw new ControlError("STALE_SESSION", "Session restarted; its old control grant is no longer valid.");
     }
     const capabilities = controlCapabilities(fresh.provider);
-    const screen = this.redact(viewport(owned.terminal));
+    const screen = viewport(owned.terminal, (text) => this.redact(text));
     if (request.method === "screen") return { sessionId: id, text: screen, revision: hash(screen), outputOffset: owned.outputOffset,
       interaction: capabilities.menus ? codexChoices(screen) : null };
     if ((request.method === "choose" || request.method === "dismiss") && !capabilities.menus) {
@@ -390,11 +390,15 @@ export function codexChoices(screen: string): { revision: string; selected: numb
     options: matches.map((m) => ({ number: Number(m[2]), label: m[3] })) };
 }
 
-function viewport(terminal: import("@xterm/headless").Terminal): string {
+/**
+ * The visible rows, masked with the scrollback above them: a secret the top edge cuts (its head scrolled away) is
+ * masked whole before the rows are selected. Masking can join wrapped rows, so the last `rows` lines are taken after.
+ */
+function viewport(terminal: import("@xterm/headless").Terminal, redact: (text: string) => string): string {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
-  for (let row = buffer.baseY; row < buffer.baseY + terminal.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
-  return lines.join("\n").trim().slice(-24_000);
+  for (let row = 0; row < buffer.baseY + terminal.rows; row++) lines.push(buffer.getLine(row)?.translateToString(true) ?? "");
+  return redact(lines.join("\n")).split("\n").slice(-terminal.rows).join("\n").trim().slice(-24_000);
 }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
 function string(value: unknown, max: number, name: string): string {

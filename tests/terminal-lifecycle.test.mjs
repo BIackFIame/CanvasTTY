@@ -179,7 +179,8 @@ test("an exited PTY can restart in place without recreating its xterm card", asy
 test("failed PTYs preserve their final sanitized output as failure details", async () => {
   const source = await readFile(terminalManagerPath, "utf8");
 
-  assert.match(source, /terminalFailureDetails\(current\.bufferChunks\.slice\(current\.bufferStart\)\.join\(""\)\)/);
+  // Masked whole before the last lines are chosen (a cut inside a secret would leave its tail readable).
+  assert.match(source, /terminalFailureDetails\(this\.redactSecrets\(current\.bufferChunks\.slice\(current\.bufferStart\)\.join\(""\)\)\)/);
   assert.match(source, /current\.metadata\.failureDetails = exitCode === 0/);
 });
 

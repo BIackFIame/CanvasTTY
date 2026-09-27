@@ -1534,7 +1534,7 @@ export class TerminalManager {
       current.metadata.status = exitCode === 0 ? "done" : "failed";
       current.metadata.failureDetails = exitCode === 0
         ? null
-        : this.redactSecrets(terminalFailureDetails(current.bufferChunks.slice(current.bufferStart).join("")));
+        : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
       current.agentBrowser?.cleanup();
       current.agentBrowser = null;
       current.agentRuntime?.cleanup();

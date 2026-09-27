@@ -141,7 +141,8 @@ export class AgentControlService {
     return {
       sessionId: session.id,
       status: session.status,
-      output: this.redact(tail(this.terminals.readBuffer(sessionId).buffer, maxChars))
+      // The whole buffer is masked first: a cut inside a secret would leave a tail no pattern recognizes.
+      output: tail(this.redact(this.terminals.readBuffer(sessionId).buffer), maxChars)
     };
   }
 
@@ -161,7 +162,7 @@ export class AgentControlService {
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
       exitCode: session.exitCode,
-      output: this.redact(tail(buffer, MAX_OBSERVE_CHARS))
+      output: tail(this.redact(buffer), MAX_OBSERVE_CHARS)
     };
   }
 

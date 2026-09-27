@@ -151,3 +151,75 @@ test("the vault hands every value it reads or writes to the registry; agent-read
   assert.equal(observed.includes(value) || observed.includes(secrets.github), false);
   assert.match(observed, /env OPENAI=<redacted:secret>/u);
 });
+
+// A custom secret with no generic token shape: once its head is cut away, nothing but the full value identifies it.
+const PLAIN_SECRET = "purple-otter-marmalade-sings-loudly";
+const fragments = (text) => {
+  const found = [];
+  for (let size = 6; size < PLAIN_SECRET.length; size++) {
+    for (let start = 0; start + size <= PLAIN_SECRET.length; start++) {
+      const piece = PLAIN_SECRET.slice(start, start + size);
+      if (/[a-z]-[a-z]/u.test(piece) && text.includes(piece)) found.push(piece);
+    }
+  }
+  return found;
+};
+
+function cutFixture(t) {
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.custom", [PLAIN_SECRET]);
+  const prints = [];
+  const exits = [];
+  let sessions;
+  const terminals = new TerminalManager((channel, payload) => sessions?.observe(channel, payload),
+    { get: (provider) => ({ state: "available", provider, executable: `/resolved/${provider}`, launcher: "native", environment: {}, checked: [] }), snapshot: () => ({}) },
+    undefined, undefined, true, () => ({ pid: 1, write() {}, resize() {}, kill() {},
+      onData(listener) { prints.push(listener); return { dispose() {} }; },
+      onExit(listener) { exits.push(listener); return { dispose() {} }; } }));
+  t.after(() => terminals.shutdown());
+  terminals.configureRedaction(registry);
+  const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
+  return { terminals, card, print: (text) => prints.forEach((listener) => listener(text)), exit: (code) => exits.forEach((listener) => listener({ exitCode: code })),
+    attach: (value) => { sessions = value; } };
+}
+
+test("observe_agent and get_agent_result mask the whole buffer before cutting the tail: no fragment of a custom secret survives", async (t) => {
+  const f = cutFixture(t);
+  const control = new AgentControlService(f.terminals);
+  // The 300-character observation starts 12 characters before the secret ends.
+  f.print(`${"a".repeat(1_000)}${PLAIN_SECRET}${"b".repeat(288)}`);
+  const observed = control.observe(f.card.id, 300).output;
+  assert.ok(observed.length <= 300, "the bound is kept");
+  assert.deepEqual(fragments(observed), []);
+  // get_agent_result's 8 192-character tail, cut inside the secret the same way.
+  f.print(`${PLAIN_SECRET}${"c".repeat(8_192 - 10)}`);
+  const result = control.result(f.card.id).output;
+  assert.ok(result.length <= 8_192);
+  assert.deepEqual(fragments(result), []);
+  // Wrapped secrets are still masked whole.
+  f.print(`\r\n${PLAIN_SECRET.slice(0, 15)}\r\n${PLAIN_SECRET.slice(15)}\r\n`);
+  assert.deepEqual(fragments(control.observe(f.card.id, 8_192).output), []);
+});
+
+test("plugin screen text and failure details mask the whole buffer before cutting", async (t) => {
+  const { PluginSessions } = await import("../src/main/services/PluginSessions.ts");
+  const f = cutFixture(t);
+  const screens = [];
+  const sessions = new PluginSessions({ terminals: f.terminals, notify: (_p, _s, _m, event) => { if (event.screen !== undefined) screens.push(event.screen); return true; } });
+  f.attach(sessions);
+  sessions.handle("p.reader", "svc", "sessions.subscribe", {}, ["sessions:events", "sessions:read-screen"]);
+  // The 4 000-character screen starts 12 characters before the secret ends.
+  f.print(`${PLAIN_SECRET}${"d".repeat(4_000 - 12)}`);
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "working" });
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "idle" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(screens.length > 0 && screens.every((screen) => screen.length <= 4_000));
+  assert.deepEqual(fragments(screens.join("\n")), []);
+  // Failure details keep the last 8 000 characters of the output: cut inside the secret too.
+  f.print(`\r\n${"e".repeat(50)}${PLAIN_SECRET}${"f".repeat(8_000 - 1 - 12)}`);
+  f.exit(3);
+  const failed = f.terminals.list().find((session) => session.id === f.card.id);
+  assert.equal(failed.status, "failed");
+  assert.ok(failed.failureDetails.length <= 8_000);
+  assert.deepEqual(fragments(failed.failureDetails), []);
+});

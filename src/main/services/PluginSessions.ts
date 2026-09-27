@@ -203,7 +203,8 @@ export class PluginSessions {
   private screen(sessionId: string): string {
     try {
       const { buffer } = this.deps.terminals.readBuffer(sessionId);
-      return this.deps.terminals.redactSecrets(plainText(buffer).slice(-MAX_SCREEN_CHARS));
+      // Masked whole before the cut, so a secret the cut splits leaves no readable tail.
+      return this.deps.terminals.redactSecrets(plainText(buffer)).slice(-MAX_SCREEN_CHARS);
     } catch {
       return "";
     }

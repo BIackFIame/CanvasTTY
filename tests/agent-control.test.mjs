@@ -539,3 +539,26 @@ test("a parent cannot exceed the subagent fan-out cap", () => {
   );
   terminals.disposeAll();
 });
+
+test("the control CLI screen masks a custom secret the viewport's top edge cuts", localSocket, async (t) => {
+  const { SecretRedactionRegistry } = await import("../src/main/services/safety/SecretRedaction.ts");
+  const secret = "purple-otter-marmalade-sings-loudly";
+  const f = await fixture(t);
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.custom", [secret]);
+  f.terminals.configureRedaction(registry);
+  const { session } = await f.create();
+  const { cols, rows } = f.terminals.geometry(session.id);
+  // The secret wraps: its head ends one row, its tail starts the next; that next row is the viewport's first.
+  const pty = f.calls.at(-1).pty;
+  pty.data(`${"a".repeat(cols - 10)}${secret}\r\n${Array.from({ length: rows - 1 }, (_value, index) => `line ${index}`).join("\r\n")}`);
+  let text = "";
+  for (let i = 0; i < 50 && !text.includes(`line ${rows - 2}`); i++) {
+    await delay(10);
+    ({ text } = await f.request("screen", { sessionId: session.id }));
+  }
+  assert.ok(text.includes(`line ${rows - 2}`) && text.split("\n").length <= rows, "the screen is the current viewport");
+  assert.equal(text.includes(secret.slice(10)), false, "the tail on the top row is masked");
+  assert.equal(/marmalade|loudly/u.test(text), false);
+  assert.match(text, /<redacted:secret>/u, "masked where it stood, as one value");
+});
