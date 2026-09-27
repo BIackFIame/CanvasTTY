@@ -57,7 +57,7 @@ interface TerminalPort {
   } | null;
   setPluginOwner(id: string, pluginId: string): void;
   readBuffer(id: string): TerminalBufferSnapshot;
-  inputChecked(id: string, text: string): boolean;
+  deliverInput(id: string, text: string): Promise<{ delivered: boolean }>;
   dispose(id: string, options?: { keepEnvironmentData?: boolean }): void;
   redactSecrets(text: string): string;
 }
@@ -243,13 +243,15 @@ export class PluginSessions {
     return { sessionId: created.id };
   }
 
-  private send(pluginId: string, values: Record<string, unknown>): { sessionId: string; sent: boolean } {
+  /** `sent` is true once the text reached the card's agent (after a launch its plugins prepared has started). */
+  private send(pluginId: string, values: Record<string, unknown>): Promise<{ sessionId: string; sent: boolean }> {
     const sessionId = this.requireOwned(pluginId, values.sessionId);
     if (typeof values.text !== "string" || values.text.length === 0 || values.text.length > MAX_SEND_CHARS) {
       throw new Error(`text must be 1 to ${MAX_SEND_CHARS} characters.`);
     }
     const submit = values.submit === undefined ? true : values.submit === true;
-    return { sessionId, sent: this.deps.terminals.inputChecked(sessionId, submit ? `${values.text}\r` : values.text) };
+    return this.deps.terminals.deliverInput(sessionId, submit ? `${values.text}\r` : values.text)
+      .then((delivery) => ({ sessionId, sent: delivery.delivered }));
   }
 
   private stop(pluginId: string, values: Record<string, unknown>): { sessionId: string; stopped: true } {

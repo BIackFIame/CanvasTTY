@@ -1,7 +1,7 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { ProviderId, SessionRole } from "../../../shared/contracts.ts";
-import type { AgentControlService, SpawnAgentRequest } from "../AgentControlService.ts";
+import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
 import { ORCHESTRATION_TOOL_DEFINITIONS, isPluginOrchestrationTool } from "../../../agent-browser/orchestration-catalog.mjs";
 import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
@@ -40,9 +40,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       }
       switch (request.tool) {
         case "spawn_agent":
-          return this.spawn(sessionId, request.arguments);
+          return await this.spawn(sessionId, request.arguments);
         case "send_to_agent":
-          return this.send(sessionId, request.arguments);
+          return await this.send(sessionId, request.arguments);
         case "observe_agent":
           return this.observe(sessionId, request.arguments);
         case "get_agent_result":
@@ -56,6 +56,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       }
     } catch (error) {
       if (error && typeof error === "object" && "bridgeError" in error) throw error;
+      // The launch was refused, cancelled or superseded: retrying the same call would not deliver it either.
+      if (error instanceof PromptNotDeliveredError) throw orchestrationBridgeError("INVALID_REQUEST", error.message, false);
       throw orchestrationBridgeError(
         "INTERNAL_ERROR",
         error instanceof Error ? error.message : "Orchestration command failed.",
@@ -80,8 +82,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
-  private spawn(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {
-    const created = this.control.spawn({
+  private async spawn(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
@@ -97,9 +99,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     };
   }
 
-  private send(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {
+  private async send(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.requireOwned(orchestratorId, args.sessionId as string);
-    this.control.send(
+    await this.control.send(
       args.sessionId as string,
       args.prompt as string,
       args.submit === undefined ? true : Boolean(args.submit)

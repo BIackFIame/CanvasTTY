@@ -110,6 +110,10 @@ interface ManagedSession {
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
+  /** Bumped by every launch the person or the app asks for (create, restart, restore); input waits for one. */
+  launchEpoch: number;
+  /** Input waiting for this launch to start (deliverInput): woken whenever the launch moves on. */
+  launchWaiters: Set<() => void>;
   /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
   restored?: boolean;
   /** What the CLI's own title last showed (Claude: spinner working, «✳» no turn running). */
@@ -139,6 +143,11 @@ interface PlannedSpawn {
 }
 /** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
 const QUIT_RELEASE_TIMEOUT_MS = 3_000;
+/** Longer than every plugin step of a launch together (prepare, resume, launch options, wrap). */
+export const LAUNCH_INPUT_WAIT_MS = 60_000;
+
+/** What happened to input handed to deliverInput. */
+export type InputDelivery = { delivered: true } | { delivered: false; reason: string };
 
 type LaunchContribution = Extract<PreparedLaunch, { ok: true }>;
 
@@ -469,7 +478,9 @@ export class TerminalManager {
       launchToken: 0,
       launchCleanup: null,
       restoringLaunch: false,
-      environmentReady: false
+      environmentReady: false,
+      launchEpoch: 0,
+      launchWaiters: new Set()
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
@@ -499,6 +510,9 @@ export class TerminalManager {
     if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
     delete session.extras.heldState;
     delete session.metadata.restoreNote;
+    // Input queued for the launch that ended never reaches this one.
+    session.launchEpoch += 1;
+    this.wakeLaunchWaiters(session);
     let resume: ResumeRequest = null;
     if (options.resume === true && session.metadata.provider !== "terminal") {
       const peers = [...this.sessions.values()].filter((candidate) => (
@@ -595,6 +609,58 @@ export class TerminalManager {
 
   input(id: string, data: string): void {
     this.inputChecked(id, data);
+  }
+
+  /** The card's launch waits for its plugins (or its measured grid): nothing can be written to it yet. */
+  launchPending(id: string): boolean {
+    const session = this.sessions.get(id);
+    return Boolean(session && session.metadata.exitCode === null && !session.process);
+  }
+
+  /**
+   * The one delivery rule for text another agent, a plugin or a controller sends to a card (spawn_agent's first
+   * prompt, send_to_agent, plugin sessions.send). A running card gets it at once. A card whose launch plugins are
+   * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
+   * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
+   * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
+   * it never reaches a later launch of the card.
+   */
+  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS): Promise<InputDelivery> {
+    const session = this.sessions.get(id);
+    if (!session) return { delivered: false, reason: "The session does not exist." };
+    const epoch = session.launchEpoch;
+    const deadline = Date.now() + waitMs;
+    const waiting = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
+      && session.metadata.exitCode === null && !session.process;
+    while (waiting()) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return { delivered: false, reason: `The session did not start within ${Math.round(waitMs / 1000)} s.` };
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(wake, remaining);
+        function wake(): void {
+          clearTimeout(timer);
+          session!.launchWaiters.delete(wake);
+          resolve();
+        }
+        session.launchWaiters.add(wake);
+      });
+    }
+    if (this.sessions.get(id) !== session) return { delivered: false, reason: "The session was closed before it started." };
+    if (session.launchEpoch !== epoch) return { delivered: false, reason: "The session was restarted before it started." };
+    if (session.metadata.exitCode !== null) {
+      return { delivered: false, reason: session.metadata.failureDetails
+        ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
+        : "The session has already exited." };
+    }
+    return this.inputChecked(id, data)
+      ? { delivered: true }
+      : { delivered: false, reason: "The terminal no longer accepts input." };
+  }
+
+  private wakeLaunchWaiters(session: ManagedSession): void {
+    for (const wake of [...session.launchWaiters]) wake();
   }
 
   inputChecked(id: string, data: string): boolean {
@@ -768,6 +834,7 @@ export class TerminalManager {
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.wakeLaunchWaiters(session);
     this.hiddenSinceOffset.delete(id);
     this.launchContexts.delete(id);
     this.redaction.clear(`session:${id}`);
@@ -950,7 +1017,9 @@ export class TerminalManager {
       launchCleanup: null,
       restoringLaunch: awaitMeasuredGrid,
       environmentReady: resumed?.ok === true,
-      restored: true
+      restored: true,
+      launchEpoch: 0,
+      launchWaiters: new Set()
     };
     this.sessions.set(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
@@ -1035,6 +1104,7 @@ export class TerminalManager {
       session.metadata.failureDetails = error instanceof Error ? error.message : String(error);
     }
     this.emitSession(session.metadata);
+    this.wakeLaunchWaiters(session);
   }
 
   private spawnProcess(
@@ -1260,7 +1330,8 @@ export class TerminalManager {
         }
         this.emitSession(metadata, outcome === "failed" ? failureOrigin : null);
         this.schedulePersistence();
-      });
+      })
+      .finally(() => this.wakeLaunchWaiters(session));
   }
 
   private async runContributedLaunch(

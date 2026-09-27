@@ -333,7 +333,7 @@ test("plugins control only the sessions they created (create, send, stop), like 
   assert.equal(terminals.listMetadata().find((item) => item.id === sessionId).role, "agent");
   // ownedOnly: only its own card's events, marked owned.
   assert.deepEqual(notices.map((notice) => [notice.params.type, notice.params.session.id, notice.params.owned]), [["created", sessionId, true]]);
-  assert.deepEqual(sessions.handle("p1", "svc", "sessions.send", { sessionId, text: "ls" }, launch), { sessionId, sent: true });
+  assert.deepEqual(await sessions.handle("p1", "svc", "sessions.send", { sessionId, text: "ls" }, launch), { sessionId, sent: true });
   assert.deepEqual(calls[0].writes, ["ls\r"]);
   for (const id of [foreign.id, "missing"]) {
     assert.throws(() => sessions.handle("p1", "svc", "sessions.send", { sessionId: id, text: "rm -rf ." }, launch), /No session this plugin started/u);
@@ -380,7 +380,7 @@ test("a plugin keeps control of the cards it started after a restore; the owner 
   const theirs = second.terminals.listMetadata().find((item) => item.title === "Person's");
   assert.equal(mine.id, sessionId);
   assert.deepEqual(second.notices.map((event) => [event.type, event.session.id, event.owned]), [["restored", sessionId, true]]);
-  assert.deepEqual(second.sessions.handle("owner.plugin", "svc", "sessions.send", { sessionId, text: "ls" }, launch), { sessionId, sent: true });
+  assert.deepEqual(await second.sessions.handle("owner.plugin", "svc", "sessions.send", { sessionId, text: "ls" }, launch), { sessionId, sent: true });
   assert.throws(() => second.sessions.handle("other.plugin", "svc", "sessions.send", { sessionId, text: "ls" }, launch), /No session this plugin started/u);
   assert.throws(() => second.sessions.handle("owner.plugin", "svc", "sessions.stop", { sessionId: theirs.id }, launch), /No session this plugin started/u);
   second.sessions.handle("owner.plugin", "svc", "sessions.stop", { sessionId }, launch);

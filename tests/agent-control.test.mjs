@@ -413,7 +413,7 @@ function serviceFixture() {
   return { calls, terminals, control };
 }
 
-test("spawn creates a subagent next to its parent and delivers the initial prompt", () => {
+test("spawn creates a subagent next to its parent and delivers the initial prompt", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -421,7 +421,7 @@ test("spawn creates a subagent next to its parent and delivers the initial promp
     profile: "normal",
     position: { x: 100, y: 100 }
   });
-  const child = control.spawn({
+  const child = await control.spawn({
     parentSessionId: parent.id,
     provider: "cursor",
     cwd: process.cwd(),
@@ -463,7 +463,7 @@ test("children lists only that parent's subagents in spawn order", () => {
   terminals.disposeAll();
 });
 
-test("send appends submit unless told otherwise and rejects exited sessions", () => {
+test("send appends submit unless told otherwise and rejects exited sessions", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -471,9 +471,9 @@ test("send appends submit unless told otherwise and rejects exited sessions", ()
     profile: "normal",
     position: { x: 0, y: 0 }
   });
-  const child = control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: process.cwd() });
-  control.send(child.id, "run the tests");
-  control.send(child.id, " --quiet", false);
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "qwen", cwd: process.cwd() });
+  await control.send(child.id, "run the tests");
+  await control.send(child.id, " --quiet", false);
 
   const sent = [...writes.values()].flat().join("");
   assert.match(sent, /run the tests\r --quiet/u);
@@ -498,7 +498,7 @@ test("observe returns a capped terminal tail and result reflects exit state", ()
   terminals.disposeAll();
 });
 
-test("cancel disposes the subagent and plain terminals are not agents", () => {
+test("cancel disposes the subagent and plain terminals are not agents", async () => {
   const { terminals, control } = serviceFixture();
   const parent = terminals.create({
     provider: "codex",
@@ -512,7 +512,7 @@ test("cancel disposes the subagent and plain terminals are not agents", () => {
     profile: "normal",
     position: { x: 0, y: 0 }
   });
-  const child = control.spawn({ parentSessionId: parent.id, provider: "pi", cwd: process.cwd() });
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "pi", cwd: process.cwd() });
   control.cancel(child.id);
   assert.equal(terminals.list().some((session) => session.id === child.id), false);
 

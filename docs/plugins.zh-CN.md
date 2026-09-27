@@ -173,7 +173,7 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 
 带 `"optionsFrom": "service"` 的 `select` 还会列出服务提供的选项，例如插件自己的账户。启动器打开时，CanvasTTY 向服务发送 `canvastty.launch.options` `{ provider, fields: [键] }`，最多等待 3 秒；回答 `{ "<键>": [{ value, label }] }` 在声明的选项之后为每个字段追加最多 64 个选项（声明的选项仍然必需，服务未回答时启动器只显示它们）。由于此类列表可能在卡片保存后变化，其值接受为不含控制字符、最多 200 个字符的任意文本，`canvastty.launch.prepare` 必须检查该值，并拒绝已不存在的选项。
 
-编排器可以把同样的值作为 `launchOptions`（`{ "<pluginId>": { "<键>": 值 } }`）传给 `spawn_agent`，校验方式与启动器相同；插件工具可以给出这些值（例如它选定的账户）。
+编排器可以把同样的值作为 `launchOptions`（`{ "<pluginId>": { "<键>": 值 } }`）传给 `spawn_agent`，校验方式与启动器相同；插件工具可以给出这些值（例如它选定的账户）。当子智能体的启动在等待插件（启动选项、启动策略、环境）时，`spawn_agent` 只在其 `prompt` 送达已启动的智能体后才应答，`send_to_agent` 同样等待。启动被拒绝、失败或取消时，调用以原因和会话 id 失败（卡片保留）；文本被丢弃，不会留给之后的重启。对这样的卡片，控制 CLI 应答 `NOT_READY`。
 
 智能体启动前，宿主向服务发送 `canvastty.launch.prepare` 请求（界面无法发送）：
 
@@ -336,7 +336,7 @@ interface PluginSessionEvent {
 | 请求 | 条件 | 效果 |
 |:--|:--|:--|
 | `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | 通过常规启动流程启动一张 `agent` 卡片（包括启动选项和环境；拒绝原因显示在卡片上）。卡片可见且从不抢占焦点。每个插件最多 16 张。回答 `{ sessionId }` |
-| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | 向本插件启动的卡片输入文本（除非 `submit: false`，否则带回车） |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | 向本插件启动的卡片输入文本（除非 `submit: false`，否则带回车）。启动仍由插件准备中的卡片在启动开始后收到文本；启动未成功时 `sent` 为 false（文本被丢弃） |
 | `sessions.stop` `{ sessionId }` | `sessions:control` | 关闭本插件启动的卡片；保留其环境数据 |
 
 他人的或未知的 id 得到相同的错误，因此插件无法探测其他卡片。没有删除操作，也没有读取屏幕的控制调用。

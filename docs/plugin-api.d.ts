@@ -477,6 +477,7 @@ export interface CanvasTTYServiceHostApi {
     environment?: { pluginId: string; kind: string; options?: Record<string, boolean | string> };
   }): { sessionId: string };
   /** Needs `sessions:control`; only cards this plugin created. Enter is added unless `submit: false`. */
+  /** Waits until a launch its plugins prepare has started; `sent` is false (and the text dropped) when it did not start. */
   "sessions.send"(params: { sessionId: string; text: string; submit?: boolean }): { sessionId: string; sent: boolean };
   /** Needs `sessions:control`; only cards this plugin created. Closes the card, keeps its environment data. */
   "sessions.stop"(params: { sessionId: string }): { sessionId: string; stopped: true };

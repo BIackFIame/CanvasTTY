@@ -24,6 +24,8 @@ interface TerminalPort {
   listMetadata(): SessionMetadata[];
   readBuffer(id: string): TerminalBufferSnapshot;
   inputChecked(id: string, text: string): boolean;
+  /** The launch still waits for its plugins: the card cannot take input yet. */
+  launchPending?(id: string): boolean;
   geometry(id: string): { cols: number; rows: number };
   /** Masks plugin launch secrets in text handed to a controller. */
   redactSecrets?(text: string): string;
@@ -306,6 +308,10 @@ export class AgentControlGateway {
       interaction: capabilities.menus ? codexChoices(screen) : null };
     if ((request.method === "choose" || request.method === "dismiss") && !capabilities.menus) {
       throw new ControlError("NOT_SUPPORTED", `Menus are parsed for Codex only; resolve ${fresh.provider} prompts from the desktop and treat screen as the only evidence.`);
+    }
+    // Its launch plugins are still preparing it: nothing can be written yet, and nothing is queued.
+    if (this.options.terminals.launchPending?.(id)) {
+      throw new ControlError("NOT_READY", "The session is still starting (its launch is being prepared); nothing was written. Check status again.");
     }
     if (this.busy.has(id)) throw new ControlError("BUSY", "A control operation is pending for this session.");
     this.busy.add(id);

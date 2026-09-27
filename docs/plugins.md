@@ -194,7 +194,7 @@ Up to 8 fields; `kind` is `boolean`, `select` (1–16 options) or `text` (at mos
 
 A `select` with `"optionsFrom": "service"` also lists choices the service offers, such as its own accounts. When the launcher opens, CanvasTTY asks the service `canvastty.launch.options` `{ provider, fields: [keys] }` and waits at most 3 s; the answer `{ "<key>": [{ value, label }] }` adds up to 64 choices per field after the declared ones (which stay required and are all the launcher shows when the service does not answer). Because such a list can change after a card was saved, its value is accepted as any text up to 200 characters without control characters, and `canvastty.launch.prepare` must check it and refuse a value it no longer knows.
 
-Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked).
+Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked). While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
 
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
@@ -357,7 +357,7 @@ Control follows the agent-control gateway's model: the service is one controller
 | Request | Gate | Effect |
 |:--|:--|:--|
 | `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }` |
-| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started |
+| `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started. A card whose launch its plugins still prepare gets it once that launch started; `sent` is false when the launch did not start (the text is dropped) |
 | `sessions.stop` `{ sessionId }` | `sessions:control` | Closes a card this plugin started; its environment data is kept |
 
 A foreign or unknown id gets the same error, so a plugin cannot probe other cards. There is no delete and no screen-reading control call.
