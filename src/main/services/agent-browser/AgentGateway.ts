@@ -1,5 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -31,6 +30,15 @@ import {
   type AgentGatewaySocket,
   type WindowsPipeHostTransportOptions
 } from "./WindowsPipeHostTransport.ts";
+import {
+  MAX_UNIX_SOCKET_PATH_BYTES,
+  closeServer,
+  listenOnEndpoint,
+  makePrivateDirectory,
+  removeEndpoint,
+  tokenDigest,
+  tokenMatches
+} from "../gatewaySocket.ts";
 
 const DEFAULT_CAPABILITY_TTL_MS = 60_000;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
@@ -205,15 +213,14 @@ export class AgentGateway {
     this.ownedRuntimeDirectory = ownedRuntimeDirectory;
 
     try {
-      await listen(server, endpoint, this.platform);
-      await chmod(endpoint, 0o600);
+      await listenOnEndpoint(server, endpoint, this.platform);
     } catch (error) {
       for (const state of [...this.acceptedConnections]) this.disconnect(state, "closed");
       await closeServer(server);
       this.server = null;
       this.endpoint = null;
       this.ownedRuntimeDirectory = null;
-      await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true });
       throw error;
     }
 
@@ -259,7 +266,7 @@ export class AgentGateway {
     };
     this.leases.set(connectionId, {
       actor,
-      tokenDigest: digest(capabilityToken),
+      tokenDigest: tokenDigest(capabilityToken),
       reconnectToken: null,
       reconnectTokenDigest: null,
       expiresAt: this.now() + this.capabilityTtlMs,
@@ -311,7 +318,7 @@ export class AgentGateway {
     this.ownedRuntimeDirectory = null;
     if (server) await closeServer(server);
     if (windowsTransport) await windowsTransport.close();
-    if (endpoint) await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+    if (endpoint) await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: this.platform !== "win32" });
   }
 
   private handleTransportFatal(transport: WindowsPipeHostTransport): void {
@@ -482,13 +489,8 @@ export class AgentGateway {
       && lease.actor.connectionId === message.connectionId
       && lease.actor.terminalSessionId === message.terminalSessionId
       && lease.actor.provider === message.provider;
-    const suppliedDigest = digest(message.capabilityToken);
-    const initialTokenMatches = suppliedDigest.length === lease.tokenDigest.length
-      && timingSafeEqual(suppliedDigest, lease.tokenDigest);
-    const reconnectTokenMatches = lease.reconnectTokenDigest !== null
-      && suppliedDigest.length === lease.reconnectTokenDigest.length
-      && timingSafeEqual(suppliedDigest, lease.reconnectTokenDigest);
-    suppliedDigest.fill(0);
+    const initialTokenMatches = tokenMatches(message.capabilityToken, lease.tokenDigest);
+    const reconnectTokenMatches = tokenMatches(message.capabilityToken, lease.reconnectTokenDigest);
     if (!identityMatches) {
       throw bridgeError("AUTH_INVALID", "Agent browser capability is invalid.", false);
     }
@@ -499,7 +501,7 @@ export class AgentGateway {
       }
       lease.used = true;
       lease.reconnectToken = randomBytes(32).toString("base64url");
-      lease.reconnectTokenDigest = digest(lease.reconnectToken);
+      lease.reconnectTokenDigest = tokenDigest(lease.reconnectToken);
     } else if (initialTokenMatches) {
       if (!activeConnections || activeConnections.size === 0) {
         throw bridgeError("AUTH_REPLAYED", "Agent browser capability was already used.", false);
@@ -670,10 +672,6 @@ export class AgentGateway {
   }
 }
 
-function digest(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
 function clearLeaseSecrets(lease: CapabilityLease): void {
   lease.tokenDigest.fill(0);
   lease.reconnectTokenDigest?.fill(0);
@@ -686,10 +684,9 @@ async function createEndpoint(
 ): Promise<{ endpoint: string; ownedRuntimeDirectory: string | null }> {
   const suffix = randomBytes(8).toString("hex");
   if (requestedRuntimeDirectory) {
-    await mkdir(requestedRuntimeDirectory, { recursive: true, mode: 0o700 });
-    await chmod(requestedRuntimeDirectory, 0o700);
+    await makePrivateDirectory(requestedRuntimeDirectory, { recursive: true });
     const endpoint = join(requestedRuntimeDirectory, `g-${randomBytes(2).toString("hex")}.sock`);
-    if (Buffer.byteLength(endpoint, "utf8") > 100) {
+    if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
       throw new Error("Agent browser runtime directory is too long for a Unix domain socket.");
     }
     return { endpoint, ownedRuntimeDirectory: null };
@@ -697,66 +694,10 @@ async function createEndpoint(
 
   let runtimeDirectory = join(tmpdir(), `ctty-${process.getuid?.() ?? "user"}-${suffix}`);
   let endpoint = join(runtimeDirectory, "gateway.sock");
-  if (Buffer.byteLength(endpoint, "utf8") > 100) {
+  if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
     runtimeDirectory = join("/tmp", `ctty-${process.getuid?.() ?? "user"}-${suffix}`);
     endpoint = join(runtimeDirectory, "gateway.sock");
   }
-  await mkdir(runtimeDirectory, { mode: 0o700 });
-  await chmod(runtimeDirectory, 0o700);
+  await makePrivateDirectory(runtimeDirectory);
   return { endpoint, ownedRuntimeDirectory: runtimeDirectory };
-}
-
-function listen(server: Server, endpoint: string, platform: NodeJS.Platform): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    if (platform === "win32") {
-      server.listen({ path: endpoint, readableAll: false, writableAll: false });
-    } else {
-      server.listen(endpoint);
-    }
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve) => {
-    if (!server.listening) {
-      resolve();
-      return;
-    }
-    server.close(() => resolve());
-  });
-}
-
-async function cleanupEndpoint(
-  endpoint: string,
-  ownedRuntimeDirectory: string | null,
-  platform: NodeJS.Platform
-): Promise<void> {
-  if (platform !== "win32") {
-    try {
-      await unlink(endpoint);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-  }
-  if (ownedRuntimeDirectory) {
-    try {
-      await rmdir(ownedRuntimeDirectory);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-  }
-}
-
-function isMissing(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }

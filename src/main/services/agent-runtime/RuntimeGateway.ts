@@ -1,5 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server as HttpServer, ServerResponse } from "node:http";
 import { createServer } from "node:net";
@@ -25,6 +24,15 @@ import {
   type AgentGatewaySocket,
   type WindowsPipeHostTransportOptions
 } from "../agent-browser/WindowsPipeHostTransport.ts";
+import {
+  MAX_UNIX_SOCKET_PATH_BYTES,
+  closeServer,
+  listenOnEndpoint,
+  makePrivateDirectory,
+  removeEndpoint,
+  tokenDigest,
+  tokenMatches
+} from "../gatewaySocket.ts";
 
 const AGENT_PROVIDERS = new Set<ProviderId>([
   "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
@@ -229,8 +237,7 @@ export class RuntimeGateway {
     this.endpoint = created.endpoint;
     this.ownedRuntimeDirectory = created.ownedRuntimeDirectory;
     try {
-      await listen(server, created.endpoint);
-      await chmod(created.endpoint, 0o600);
+      await listenOnEndpoint(server, created.endpoint, this.platform);
       if (this.httpHooksRequested) await this.startHttp();
       return created.endpoint;
     } catch (error) {
@@ -238,7 +245,7 @@ export class RuntimeGateway {
       this.server = null;
       this.endpoint = null;
       this.ownedRuntimeDirectory = null;
-      await cleanupEndpoint(created.endpoint, created.ownedRuntimeDirectory, this.platform);
+      await removeEndpoint(created.endpoint, created.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
       throw error;
     }
   }
@@ -267,7 +274,7 @@ export class RuntimeGateway {
     this.leases.set(terminalSessionId, {
       terminalSessionId,
       provider,
-      tokenDigest: digest(capabilityToken),
+      tokenDigest: tokenDigest(capabilityToken),
       activeTurnId: null,
       latest: null,
       captureResult: captureResultOrGrantExpiresAt === true,
@@ -339,7 +346,7 @@ export class RuntimeGateway {
     this.httpPort = null;
     if (httpServer) {
       httpServer.closeAllConnections();
-      await closeServer(httpServer as unknown as Server);
+      await closeServer(httpServer);
     }
     const server = this.server;
     const transport = this.windowsTransport;
@@ -351,7 +358,7 @@ export class RuntimeGateway {
     this.ownedRuntimeDirectory = null;
     if (server) await closeServer(server);
     if (transport) await transport.close();
-    if (endpoint) await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+    if (endpoint) await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: this.platform !== "win32", ignoreErrors: true });
   }
 
   private accept(socket: AgentGatewaySocket): void {
@@ -423,11 +430,7 @@ export class RuntimeGateway {
     }
     const lease = this.leases.get(value.terminalSessionId);
     if (!lease || lease.provider !== value.provider) return false;
-    const supplied = digest(value.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length
-      && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid) return false;
+    if (!tokenMatches(value.capabilityToken, lease.tokenDigest)) return false;
     if (lease.answerCaptureGrantExpiresAt === null) return false;
     if (lease.answerCaptureGrantExpiresAt <= this.now()) {
       lease.answerCaptureGrantExpiresAt = null;
@@ -445,7 +448,7 @@ export class RuntimeGateway {
     const message = parseLifecycleMessage(value);
     const lease = this.leases.get(message.terminalSessionId);
     if (!lease || lease.provider !== message.provider) throw new Error("Runtime capability is invalid.");
-    if (!tokenMatches(lease, message.capabilityToken)) throw new Error("Runtime capability is invalid.");
+    if (!tokenMatches(message.capabilityToken, lease.tokenDigest)) throw new Error("Runtime capability is invalid.");
     return this.applyLifecycle(lease, message);
   }
 
@@ -563,7 +566,7 @@ export class RuntimeGateway {
       this.httpUnusable = true;
       return finish(401);
     }
-    if (capability.length < 32 || !tokenMatches(lease, capability)) return finish(401);
+    if (capability.length < 32 || !tokenMatches(capability, lease.tokenDigest)) return finish(401);
     const declared = Number(request.headers["content-length"]);
     let size = 0;
     let oversized = Number.isFinite(declared) && declared > MAX_HOOK_INPUT_BYTES;
@@ -624,10 +627,7 @@ export class RuntimeGateway {
     }
     const lease = this.leases.get(request.terminalSessionId);
     if (!lease || lease.provider !== request.provider) return close();
-    const supplied = digest(request.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid || !lease.decisions) return close();
+    if (!tokenMatches(request.capabilityToken, lease.tokenDigest) || !lease.decisions) return close();
     const { terminalSessionId, capabilityToken: _token, ...forwarded } = request;
     let answered = false;
     const answer = (decision: RuntimePermissionDecision, unavailable = false): void => {
@@ -679,13 +679,6 @@ export class RuntimeGateway {
 interface Delivery {
   terminalSessionId: string;
   signal: RuntimeLifecycleSignal;
-}
-
-function tokenMatches(lease: RuntimeLease, token: string): boolean {
-  const supplied = digest(token);
-  const valid = supplied.length === lease.tokenDigest.length && timingSafeEqual(supplied, lease.tokenDigest);
-  supplied.fill(0);
-  return valid;
 }
 
 /**
@@ -855,10 +848,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function digest(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
 async function createEndpoint(requestedRuntimeDirectory?: string): Promise<{
   endpoint: string;
   ownedRuntimeDirectory: string | null;
@@ -866,46 +855,13 @@ async function createEndpoint(requestedRuntimeDirectory?: string): Promise<{
   const suffix = randomBytes(8).toString("hex");
   const runtimeDirectory = requestedRuntimeDirectory
     ?? join(tmpdir(), `ctty-runtime-${process.getuid?.() ?? "user"}-${suffix}`);
-  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  await chmod(runtimeDirectory, 0o700);
+  await makePrivateDirectory(runtimeDirectory, { recursive: true });
   const endpoint = join(runtimeDirectory, `r-${randomBytes(2).toString("hex")}.sock`);
-  if (Buffer.byteLength(endpoint, "utf8") > 100) {
+  if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
     throw new Error("Agent runtime directory is too long for a Unix domain socket.");
   }
   return {
     endpoint,
     ownedRuntimeDirectory: requestedRuntimeDirectory ? null : runtimeDirectory
   };
-}
-
-function listen(server: Server, endpoint: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve) => {
-    if (!server.listening) return resolve();
-    server.close(() => resolve());
-  });
-}
-
-async function cleanupEndpoint(
-  endpoint: string,
-  ownedRuntimeDirectory: string | null,
-  platform: NodeJS.Platform
-): Promise<void> {
-  if (platform !== "win32") await unlink(endpoint).catch(() => undefined);
-  if (ownedRuntimeDirectory) await rmdir(ownedRuntimeDirectory).catch(() => undefined);
 }

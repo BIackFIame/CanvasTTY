@@ -1,10 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { lazyRequire } from "../../lazyRequire.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
+import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
 import type { CreateSessionRequest, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
@@ -92,6 +93,7 @@ export class ControlError extends Error {
 export class AgentControlGateway {
   private readonly options: AgentControlGatewayOptions;
   private readonly token = randomBytes(32).toString("hex");
+  private readonly tokenHash = tokenDigest(this.token);
   private readonly instanceId = randomBytes(16).toString("hex");
   private readonly sessions = new Map<string, OwnedSession>();
   private readonly sockets = new Set<AgentGatewaySocket>();
@@ -143,14 +145,10 @@ export class AgentControlGateway {
     this.socketDirectory = directory;
     await chmod(directory, 0o700);
     const endpoint = join(directory, "c.sock");
-    if (Buffer.byteLength(endpoint) > 100) throw new Error("Agent control socket path is too long.");
+    if (Buffer.byteLength(endpoint) > MAX_UNIX_SOCKET_PATH_BYTES) throw new Error("Agent control socket path is too long.");
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject);
-      server.listen(endpoint, () => { server.off("error", reject); resolve(); });
-    });
-    await chmod(endpoint, 0o600);
+    await listenOnEndpoint(server, endpoint, platform);
     return endpoint;
   }
 
@@ -187,7 +185,7 @@ export class AgentControlGateway {
     this.windows = null;
     this.socketDirectory = null;
     if (transport) await transport.close().catch(() => undefined);
-    if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server) await closeServer(server);
     if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
   }
 
@@ -311,7 +309,7 @@ export class AgentControlGateway {
       || typeof value.controller !== "string" || !SECRET.test(value.controller)
       || !["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss"].includes(String(value.method))
       || !record(value.params)) throw new Error("Invalid envelope");
-    if (!timingSafeEqual(Buffer.from(value.token), Buffer.from(this.token))) throw new Error("Invalid credential");
+    if (!tokenMatches(value.token, this.tokenHash)) throw new Error("Invalid credential");
     return value as unknown as ControlRequest;
   }
 
