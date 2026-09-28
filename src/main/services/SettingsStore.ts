@@ -235,11 +235,17 @@ export class SettingsStore {
 
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
     this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
+    // Filter in queue order: a snapshot taken while an update() is still
+    // writing lacks that update, and persisting it afterwards dropped the
+    // update from the file (it stayed only in memory).
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (!providerSelectionsChanged(this.value, filtered)) return;
+      await this.persist(filtered);
       this.value = filtered;
-      await this.queuePersist();
-    }
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 

@@ -958,3 +958,21 @@ test("drops overlapping Home placements and always preserves a Settings entry po
 
   assert.deepEqual(layout.map((item) => item.widgetId), ["core.settings"]);
 });
+
+test("a provider recheck during a settings update does not write the settings without the update", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-settings-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SettingsStore(root, "en");
+  await store.load();
+  const providers = ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"];
+  const availability = Object.fromEntries(providers.map((provider) => [provider, provider !== "grok"]));
+  const updating = store.update({ palette: "night" });
+  const rechecking = store.setAvailableProviders(availability);
+  await Promise.all([updating, rechecking]);
+  const memory = store.get();
+  const disk = JSON.parse(await readFile(join(root, "settings.json"), "utf8"));
+  assert.equal(memory.palette, "night");
+  assert.equal(disk.palette, "night", "the file keeps the update");
+  assert.equal(disk.homeLauncherProviders.includes("grok"), false);
+  assert.deepEqual(disk.homeLauncherProviders, memory.homeLauncherProviders);
+});
