@@ -143,6 +143,13 @@ interface PlannedSpawn {
 }
 /** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
 const QUIT_RELEASE_TIMEOUT_MS = 3_000;
+/**
+ * Quitting waits this long for the PTYs it hung up to exit, then kills the rest and waits `PTY_KILL_WAIT_MS` more.
+ * node-pty reports an exit through a native callback into JavaScript; one that arrives while Electron tears the
+ * Node environment down cannot run there, and node-pty turns that into a C++ exception that aborts the app.
+ */
+export const PTY_EXIT_WAIT_MS = 2_000;
+export const PTY_KILL_WAIT_MS = 1_000;
 /** Longer than every plugin step of a launch together (prepare, resume, launch options, wrap). */
 export const LAUNCH_INPUT_WAIT_MS = 60_000;
 
@@ -197,6 +204,8 @@ export class TerminalManager {
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
+  // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
+  private readonly liveProcesses = new Map<IPty, Promise<void>>();
   private suppressPersistence = false;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
@@ -360,6 +369,35 @@ export class TerminalManager {
     this.disposeAll();
     await Promise.allSettled(this.quitReleases.splice(0));
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
+  }
+
+  /**
+   * Resolves once every PTY this manager started has exited, so the app never finishes quitting while a native
+   * exit watcher is still pending. Called after `shutdown()` (which hung every card up): a process still running
+   * after `exitWaitMs` is killed, and after `killWaitMs` more the wait gives up. Returns how many never exited.
+   */
+  async waitForProcessExits(exitWaitMs = PTY_EXIT_WAIT_MS, killWaitMs = PTY_KILL_WAIT_MS): Promise<number> {
+    if (this.liveProcesses.size === 0) return 0;
+    if (!await this.allProcessesExited(exitWaitMs)) {
+      for (const process of this.liveProcesses.keys()) {
+        try {
+          // Windows PTYs take no signal.
+          if (globalThis.process.platform === "win32") process.kill();
+          else process.kill("SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+      await this.allProcessesExited(killWaitMs);
+    }
+    return this.liveProcesses.size;
+  }
+
+  private allProcessesExited(timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const exited = Promise.all(this.liveProcesses.values()).then(() => true as const);
+    return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
   }
 
   list(): SessionSnapshot[] {
@@ -1538,28 +1576,40 @@ export class TerminalManager {
       this.queueOutput(id, current, data);
     });
 
+    let exited!: () => void;
+    this.liveProcesses.set(process, new Promise<void>((resolve) => { exited = resolve; }));
     process.onExit(({ exitCode }) => {
+      this.liveProcesses.delete(process);
+      exited();
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
-
-      this.flushOutput(id, current);
-      current.metadata.exitCode = exitCode;
-      current.metadata.status = exitCode === 0 ? "done" : "failed";
-      current.metadata.failureDetails = exitCode === 0
-        ? null
-        : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
-      current.agentBrowser?.cleanup();
-      current.agentBrowser = null;
-      current.agentRuntime?.cleanup();
-      current.agentRuntime = null;
-      current.agentOrchestration?.cleanup();
-      current.agentOrchestration = null;
-      void current.launchCleanup?.().catch(() => undefined);
-      current.launchCleanup = null;
-      this.emitSession(current.metadata);
-      // Recorded at the moment of exit, so a finished agent is never relaunched.
-      this.schedulePersistence();
+      // node-pty calls this from a native callback that aborts the whole app when JavaScript throws in it.
+      try {
+        this.recordExit(id, current, exitCode);
+      } catch (error) {
+        console.warn(`PTY ${id} exit could not be recorded.`, error);
+      }
     });
+  }
+
+  private recordExit(id: string, current: ManagedSession, exitCode: number): void {
+    this.flushOutput(id, current);
+    current.metadata.exitCode = exitCode;
+    current.metadata.status = exitCode === 0 ? "done" : "failed";
+    current.metadata.failureDetails = exitCode === 0
+      ? null
+      : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
+    current.agentBrowser?.cleanup();
+    current.agentBrowser = null;
+    current.agentRuntime?.cleanup();
+    current.agentRuntime = null;
+    current.agentOrchestration?.cleanup();
+    current.agentOrchestration = null;
+    void current.launchCleanup?.().catch(() => undefined);
+    current.launchCleanup = null;
+    this.emitSession(current.metadata);
+    // Recorded at the moment of exit, so a finished agent is never relaunched.
+    this.schedulePersistence();
   }
 
   private queueOutput(id: string, session: ManagedSession, data: string): void {

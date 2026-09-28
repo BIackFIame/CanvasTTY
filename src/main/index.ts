@@ -1037,12 +1037,17 @@ async function shutdownServices(): Promise<void> {
   browserRequests.clear();
   await evenG2?.close();
   if (terminalManager) await terminalManager.shutdown();
+  // The hung-up PTYs exit while the other services close; quitting waits for them (see waitForProcessExits).
+  const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
+    if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
+  });
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
   if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
+  await ptyExits;
 }
 
 async function openPluginWindow(pluginId: string, contributionId: string): Promise<void> {
