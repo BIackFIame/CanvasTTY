@@ -18,7 +18,11 @@ type Port = {
   readBuffer(id: string): { buffer: string; outputOffset: number };
 };
 interface Screen {
-  terminal: InstanceType<typeof xterm.Terminal>;
+  /**
+   * The session's headless screen, made the first time the glasses read it (from the scrollback, which is
+   * the same text the live stream carries) and fed from then on. Sessions nobody reads cost nothing to parse.
+   */
+  terminal: InstanceType<typeof xterm.Terminal> | null;
   ready: Promise<void>;
   offset: number;
   lastAnswer: string;
@@ -38,19 +42,14 @@ export class TerminalPresentation {
   constructor(port: Port) {
     this.port = port;
   }
+  /** The session's answer state; cheap, made for every session the companion hears about. */
   private screen(id: string): Screen {
     const prior = this.screens.get(id);
     if (prior) return prior;
-    const terminal = new xterm.Terminal({
-      ...this.port.geometry(id),
-      allowProposedApi: true,
-      scrollback: 300,
-    });
-    const buffer = this.port.readBuffer(id);
     const screen: Screen = {
-      terminal,
-      ready: new Promise((resolve) => terminal.write(buffer.buffer, resolve)),
-      offset: buffer.outputOffset,
+      terminal: null,
+      ready: Promise.resolve(),
+      offset: 0,
       lastAnswer: "",
       answerTurn: null,
       answerExpiresAt: null,
@@ -65,10 +64,26 @@ export class TerminalPresentation {
     this.screens.set(id, screen);
     return screen;
   }
+  /** The session's state with its headless screen, made from the scrollback on first use. */
+  private parsed(id: string): Screen & { terminal: InstanceType<typeof xterm.Terminal> } {
+    const screen = this.screen(id);
+    if (!screen.terminal) {
+      const terminal = new xterm.Terminal({
+        ...this.port.geometry(id),
+        allowProposedApi: true,
+        scrollback: 300,
+      });
+      const buffer = this.port.readBuffer(id);
+      screen.terminal = terminal;
+      screen.offset = buffer.outputOffset;
+      screen.ready = new Promise((resolve) => terminal.write(buffer.buffer, resolve));
+    }
+    return screen as Screen & { terminal: InstanceType<typeof xterm.Terminal> };
+  }
   observe(channel: string, payload: unknown): void {
     if (channel === IPC.terminalRemoved) {
       const id = (payload as { id: string }).id;
-      this.screens.get(id)?.terminal.dispose();
+      this.screens.get(id)?.terminal?.dispose();
       this.screens.delete(id);
       return;
     }
@@ -83,7 +98,10 @@ export class TerminalPresentation {
     }
     if (channel !== IPC.terminalData) return;
     const event = payload as TerminalDataEvent,
-      screen = this.screen(event.id);
+      screen = this.screens.get(event.id);
+    // Not read yet: the scrollback will hold this output when the glasses first ask.
+    const terminal = screen?.terminal;
+    if (!screen || !terminal) return;
     const overlap = Math.max(
       0,
       screen.offset - (event.outputOffset - event.data.length),
@@ -92,14 +110,14 @@ export class TerminalPresentation {
     screen.offset = Math.max(screen.offset, event.outputOffset);
     const geometry = this.port.geometry(event.id);
     if (
-      geometry.cols !== screen.terminal.cols ||
-      geometry.rows !== screen.terminal.rows
+      geometry.cols !== terminal.cols ||
+      geometry.rows !== terminal.rows
     )
-      screen.terminal.resize(geometry.cols, geometry.rows);
+      terminal.resize(geometry.cols, geometry.rows);
     if (data)
       screen.ready = screen.ready.then(
         () =>
-          new Promise<void>((resolve) => screen.terminal.write(data, resolve)),
+          new Promise<void>((resolve) => terminal.write(data, resolve)),
       );
   }
   answer(id: string, text: string, turnId: string | null, expiresAt: number): void {
@@ -130,7 +148,7 @@ export class TerminalPresentation {
     screen.busySeen = false;
   }
   private async text(id: string, history = false): Promise<string> {
-    const screen = this.screen(id);
+    const screen = this.parsed(id);
     await screen.ready;
     const buffer = screen.terminal.buffer.active,
       lines: string[] = [];
@@ -243,7 +261,7 @@ export class TerminalPresentation {
     };
   }
   close(): void {
-    for (const screen of this.screens.values()) screen.terminal.dispose();
+    for (const screen of this.screens.values()) screen.terminal?.dispose();
     this.screens.clear();
   }
 }
