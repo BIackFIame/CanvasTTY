@@ -142,12 +142,31 @@ export function resolveTarget(word: Word | string, cwd: string | null, ctx: Path
 // Programs
 // ---------------------------------------------------------------------------
 
-const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'csh', 'tcsh', 'ash', 'busybox']);
+const SHELLS = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'fish', 'csh', 'tcsh', 'ash', 'hush']);
+/** Multi-call binaries: `busybox rm …` runs the applet `rm`. */
+const MULTICALL = new Set(['busybox', 'toybox']);
+/** Shell words that may stand before a command in the same segment; the command after them runs. */
+const LEADING_RESERVED = new Set(['!', 'do', 'then', 'else', 'elif', 'if', 'while', 'until', '{']);
 const INTERPRETERS = new Set(['python', 'python2', 'python3', 'pypy', 'pypy3', 'node', 'nodejs', 'ruby', 'perl', 'php', 'lua', 'luajit', 'rscript', 'tsx', 'ts-node', 'deno', 'bun', 'osascript', 'jshell', 'groovy', 'julia', 'elixir', 'swift']);
 const POWERSHELLS = new Set(['powershell', 'pwsh']);
 const EVAL_WORDS = new Set(['eval', 'iex', 'invoke-expression']);
 const ELEVATION = new Set(['sudo', 'doas', 'pkexec', 'run0', 'runas', 'gsudo', 'please']);
-const WRAPPERS = new Set(['nohup', 'time', 'nice', 'ionice', 'timeout', 'gtimeout', 'stdbuf', 'command', 'builtin', 'exec', 'caffeinate', 'watch', 'chronic', 'unbuffer', 'setsid', 'script']);
+const WRAPPERS = new Set(['nohup', 'time', 'nice', 'ionice', 'timeout', 'gtimeout', 'stdbuf', 'command', 'builtin', 'exec', 'caffeinate', 'watch', 'chronic', 'unbuffer', 'setsid']);
+/** Per wrapper, the flags whose next word is their value (so the value is not taken for the command). */
+const WRAPPER_VALUE_FLAGS: Record<string, readonly string[]> = {
+  env: ['-u', '--unset', '-C', '--chdir', '-P', '-S', '--split-string'],
+  time: ['-f', '--format', '-o', '--output'],
+  nice: ['-n', '--adjustment'],
+  ionice: ['-c', '--class', '-n', '--classdata', '-p', '--pid', '-P', '--pgid', '-u', '--uid'],
+  timeout: ['-s', '--signal', '-k', '--kill-after'],
+  gtimeout: ['-s', '--signal', '-k', '--kill-after'],
+  stdbuf: ['-i', '-o', '-e', '--input', '--output', '--error'],
+  exec: ['-a'],
+  caffeinate: ['-t', '-w'],
+  watch: ['-n', '--interval', '-q', '--equexit'],
+  setsid: [],
+  xargs: ['-n', '-P', '-I', '-L', '-d', '-s', '-E', '-a', '--arg-file', '--max-args', '--max-procs', '--replace', '--max-lines', '--delimiter', '--max-chars', '--eof']
+};
 const DISK = new Set(['mkfs', 'mke2fs', 'mkswap', 'newfs', 'newfs_apfs', 'newfs_hfs', 'newfs_msdos', 'wipefs', 'fdisk', 'sfdisk', 'gdisk', 'sgdisk', 'cfdisk', 'parted', 'blkdiscard', 'diskpart', 'format-volume', 'clear-disk', 'initialize-disk', 'remove-partition', 'new-partition', 'set-disk', 'mdadm', 'lvremove', 'vgremove', 'pvremove', 'cryptsetup', 'asr', 'fdformat', 'gpt']);
 const FETCHERS = new Set(['curl', 'wget', 'fetch', 'http', 'https', 'xh', 'aria2c', 'iwr', 'irm', 'invoke-webrequest', 'invoke-restmethod', 'start-bitstransfer', 'certutil', 'bitsadmin', 'lwp-download']);
 const DELETERS = new Set(['rm', 'unlink', 'shred', 'trash', 'del', 'erase', 'rd', 'rmdir', 'remove-item', 'ri', 'rimraf', 'srm']);
@@ -202,8 +221,13 @@ function analyzeText(command: string, cwd: string | null, acc: Acc): string | nu
 
 function analyzeSegment(segment: Segment, cwd: string | null, acc: Acc, downloadedHere: Target[]): string | null {
   const words = [...segment.words];
-  // Leading NAME=value assignments.
-  while (words.length && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(words[0]!.text) && !words[0]!.quoted) words.shift();
+  // Leading NAME=value assignments and the shell's own words before a command (`do rm …`, `then rm …`, `! rm …`).
+  for (;;) {
+    const first = words[0];
+    if (!first || first.quoted) break;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(first.text) || LEADING_RESERVED.has(first.text)) words.shift();
+    else break;
+  }
   for (const word of segment.words) inspectWord(word, acc);
   for (const redirect of segment.redirects) {
     if (redirect.fdDup || !redirect.target) continue;
@@ -251,20 +275,40 @@ function analyzeArgv(argvWords: Word[], cwd: string | null, acc: Acc, stdin: Std
   }
 
   // Wrappers run their argument as a command.
-  if (WRAPPERS.has(program) || program === 'env' && args.some(arg => !arg.startsWith('-') && !arg.includes('=')) || program === 'xargs') {
+  if (WRAPPERS.has(program) || program === 'env' || program === 'xargs') {
     if (program === 'command' && (args[0] === '-v' || args[0] === '-V')) return cwd;
-    const takesValue = new Set(['-n', '-u', '-s', '-k', '-i', '-o', '-e', '-c', '-C', '-I', '-L', '-P', '-d', '--signal', '--kill-after', '--adjustment', '--unset', '--chdir', '--max-args', '--max-procs', '--replace', '--delimiter']);
+    const takesValue = new Set(WRAPPER_VALUE_FLAGS[program] ?? []);
     let i = 0;
+    let runDir = cwd;
     for (; i < argWords.length; i++) {
       const text = argWords[i]!.text;
       if (program === 'env' && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(text)) continue;
-      if (text.startsWith('-')) { if (takesValue.has(text) && program !== 'xargs' || program === 'xargs' && ['-n', '-P', '-I', '-L', '-d', '-s', '-E'].includes(text)) i++; continue; }
+      if (text === '--') { i++; break; }
+      if (text.startsWith('-')) {
+        // `env -S 'rm -rf x'` splits its value into the command it runs.
+        const split = program === 'env' ? /^(?:-S|--split-string)(?:=|$)(.*)$/u.exec(text) : null;
+        if (split) {
+          const value = split[1] ? split[1] : argWords[i + 1]?.text;
+          if (value !== undefined) analyzeText([value, ...args.slice(split[1] ? i + 1 : i + 2)].join(' '), runDir, acc);
+          return cwd;
+        }
+        // `env -C DIR` runs the command in DIR.
+        if (program === 'env' && /^(?:-C|--chdir)$/u.test(text)) runDir = argWords[i + 1] ? resolveTarget(argWords[i + 1]!, cwd, acc.ctx).abs : null;
+        if (program === 'env' && text.startsWith('--chdir=')) runDir = resolveTarget(text.slice('--chdir='.length), cwd, acc.ctx).abs;
+        if (takesValue.has(text)) i++;
+        continue;
+      }
       if ((program === 'timeout' || program === 'gtimeout') && /^\d/u.test(text)) continue;
       if (program === 'nice' && /^-?\d+$/u.test(text)) continue;
       break;
     }
     if (i >= argWords.length) return cwd;
-    return analyzeArgv(argWords.slice(i), cwd, acc, program === 'xargs' ? { pipeIn: false, heredoc: null } : stdin, downloadedHere);
+    return analyzeArgv(argWords.slice(i), runDir, acc, program === 'xargs' ? { pipeIn: false, heredoc: null } : stdin, downloadedHere);
+  }
+  if (program === 'script') return runScriptCommand(argWords, cwd, acc, stdin, downloadedHere);
+  if (MULTICALL.has(program)) {
+    const applet = argWords.findIndex(word => !word.text.startsWith('-'));
+    return applet >= 0 ? analyzeArgv(argWords.slice(applet), cwd, acc, stdin, downloadedHere) : cwd;
   }
 
   if (program === 'cd' || program === 'pushd' || program === 'chdir' || program === 'set-location' || program === 'sl') {
@@ -299,6 +343,53 @@ function analyzeArgv(argvWords: Word[], cwd: string | null, acc: Acc, stdin: Std
 
   classifyProgram(program, argWords, cwd, acc, stdin, downloadedHere);
   return cwd;
+}
+
+/**
+ * `script` records a terminal session: util-linux runs `-c CMD` (`script -qc 'rm …' /dev/null`), BSD runs the words
+ * after the log file (`script -q /dev/null rm …`). The log file itself is written.
+ */
+function runScriptCommand(argWords: Word[], cwd: string | null, acc: Acc, stdin: Stdin, downloadedHere: Target[]): string | null {
+  const args = argWords.map(word => word.text);
+  const values = new Set(['-E', '--echo', '-I', '--log-in', '-O', '--log-out', '-B', '--log-io', '-T', '--log-timing', '-m', '--logging-format', '-o', '--output-limit', '-t']);
+  const operands: Word[] = [];
+  let command: string | null = null;
+  for (let i = 0; i < argWords.length; i++) {
+    const text = args[i]!;
+    if (operands.length) { operands.push(argWords[i]!); continue; }
+    if (text === '--command' || /^-[a-zA-Z]*c$/u.test(text)) { command = args[i + 1] ?? null; i++; continue; }
+    if (text.startsWith('--command=')) { command = text.slice('--command='.length); continue; }
+    if (/^-[a-zA-Z]*c./u.test(text) && !text.startsWith('--')) { command = text.slice(text.indexOf('c') + 1); continue; }
+    if (values.has(text)) { i++; continue; }
+    if (text.startsWith('-')) continue;
+    operands.push(argWords[i]!);
+  }
+  const log = operands[0];
+  if (log && !HARMLESS_DEVICE.test(log.text)) acc.writes.push(resolveTarget(log, cwd, acc.ctx));
+  if (command !== null) analyzeText(command, cwd, acc);
+  else if (operands.length > 1) analyzeArgv(operands.slice(1), cwd, acc, stdin, downloadedHere);
+  return cwd;
+}
+
+/** `perl -i` / `ruby -i` edit their file operands in place (`-pi -e 's/a/b/' f`, `-i.bak`, `-i -pe …`). */
+function inPlaceEdit(argWords: Word[], cwd: string | null, acc: Acc): boolean {
+  const args = argWords.map(word => word.text);
+  if (!args.some(arg => /^-[a-zA-Z]*i/u.test(arg) && !arg.startsWith('--'))) return false;
+  const operands: Word[] = [];
+  let script = false;
+  for (let i = 0; i < argWords.length; i++) {
+    const text = args[i]!;
+    if (text === '--') { operands.push(...argWords.slice(i + 1)); break; }
+    // A cluster ending in e/E takes the next word as the program (`-e`, `-pe`), unless an `i` before it makes the
+    // rest its backup suffix (`-pie` is -p and -i with suffix "e").
+    if (/^-[a-zA-Z]*[eE]$/u.test(text) && !text.slice(1, -1).includes('i')) { script = true; i++; continue; }
+    if (/^-[IMmrx]$/u.test(text)) { i++; continue; }
+    if (text.startsWith('-')) continue;
+    operands.push(argWords[i]!);
+  }
+  // Without -e the first operand is the program file.
+  for (const word of operands.slice(script ? 0 : 1)) acc.writes.push(resolveTarget(word, cwd, acc.ctx));
+  return true;
 }
 
 function runScript(file: Target, acc: Acc, downloadedHere: Target[]): void {
@@ -341,6 +432,7 @@ function runInterpreter(program: string, argWords: Word[], cwd: string | null, a
   const args = argWords.map(word => word.text);
   if (args.length === 1 && /^(?:--?version|-v|-V)$/u.test(args[0]!)) return cwd;
   const python = program.startsWith('python') || program.startsWith('pypy');
+  if ((program === 'perl' || program === 'ruby') && inPlaceEdit(argWords, cwd, acc)) return cwd;
   for (let i = 0; i < argWords.length; i++) {
     const text = args[i]!;
     if (python && text === '-m') return cwd;
@@ -408,6 +500,14 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
   if (program === 'find') {
     const starts: Word[] = [];
     let i = 0;
+    // Options before the start folders: -H -L -P (symlinks), -E -X -d -s -x (BSD), -O<level>, -D <debug> (GNU), -f <path> (BSD).
+    for (; i < argWords.length; i++) {
+      const text = argWords[i]!.text;
+      if (/^-(?:[HLPEXdsx]+|O\d*)$/u.test(text)) continue;
+      if (text === '-D') { i++; continue; }
+      if (text === '-f' && argWords[i + 1]) { starts.push(argWords[i + 1]!); i++; continue; }
+      break;
+    }
     for (; i < argWords.length && !/^[-(!]/u.test(argWords[i]!.text); i++) starts.push(argWords[i]!);
     if (!starts.length) starts.push(wordOf('.'));
     const exec = args.findIndex(arg => /^-(?:exec|execdir|ok|okdir)$/u.test(arg));
@@ -424,17 +524,19 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
   }
 
   // Writing.
+  const targetDir = targetDirectory(program, argWords);
   if (COPIERS.has(program)) {
     const files = positional.filter(word => !/^-/u.test(word.text));
-    const dest = files.length > 1 ? files[files.length - 1]! : program === 'install' && args.includes('-d') ? files[0] : undefined;
+    const dest = targetDir ?? (files.length > 1 ? files[files.length - 1]! : program === 'install' && args.includes('-d') ? files[0] : undefined);
     // rsync to `host:path` is a remote copy, not a local write.
     if (dest && !(program === 'rsync' && /^[^/\\]*:/u.test(dest.text) && !/^[A-Za-z]:[\\/]/u.test(dest.text))) acc.writes.push(target(dest));
     return;
   }
   if (MOVERS.has(program)) {
     // A move changes both ends (a moved symlink is the link itself; the destination may be a folder it enters).
-    const files = positional.filter(word => !/^-/u.test(word.text));
-    files.forEach((word, index) => acc.writes.push(target(word, index < files.length - 1)));
+    const files = positional.filter(word => !/^-/u.test(word.text) && word !== targetDir);
+    files.forEach((word, index) => acc.writes.push(target(word, targetDir !== undefined || index < files.length - 1)));
+    if (targetDir) acc.writes.push(target(targetDir));
     return;
   }
   if (CREATORS.has(program)) {
@@ -449,22 +551,50 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
     for (const word of files) acc.writes.push(target(word));
     return;
   }
-  if (program === 'sed' || program === 'gsed' || program === 'perl') {
+  if (program === 'sed' || program === 'gsed') {
     if (!args.some(arg => /^-[a-zA-Z]*i/u.test(arg) || arg.startsWith('--in-place'))) return;
     const explicitScript = args.some(arg => arg === '-e' || arg === '-f' || arg.startsWith('--expression'));
     for (const word of positional.filter(word => !/^-/u.test(word.text)).slice(explicitScript ? 0 : 1)) acc.writes.push(target(word));
     return;
   }
   if (program === 'tar' || program === 'bsdtar' || program === 'unzip' || program === '7z' || program === 'unrar') {
-    const extract = program === 'unzip' || program === 'unrar' || program === '7z' && sub === 'x' || /^-?[a-zA-Z]*x/u.test(args[0] ?? '') || args.includes('--extract') || args.includes('-x');
-    const dirFlag = args.findIndex(arg => arg === '-C' || arg === '--directory' || arg === '-d' || arg.startsWith('-o'));
-    const dest = dirFlag >= 0 ? (args[dirFlag]!.startsWith('-o') && args[dirFlag]!.length > 2 ? args[dirFlag]!.slice(2) : args[dirFlag + 1]) : '.';
+    const tar = program === 'tar' || program === 'bsdtar';
+    // tar: the old bundled first word (`xzf`) or any short cluster with x (`-C dir -xzf`), --extract, --get.
+    const extract = program === 'unzip' || program === 'unrar' || program === '7z' && sub === 'x'
+      || tar && (/^[a-zA-Z]*x/u.test(args[0] ?? '') || args.some(arg => /^-[a-zA-Z]*x[a-zA-Z]*$/u.test(arg) || arg === '--extract' || arg === '--get'));
+    let dest: string | undefined = '.';
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!;
+      if (tar && (arg === '-C' || arg === '--directory') || program === 'unzip' && arg === '-d') dest = args[i + 1];
+      else if (tar && arg.startsWith('--directory=')) dest = arg.slice('--directory='.length);
+      else if (program === '7z' && arg.startsWith('-o') && arg.length > 2) dest = arg.slice(2);
+      else continue;
+      break;
+    }
     if (extract && dest) acc.writes.push(target(dest));
     const fileFlag = args.findIndex(arg => /^-?[a-zA-Z]*f$/u.test(arg) || arg === '--file');
     if (!extract && fileFlag >= 0 && args[fileFlag + 1]) acc.writes.push(target(args[fileFlag + 1]!));
     return;
   }
   if (FETCHERS.has(program)) classifyFetch(program, argWords, cwd, acc, downloadedHere);
+}
+
+/** curl and wget short options that take a value (the rest of the cluster, or the next word). */
+const CURL_VALUE_LETTERS = new Set([...'oAbcCdDeEFHKmPQrtTuUwxXyYz']);
+const WGET_VALUE_LETTERS = new Set([...'OPoaeiBtTwQUlADIXR']);
+/** Of those, the letters whose value is a file the program writes besides the download (cookie jar, headers, log). */
+const FETCH_SIDE_FILES: Record<string, ReadonlySet<string>> = { curl: new Set(['c', 'D']), wget: new Set(['o', 'a']) };
+
+/** `-t DIR`, `-tDIR`, `--target-directory DIR`, `--target-directory=DIR` of GNU cp, mv, install and ln. */
+function targetDirectory(program: string, argWords: readonly Word[]): Word | undefined {
+  if (!['cp', 'mv', 'install', 'ln'].includes(program)) return undefined;
+  for (let i = 0; i < argWords.length; i++) {
+    const text = argWords[i]!.text;
+    if (text === '-t' || text === '--target-directory') return argWords[i + 1];
+    if (text.startsWith('--target-directory=')) return { ...argWords[i]!, text: text.slice('--target-directory='.length), tilde: text.slice('--target-directory='.length).startsWith('~') };
+    if (/^-t./u.test(text)) return { ...argWords[i]!, text: text.slice(2), tilde: text.slice(2).startsWith('~') };
+  }
+  return undefined;
 }
 
 /** Where a download lands: `-o file`, `-O` (the URL's name), wget's default. */
@@ -475,15 +605,42 @@ function classifyFetch(program: string, argWords: Word[], cwd: string | null, ac
   const land = (t: Target): void => { acc.writes.push(t); downloadedHere.push(t); };
   const urlName = (): string => (urls[0] ?? '').replace(/[?#].*$/u, '').split('/').pop() || 'index.html';
   let explicit = false;
+  let outputDir: string | null = null;
+  const output = (value: Word | string): void => { explicit = true; if ((typeof value === 'string' ? value : value.text) !== '-') land(target(value)); };
+  const remoteName = (): void => { explicit = true; land(target(outputDir ? join(outputDir, urlName()) : urlName())); };
+  const curlish = program === 'curl';
+  const wget = program === 'wget';
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!, next = argWords[i + 1];
-    if ((arg === '-o' || arg === '--output' || arg === '-O' && program === 'wget' || arg === '--output-document' || /^-outfile$/iu.test(arg) || arg === '-P' || arg === '--directory-prefix') && next) {
-      explicit = true;
-      if (next.text !== '-') land(target(next));
+    const long = /^(--output|--output-document|--directory-prefix|--output-dir)=(.*)$/u.exec(arg);
+    if (long) {
+      if (long[1] === '--output-dir') outputDir = expand(long[2]!, cwd, acc.ctx);
+      else output(long[2]!);
+      continue;
+    }
+    if (arg === '--output-dir' && next) { outputDir = expand(next, cwd, acc.ctx); i++; continue; }
+    if ((arg === '-o' || arg === '--output' || arg === '-O' && wget || arg === '--output-document' || /^-outfile$/iu.test(arg) || arg === '-P' || arg === '--directory-prefix') && next) {
+      output(next);
       i++; continue;
     }
-    if (arg === '-O' || arg === '--remote-name' || arg === '--remote-name-all') { explicit = true; land(target(urlName())); }
+    if (arg === '-O' || arg === '--remote-name' || arg === '--remote-name-all') { remoteName(); continue; }
+    // Bundled short flags: `curl -fsSLo out`, `curl -sLoout`, `wget -qO out`, `wget -qP dir`.
+    if ((curlish || wget) && /^-[a-zA-Z]{2,}/u.test(arg) && !arg.startsWith('--')) {
+      const takes = curlish ? CURL_VALUE_LETTERS : WGET_VALUE_LETTERS;
+      for (let k = 1; k < arg.length; k++) {
+        const letter = arg[k]!;
+        if (curlish && letter === 'O') { remoteName(); continue; }
+        if (!takes.has(letter)) continue;
+        const value: Word | string | undefined = arg.slice(k + 1) || next;
+        if (!arg.slice(k + 1)) i++;
+        if (value === undefined) break;
+        if (curlish && letter === 'o' || wget && (letter === 'O' || letter === 'P')) output(value);
+        else if (FETCH_SIDE_FILES[program]!.has(letter)) acc.writes.push(target(value));
+        break;
+      }
+    }
   }
+  if (outputDir && !explicit) acc.writes.push(target(outputDir));
   if (program === 'wget' && !explicit && !args.some(arg => arg === '-O-' || arg === '-qO-' || arg === '--spider')) land(target(urlName()));
 }
 
