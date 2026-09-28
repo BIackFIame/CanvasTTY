@@ -1740,6 +1740,8 @@ function appendScrollback(session: ManagedSession, data: string): void {
     }
     const overflow = session.bufferLength - MAX_SCROLLBACK_CHARS;
     if (first.length <= overflow) {
+      // Release the dropped chunk now: the slot stays until the array is compacted, the text must not.
+      session.bufferChunks[session.bufferStart] = "";
       session.bufferStart += 1;
       session.bufferLength -= first.length;
       continue;
