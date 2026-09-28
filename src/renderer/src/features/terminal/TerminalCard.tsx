@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -44,6 +44,7 @@ import { shouldActivateCanvasFromClick } from "../workspace/focus";
 import type { ResizeDirection } from "../workspace/snap";
 import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
 import { renameCommit, visibleTerminalTitle } from "./terminalTitle";
+import { canvasCardPropsEqual } from "./terminalCardProps";
 
 interface TerminalCardProps {
   session: SessionSnapshot;
@@ -104,7 +105,13 @@ const SEARCH_DECORATIONS = {
   activeMatchColorOverviewRuler: "#9a96c2"
 } as const;
 
-export function TerminalCard({
+/**
+ * A card renders again only when one of its props changes (snap targets by value): a pan re-renders the
+ * workspace on every pointer move, and none of that reaches the cards.
+ */
+export const TerminalCard = memo(TerminalCardView, canvasCardPropsEqual);
+
+function TerminalCardView({
   session,
   locale,
   palette,
