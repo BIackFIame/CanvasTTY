@@ -173,7 +173,12 @@ let updaterInitialized = false;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-async function createWindow(): Promise<BrowserWindow> {
+/**
+ * Creates the shell window and starts loading the startup page into it. The
+ * page load is not awaited: services start next to it, and the application
+ * surface may replace the page before it finished (see startApplication).
+ */
+function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -225,8 +230,8 @@ async function createWindow(): Promise<BrowserWindow> {
   });
 
   // Both handlers are registered before the startup page load: a close landing
-  // inside that load has to be visible to the load's own catch below, and the
-  // dead window must not stay in `mainWindow` until the load settles.
+  // inside that load has to be visible to the load's own failure handling, and
+  // the dead window must not stay in `mainWindow` until the load settles.
   window.on("close", () => {
     mainWindowClosing = true;
   });
@@ -238,16 +243,27 @@ async function createWindow(): Promise<BrowserWindow> {
     }
   });
 
-  try {
-    await window.loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" }));
-  } catch (error) {
+  const startupPage: StartupPageLoad = { failure: null, superseded: false };
+  window.loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" })).catch((error) => {
     // A close during this load aborts the navigation (ERR_ABORTED / ERR_FAILED).
-    // That is a quit, not a failed startup, so it must not reach the caller's
-    // failure handling; a real error on a live window still propagates.
-    if (!shellWindowGone(window)) throw error;
-    console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
-  }
-  return window;
+    // That is a quit, not a failed startup; the application surface replacing a
+    // page that was still loading aborts it the same way. Neither is a failure;
+    // a real error on a live window is kept for startApplication to report.
+    if (shellWindowGone(window)) {
+      console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
+      return;
+    }
+    if (!startupPage.superseded) startupPage.failure = error;
+  });
+  return { window, startupPage };
+}
+
+/** The startup page load of a fresh shell window, as startApplication sees it. */
+interface StartupPageLoad {
+  /** A real load error of the page, reported as a failed startup. */
+  failure: unknown;
+  /** Set once the application surface starts loading: aborting the page is expected then. */
+  superseded: boolean;
 }
 
 /**
@@ -789,9 +805,12 @@ async function startApplication(): Promise<void> {
   if (startupRunning || shutdownRunning || shutdownComplete) return;
   startupRunning = true;
   let window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  let startupPage: StartupPageLoad | null = null;
 
   try {
-    if (!window) window = await createWindow();
+    // Services start while the startup page is still loading; the page is only
+    // there until the application surface replaces it.
+    if (!window) ({ window, startupPage } = createWindow());
     if (process.env.CANVASTTY_CLI_RESOLUTION_SMOKE === "1") {
       const registry = buildProviderCliRegistry();
       console.log(`CANVASTTY_CLI_RESOLUTION_SMOKE_READY ${JSON.stringify(registry.snapshot())}`);
@@ -804,6 +823,10 @@ async function startApplication(): Promise<void> {
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
     if (!servicesReady) await initializeServices();
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
+    if (startupPage) {
+      if (startupPage.failure) throw startupPage.failure;
+      startupPage.superseded = true;
+    }
     initializeUpdater();
     await loadApplication(window);
   } catch (error) {

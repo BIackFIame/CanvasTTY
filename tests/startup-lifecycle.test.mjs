@@ -36,6 +36,36 @@ test("closing during service startup stops renderer loading without a failure di
   assert.equal(failures, 1, "a real error on a live window still reaches the failure page");
 });
 
+test("services start while the startup page is still loading, and only a real page error fails startup", async () => {
+  const source = await readFile(mainPath, "utf8");
+  const start = source.slice(source.indexOf("async function startApplication"), source.indexOf("function buildProviderCliRegistry"));
+  const events = [];
+  let page;
+  const context = {
+    startupRunning: false,
+    shutdownRunning: false,
+    shutdownComplete: false,
+    servicesReady: false,
+    mainWindow: null,
+    process: { env: {} },
+    shellWindowGone: () => false,
+    // The page load never settles here: startup must not wait for it.
+    createWindow: () => { page = { failure: null, superseded: false }; events.push("window"); return { window: {}, startupPage: page }; },
+    initializeServices: async () => { events.push(`services superseded=${page.superseded}`); },
+    initializeUpdater: () => events.push("updater"),
+    loadApplication: async () => { events.push(`app superseded=${page.superseded}`); },
+    showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); }
+  };
+  const startApplication = runInNewContext(`${stripTypeScriptTypes(start)}; startApplication`, context);
+  await startApplication();
+  assert.deepEqual(events, ["window", "services superseded=false", "updater", "app superseded=true"]);
+
+  events.length = 0;
+  context.initializeServices = async () => { page.failure = new Error("startup page failed"); };
+  await startApplication();
+  assert.deepEqual(events, ["window", "failure startup page failed"]);
+});
+
 test("main process acquires the single-instance lock before readiness", async () => {
   const source = await readFile(mainPath, "utf8");
   const lock = source.indexOf("app.requestSingleInstanceLock()");
