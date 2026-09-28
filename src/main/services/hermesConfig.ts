@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
-import { parseDocument } from "yaml";
+import { lazyRequire } from "../lazyRequire.ts";
 import {
   ORCHESTRATION_MCP_SERVER_NAME,
   ORCHESTRATION_TOOL_NAMES
@@ -33,6 +33,8 @@ import {
 import { AGENT_BROWSER_ENV } from "./agent-browser/protocol.ts";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 
+// YAML is only parsed for Hermes configs; it is loaded then, not with the app.
+const yaml = lazyRequire<typeof import("yaml")>("yaml");
 const CONFIG_FILE_MODE = 0o600;
 const CONFIG_DIRECTORY_MODE = 0o700;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
@@ -314,6 +316,7 @@ function cleanupOwnedConfiguration(
 }
 
 function parseHermesDocument(raw: string, path: string) {
+  const { parseDocument } = yaml();
   let document = parseDocument(raw, { strict: true, uniqueKeys: true });
   if (document.errors.length > 0) {
     throw new Error(`Hermes YAML configuration is invalid: ${path}`);

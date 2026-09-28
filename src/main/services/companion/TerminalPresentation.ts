@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import xterm from "@xterm/headless";
+import { lazyRequire } from "../../lazyRequire.ts";
 import {
   IPC,
   type SessionMetadata,
@@ -12,6 +12,9 @@ import {
   presentTerminal,
 } from "./presentation.ts";
 
+// Headless terminals are created on demand; the module loads with the first one.
+const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
+
 type Port = {
   listMetadata(): SessionMetadata[];
   geometry(id: string): { cols: number; rows: number };
@@ -22,7 +25,7 @@ interface Screen {
    * The session's headless screen, made the first time the glasses read it (from the scrollback, which is
    * the same text the live stream carries) and fed from then on. Sessions nobody reads cost nothing to parse.
    */
-  terminal: InstanceType<typeof xterm.Terminal> | null;
+  terminal: import("@xterm/headless").Terminal | null;
   ready: Promise<void>;
   offset: number;
   lastAnswer: string;
@@ -65,10 +68,10 @@ export class TerminalPresentation {
     return screen;
   }
   /** The session's state with its headless screen, made from the scrollback on first use. */
-  private parsed(id: string): Screen & { terminal: InstanceType<typeof xterm.Terminal> } {
+  private parsed(id: string): Screen & { terminal: import("@xterm/headless").Terminal } {
     const screen = this.screen(id);
     if (!screen.terminal) {
-      const terminal = new xterm.Terminal({
+      const terminal = new (xterm().Terminal)({
         ...this.port.geometry(id),
         allowProposedApi: true,
         scrollback: 300,
@@ -78,7 +81,7 @@ export class TerminalPresentation {
       screen.offset = buffer.outputOffset;
       screen.ready = new Promise((resolve) => terminal.write(buffer.buffer, resolve));
     }
-    return screen as Screen & { terminal: InstanceType<typeof xterm.Terminal> };
+    return screen as Screen & { terminal: import("@xterm/headless").Terminal };
   }
   observe(channel: string, payload: unknown): void {
     if (channel === IPC.terminalRemoved) {

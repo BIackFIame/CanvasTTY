@@ -4,7 +4,6 @@ import { isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
 import { app, BrowserWindow, dialog, net, Notification, protocol, safeStorage, session } from "electron";
-import electronUpdater from "electron-updater";
 import {
   IPC,
   type LocaleId,
@@ -43,11 +42,7 @@ import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
 import { activeCanvasWheelBinding } from "../shared/canvasNavigation";
-import { runBrowserElectronSmoke } from "./services/browser/BrowserElectronSmoke";
-import {
-  runProviderElectronSmoke,
-  type ProviderSmokeTarget
-} from "./services/browser/ProviderElectronSmoke";
+import type { ProviderSmokeTarget } from "./services/browser/ProviderElectronSmoke";
 import {
   AgentBrowserBridge,
   OrchestrationGateway,
@@ -75,9 +70,11 @@ import {
 } from "./services/hermesConfig";
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
+import { lazyRequire } from "./lazyRequire";
 
-// electron-updater is CommonJS; a default import is the only ESM-safe form.
-const { autoUpdater } = electronUpdater;
+// electron-updater (and what it pulls in) is loaded only by a packaged app that
+// checks for updates, never at startup of a dev build.
+const electronUpdater = lazyRequire<typeof import("electron-updater")>("electron-updater");
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
   app.setPath("userData", process.env.CANVASTTY_USER_DATA_DIR);
@@ -768,6 +765,8 @@ async function loadApplication(window: BrowserWindow): Promise<void> {
   }
   const browserSmokeUrl = process.env.CANVASTTY_BROWSER_SMOKE_URL;
   if (browserSmokeUrl && browserService) {
+    // The smoke runners are test code: they load only when a smoke run asks for them.
+    const { runBrowserElectronSmoke } = await import("./services/browser/BrowserElectronSmoke");
     await runBrowserElectronSmoke(browserService, browserSmokeUrl, app.getPath("userData"));
     console.log("CANVASTTY_BROWSER_SMOKE_READY");
     app.quit();
@@ -778,6 +777,7 @@ async function loadApplication(window: BrowserWindow): Promise<void> {
       throw new Error("Provider smoke requires the local agent browser gateway.");
     }
     const targets = parseProviderSmokeTargets(providerSmoke);
+    const { runProviderElectronSmoke } = await import("./services/browser/ProviderElectronSmoke");
     await runProviderElectronSmoke({
       bridge: agentBrowserBridge,
       helper: agentBrowserHelper,
@@ -941,6 +941,7 @@ function initializeUpdater(): void {
 
   // The user decides when to download (the settings row), while an update that
   // is already on disk installs itself on quit.
+  const { autoUpdater } = electronUpdater();
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   let availableVersion = "";
@@ -977,6 +978,7 @@ async function requestUpdaterCheck(): Promise<void> {
   }
   if (updaterState.status === "downloading" || updaterState.status === "downloaded") return;
   try {
+    const { autoUpdater } = electronUpdater();
     if (updaterState.status === "available") await autoUpdater.downloadUpdate();
     else {
       publishUpdaterState({ status: "checking" });
@@ -990,7 +992,7 @@ async function requestUpdaterCheck(): Promise<void> {
 /** Renderer "install" intent; only meaningful once a download finished. */
 function installUpdaterUpdate(): void {
   if (updaterState.status !== "downloaded") return;
-  autoUpdater.quitAndInstall();
+  electronUpdater().autoUpdater.quitAndInstall();
 }
 
 function updaterFailureReason(error: unknown): "offline" | "error" {

@@ -3,13 +3,16 @@ import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import xterm from "@xterm/headless";
+import { lazyRequire } from "../../lazyRequire.ts";
 import type { CreateSessionRequest, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
 import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
+
+// Headless terminals are created on demand; the module loads with the first one.
+const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
@@ -367,7 +370,7 @@ export class AgentControlGateway {
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
       const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
-      const terminal = new xterm.Terminal({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
       const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
         ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),

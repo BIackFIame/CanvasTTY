@@ -14,7 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseDocument } from "yaml";
+import { lazyRequire } from "../../lazyRequire.ts";
 import { DECISION_FAIL_CLOSED_ENV } from "../../../agent-runtime/runtime-protocol.mjs";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
 import {
@@ -25,6 +25,8 @@ import {
   permissionGateTimings
 } from "../../../agent-runtime/runtime-protocol.mjs";
 
+// YAML is only parsed for Hermes configs; it is loaded then, not with the app.
+const yaml = lazyRequire<typeof import("yaml")>("yaml");
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 const HOOK_TIMEOUT_SECONDS = 3;
@@ -977,6 +979,7 @@ function cleanupHermes(path: string, journal: TextOverlayJournal): void {
 }
 
 function mutateHermesHooks(raw: string, commands: Record<string, string[]>, remove: boolean): string {
+  const { parseDocument } = yaml();
   let document = parseDocument(raw, { strict: true, uniqueKeys: true });
   if (document.errors.length > 0) throw new Error("Hermes YAML lifecycle configuration is invalid.");
   let value = document.toJS({ maxAliasCount: 100 }) as unknown;

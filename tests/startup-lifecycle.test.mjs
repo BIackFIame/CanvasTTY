@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -64,6 +64,22 @@ test("services start while the startup page is still loading, and only a real pa
   context.initializeServices = async () => { page.failure = new Error("startup page failed"); };
   await startApplication();
   assert.deepEqual(events, ["window", "failure startup page failed"]);
+});
+
+test("dependencies only some paths need are not imported when the main process starts", async () => {
+  // Each costs its import time on every launch (electron-updater about 30 ms): they load
+  // through lazyRequire on first use. The smoke runners are test code behind env flags.
+  const lazy = ["electron-updater", "yaml", "secure-remote-password/client.js", "secure-remote-password/server.js", "@xterm/headless"];
+  const root = new URL("../src/main/", import.meta.url);
+  const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".ts"));
+  const staticImports = [];
+  for (const file of files) {
+    const source = await readFile(new URL(file, root), "utf8");
+    for (const match of source.matchAll(/^import\s+(?!type\b)[^;]*?from\s+"([^"]+)"/gmu)) {
+      if (lazy.includes(match[1]) || /ElectronSmoke$/u.test(match[1])) staticImports.push(`${file}: ${match[1]}`);
+    }
+  }
+  assert.deepEqual(staticImports, []);
 });
 
 test("main process acquires the single-instance lock before readiness", async () => {
