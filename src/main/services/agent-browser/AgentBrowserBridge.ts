@@ -55,6 +55,11 @@ export class AgentBrowserBridge implements AgentBrowserLaunchCoordinator {
     this.providers.providerClisRefreshed();
   }
 
+  /** Background provider probes a first launch would otherwise run on the main thread (Kimi's `--help`). */
+  warmProviderProbes(): Promise<void> {
+    return this.providers.warmKimiProbe();
+  }
+
   prepareLaunch(input: PrepareAgentBrowserLaunchInput): PreparedAgentBrowserPtyLaunch | null {
     if (!this.gateway.isEnabled) return null;
     const capability = this.gateway.registerAgent(input);

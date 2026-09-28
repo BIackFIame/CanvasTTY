@@ -20,7 +20,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import {
   APPROVED_BROWSER_TOOL_NAMES,
   MCP_SERVER_NAME,
@@ -67,6 +67,8 @@ export interface ProviderLaunchOptions {
   kimiHomeDirectory?: string;
   runtimeDirectory: string;
   probeKimiPerRunConfig?: (cli: AvailableProviderCli) => boolean;
+  /** The same probe off the main thread, for warmKimiProbe; defaults to the sync probe's answer when only that is given. */
+  probeKimiPerRunConfigAsync?: (cli: AvailableProviderCli) => Promise<boolean>;
   environment?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -82,8 +84,13 @@ export class ProviderLaunchAdapters {
   private readonly kimiHomeDirectory: string;
   private kimiProbedExecutable: string | null = null;
   private readonly probe: (cli: AvailableProviderCli) => boolean;
+  private readonly probeAsync: (cli: AvailableProviderCli) => Promise<boolean>;
   private readonly environment: Readonly<Record<string, string | undefined>>;
   private kimiSupportsPerRunConfig: boolean | null = null;
+  /** A background probe's answer, used by the next Kimi launch of the same executable instead of a blocking probe. */
+  private kimiWarmed: { executable: string; generation: number; result: boolean } | null = null;
+  private kimiWarming: Promise<void> | null = null;
+  private kimiGeneration = 0;
   private kimiConfiguration: KimiTemporaryConfiguration | null = null;
   private kimiConfigurationUsers = 0;
   private hermesConfiguration: HermesTemporaryConfiguration | null = null;
@@ -98,12 +105,40 @@ export class ProviderLaunchAdapters {
       options.kimiHomeDirectory ?? join(homedir(), ".kimi-code")
     );
     this.probe = options.probeKimiPerRunConfig ?? probeKimiPerRunMcpConfig;
+    const syncProbe = options.probeKimiPerRunConfig;
+    this.probeAsync = options.probeKimiPerRunConfigAsync
+      ?? (syncProbe ? async (cli) => syncProbe(cli) : probeKimiPerRunMcpConfigAsync);
     this.environment = options.environment ?? process.env;
   }
 
   providerClisRefreshed(): void {
     this.kimiProbedExecutable = null;
     this.kimiSupportsPerRunConfig = null;
+    this.kimiWarmed = null;
+    this.kimiGeneration += 1;
+  }
+
+  /**
+   * Asks the Kimi CLI whether it takes a per-run MCP config in the background (`kimi --help`, up to 3 s), so the
+   * first Kimi launch finds the answer instead of blocking the main process on the same probe. A launch that
+   * comes first still probes synchronously, exactly as before; a recheck of the CLIs discards the answer.
+   */
+  warmKimiProbe(): Promise<void> {
+    const kimiCli = this.providerClis.get("kimi");
+    if (kimiCli.state === "unavailable") return Promise.resolve();
+    if (this.kimiSupportsPerRunConfig !== null && this.kimiProbedExecutable === kimiCli.executable) return Promise.resolve();
+    const generation = this.kimiGeneration;
+    if (this.kimiWarmed?.executable === kimiCli.executable && this.kimiWarmed.generation === generation) return Promise.resolve();
+    if (this.kimiWarming) return this.kimiWarming;
+    const warming = this.probeAsync(kimiCli)
+      .then((result) => {
+        if (generation === this.kimiGeneration) this.kimiWarmed = { executable: kimiCli.executable, generation, result };
+      }, () => undefined)
+      .finally(() => {
+        if (this.kimiWarming === warming) this.kimiWarming = null;
+      });
+    this.kimiWarming = warming;
+    return warming;
   }
 
   /** `orchestrationTools`: the canvastty_agents tools this session may use (default: the core tools). */
@@ -194,7 +229,10 @@ export class ProviderLaunchAdapters {
       this.kimiProbedExecutable = kimiCli.executable;
     }
     if (this.kimiSupportsPerRunConfig === null) {
-      this.kimiSupportsPerRunConfig = this.probe(kimiCli);
+      const warmed = this.kimiWarmed;
+      this.kimiSupportsPerRunConfig = warmed && warmed.executable === kimiCli.executable && warmed.generation === this.kimiGeneration
+        ? warmed.result
+        : this.probe(kimiCli);
       KimiTemporaryConfiguration.recover(this.kimiHomeDirectory);
     }
     const supportsPerRun = this.kimiSupportsPerRunConfig;
@@ -386,6 +424,23 @@ export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli): boolean {
   });
   if (result.error || result.status !== 0) return false;
   return `${result.stdout ?? ""}\n${result.stderr ?? ""}`.includes("--mcp-config-file");
+}
+
+/** probeKimiPerRunMcpConfig without blocking: the same command, limits and answer. */
+export function probeKimiPerRunMcpConfigAsync(cli: AvailableProviderCli): Promise<boolean> {
+  const launch = providerChildProcessLaunch(cli, ["--help"]);
+  return new Promise((resolve) => {
+    execFile(launch.command, launch.args, {
+      encoding: "utf8",
+      env: { ...process.env, ...launch.environment },
+      timeout: 3_000,
+      maxBuffer: 256 * 1024,
+      windowsHide: true,
+      ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
+    }, (error, stdout, stderr) => {
+      resolve(!error && `${stdout ?? ""}\n${stderr ?? ""}`.includes("--mcp-config-file"));
+    });
+  });
 }
 
 export function recoverKimiConfigurationOnStartup(

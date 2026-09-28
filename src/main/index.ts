@@ -397,6 +397,9 @@ async function initializeServices(): Promise<void> {
       hermesHomeDirectory,
       kimiHomeDirectory
     });
+    // Off the startup path: the first Kimi launch then finds the probe answered instead of blocking on it.
+    const bridge = agentBrowserBridge;
+    setTimeout(() => void bridge.warmProviderProbes().catch(() => undefined), 5_000).unref();
 
     const lifecycleRuntimeDirectory = join(userDataPath, "lifecycle", "runtime");
     runtimeGateway = new RuntimeGateway({
@@ -651,6 +654,7 @@ async function initializeServices(): Promise<void> {
     recheckProviderClis: async () => {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();
+      void agentBrowserBridge?.warmProviderProbes().catch(() => undefined);
       await limitsService!.providerClisRefreshed();
       const availability = providerCliAvailability(providerClis!);
       const updatedSettings = await settings.setAvailableProviders(availability);
