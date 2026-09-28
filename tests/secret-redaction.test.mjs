@@ -409,3 +409,25 @@ test("redactTail with long held values equals masking the whole text and cutting
     }
   }
 });
+
+test("registry: an accepted value is masked where it stands even when its wrap characters leave fewer than eight others", () => {
+  const registry = new SecretRedactionRegistry();
+  const spaced = ["abc", "defg"].join(" ");
+  const tabbed = ["abc", "defg"].join("\t");
+  const broken = ["abc", "defg"].join("\n");
+  const sparse = ["a", "b"].join(" ".repeat(7));
+  // Two halves further apart than a wrap gap, but that is how the value itself is written.
+  const gapped = ["abcd", "efgh"].join(" ".repeat(70));
+  registry.add("test", [spaced, tabbed, broken, sparse, gapped]);
+  for (const value of [spaced, tabbed, broken, sparse, gapped]) {
+    assert.equal(registry.redact(`x ${value} y`), "x <redacted:secret> y", JSON.stringify(value));
+    assert.equal(registry.redact(`{"v":"${JSON.stringify(value).slice(1, -1)}"}`), `{"v":"<redacted:secret>"}`, `${JSON.stringify(value)} JSON-escaped`);
+  }
+  // Only the value as written: its characters alone, or with other gaps, are ordinary text.
+  for (const text of ["a b", "ab", "a  b", "abcdefg"]) assert.equal(registry.redact(`x ${text} y`), `x ${text} y`, text);
+  const base = scrollback(60_000);
+  for (const at of [base.length - 8_192 - 3, base.length - 8_192 - 16_384 - 4]) {
+    const text = `${base.slice(0, at)}${spaced}${base.slice(at)}`;
+    assert.equal(registry.redactTail(text, 8_192), registry.redact(text).slice(-8_192), `tail at ${at}`);
+  }
+});

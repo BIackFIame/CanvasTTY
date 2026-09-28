@@ -8,7 +8,9 @@
  *    the terminal's wrapping put a line break, indentation or a box side between its characters, and in its
  *    JSON-escaped form. They are found by a linear search over the text with those gaps taken out, never by a
  *    pattern built from the value: a pattern for a key of a few thousand characters exceeds what the regular
- *    expression engine accepts, and the error broke every masking call.
+ *    expression engine accepts, and the error broke every masking call. A value that holds wrap characters of
+ *    its own is also searched exactly as written, so it is masked even when too few characters remain without
+ *    them for the wrap-tolerant search, or when its own gaps are wider than a wrap gap.
  * 2. JSON string values under key-like names (`"apiKey"`, `"token"`, `"authorization"`, …), across lines too.
  * 3. Generic shapes: PEM private keys, `sk-…`, GitHub, Slack, AWS, Google, xAI tokens, JWTs, `Bearer …`,
  *    `Authorization:` values, URL credentials, secret-looking query values and assignments, and long
@@ -38,10 +40,18 @@ const PRIVATE_KEY_HEADER = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
 const PRIVATE_KEY_FOOTER = /-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
 const JSON_SECRET_VALUE = /("(?:[A-Za-z0-9_.-]{0,40}(?:api[_-]?key|token|secret|password|authorization))"\s*:\s*")(?!<redacted:)[^"]{1,2048}("?)/giu;
 
+/** The search forms of the held values. */
+type KnownForms = {
+  /** Each value and its JSON-escaped form without wrap characters, when at least MIN_SECRET_CHARS remain. */
+  bare: readonly string[];
+  /** Each value and JSON-escaped form that holds wrap characters, exactly as written. */
+  exact: readonly string[];
+};
+const NO_FORMS: KnownForms = { bare: [], exact: [] };
+
 export class SecretRedactionRegistry {
   private readonly owners = new Map<string, Set<string>>();
-  /** Every held value and its JSON-escaped form without wrap characters, longest first. */
-  private forms: string[] = [];
+  private forms: KnownForms = NO_FORMS;
   /** The longest text one held value can match: its characters plus a full wrap gap between each two. */
   private knownSpan = 0;
   private dirty = false;
@@ -99,21 +109,27 @@ export class SecretRedactionRegistry {
   }
 
   /** The search forms of every held value; rebuilt only after a change. */
-  private knownForms(): readonly string[] {
+  private knownForms(): KnownForms {
     if (!this.dirty) return this.forms;
-    const forms = new Set<string>();
+    const bare = new Set<string>();
+    const exact = new Set<string>();
     let longest = 0;
     for (const values of this.owners.values()) {
       for (const value of values) {
         for (const form of [value, JSON.stringify(value).slice(1, -1)]) {
           longest = Math.max(longest, form.length);
-          const bare = withoutWrapCharacters(form);
-          // A value that is mostly spaces would leave a fragment that garbles ordinary text.
-          if (bare.length >= MIN_SECRET_CHARS) forms.add(bare);
+          const stripped = withoutWrapCharacters(form);
+          // Without its wrap characters, a value that is mostly spaces would leave a fragment that garbles
+          // ordinary text; such a value is found as written (below).
+          if (stripped.length >= MIN_SECRET_CHARS) bare.add(stripped);
+          // Every held form is at least MIN_SECRET_CHARS long as written: the value was trimmed and checked in
+          // add(), and escaping only lengthens it.
+          if (stripped !== form) exact.add(form);
         }
       }
     }
-    this.forms = [...forms].sort((a, b) => b.length - a.length);
+    const longestFirst = (a: string, b: string): number => b.length - a.length;
+    this.forms = { bare: [...bare].sort(longestFirst), exact: [...exact].sort(longestFirst) };
     // A form of n characters matches at most n characters plus a full wrap gap between each two.
     this.knownSpan = longest * (MAX_WRAP_GAP + 1);
     this.dirty = false;
@@ -141,16 +157,42 @@ function withoutWrapCharacters(text: string): string {
 }
 
 /**
- * Replaces every held value in `text`, also where wrapping put up to MAX_WRAP_GAP wrap characters between two of
- * its characters. The text is searched with its wrap characters taken out (a map leads back to the original
- * positions), each form with Knuth-Morris-Pratt: linear in the text plus the form, whatever either holds. Matches
- * are taken leftmost first, the longest at a position, and never overlap.
+ * Replaces every held value in `text`: the wrap-free forms also where wrapping put up to MAX_WRAP_GAP wrap
+ * characters between two of their characters, the exact forms as written. Matches are taken leftmost first, the
+ * longest at a position, and never overlap.
  */
-function maskKnownValues(text: string, forms: readonly string[]): string {
-  if (forms.length === 0) return text;
-  const bare = withoutWrapCharacters(text);
-  const present = forms.filter(form => bare.includes(form));
-  if (present.length === 0) return text;
+function maskKnownValues(text: string, forms: KnownForms): string {
+  const endAt = knownMatchEnds(text, forms);
+  if (!endAt) return text;
+  let result = "";
+  let kept = 0;
+  for (let at = 0; at < text.length;) {
+    const end = endAt[at];
+    if (end === 0) { at++; continue; }
+    result += text.slice(kept, at) + SECRET_MARKER;
+    kept = end;
+    at = end;
+  }
+  return kept === 0 ? text : result + text.slice(kept);
+}
+
+/**
+ * For each position of `text`, the end of the longest held-value match that starts there (0: none), or null when
+ * nothing matches. The wrap-free forms are searched in the text with its wrap characters taken out (a map leads
+ * back to the original positions), the exact forms in the text itself; each with Knuth-Morris-Pratt, linear in
+ * the text plus the form, whatever either holds.
+ */
+function knownMatchEnds(text: string, forms: KnownForms): Int32Array | null {
+  if (forms.bare.length === 0 && forms.exact.length === 0) return null;
+  const exact = forms.exact.filter(form => text.includes(form));
+  const bare = forms.bare.length ? withoutWrapCharacters(text) : '';
+  const present = forms.bare.filter(form => bare.includes(form));
+  if (present.length === 0 && exact.length === 0) return null;
+  const endAt = new Int32Array(text.length);
+  for (const form of exact) {
+    for (const start of occurrences(text, form)) endAt[start] = Math.max(endAt[start], start + form.length);
+  }
+  if (present.length === 0) return endAt;
   // Where each character of `bare` stands in `text`, and how many oversized gaps lie before it (a match may
   // not cross one).
   const positions = new Int32Array(bare.length);
@@ -161,24 +203,15 @@ function maskKnownValues(text: string, forms: readonly string[]): string {
     positions[count++] = i;
     previous = i;
   }
-  // The longest match that starts at each position of `bare`.
-  const longestAt = new Int32Array(bare.length);
   for (const form of present) {
     for (const start of occurrences(bare, form)) {
       // Only the gaps inside the match count, not the one before its first character.
-      if (oversized[start + form.length] - oversized[start + 1] === 0 && form.length > longestAt[start]) longestAt[start] = form.length;
+      if (oversized[start + form.length] - oversized[start + 1] !== 0) continue;
+      const from = positions[start];
+      endAt[from] = Math.max(endAt[from], positions[start + form.length - 1] + 1);
     }
   }
-  let result = "";
-  let kept = 0;
-  for (let at = 0; at < bare.length;) {
-    const length = longestAt[at];
-    if (length === 0) { at++; continue; }
-    result += text.slice(kept, positions[at]) + SECRET_MARKER;
-    kept = positions[at + length - 1] + 1;
-    at += length;
-  }
-  return kept === 0 ? text : result + text.slice(kept);
+  return endAt;
 }
 
 /** Every start of `pattern` in `text`, overlapping ones included (Knuth-Morris-Pratt). */
