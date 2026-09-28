@@ -412,12 +412,12 @@ function orchestrationServerEntry(helper: StdioHelperLaunch): Record<string, unk
   };
 }
 
-export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli): boolean {
+export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli, timeoutMs = 3_000): boolean {
   const launch = providerChildProcessLaunch(cli, ["--help"]);
   const result = spawnSync(launch.command, launch.args, {
     encoding: "utf8",
     env: { ...process.env, ...launch.environment },
-    timeout: 3_000,
+    timeout: timeoutMs,
     maxBuffer: 256 * 1024,
     windowsHide: true,
     ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})
@@ -427,13 +427,13 @@ export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli): boolean {
 }
 
 /** probeKimiPerRunMcpConfig without blocking: the same command, limits and answer. */
-export function probeKimiPerRunMcpConfigAsync(cli: AvailableProviderCli): Promise<boolean> {
+export function probeKimiPerRunMcpConfigAsync(cli: AvailableProviderCli, timeoutMs = 3_000): Promise<boolean> {
   const launch = providerChildProcessLaunch(cli, ["--help"]);
   return new Promise((resolve) => {
     execFile(launch.command, launch.args, {
       encoding: "utf8",
       env: { ...process.env, ...launch.environment },
-      timeout: 3_000,
+      timeout: timeoutMs,
       maxBuffer: 256 * 1024,
       windowsHide: true,
       ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})

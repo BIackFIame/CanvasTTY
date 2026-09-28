@@ -845,7 +845,8 @@ test("the background Kimi probe gives the same answer as the blocking one", { sk
     ["echo '--mcp-config-file'; exit 2", false]
   ]) {
     const kimi = cli(body);
-    assert.equal(probeKimiPerRunMcpConfig(kimi), expected, body);
-    assert.equal(await probeKimiPerRunMcpConfigAsync(kimi), expected, body);
+    // A generous limit: the answers are compared, not the 3 s default, which a loaded machine can hit.
+    assert.equal(probeKimiPerRunMcpConfig(kimi, 30_000), expected, body);
+    assert.equal(await probeKimiPerRunMcpConfigAsync(kimi, 30_000), expected, body);
   }
 });
