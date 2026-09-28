@@ -101,6 +101,12 @@ const INHERITED_ENVIRONMENT = new Set([
  * hook read and hashed itself, and a mismatch stops the load. They run
  * before the entry through `--import`, off the main thread (module.register).
  *
+ * The entry checked is the main module node actually resolved (the one
+ * resolve without a parent), not only the URL the host computed: when the
+ * entry or a folder above it is replaced by a symlink after the host's check,
+ * node resolves the main module to another file, and that file must match the
+ * hash too. The host's URL stays checked as well.
+ *
  * The hooks take their modules with `await import(...)`, never a static
  * `import ... from`: electron-vite puts its CommonJS shim (`__dirname`,
  * `require`) after the last static import it finds in the main bundle, and a
@@ -111,10 +117,16 @@ const ENTRY_GUARD_HOOKS = `
 const { createHash } = await import("node:crypto");
 const { readFile } = await import("node:fs/promises");
 let entryUrl = null;
+let mainUrl = null;
 let expected = null;
 export function initialize(data) { entryUrl = data.url; expected = data.sha256; }
+export async function resolve(specifier, context, nextResolve) {
+  const resolved = await nextResolve(specifier, context);
+  if (mainUrl === null && context.parentURL === undefined) mainUrl = resolved.url;
+  return resolved;
+}
 export async function load(url, context, nextLoad) {
-  if (url !== entryUrl) return nextLoad(url, context);
+  if (url !== entryUrl && url !== mainUrl) return nextLoad(url, context);
   const source = await readFile(new URL(url));
   if (createHash("sha256").update(source).digest("hex") !== expected) {
     throw new Error("The service entry changed after it was trusted.");
@@ -360,7 +372,8 @@ export class PluginServiceSupervisor {
 
     // The check above and node's own read of the entry are separate reads: a file
     // replaced in between would run as trusted. The guard makes node run only
-    // bytes it read and hashed itself, so what runs is what matched the hash.
+    // bytes it read and hashed itself, so what runs is what matched the hash,
+    // wherever node resolves `spec.entryPath` by then.
     const child = spawn(this.options.command, [...entryGuardArguments(entryUrl, spec.sha256), spec.entryPath], {
       cwd: spec.root,
       env: pluginServiceEnvironment(this.options.environment),

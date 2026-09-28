@@ -474,3 +474,50 @@ test("end to end: trust starts the service, disable and uninstall stop it", asyn
   await assert.rejects(instance.request(manifest.id, "echo", "echo", { text: "x" }), /not running/);
   assert.equal(instance.report(manifest.id).services.length, 0);
 });
+
+/**
+ * Runs a trusted entry through a "node" that first changes the plugin files with `swap` (a shell snippet; `$entry`
+ * is the entry path the supervisor passed, `$tampered` an untrusted module writing the marker), then runs the real
+ * node. The untrusted module must never run, however the swap changes the path node resolves.
+ */
+async function assertSwapNeverRuns(t, { swap, extension = "mjs", command = process.execPath }) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-resolve-")));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const marker = join(root, "tampered-ran");
+  const cjs = extension === "cjs";
+  const tamperedSource = cjs
+    ? `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`
+    : `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");\n${PROBE}`;
+  await mkdir(join(root, "untrusted"), { recursive: true });
+  const tampered = join(root, "untrusted", `probe.${extension}`);
+  await writeFile(tampered, tamperedSource);
+  const wrapper = join(root, "node-with-swap.sh");
+  await writeFile(wrapper, `#!/bin/sh\nfor entry; do :; done\ntampered=${JSON.stringify(tampered)}\n${swap}\nexec ${JSON.stringify(command)} "$@"\n`, { mode: 0o700 });
+  const { instance } = supervisor({ command: wrapper, restartDelaysMs: [10_000] });
+  t.after(() => instance.dispose());
+  const trusted = cjs ? `require("node:readline");\n` : PROBE;
+  const base = await specFor(join(root, "plugin"), "com.example.a", "probe", trusted);
+  const spec = cjs ? { ...base, entryPath: join(root, "plugin", "probe.cjs") } : base;
+  if (cjs) await writeFile(spec.entryPath, trusted);
+  await instance.sync([spec]);
+  const markerExists = () => stat(marker).then(() => true, () => false);
+  const exited = () => instance.report("com.example.a").log.some((entry) => /exit|crash|stopped/i.test(entry.message));
+  await waitFor(async () => (await markerExists()) || exited(), 5_000);
+  assert.equal(await markerExists(), false, "the untrusted module must not run");
+}
+
+test("an entry replaced by a symlink to another module after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { swap: `rm -f "$entry"; ln -s "$tampered" "$entry"` });
+});
+
+test("an entry whose folder is replaced by a symlink after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { swap: `dir=$(dirname "$entry"); mv "$dir" "$dir.trusted"; ln -s "$(dirname "$tampered")" "$dir"` });
+});
+
+test("a CommonJS entry swapped after the host checked it is not run, by content", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { extension: "cjs", swap: `cp "$tampered" "$entry"` });
+});
+
+test("a CommonJS entry replaced by a symlink after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { extension: "cjs", swap: `rm -f "$entry"; ln -s "$tampered" "$entry"` });
+});
