@@ -3,6 +3,8 @@ import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 
 import {
   BrowserAuditStore,
@@ -204,4 +206,54 @@ test("BrowserAuditStore repairs a line torn by a crash instead of refusing every
   const again = new BrowserAuditStore(root);
   assert.equal((await again.append(auditInput("after-newline"))).sequence, 4);
   assert.equal((await again.verify()).valid, true);
+});
+
+function runInLocale(locale, root, action) {
+  const script = `
+    const { BrowserAuditStore } = await import(${JSON.stringify(new URL("../src/main/services/browser/BrowserAuditStore.ts", import.meta.url).href)});
+    const store = new BrowserAuditStore(${JSON.stringify(root)});
+    if (${JSON.stringify(action)} === "append") {
+      await store.append({ timestamp: 1, requestId: "r-" + ${JSON.stringify(locale)}, actorKind: "agent", actorId: "a", operation: "browser_click",
+        phase: "result", ok: true, details: { "z": 1, "ä": 2, "Zeta": 3, "alpha": 4 } });
+    }
+    process.stdout.write(JSON.stringify(await store.verify()));`;
+  const result = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script], {
+    env: { ...process.env, LC_ALL: locale, LANG: locale },
+    encoding: "utf8"
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+test("the audit hash does not depend on the system locale", async (t) => {
+  const root = await fixture(t, "canvastty-audit-locale-");
+  assert.equal(runInLocale("sv_SE.UTF-8", root, "append").valid, true);
+  // The same log read by a process with another collation.
+  const other = runInLocale("en_US.UTF-8", root, "verify");
+  assert.equal(other.valid, true);
+  assert.equal(other.records, 1);
+  assert.equal(runInLocale("en_US.UTF-8", root, "append").records, 2);
+  assert.equal(runInLocale("sv_SE.UTF-8", root, "verify").valid, true);
+});
+
+test("records hashed with the earlier locale-ordered keys still verify and extend the chain", async (t) => {
+  const root = await fixture(t, "canvastty-audit-legacy-");
+  const legacyJson = (value) => {
+    if (Array.isArray(value)) return `[${value.map(legacyJson).join(",")}]`;
+    if (value && typeof value === "object") {
+      return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => `${JSON.stringify(key)}:${legacyJson(entry)}`).join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  const store = new BrowserAuditStore(root);
+  const first = await store.append(auditInput("legacy-1", { details: { Zeta: 1, alpha: 2 } }));
+  const { hash: _hash, ...base } = first;
+  const legacy = { ...base, hash: createHash("sha256").update(legacyJson(base)).digest("hex") };
+  assert.notEqual(legacy.hash, first.hash, "the fixture differs between the two orderings");
+  await writeFile(store.filePath, `${JSON.stringify(legacy)}\n`);
+  const reopened = new BrowserAuditStore(root);
+  const next = await reopened.append(auditInput("new-2"));
+  assert.equal(next.previousHash, legacy.hash);
+  assert.deepEqual((await reopened.verify()).valid, true);
 });
