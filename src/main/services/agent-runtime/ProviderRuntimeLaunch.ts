@@ -1149,9 +1149,15 @@ function mkdirPrivate(path: string): void {
 function atomicWrite(path: string, value: string, mode = FILE_MODE): void {
   mkdirPrivate(dirname(path));
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, value, { mode });
-  chmodSync(temporary, mode);
-  renameSync(temporary, path);
+  try {
+    writeFileSync(temporary, value, { mode });
+    chmodSync(temporary, mode);
+    renameSync(temporary, path);
+  } catch (error) {
+    // The name is random, so a leftover would never be reused or cleaned up.
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function readOptional(path: string): string | null {
