@@ -52,7 +52,7 @@ import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
-import { AGENT_PROVIDERS } from "./lib/providers";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
 import {
   mergeSessionSnapshots,
   upsertSession,
@@ -82,9 +82,9 @@ const FALLBACK_SETTINGS: AppSettings = {
   homeAccentPreset: "classic",
   homeAccentColors: { ...DEFAULT_HOME_ACCENT_COLORS },
   sessionRowColorMode: "status",
-  homeLauncherProviders: ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"],
+  homeLauncherProviders: [...AGENT_PROVIDERS],
   apiProfiles: [],
-  homeLimitProviders: ["codex", "claude", "qwen", "kimi", "opencode", "grok"],
+  homeLimitProviders: [...LIMIT_PROVIDERS],
   canvasLauncherItems: [...DEFAULT_CANVAS_LAUNCHER_ITEMS],
   radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
   radialLauncherEnabled: false,

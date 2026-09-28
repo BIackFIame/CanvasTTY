@@ -52,6 +52,7 @@ import type { DecisionService } from "./DecisionHooks.ts";
 import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 import type { AgentToolProvider } from "./PluginAgentTools.ts";
 import type { CardActionProvider } from "./PluginCards.ts";
+import { AGENT_PROVIDERS } from "../../shared/contracts.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -90,9 +91,7 @@ const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
 const MAX_PLUGIN_SERVICES = 8;
 const PLUGIN_DATA_DIR = "plugin-data";
 const PLUGIN_INPUT_BRIDGE_URL = "canvastty-plugin://host/input-bridge.js";
-const AGENT_PROVIDERS = new Set<AgentProviderId>([
-  "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
-]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const PLUGIN_HOOK_EVENTS = new Set<PluginAgentHookEvent>([
   "session-start",
   "prompt-submit",
@@ -1506,7 +1505,7 @@ function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): Plu
     }
     const providers: AgentProviderId[] = [];
     for (const provider of candidate.providers) {
-      if (!AGENT_PROVIDERS.has(provider as AgentProviderId)) {
+      if (!AGENT_PROVIDER_SET.has(provider as AgentProviderId)) {
         throw new Error(`Plugin hook ${id} has an unknown provider: ${String(provider)}.`);
       }
       if (providers.includes(provider as AgentProviderId)) {
@@ -1612,7 +1611,7 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
-      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
       throw new Error("Plugin launch appliesTo must list agent providers.");
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
@@ -1633,7 +1632,7 @@ function validateServiceDecide(value: unknown): PluginServiceDecide {
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
-      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
       throw new Error("Plugin decide appliesTo must list agent providers.");
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
@@ -1707,7 +1706,7 @@ function validateCardActions(value: unknown): PluginCardAction[] {
 }
 
 const MAX_ENVIRONMENT_KINDS = 8;
-const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDERS]);
+const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDER_SET]);
 
 function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ENVIRONMENT_KINDS) {
@@ -3082,7 +3081,7 @@ function isRuntimeHookRecord(value: unknown): value is RuntimeHookRecord {
     && !isAbsolute(value.entry)
     && Array.isArray(value.providers)
     && value.providers.length > 0
-    && value.providers.every((provider) => AGENT_PROVIDERS.has(provider as AgentProviderId))
+    && value.providers.every((provider) => AGENT_PROVIDER_SET.has(provider as AgentProviderId))
     && new Set(value.providers).size === value.providers.length
     && Array.isArray(value.events)
     && value.events.length > 0

@@ -9,6 +9,11 @@ export const PROVIDER_LABELS: Record<ProviderId, string> = {
 };
 export type CanvasLauncherItemId = ProviderId;
 
+/** Whether a value is one of the provider ids above. */
+export function isProviderId(value: unknown): value is ProviderId {
+  return typeof value === "string" && Object.hasOwn(PROVIDER_LABELS, value);
+}
+
 export const CANVAS_LAUNCHER_ITEMS: readonly CanvasLauncherItemId[] = [
   "codex",
   "claude",

@@ -5,7 +5,7 @@ import { createServer } from "node:net";
 import type { AddressInfo, Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProviderId } from "../../../shared/contracts.ts";
+import { AGENT_PROVIDERS, type ProviderId } from "../../../shared/contracts.ts";
 import {
   CLAUDE_HTTP_HOOK,
   MAX_ANSWER_CHARS,
@@ -34,9 +34,7 @@ import {
   tokenMatches
 } from "../gatewaySocket.ts";
 
-const AGENT_PROVIDERS = new Set<ProviderId>([
-  "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
-]);
+const AGENT_PROVIDER_SET = new Set<ProviderId>(AGENT_PROVIDERS);
 const MAX_RUNTIME_SESSIONS = 32;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 // Hook helpers write their one message right after connecting. A connection
@@ -261,7 +259,7 @@ export class RuntimeGateway {
     if (!this.endpoint || (!this.server && !this.windowsTransport?.isRunning)) {
       throw new Error("Agent runtime gateway must be started before launching agents.");
     }
-    if (!terminalSessionId || !AGENT_PROVIDERS.has(provider)) {
+    if (!terminalSessionId || !AGENT_PROVIDER_SET.has(provider)) {
       throw new Error("Agent runtime launch identity is invalid.");
     }
     if (!this.leases.has(terminalSessionId) && this.leases.size >= MAX_RUNTIME_SESSIONS) {
@@ -767,7 +765,7 @@ function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissi
   if (value.v !== RUNTIME_PROTOCOL_VERSION || value.type !== "permission_request") throw new Error("Permission request version is unsupported.");
   if (
     typeof value.terminalSessionId !== "string" || !value.terminalSessionId || value.terminalSessionId.length > 160
-    || typeof value.provider !== "string" || !AGENT_PROVIDERS.has(value.provider as ProviderId)
+    || typeof value.provider !== "string" || !AGENT_PROVIDER_SET.has(value.provider as ProviderId)
     || typeof value.capabilityToken !== "string" || value.capabilityToken.length < 32
     || typeof value.requestId !== "string" || !/^[A-Za-z0-9-]{8,80}$/u.test(value.requestId)
     || typeof value.toolName !== "string" || !value.toolName || value.toolName.length > PERMISSION_GATE.toolNameChars
@@ -810,7 +808,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     || value.terminalSessionId.length === 0
     || value.terminalSessionId.length > 160
     || typeof value.provider !== "string"
-    || !AGENT_PROVIDERS.has(value.provider as ProviderId)
+    || !AGENT_PROVIDER_SET.has(value.provider as ProviderId)
     || typeof value.capabilityToken !== "string"
     || value.capabilityToken.length < 32
     || typeof value.state !== "string"

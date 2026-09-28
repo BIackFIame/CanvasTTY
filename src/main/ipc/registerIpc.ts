@@ -14,7 +14,7 @@ import type {
   ProviderSecretId,
   SessionBounds
 } from "../../shared/contracts";
-import { IPC, PROVIDER_SECRET_IDS } from "../../shared/contracts";
+import { IPC, PROVIDER_SECRET_IDS, isProviderId } from "../../shared/contracts";
 import { isCanvasNavigationMouseButton } from "../../shared/canvasNavigation";
 import { createWindowStateObserver, readWindowState } from "../windowState";
 import type { SettingsStore } from "../services/SettingsStore";
@@ -871,7 +871,7 @@ async function pickPluginMediaLibrary(
 }
 
 function providerValue(value: unknown): ProviderId {
-  if (value === "terminal" || value === "codex" || value === "claude" || value === "qwen" || value === "kimi" || value === "opencode" || value === "hermes" || value === "grok" || value === "omp" || value === "pi" || value === "cursor" || value === "minimax" || value === "devin" || value === "antigravity") return value;
+  if (isProviderId(value)) return value;
   throw new Error("Plugin requested an unknown launcher provider.");
 }
 

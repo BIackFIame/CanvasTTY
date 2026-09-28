@@ -63,6 +63,7 @@ import {
   normalizeCanvasOverrideBinding,
   type CanvasNavigationPlatform
 } from "../../shared/canvasNavigation.ts";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "../../shared/contracts.ts";
 
 const LOCALES = new Set<LocaleId>(["ru", "en"]);
 const SESSION_RESTORE_MODES = new Set<SessionRestoreMode>(["off", "reopen", "continue"]);
@@ -82,10 +83,9 @@ const PROVIDER_ADDITIONS_SETTINGS_VERSION = 19;
 const ADDED_AGENT_PROVIDERS: AgentProviderId[] = ["omp", "pi", "cursor", "minimax", "devin", "antigravity"];
 const LEGACY_AGENT_PROVIDERS: AgentProviderId[] = ["codex", "claude", "kimi", "opencode", "hermes"];
 const PRE_QWEN_AGENT_PROVIDERS: AgentProviderId[] = [...LEGACY_AGENT_PROVIDERS, "grok"];
-const AGENT_PROVIDERS = new Set<AgentProviderId>(["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const LEGACY_LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "kimi"];
 const PRE_QWEN_LIMIT_PROVIDERS: LimitProviderId[] = [...LEGACY_LIMIT_PROVIDERS, "opencode", "grok"];
-const LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 const LIMIT_PROVIDER_SET = new Set<LimitProviderId>(LIMIT_PROVIDERS);
 const CANVAS_LAUNCHER_ITEM_SET = new Set<CanvasLauncherItemId>(CANVAS_LAUNCHER_ITEMS);
 const RADIAL_LAUNCHER_ITEM_SET = new Set<RadialLauncherItemId>(RADIAL_LAUNCHER_ITEMS);
@@ -114,7 +114,7 @@ export class SettingsStore {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
     this.availableProviders = new Set(availability
-      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
+      ? AGENT_PROVIDERS.filter((provider) => availability[provider])
       : AGENT_PROVIDERS);
     this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
   }
@@ -234,7 +234,7 @@ export class SettingsStore {
   }
 
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
-    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
+    this.availableProviders = new Set(AGENT_PROVIDERS.filter((provider) => availability[provider]));
     // Filter in queue order: a snapshot taken while an update() is still
     // writing lacks that update, and persisting it afterwards dropped the
     // update from the file (it stayed only in memory).
@@ -450,7 +450,7 @@ export function normalizeSettings(
     : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
-      (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)
+      (provider): provider is AgentProviderId => AGENT_PROVIDER_SET.has(provider as AgentProviderId)
     )
     : fallback.acknowledgedDangerousProfiles;
   const shortcuts = normalizeShortcuts(source.shortcuts, fallback.shortcuts);
@@ -686,9 +686,9 @@ function normalizeAgentProviderSelection(
 ): AgentProviderId[] {
   if (!Array.isArray(candidate)) return [...fallback];
   const selected = new Set(candidate.filter((provider): provider is AgentProviderId => (
-    typeof provider === "string" && AGENT_PROVIDERS.has(provider as AgentProviderId)
+    typeof provider === "string" && AGENT_PROVIDER_SET.has(provider as AgentProviderId)
   )));
-  return [...AGENT_PROVIDERS].filter((provider) => selected.has(provider));
+  return AGENT_PROVIDERS.filter((provider) => selected.has(provider));
 }
 
 function filterUnavailableProviders(settings: AppSettings, available: ReadonlySet<AgentProviderId>): AppSettings {
