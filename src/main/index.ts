@@ -676,7 +676,9 @@ async function initializeServices(): Promise<void> {
       // (the launch dialog enables it right before launching an orchestrator).
       await applyAgentControlSetting(next.agentControlEnabled);
       agentBrowserBridge?.setEnabled(next.browserAgentAccess);
-      browserService?.setRestoreTabs(next.browserRestoreTabs);
+      browserService?.setRestoreTabs(next.browserRestoreTabs).catch((error: unknown) => {
+        console.warn("CanvasTTY browser tab restore setting could not be applied.", error);
+      });
       browserService?.cancelCanvasNavigationGesture();
       browserService?.setCanvasWheelCaptureMode(next.canvasWheelCaptureMode);
       canvasNavigationInput?.setBindings({
