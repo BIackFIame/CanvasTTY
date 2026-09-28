@@ -1,59 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return Object.freeze({
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: Object.freeze({ PATH: "/resolved:/usr/bin" }),
-        checked: Object.freeze([{ path: `/resolved/${provider}`, result: "selected" }])
-      });
-    },
-    snapshot() {
-      return {};
-    }
-  };
-}
-
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    let onData = () => undefined;
-    let onExit = () => undefined;
-    const process = {
-      pid: 10_000 + calls.length,
-      process: command,
-      write() {},
-      resize(cols, rows) {
-        process.lastResize = { cols, rows };
-      },
-      kill() {},
-      pause() {},
-      resume() {},
-      onData(listener) {
-        onData = listener;
-        return { dispose() {} };
-      },
-      onExit(listener) {
-        onExit = listener;
-        return { dispose() {} };
-      },
-      emitData(data) {
-        onData(data);
-      },
-      emitExit(exitCode) {
-        onExit({ exitCode, signal: 0 });
-      },
-      lastResize: null
-    };
-    calls.push({ command, args, options, process });
-    return process;
-  };
-}
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 test("Grok PTY starts and restarts only with the renderer-measured grid", () => {
   const calls = [];
@@ -63,7 +11,7 @@ test("Grok PTY starts and restarts only with the renderer-measured grid", () => 
     undefined,
     undefined,
     true,
-    fakeSpawner(calls)
+    fakeSpawner(calls, { pidBase: 10_000 })
   );
   const session = manager.create({
     provider: "grok",
@@ -97,7 +45,7 @@ test("other providers retain immediate startup and subsequent PTY resize", () =>
     undefined,
     undefined,
     true,
-    fakeSpawner(calls)
+    fakeSpawner(calls, { pidBase: 10_000 })
   );
   const session = manager.create({
     provider: "codex",
@@ -130,7 +78,7 @@ test("answer-capture grants are passed only to the explicitly granted session ge
     undefined,
     runtime,
     true,
-    fakeSpawner(calls)
+    fakeSpawner(calls, { pidBase: 10_000 })
   );
   const expiresAt = Date.now() + 60_000;
   const session = manager.create({

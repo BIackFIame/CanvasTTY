@@ -24,6 +24,7 @@ import {
   MAX_RESULT_CHARS,
   MAX_RUNTIME_MESSAGE_BYTES
 } from "../src/agent-runtime/runtime-protocol.mjs";
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const localSocket = { skip: process.platform === "win32" ? "Unix socket tests; native Windows pipe relay has its own suite." : false };
 const PROMPT = "\x1b[2J\x1b[H>_ OpenAI Codex\r\nmodel: test\r\npermissions: YOLO mode\r\n\r\n› Ask Codex to do anything";
@@ -437,44 +438,9 @@ test("opt-in hook result capture is authenticated, bounded and absent for ordina
 
 const writes = new Map();
 
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = {
-      pid: 20_000 + calls.length,
-      write(data) {
-        writes.set(options?.name ?? calls.length, [...(writes.get(options?.name ?? calls.length) ?? []), data]);
-      },
-      resize() {},
-      kill() {},
-      pause() {},
-      resume() {},
-      onData() { return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
-    };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
-
 function serviceFixture() {
   const calls = [];
-  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls, { onWrite: (data, options) => writes.set(options?.name ?? calls.length, [...(writes.get(options?.name ?? calls.length) ?? []), data]) }));
   const control = new AgentControlService(terminals);
   return { calls, terminals, control };
 }

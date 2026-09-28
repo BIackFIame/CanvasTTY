@@ -9,41 +9,9 @@ import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { OrchestrationGateway } from "../src/main/services/agent-browser/OrchestrationGateway.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
 import { ORCHESTRATION_BRIDGE_PROTOCOL_VERSION } from "../src/main/services/agent-browser/orchestration-protocol.ts";
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const writes = [];
-
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = {
-      pid: 20_000 + calls.length,
-      write(data) { writes.push(data); },
-      resize() {},
-      kill() {},
-      pause() {},
-      resume() {},
-      onData() { return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
-    };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
 
 class TestClient {
   constructor(socket) {
@@ -97,7 +65,7 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const calls = [];
-  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls, { onWrite: (data) => writes.push(data) }));
   const control = new AgentControlService(terminals);
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
