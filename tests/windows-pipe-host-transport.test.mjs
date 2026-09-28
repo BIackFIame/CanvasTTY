@@ -126,3 +126,40 @@ test("Windows pipe transport rejects oversized native relay headers before alloc
   child.stdout.write(invalid.subarray(0, protocol.headerBytes));
   await assert.rejects(starting, /bounded payload/i);
 });
+
+test("Windows pipe transport turns host pipe errors into a transport failure instead of an uncaught exception", async () => {
+  for (const stream of ["stdin", "stdout", "stderr"]) {
+    const child = fakeHost();
+    const sockets = [];
+    const transport = new WindowsPipeHostTransport({
+      platform: "win32",
+      hostPath: join(process.cwd(), "package.json"),
+      spawnHost: () => child
+    });
+    const fatal = [];
+    transport.on("fatal", (error) => fatal.push(error));
+    const starting = transport.start((socket) => sockets.push(socket));
+    child.stdout.write(frame(protocol.hostToParent.ready, 0, Buffer.from("\\\\.\\pipe\\canvastty-agent-0123456789abcdef", "utf8")));
+    await starting;
+    child.stdout.write(frame(protocol.hostToParent.connect, 3));
+    let closed = false;
+    const socketErrors = [];
+    sockets[0].on("error", (error) => socketErrors.push(error));
+    sockets[0].on("close", () => { closed = true; });
+
+    const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+    assert.doesNotThrow(() => child[stream].emit("error", epipe), `${stream} error is handled`);
+    if (stream === "stderr") {
+      // Diagnostics only: losing stderr does not end the relay.
+      assert.equal(transport.isRunning, true);
+      await transport.close();
+      continue;
+    }
+    assert.equal(closed, true);
+    assert.equal(socketErrors.length, 1);
+    assert.equal(transport.isRunning, false);
+    assert.equal(fatal.length, 1);
+    assert.match(fatal[0].message, /EPIPE/);
+    assert.equal(sockets[0].write(Buffer.from("late")), false);
+  }
+});
