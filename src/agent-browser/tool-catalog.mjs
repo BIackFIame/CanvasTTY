@@ -188,36 +188,59 @@ function validateSchema(schema, value, path) {
   return `${path} uses an unsupported schema.`;
 }
 
-export function canonicalStringify(value) {
-  const seen = new Set();
-  return JSON.stringify(canonicalValue(value, seen));
-}
+const byCodeUnit = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 
-function canonicalValue(value, seen) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Canonical JSON cannot contain a non-finite number.");
-    return value;
-  }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) throw new TypeError("Canonical JSON cannot contain a cycle.");
-    seen.add(value);
-    const output = value.map((entry) => canonicalValue(entry, seen));
-    seen.delete(value);
-    return output;
-  }
-  if (isPlainObject(value)) {
-    if (seen.has(value)) throw new TypeError("Canonical JSON cannot contain a cycle.");
-    seen.add(value);
-    const output = {};
-    for (const key of Object.keys(value).sort()) {
-      const child = value[key];
-      if (child !== undefined) output[key] = canonicalValue(child, seen);
+/**
+ * The app's one canonical JSON: object keys sorted by UTF-16 code unit (never
+ * by locale), no whitespace, undefined properties left out as JSON.stringify
+ * does. Bridge messages, their digests, provider config hashes and the browser
+ * audit chain all use it.
+ *
+ * Strict by default: a cycle, a non-finite number, a non-plain object or an
+ * undefined array entry throws. `lenient` answers those as JSON.stringify
+ * would (null, the object's own keys, null) for records that must hash
+ * exactly as they were written. `compareKeys` exists only to verify records
+ * hashed under an older key order.
+ */
+export function canonicalStringify(value, options = {}) {
+  const lenient = options.lenient === true;
+  const compare = options.compareKeys ?? byCodeUnit;
+  const seen = new Set();
+  const encode = (item, inArray) => {
+    switch (typeof item) {
+      case "string":
+      case "boolean":
+        return JSON.stringify(item);
+      case "number":
+        if (!Number.isFinite(item) && !lenient) throw new TypeError("Canonical JSON cannot contain a non-finite number.");
+        return JSON.stringify(item);
+      case "object": {
+        if (item === null) return "null";
+        const array = Array.isArray(item);
+        if (!array && !lenient && !isPlainObject(item)) throw new TypeError("Canonical JSON cannot contain object.");
+        if (seen.has(item)) throw new TypeError("Canonical JSON cannot contain a cycle.");
+        seen.add(item);
+        try {
+          if (array) return `[${item.map((entry) => encode(entry, true)).join(",")}]`;
+          const fields = [];
+          for (const key of Object.keys(item).sort(compare)) {
+            const text = encode(item[key], false);
+            if (text !== undefined) fields.push(`${JSON.stringify(key)}:${text}`);
+          }
+          return `{${fields.join(",")}}`;
+        } finally {
+          seen.delete(item);
+        }
+      }
+      default:
+        if (item === undefined && !inArray) return undefined;
+        if (lenient && typeof item !== "bigint") return inArray ? "null" : undefined;
+        throw new TypeError(`Canonical JSON cannot contain ${typeof item}.`);
     }
-    seen.delete(value);
-    return output;
-  }
-  throw new TypeError(`Canonical JSON cannot contain ${typeof value}.`);
+  };
+  const text = encode(value, false);
+  if (text === undefined) throw new TypeError("Canonical JSON cannot contain undefined.");
+  return text;
 }
 
 export function byteLengthOfCanonicalJson(value) {

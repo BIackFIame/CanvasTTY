@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
+import { canonicalStringify } from "../../../agent-browser/tool-catalog.mjs";
 
 const AUDIT_VERSION = 1;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
@@ -300,7 +301,7 @@ function redactUrl(value: string): string {
 }
 
 function hashRecord(record: Omit<BrowserAuditRecord, "hash">): string {
-  return createHash("sha256").update(stableJson(record, byCodeUnit)).digest("hex");
+  return createHash("sha256").update(canonicalStringify(record, { lenient: true })).digest("hex");
 }
 
 /**
@@ -311,22 +312,11 @@ function hashRecord(record: Omit<BrowserAuditRecord, "hash">): string {
 function recordHashMatches(record: Omit<BrowserAuditRecord, "hash">, hash: unknown): boolean {
   if (typeof hash !== "string") return false;
   return hashRecord(record) === hash
-    || createHash("sha256").update(stableJson(record, byLocale)).digest("hex") === hash;
+    || createHash("sha256").update(canonicalStringify(record, { lenient: true, compareKeys: byLocale })).digest("hex") === hash;
 }
 
 const byCodeUnit = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
 const byLocale = (left: string, right: string): number => left.localeCompare(right);
-
-function stableJson(value: unknown, order: (left: string, right: string) => number): string {
-  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item, order)).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => order(left, right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry, order)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
 
 function safeString(value: string, max: number): string {
   return String(value).replace(/[\u0000-\u001f\u007f]/g, "").slice(0, max);
