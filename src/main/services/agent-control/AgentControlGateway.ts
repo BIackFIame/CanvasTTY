@@ -84,7 +84,7 @@ export interface AgentControlGatewayOptions {
   onTransportRestarted?(connectionPath: string): void;
 }
 
-export class ControlError extends Error {
+class ControlError extends Error {
   readonly code: string;
   constructor(code: string, message: string) { super(message); this.code = code; }
 }
@@ -489,7 +489,7 @@ export function codexComposerReady(screen: string): boolean {
   return screen.split("\n").some((line) => /^\s*›\s*(?:Ask Codex to do anything)?\s*$/.test(line));
 }
 
-export function codexChoices(screen: string): { revision: string; selected: number; options: Array<{ number: number; label: string }> } | null {
+function codexChoices(screen: string): { revision: string; selected: number; options: Array<{ number: number; label: string }> } | null {
   const matches = screen.split("\n").map((line) => line.match(/^\s*(›\s*)?(\d+)\.\s+(.+)$/)).filter((m) => m !== null);
   if (matches.length < 2 || matches.length > 12 || matches.filter((m) => m[1]).length !== 1) return null;
   if (matches.some((m, i) => Number(m[2]) !== i + 1)) return null;

@@ -538,7 +538,7 @@ const DECISION_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
   qwen: "^(run_shell_command|write_file|edit|replace)$"
 };
 
-export function decisionHookCommands(
+function decisionHookCommands(
   provider: DecisionHookProvider,
   gate: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform,
@@ -720,7 +720,7 @@ export function createQwenHookSettings(options: {
   return path;
 }
 
-export function recoverQwenHookSettings(runtimeDirectory: string): void {
+function recoverQwenHookSettings(runtimeDirectory: string): void {
   if (!existsSync(runtimeDirectory)) return;
   for (const name of readdirSync(runtimeDirectory)) {
     if (/^qwen-hooks-[a-f0-9]{24}\.json$/u.test(name)) unlinkIfExists(join(runtimeDirectory, name));

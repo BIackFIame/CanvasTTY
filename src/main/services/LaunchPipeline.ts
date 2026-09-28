@@ -75,12 +75,12 @@ export type PreparedLaunch =
   }
   | { ok: false; reason: string };
 
-export const LAUNCH_PREPARE_TIMEOUT_MS = 5_000;
+const LAUNCH_PREPARE_TIMEOUT_MS = 5_000;
 /** How long the launcher waits for a service's extra select choices before showing the declared ones only. */
-export const LAUNCH_OPTIONS_TIMEOUT_MS = 3_000;
+const LAUNCH_OPTIONS_TIMEOUT_MS = 3_000;
 const MAX_SERVICE_OPTIONS = 64;
 /** Replaced in env values and args with the plugin's folder of written files for this run. */
-export const LAUNCH_FILES_TOKEN = "{launchFiles}";
+const LAUNCH_FILES_TOKEN = "{launchFiles}";
 const MAX_OPTION_PLUGINS = 16;
 export const MAX_ENV = 32;
 export const MAX_ENV_VALUE_BYTES = 8 * 1024;

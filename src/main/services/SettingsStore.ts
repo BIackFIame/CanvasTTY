@@ -850,7 +850,7 @@ function normalizePluginCanvas(candidate: unknown, fallback: readonly PluginCanv
   return instances;
 }
 
-export function normalizeCanvasRegions(
+function normalizeCanvasRegions(
   candidate: unknown,
   fallback: readonly CanvasRegion[] = []
 ): CanvasRegion[] {

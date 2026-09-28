@@ -25,7 +25,7 @@ import { canonicalStringify } from "../../agent-browser/tool-catalog.mjs";
 // atomic replacement, backups and their hashes. The recovery journals built on
 // them stay provider-specific; their on-disk format is unchanged.
 
-export const CONFIG_FILE_MODE = 0o600;
+const CONFIG_FILE_MODE = 0o600;
 const CONFIG_DIRECTORY_MODE = 0o700;
 const MAX_LOCK_FILE_BYTES = 4 * 1024;
 const MAX_STALE_LOCK_RETRIES = 3;

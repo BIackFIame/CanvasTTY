@@ -57,7 +57,7 @@ export interface DecisionRequest {
 type Verdict = "deny" | "ask" | "allow";
 interface Answer { verdict: Verdict | null; reason: string; service: DecisionService }
 
-export const DECIDE_TIMEOUT_MS = DEFAULT_DECIDE_TIMEOUT_MS;
+const DECIDE_TIMEOUT_MS = DEFAULT_DECIDE_TIMEOUT_MS;
 const MAX_REASON = 500;
 const MAX_SERVICES = 8;
 

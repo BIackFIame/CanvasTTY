@@ -34,7 +34,7 @@ function defineProviderCli(
   });
 }
 
-export const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, ProviderCliDefinition>> = Object.freeze({
+const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, ProviderCliDefinition>> = Object.freeze({
   codex: defineProviderCli("codex", ["codex"], [
     { root: "windows-local-appdata", segments: ["Programs", "OpenAI", "Codex", "bin"] }
   ]),
@@ -56,7 +56,7 @@ export const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, Provider
   antigravity: defineProviderCli("antigravity", ["agy"])
 });
 
-export const PROVIDER_CLI_IDS: readonly AgentProviderId[] = Object.freeze(
+const PROVIDER_CLI_IDS: readonly AgentProviderId[] = Object.freeze(
   Object.keys(PROVIDER_CLI_DEFINITIONS) as AgentProviderId[]
 );
 
@@ -253,7 +253,7 @@ function resolveProviderCli(input: ResolveProviderCliInput): ProviderCliResoluti
   return Object.freeze(unavailable);
 }
 
-export function providerCliDiagnostic(provider: AgentProviderId, checked: readonly ProviderCliCheck[]): string {
+function providerCliDiagnostic(provider: AgentProviderId, checked: readonly ProviderCliCheck[]): string {
   const paths = checked.length === 0
     ? "  (no candidate paths were available)"
     : checked.map((candidate) => `  - ${candidate.path}: ${candidate.result}`).join("\n");

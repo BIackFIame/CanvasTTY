@@ -17,4 +17,3 @@ export function canonicalStringify(
   value: unknown,
   options?: { lenient?: boolean; compareKeys?: (left: string, right: string) => number }
 ): string;
-export function byteLengthOfCanonicalJson(value: unknown): number;

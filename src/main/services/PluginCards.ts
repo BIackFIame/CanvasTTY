@@ -35,7 +35,7 @@ export interface CardActionInvocation {
   session: PluginSessionSummary;
 }
 
-export const CARD_ACTION_TIMEOUT_MS = 15_000;
+const CARD_ACTION_TIMEOUT_MS = 15_000;
 const MAX_BADGE_TEXT = 24;
 const MAX_BADGE_TOOLTIP = 200;
 const MAX_MESSAGE = 2_000;

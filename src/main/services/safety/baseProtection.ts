@@ -9,7 +9,7 @@ import { analyzeAction, commandFromArgv, realish, type HardFacts, type ToolActio
  * model: local rules only, no git, no network.
  */
 
-export const BASE_DENY_RULES = ['elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
+const BASE_DENY_RULES = ['elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
 export type BaseDenyRule = typeof BASE_DENY_RULES[number];
 
 /** What the model reads: why the call was refused and what to do instead. */

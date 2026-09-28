@@ -243,10 +243,6 @@ export function canonicalStringify(value, options = {}) {
   return text;
 }
 
-export function byteLengthOfCanonicalJson(value) {
-  return Buffer.byteLength(canonicalStringify(value), "utf8");
-}
-
 function isPlainObject(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);

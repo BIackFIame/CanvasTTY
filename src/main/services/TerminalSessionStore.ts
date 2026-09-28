@@ -13,7 +13,7 @@ import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
 
-export const TERMINAL_SESSION_STORE_VERSION = 2;
+const TERMINAL_SESSION_STORE_VERSION = 2;
 const MAX_PERSISTED_SESSIONS = 64;
 /** Opaque plugin-owned JSON (launch options, environment refs) is capped per value. */
 export const MAX_PLUGIN_SLOT_BYTES = 4_096;

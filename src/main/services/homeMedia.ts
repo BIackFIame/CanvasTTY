@@ -3,7 +3,7 @@ import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 
-export const MAX_HOME_MEDIA_BYTES = 25 * 1024 * 1024;
+const MAX_HOME_MEDIA_BYTES = 25 * 1024 * 1024;
 const MAX_HOME_MEDIA_PATH_LENGTH = 4_096;
 const HOME_MEDIA_MIME: Record<string, string> = {
   ".png": "image/png",

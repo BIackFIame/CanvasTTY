@@ -76,14 +76,14 @@ export interface PathContext { root: string; rootReal: string; home: string; tem
  * `agentRoots`: the agent's own config folders (Claude's ~/.claude or the run's CLAUDE_CONFIG_DIR). Their plan and
  * memory folders belong to the agent, so writing there is not a write outside the project.
  */
-export function pathContext(root: string, home = homedir(), agentRoots?: readonly string[]): PathContext {
+function pathContext(root: string, home = homedir(), agentRoots?: readonly string[]): PathContext {
   return { root, rootReal: realish(resolve(root)), home, temp: tmpdir(), agentRoots: (agentRoots ?? [join(home, '.claude')]).map(dir => realish(resolve(dir))) };
 }
 
 const AGENT_SERVICE_DIR = /^(?:plans|projects[\\/][^\\/]+[\\/]memory)(?:[\\/]|$)/u;
 
 /** The path is inside an agent config folder's `plans/` or `projects/<project>/memory/` (already resolved, so no `..`). */
-export function isAgentServicePath(abs: string, ctx: PathContext): boolean {
+function isAgentServicePath(abs: string, ctx: PathContext): boolean {
   return ctx.agentRoots.some(dir => {
     return isPathInside(dir, abs, { allowRoot: false }) && AGENT_SERVICE_DIR.test(relative(dir, abs));
   });
@@ -116,7 +116,7 @@ function expand(word: Word | string, cwd: string | null, ctx: PathContext): stri
  * Where a word points. `noFollow`: the operation acts on the last path component itself (rm, unlink, mv of a
  * symlink removes or renames the link, not what it points to), so only the folders above it are resolved.
  */
-export function resolveTarget(word: Word | string, cwd: string | null, ctx: PathContext, noFollow = false): Target {
+function resolveTarget(word: Word | string, cwd: string | null, ctx: PathContext, noFollow = false): Target {
   const raw = typeof word === 'string' ? word : word.text;
   const blank: Target = { raw, abs: null, where: 'unresolved', device: DEVICE.test(raw), root: false };
   const globbed = typeof word !== 'string' && word.glob;
@@ -178,7 +178,7 @@ const GIT_READ = new Set(['status', 'log', 'diff', 'show', 'rev-parse', 'ls-file
 const WINDOWS_BUILTINS = new Set(['del', 'erase', 'rd', 'copy', 'xcopy', 'robocopy', 'move', 'ren', 'rename', 'format', 'cipher', 'attrib', 'icacls', 'takeown', 'mklink', 'md', 'mkdir', 'rmdir']);
 
 /** A program's name for the tables: basename, lower case, without a Windows executable suffix. */
-export function programName(argv0: string): string {
+function programName(argv0: string): string {
   const name = argv0.replace(/\\/gu, '/').split('/').pop() ?? argv0;
   return name.toLowerCase().replace(/\.(exe|cmd|bat|com)$/u, '');
 }
