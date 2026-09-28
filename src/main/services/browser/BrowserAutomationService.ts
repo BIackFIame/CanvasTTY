@@ -10,6 +10,7 @@ import type {
   BrowserObservedElement
 } from "../../../shared/contracts.ts";
 import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
+import { SENSITIVE_FIELD_SOURCE, isSensitiveFieldIdentity } from "../safety/sensitiveNames.ts";
 
 const MAX_OBSERVE_ELEMENTS = 200;
 const MAX_READ_CHARACTERS = 100_000;
@@ -1166,7 +1167,7 @@ function presenceExpression(payload: string): string {
   return `(()=>{const values=${payload};let host=globalThis.__canvasttyPresenceHost;if(!host||!host.isConnected){host=document.createElement('div');host.setAttribute('data-canvastty-presence','');host.style.cssText='all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;pointer-events:none!important;overflow:visible!important;';document.documentElement.appendChild(host);globalThis.__canvasttyPresenceHost=host;}host.replaceChildren(...values.map(v=>{const marker=document.createElement('div');marker.style.cssText='all:initial!important;position:absolute!important;left:'+v.x+'px!important;top:'+v.y+'px!important;transform:translate(-3px,-3px)!important;pointer-events:none!important;opacity:'+(v.stale?'.45':'1')+'!important;';const dot=document.createElement('span');dot.style.cssText='display:block!important;width:10px!important;height:10px!important;border-radius:999px!important;background:'+v.color+'!important;border:2px solid white!important;box-shadow:0 1px 5px rgba(0,0,0,.45)!important;';marker.append(dot);return marker;}));return true;})()`;
 }
 
-const MASK_SENSITIVE_EXPRESSION = `(()=>{const sensitive=(el)=>{const ac=(el.getAttribute('autocomplete')||'').toLowerCase();const identity=['name','id','aria-label','aria-labelledby','placeholder','title'].map(k=>el.getAttribute(k)||'').join(' ').toLowerCase();return (el.type||'').toLowerCase()==='password'||/current-password|new-password|one-time-code/.test(ac)||/password|passwd|passcode|one[-_ ]?time|otp|token|secret|api[-_ ]?key|auth(?:orization)?/.test(identity);};const entries=[];const roots=[document];for(let i=0;i<roots.length;i++){for(const node of roots[i].querySelectorAll('*')){if(node.shadowRoot)roots.push(node.shadowRoot);}for(const el of roots[i].querySelectorAll('input,textarea')){if(!sensitive(el))continue;entries.push([el,el.getAttribute('style')]);el.style.setProperty('color','transparent','important');el.style.setProperty('-webkit-text-fill-color','transparent','important');el.style.setProperty('caret-color','transparent','important');el.style.setProperty('text-shadow','none','important');el.style.setProperty('background','#20242b','important');el.style.setProperty('box-shadow','inset 0 0 0 9999px #20242b','important');}}globalThis.__canvasttyScreenshotMasks=entries;return entries.length;})()`;
+const MASK_SENSITIVE_EXPRESSION = `(()=>{const sensitive=(el)=>{const ac=(el.getAttribute('autocomplete')||'').toLowerCase();const identity=['name','id','aria-label','aria-labelledby','placeholder','title'].map(k=>el.getAttribute(k)||'').join(' ').toLowerCase();return (el.type||'').toLowerCase()==='password'||/current-password|new-password|one-time-code/.test(ac)||/${SENSITIVE_FIELD_SOURCE}/.test(identity);};const entries=[];const roots=[document];for(let i=0;i<roots.length;i++){for(const node of roots[i].querySelectorAll('*')){if(node.shadowRoot)roots.push(node.shadowRoot);}for(const el of roots[i].querySelectorAll('input,textarea')){if(!sensitive(el))continue;entries.push([el,el.getAttribute('style')]);el.style.setProperty('color','transparent','important');el.style.setProperty('-webkit-text-fill-color','transparent','important');el.style.setProperty('caret-color','transparent','important');el.style.setProperty('text-shadow','none','important');el.style.setProperty('background','#20242b','important');el.style.setProperty('box-shadow','inset 0 0 0 9999px #20242b','important');}}globalThis.__canvasttyScreenshotMasks=entries;return entries.length;})()`;
 
 const RESTORE_SENSITIVE_EXPRESSION = `(()=>{for(const [el,style] of globalThis.__canvasttyScreenshotMasks||[]){if(!el||!el.isConnected)continue;if(style===null)el.removeAttribute('style');else el.setAttribute('style',style);}globalThis.__canvasttyScreenshotMasks=[];return true;})()`;
 
@@ -1217,7 +1218,7 @@ function isSensitiveElement(nodeNameValue: string | undefined, rawAttributes: st
   ].filter(Boolean).join(" ");
   return attributes.type?.toLowerCase() === "password"
     || /(?:current-password|new-password|one-time-code)/i.test(attributes.autocomplete ?? "")
-    || /(?:password|passwd|passcode|one[-_ ]?time|otp|token|secret|api[-_ ]?key|auth(?:orization)?)/i.test(identity);
+    || isSensitiveFieldIdentity(identity);
 }
 
 function mergeSensitiveBounds(

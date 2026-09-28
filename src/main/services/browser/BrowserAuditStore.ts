@@ -2,12 +2,14 @@ import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
 import { canonicalStringify } from "../../../agent-browser/tool-catalog.mjs";
+import { hasSensitiveAssignment, isSensitiveName } from "../safety/sensitiveNames.ts";
 
 const AUDIT_VERSION = 1;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
 const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const REDACTED = "[REDACTED]";
-const SENSITIVE_KEY = /^(?:authorization|cookie|credential|password|passwd|secret|token|access[_-]?token|refresh[_-]?token|api[_-]?key|promptText|text|value|values|page|base64|screenshot)$/i;
+// Page content an audit record must not carry, on top of the shared sensitive names.
+const CONTENT_KEY = /^(?:promptText|text|value|values|page|base64|screenshot)$/i;
 
 export interface BrowserAuditInput {
   timestamp?: number;
@@ -270,11 +272,11 @@ export class BrowserAuditStore {
 }
 
 export function redactAuditValue(value: unknown, key = "", depth = 0): unknown {
-  if (SENSITIVE_KEY.test(key)) return REDACTED;
+  if (CONTENT_KEY.test(key) || isSensitiveName(key)) return REDACTED;
   if (depth > 6) return "[TRUNCATED]";
   if (typeof value === "string") {
     if (/^https?:\/\//i.test(value)) return redactUrl(value);
-    if (/^(?:bearer|basic)\s+/i.test(value) || /(?:password|token|secret)=/i.test(value)) return REDACTED;
+    if (/^(?:bearer|basic)\s+/i.test(value) || hasSensitiveAssignment(value)) return REDACTED;
     return value.slice(0, 2_048);
   }
   if (typeof value === "number" || typeof value === "boolean" || value === null) return value;
