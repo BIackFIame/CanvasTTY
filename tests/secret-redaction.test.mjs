@@ -223,3 +223,96 @@ test("plugin screen text and failure details mask the whole buffer before cuttin
   assert.ok(failed.failureDetails.length <= 8_000);
   assert.deepEqual(fragments(failed.failureDetails), []);
 });
+
+// Ordinary agent output around the secrets below: colour, paths, numbers, box sides.
+function scrollback(chars) {
+  let text = "";
+  for (let i = 0; text.length < chars; i++) {
+    text += `\x1b[32m✓\x1b[0m step ${i} src/main/Example.ts:${i} took ${i % 97} ms\r\n`;
+    if (i % 9 === 0) text += `│ ${"─".repeat(40)} │\r\n`;
+  }
+  return text.slice(0, chars);
+}
+
+test("redactTail returns exactly what masking the whole text and cutting it returns, wherever the secrets fall", () => {
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.custom", [PLAIN_SECRET]);
+  const wrapped = `${PLAIN_SECRET.slice(0, 15)}\r\n${PLAIN_SECRET.slice(15)}`;
+  const pem = (body) => `-----${"BEGIN"} RSA ${"PRIVATE"} KEY-----\n${body}\n-----${"END"} RSA ${"PRIVATE"} KEY-----`;
+  const samples = [
+    PLAIN_SECRET, wrapped, secrets.openai, secrets.github, secrets.jwt, secrets.google, mixed,
+    `\r\n${sk(run("q", 18))}\r\n${run("7", 12)}x${run("R", 8)}\r\n`, `"apiKey": "${run("k", 30)}"`,
+    `export OPENAI_API_KEY=${run("v", 24)}`, `Authorization: Bearer ${run("t", 24)}`,
+    `https://deploy:${run("p", 12)}@example.test/repo`, pem(run("M", 64)), pem(`${run("N", 64)}\n`.repeat(400))
+  ];
+  const base = scrollback(240_000);
+  let compared = 0;
+  for (const tail of [300, 4_000, 8_192]) {
+    const tailCut = base.length - tail;
+    const windowCut = base.length - tail - 16_384;
+    for (const cut of [tailCut, windowCut]) {
+      for (const offset of [-3_000, -400, -20, -5, 0, 3, 17, 300]) {
+        for (const sample of samples) {
+          const at = cut + offset - Math.floor(sample.length / 2);
+          const text = `${base.slice(0, at)}${sample}${base.slice(at)}`;
+          assert.equal(registry.redactTail(text, tail), registry.redact(text).slice(-tail), `${tail} ${cut === tailCut ? "tail" : "window"} ${offset} ${sample.slice(0, 12)}`);
+          compared++;
+        }
+      }
+    }
+  }
+  // A private key opened long before the window and never closed masks everything after it, as before.
+  const open = `${base.slice(0, 1_000)}-----${"BEGIN"} ${"PRIVATE"} KEY-----\n${base.slice(1_000)}`;
+  assert.equal(registry.redactTail(open, 4_000), registry.redact(open).slice(-4_000));
+  assert.ok(compared > 600);
+  assert.equal(registry.redactTail("", 10), "");
+  assert.equal(registry.redactTail(`x ${PLAIN_SECRET}`, 0), "");
+});
+
+test("redactTail masks a window around the tail, not the whole scrollback", () => {
+  class Measured extends SecretRedactionRegistry {
+    lengths = [];
+    redact(text) { this.lengths.push(text.length); return super.redact(text); }
+  }
+  const registry = new Measured();
+  registry.add("plugin:p.custom", [PLAIN_SECRET]);
+  const text = `${scrollback(240_000)}${PLAIN_SECRET}${"z".repeat(100)}`;
+  const masked = registry.redactTail(text, 8_192);
+  assert.deepEqual(fragments(masked), []);
+  assert.ok(Math.max(...registry.lengths) <= 8_192 + 16_384 + 4_096, `masked ${registry.lengths} characters`);
+  // A held value that could wrap over the margin widens the window with it (each gap may hold 64 characters);
+  // one that could span the whole scrollback means masking the whole text.
+  registry.lengths.length = 0;
+  registry.add("plugin:p.long", [run("L", 400)]);
+  assert.deepEqual(fragments(registry.redactTail(text, 8_192)), []);
+  const widened = Math.max(...registry.lengths);
+  assert.ok(widened > 8_192 + 2 * 400 * 65 && widened < text.length, `masked ${widened} characters`);
+  registry.lengths.length = 0;
+  registry.add("plugin:p.longer", [run("K", 2_000)]);
+  registry.redactTail(text, 8_192);
+  assert.equal(Math.max(...registry.lengths), text.length);
+});
+
+test("observe_agent, get_agent_result and the plugin screen mask a bounded window of a full scrollback", async (t) => {
+  const f = cutFixture(t);
+  const masked = [];
+  const registry = f.terminals.redaction;
+  const redact = registry.redact.bind(registry);
+  registry.redact = (text) => { masked.push(text.length); return redact(text); };
+  f.print(scrollback(250_000));
+  f.print(`${PLAIN_SECRET}${"g".repeat(200)}`);
+  const control = new AgentControlService(f.terminals);
+  assert.deepEqual(fragments(control.observe(f.card.id).output), []);
+  assert.deepEqual(fragments(control.result(f.card.id).output), []);
+  const { PluginSessions } = await import("../src/main/services/PluginSessions.ts");
+  const screens = [];
+  const sessions = new PluginSessions({ terminals: f.terminals, notify: (_p, _s, _m, event) => { if (event.screen !== undefined) screens.push(event.screen); return true; } });
+  f.attach(sessions);
+  sessions.handle("p.reader", "svc", "sessions.subscribe", {}, ["sessions:events", "sessions:read-screen"]);
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "working" });
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "idle" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(screens.length > 0);
+  assert.deepEqual(fragments(screens.join("\n")), []);
+  assert.ok(masked.length >= 3 && Math.max(...masked) < 40_000, `masked ${masked} characters per call`);
+});

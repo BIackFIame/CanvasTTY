@@ -24,11 +24,22 @@ const MAX_VALUES_PER_OWNER = 64;
 const MAX_OWNERS = 512;
 /** What wrapping may put between two characters of a key: whitespace and line breaks, box-drawing sides. */
 const WRAP_GAP = '[\\s\\u2500-\\u257f]{0,64}';
+/**
+ * redactTail masks a window that starts this far (at least) before the tail it returns. Every rule except the
+ * PEM block (handled apart) and runs of one character class matches at most a few thousand characters, so a
+ * match the window's start cuts short ends long before the tail begins; the tail comes out as masking the whole
+ * text would leave it.
+ */
+const TAIL_MARGIN_CHARS = 16_384;
+const PRIVATE_KEY_HEADER = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
+const PRIVATE_KEY_FOOTER = /-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
 const JSON_SECRET_VALUE = /("(?:[A-Za-z0-9_.-]{0,40}(?:api[_-]?key|token|secret|password|authorization))"\s*:\s*")(?!<redacted:)[^"]{1,2048}("?)/giu;
 
 export class SecretRedactionRegistry {
   private readonly owners = new Map<string, Set<string>>();
   private pattern: RegExp | null = null;
+  /** The longest text one held value can match: its characters plus a full wrap gap between each two. */
+  private knownSpan = 0;
   private dirty = false;
 
   /** Adds values under an owner (`vault`, `session:<id>`, `plugin:<id>`); short or oversized values are ignored. */
@@ -63,6 +74,28 @@ export class SecretRedactionRegistry {
     return redactCredentials(result);
   }
 
+  /**
+   * The same text as `redact(text)` cut to its last `maxChars` characters, without masking the whole text: a
+   * card's 240 000-character scrollback costs as much as its last `maxChars` plus a margin wider than any match
+   * (the margin grows with the longest held value and its wrap gaps). A secret the tail's cut splits lies inside
+   * the window and is masked whole, exactly as before; an open PEM block starts the window at its header.
+   */
+  redactTail(text: string, maxChars: number): string {
+    if (typeof text !== 'string' || text.length === 0 || maxChars <= 0) return '';
+    this.knownPattern();
+    const margin = Math.max(TAIL_MARGIN_CHARS, 2 * this.knownSpan + 4_096);
+    if (text.length <= maxChars + margin) return lastChars(this.redact(text), maxChars);
+    let start = text.length - maxChars - margin;
+    start = openPrivateKeyStart(text, start) ?? start;
+    // Begin on a line: the cut then falls where most rules cannot continue anyway.
+    const lineStart = text.lastIndexOf('\n', start);
+    if (lineStart >= 0 && start - lineStart <= 4_096) start = lineStart + 1;
+    const masked = this.redact(text.slice(start));
+    // Masking shortened the window so much that the tail would reach back into its first half: mask everything.
+    if (masked.length - maxChars < margin / 2) return lastChars(this.redact(text), maxChars);
+    return lastChars(masked, maxChars);
+  }
+
   /** One pattern for every held value and its JSON-escaped form, longest first; rebuilt only after a change. */
   private knownPattern(): RegExp | null {
     if (!this.dirty) return this.pattern;
@@ -75,8 +108,36 @@ export class SecretRedactionRegistry {
     }
     const sources = [...forms].sort((a, b) => b.length - a.length).map(form => [...form].map(escapeCharacter).join(WRAP_GAP));
     this.pattern = sources.length ? new RegExp(sources.join('|'), 'gu') : null;
+    // A form of n characters matches at most n characters plus a 64-character gap between each two.
+    this.knownSpan = [...forms].reduce((longest, form) => Math.max(longest, form.length * 65), 0);
     this.dirty = false;
     return this.pattern;
+  }
+}
+
+function lastChars(text: string, maxChars: number): string {
+  return text.length <= maxChars ? text : text.slice(text.length - maxChars);
+}
+
+/**
+ * Where a PEM private-key block that is still open at `start` begins (its END is at or after `start`, or
+ * missing), or null. Such a block is masked from its header to its END or the end of the text, so the
+ * window must include the header.
+ */
+function openPrivateKeyStart(text: string, start: number): number | null {
+  let from = start;
+  for (;;) {
+    const begin = text.lastIndexOf('-----BEGIN ', from);
+    if (begin < 0) return null;
+    PRIVATE_KEY_HEADER.lastIndex = begin;
+    const header = PRIVATE_KEY_HEADER.exec(text);
+    if (header && header.index === begin) {
+      PRIVATE_KEY_FOOTER.lastIndex = begin + header[0].length;
+      const footer = PRIVATE_KEY_FOOTER.exec(text);
+      return footer && footer.index + footer[0].length <= start ? null : begin;
+    }
+    if (begin === 0) return null;
+    from = begin - 1;
   }
 }
 

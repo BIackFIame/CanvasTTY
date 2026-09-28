@@ -251,6 +251,11 @@ export class TerminalManager {
     return (text === null ? text : this.redaction.redact(text)) as T;
   }
 
+  /** `redactSecrets(text)` cut to its last `maxChars` characters, masking only a window around that tail. */
+  redactSecretsTail(text: string, maxChars: number): string {
+    return this.redaction.redactTail(text, maxChars);
+  }
+
   /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
   decisionContext(id: string): DecisionSession | null {
     const session = this.sessions.get(id);

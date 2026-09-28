@@ -142,8 +142,9 @@ export class AgentControlService {
     return {
       sessionId: session.id,
       status: session.status,
-      // The whole buffer is masked first: a cut inside a secret would leave a tail no pattern recognizes.
-      output: tail(this.redact(this.terminals.readBuffer(sessionId).buffer), maxChars)
+      // Masked before the cut (a cut inside a secret would leave a tail no pattern recognizes), over a window
+      // wider than any match rather than the whole scrollback.
+      output: this.redactTail(this.terminals.readBuffer(sessionId).buffer, maxChars)
     };
   }
 
@@ -163,7 +164,7 @@ export class AgentControlService {
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
       exitCode: session.exitCode,
-      output: tail(this.redact(buffer), MAX_OBSERVE_CHARS)
+      output: this.redactTail(buffer, MAX_OBSERVE_CHARS)
     };
   }
 
@@ -180,9 +181,10 @@ export class AgentControlService {
     }
   }
 
-  /** Plugin launch secrets never reach another agent through observed output. */
-  private redact(text: string): string {
-    return typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text;
+  /** Plugin launch secrets never reach another agent through observed output: the tail as masking the whole text leaves it. */
+  private redactTail(text: string, maxChars: number): string {
+    if (typeof this.terminals.redactSecretsTail === "function") return this.terminals.redactSecretsTail(text, maxChars);
+    return tail(typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text, maxChars);
   }
 
   /** A lookup by id: metadata only, so no other session's scrollback is copied. */
