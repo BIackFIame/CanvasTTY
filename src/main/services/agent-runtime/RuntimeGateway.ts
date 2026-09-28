@@ -1,12 +1,16 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
+import { createServer as createHttpServer } from "node:http";
+import type { IncomingMessage, Server as HttpServer, ServerResponse } from "node:http";
 import { createServer } from "node:net";
-import type { Server } from "node:net";
+import type { AddressInfo, Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ProviderId } from "../../../shared/contracts.ts";
 import {
+  CLAUDE_HTTP_HOOK,
   MAX_ANSWER_CHARS,
+  MAX_HOOK_INPUT_BYTES,
   MAX_RUNTIME_MESSAGE_BYTES,
   MAX_RESULT_CHARS,
   normalizeThreadId,
@@ -28,6 +32,14 @@ const MAX_RUNTIME_SESSIONS = 32;
 /** Decision checks in flight, per session and in total; over a cap the call is refused with advice to slow down. */
 const MAX_DECISIONS_PER_SESSION = 8;
 const MAX_DECISIONS_TOTAL = 32;
+/** Loopback HTTP listener for Claude Code's HTTP lifecycle hooks: connections, header and time bounds. */
+const HTTP_MAX_CONNECTIONS = 64;
+const HTTP_MAX_HEADER_BYTES = 8 * 1024;
+const HTTP_MAX_HEADERS = 32;
+const HTTP_HEADERS_TIMEOUT_MS = 5_000;
+const HTTP_REQUEST_TIMEOUT_MS = 10_000;
+const HTTP_KEEP_ALIVE_MS = 5_000;
+const HTTP_EVENT_RE = /^[A-Za-z][A-Za-z_]{0,79}$/u;
 const OVERLOADED_MESSAGE = "CanvasTTY is checking too many tool calls from this session at once. Wait a few seconds and run the command again, one at a time.";
 
 export type RuntimeLifecycleState = "idle" | "working" | "needs_approval";
@@ -110,6 +122,11 @@ export interface RuntimeGatewayOptions {
    */
   onPermissionRequest?(terminalSessionId: string, request: RuntimePermissionRequest, signal: AbortSignal): Promise<RuntimePermissionDecision> | RuntimePermissionDecision;
   now?: () => number;
+  /**
+   * Also listen on 127.0.0.1 (random port) for Claude Code's HTTP lifecycle hooks. POSIX only; when the listener
+   * cannot start, launches simply keep the command helper.
+   */
+  httpHooks?: boolean;
 }
 
 export class RuntimeGateway {
@@ -128,6 +145,11 @@ export class RuntimeGateway {
   private windowsTransport: WindowsPipeHostTransport | null = null;
   private endpoint: string | null = null;
   private ownedRuntimeDirectory: string | null = null;
+  private readonly httpHooksRequested: boolean;
+  private httpServer: HttpServer | null = null;
+  private httpPort: number | null = null;
+  /** Set when Claude reached the listener without its capability (a settings policy emptied the header). */
+  private httpUnusable = false;
 
   constructor(options: RuntimeGatewayOptions = {}) {
     this.platform = options.platform ?? process.platform;
@@ -139,6 +161,15 @@ export class RuntimeGateway {
     this.onAnswerCaptureRevoked = options.onAnswerCaptureRevoked;
     this.onPermissionRequest = options.onPermissionRequest;
     this.now = options.now ?? Date.now;
+    this.httpHooksRequested = options.httpHooks === true && this.platform !== "win32";
+  }
+
+  /**
+   * Base URL for Claude Code HTTP lifecycle hooks, or null when the listener is not running or proved unusable in
+   * this run (then launches use the command helper).
+   */
+  get httpHookBase(): string | null {
+    return this.httpServer && this.httpPort !== null && !this.httpUnusable ? `http://127.0.0.1:${this.httpPort}` : null;
   }
 
   get address(): string {
@@ -171,6 +202,7 @@ export class RuntimeGateway {
     try {
       await listen(server, created.endpoint);
       await chmod(created.endpoint, 0o600);
+      if (this.httpHooksRequested) await this.startHttp();
       return created.endpoint;
     } catch (error) {
       await closeServer(server);
@@ -249,6 +281,13 @@ export class RuntimeGateway {
       }
     }
     this.leases.clear();
+    const httpServer = this.httpServer;
+    this.httpServer = null;
+    this.httpPort = null;
+    if (httpServer) {
+      httpServer.closeAllConnections();
+      await closeServer(httpServer as unknown as Server);
+    }
     const server = this.server;
     const transport = this.windowsTransport;
     const endpoint = this.endpoint;
@@ -295,8 +334,10 @@ export class RuntimeGateway {
             answerCapture
           })}\n`, "utf8"));
         } else {
-          this.handleLifecycle(value);
+          // The ack goes out before the app reacts: the hook (and the agent behind it) waits only for the check.
+          const delivery = this.handleLifecycle(value);
           socket.write(Buffer.from(`${JSON.stringify({ v: RUNTIME_PROTOCOL_VERSION, type: "ack" })}\n`, "utf8"));
+          this.deliverLater(delivery);
         }
         const timeout = setTimeout(close, 1_000);
         timeout.unref();
@@ -334,15 +375,19 @@ export class RuntimeGateway {
     return true;
   }
 
-  private handleLifecycle(value: unknown): void {
+  /**
+   * Checks one lifecycle message and updates the lease at once (so currentStatus never lags); returns the app's
+   * reaction to run after the hook has its answer, or null when there is nothing to report.
+   */
+  private handleLifecycle(value: unknown): Delivery | null {
     const message = parseLifecycleMessage(value);
     const lease = this.leases.get(message.terminalSessionId);
     if (!lease || lease.provider !== message.provider) throw new Error("Runtime capability is invalid.");
-    const supplied = digest(message.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length
-      && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid) throw new Error("Runtime capability is invalid.");
+    if (!tokenMatches(lease, message.capabilityToken)) throw new Error("Runtime capability is invalid.");
+    return this.applyLifecycle(lease, message);
+  }
+
+  private applyLifecycle(lease: RuntimeLease, message: Omit<ParsedLifecycleMessage, "capabilityToken">): Delivery | null {
     if (message.result && !lease.captureResult) throw new Error("Result capture is not enabled for this session.");
     if (message.lastAssistantMessage !== undefined && (
       lease.answerCaptureGrantExpiresAt === null
@@ -360,7 +405,7 @@ export class RuntimeGateway {
       && lease.activeTurnId
       && message.turnId !== lease.activeTurnId
     ) {
-      return;
+      return null;
     }
     const signal: RuntimeLifecycleSignal = {
       state: message.state,
@@ -380,7 +425,124 @@ export class RuntimeGateway {
       turnId: signal.turnId,
       ...(signal.threadId === undefined ? {} : { threadId: signal.threadId })
     };
-    this.onSignal?.(message.terminalSessionId, signal);
+    return { terminalSessionId: message.terminalSessionId, signal };
+  }
+
+  /** Runs the app's reaction after the current I/O callback, in arrival order; a failure there never reaches a hook. */
+  private deliverLater(delivery: Delivery | null): void {
+    const onSignal = this.onSignal;
+    if (!delivery || !onSignal) return;
+    setImmediate(() => {
+      try {
+        onSignal(delivery.terminalSessionId, delivery.signal);
+      } catch (error) {
+        console.warn("CanvasTTY could not apply an agent lifecycle event:", error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
+
+  private async startHttp(): Promise<void> {
+    const server = createHttpServer({
+      maxHeaderSize: HTTP_MAX_HEADER_BYTES,
+      headersTimeout: HTTP_HEADERS_TIMEOUT_MS,
+      requestTimeout: HTTP_REQUEST_TIMEOUT_MS,
+      keepAliveTimeout: HTTP_KEEP_ALIVE_MS
+    }, (request, response) => this.acceptHttp(request, response));
+    server.maxHeadersCount = HTTP_MAX_HEADERS;
+    server.maxConnections = HTTP_MAX_CONNECTIONS;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      console.warn("CanvasTTY runs Claude Code lifecycle hooks through its helper: the loopback listener did not start.",
+        error instanceof Error ? error.message : String(error));
+      server.close();
+      return;
+    }
+    server.on("error", () => undefined);
+    this.httpServer = server;
+    this.httpPort = (server.address() as AddressInfo).port;
+  }
+
+  /**
+   * One Claude Code HTTP lifecycle hook: `POST /claude/v1/<state>/<event>` with the session id and capability in
+   * headers Claude fills from the session's environment. Anything a browser could send (another Origin, a form
+   * content type, a rebound Host) is refused before the body is read. The answer is always `{}`: lifecycle hooks
+   * decide nothing, and Claude goes on whatever the status.
+   */
+  private acceptHttp(request: IncomingMessage, response: ServerResponse): void {
+    const finish = (status: number, closeConnection = status !== 200): void => {
+      if (response.headersSent) return;
+      response.writeHead(status, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        ...(closeConnection ? { connection: "close" } : {})
+      });
+      response.end("{}");
+    };
+    const route = httpRoute(request, this.httpPort);
+    if (typeof route === "number") return finish(route);
+    const headerValue = (name: string): string | null => {
+      const value = request.headers[name];
+      return typeof value === "string" ? value : null;
+    };
+    const terminalSessionId = headerValue(CLAUDE_HTTP_HOOK.sessionHeader);
+    const capability = headerValue(CLAUDE_HTTP_HOOK.capabilityHeader);
+    const lease = terminalSessionId && terminalSessionId.length <= 160 ? this.leases.get(terminalSessionId) : undefined;
+    if (!lease || lease.provider !== "claude") return finish(401);
+    if (!capability) {
+      // Claude sent the session but not its capability: a settings policy (httpHookAllowedEnvVars) emptied the
+      // header. New launches go back to the helper for the rest of this run.
+      this.httpUnusable = true;
+      return finish(401);
+    }
+    if (capability.length < 32 || !tokenMatches(lease, capability)) return finish(401);
+    const declared = Number(request.headers["content-length"]);
+    let size = 0;
+    let oversized = Number.isFinite(declared) && declared > MAX_HOOK_INPUT_BYTES;
+    const chunks: Buffer[] = [];
+    const complete = (): void => {
+      if (response.headersSent) return;
+      let input: unknown = null;
+      if (!oversized) {
+        try {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          input = raw.trim().length > 0 ? JSON.parse(raw) : null;
+        } catch {
+          input = null;
+        }
+      }
+      let delivery: Delivery | null = null;
+      try {
+        delivery = this.leases.get(terminalSessionId!) === lease
+          ? this.applyLifecycle(lease, claudeLifecycleMessage(terminalSessionId!, route.state, route.event, input, lease.captureResult))
+          : null;
+      } catch {
+        delivery = null;
+      }
+      finish(200, oversized);
+      this.deliverLater(delivery);
+    };
+    if (oversized) return complete();
+    request.on("data", (chunk: Buffer) => {
+      if (oversized) return;
+      size += chunk.length;
+      if (size > MAX_HOOK_INPUT_BYTES) {
+        // Like the helper: an input over the bound still reports its state, without any of its fields.
+        oversized = true;
+        chunks.length = 0;
+        complete();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", complete);
+    request.on("error", () => undefined);
   }
 
   /**
@@ -446,6 +608,79 @@ export class RuntimeGateway {
     }
     pendingAnswer.then(settle, () => settle({ behavior: "ask" }));
   }
+}
+
+interface Delivery {
+  terminalSessionId: string;
+  signal: RuntimeLifecycleSignal;
+}
+
+function tokenMatches(lease: RuntimeLease, token: string): boolean {
+  const supplied = digest(token);
+  const valid = supplied.length === lease.tokenDigest.length && timingSafeEqual(supplied, lease.tokenDigest);
+  supplied.fill(0);
+  return valid;
+}
+
+/**
+ * The route of a Claude HTTP hook request, or the status that refuses it. Only a JSON POST addressed to this
+ * listener's own loopback Host passes, and only without the headers a browser adds (Origin, Referer, Sec-Fetch-*).
+ */
+function httpRoute(request: IncomingMessage, port: number | null): { state: RuntimeLifecycleState; event: string } | number {
+  if (request.method !== "POST") return 405;
+  if (port === null || request.headers.host !== `127.0.0.1:${port}`) return 403;
+  if (request.headers.origin !== undefined || request.headers.referer !== undefined
+    || request.headers["sec-fetch-site"] !== undefined || request.headers["sec-fetch-mode"] !== undefined) return 403;
+  const type = request.headers["content-type"];
+  if (typeof type !== "string" || type.split(";", 1)[0]!.trim().toLowerCase() !== "application/json") return 415;
+  const path = request.url ?? "";
+  if (!path.startsWith(CLAUDE_HTTP_HOOK.pathPrefix)) return 404;
+  const parts = path.slice(CLAUDE_HTTP_HOOK.pathPrefix.length).split("/");
+  if (parts.length !== 2 || !(RUNTIME_STATES as readonly string[]).includes(parts[0]!) || !HTTP_EVENT_RE.test(parts[1]!)) return 404;
+  return { state: parts[0] as RuntimeLifecycleState, event: parts[1]! };
+}
+
+/** What hook-helper.mjs would have sent for this Claude hook input (same fields, same bounds). */
+function claudeLifecycleMessage(
+  terminalSessionId: string,
+  state: RuntimeLifecycleState,
+  event: string,
+  input: unknown,
+  captureResult: boolean
+): Omit<ParsedLifecycleMessage, "capabilityToken"> {
+  const record = isRecord(input) ? input : {};
+  const turnId = firstString(record.turn_id, record.turnId, record.prompt_id, record.promptId);
+  const threadId = normalizeThreadId("claude", firstString(
+    record.session_id, record.sessionId, record.thread_id, record.threadId, record.conversation_id, record.conversationId
+  ));
+  const finalAnswer = state === "idle" && event === "Stop" && typeof record.last_assistant_message === "string"
+    ? record.last_assistant_message
+    : null;
+  let result: { text: string; truncated: boolean } | undefined;
+  if (captureResult && finalAnswer !== null) {
+    const text = boundedText(finalAnswer, MAX_RESULT_CHARS);
+    result = { text, truncated: text.length < finalAnswer.length };
+  }
+  return {
+    terminalSessionId,
+    provider: "claude",
+    state,
+    event,
+    turnId: turnId !== null && turnId.length <= 160 ? turnId : null,
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(result === undefined ? {} : { result })
+  };
+}
+
+function firstString(...values: unknown[]): string | null {
+  const found = values.find((value) => typeof value === "string" && value.length > 0);
+  return typeof found === "string" ? found : null;
+}
+
+/** Cuts at the limit without leaving a dangling high surrogate. */
+function boundedText(value: string, limit: number): string {
+  const text = value.slice(0, limit);
+  return /[\uD800-\uDBFF]$/u.test(text) ? text.slice(0, -1) : text;
 }
 
 /** What leaves the gateway, whatever the handler said: never an allow of cut input. */

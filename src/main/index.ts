@@ -65,6 +65,7 @@ import {
 import type { StdioHelperLaunch } from "./services/agent-browser/ProviderLaunch";
 import {
   AgentRuntimeBridge,
+  ClaudeHttpHookPolicy,
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
@@ -420,7 +421,9 @@ async function initializeServices(): Promise<void> {
         }
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
-      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal)
+      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal),
+      // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
+      httpHooks: true
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
@@ -440,6 +443,7 @@ async function initializeServices(): Promise<void> {
       args: [runtimeHelperPath],
       env: { ELECTRON_RUN_AS_NODE: "1" }
     };
+    const claudeHttpHookPolicy = new ClaudeHttpHookPolicy();
     agentRuntimeBridge = new AgentRuntimeBridge(runtimeGateway, {
       helper: agentRuntimeHelper,
       runtimeDirectory: lifecycleRuntimeDirectory,
@@ -451,6 +455,7 @@ async function initializeServices(): Promise<void> {
       permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
       wantsDecisions: (provider) => decisionHooks.wanted(provider),
       decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
+      claudeHttpHooks: (facts) => claudeHttpHookPolicy.verdict(facts),
       pluginHooks: {
         runner: {
           command: process.execPath,

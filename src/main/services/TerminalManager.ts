@@ -1161,14 +1161,25 @@ export class TerminalManager {
     role: SessionRole,
     answerCaptureGrantExpiresAt: number | undefined,
     contribution: LaunchContribution | null,
-    trustedFolder?: string
+    trustedFolder?: string,
+    environmentWrapped = false
   ): PlannedSpawn | { failure: UnavailableProviderCli } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") return { failure: providerCli };
+    // What decides whether Claude's lifecycle hooks may go over HTTP (ClaudeHttpHooks.ts): where and how it runs.
+    const claudeHttp = provider === "claude" && providerCli?.state === "available" ? {
+      executable: providerCli.executable,
+      profile,
+      environmentWrapped,
+      env: { ...terminalEnvironment(), ...providerCli.environment, ...(contribution?.env ?? {}) },
+      args: contribution?.args ?? [],
+      cwd
+    } : undefined;
     const agentRuntime = provider === "terminal"
       ? null
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd,
         ...(captureResult ? { captureResult: true } : {}),
+        ...(claudeHttp ? { claudeHttp } : {}),
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
     let pluginTools: string[] = [];
     try {
@@ -1425,7 +1436,7 @@ export class TerminalManager {
     let planned: PlannedSpawn | { failure: UnavailableProviderCli };
     try {
       planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder);
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment));
     } catch (error) {
       dropContribution();
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));

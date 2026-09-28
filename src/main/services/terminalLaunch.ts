@@ -313,7 +313,9 @@ const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
 };
 
 /** Claude settings keys that decide approvals, the hooks or the sandbox; a plugin's settings may carry e.g. `env` only. */
-const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper"];
+// `allowedHttpHookUrls` and `httpHookAllowedEnvVars` would silently switch off CanvasTTY's HTTP lifecycle hooks.
+const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper",
+  "allowedHttpHookUrls", "httpHookAllowedEnvVars"];
 // Claude 2.1.281 --help: `--bare` and `--safe-mode` skip hooks; `--allowedTools` approves tools without asking;
 // `--permission-prompt-tool` / `--permission-prompts` decide who answers permission prompts.
 const CLAUDE_CORE_OWNED_FLAGS = new Set(["--bare", "--safe-mode", "--allowedTools", "--allowed-tools", "--permission-prompt-tool", "--permission-prompts"]);

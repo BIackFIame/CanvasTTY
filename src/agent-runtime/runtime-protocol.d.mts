@@ -31,3 +31,9 @@ export const MIN_DECIDE_TIMEOUT_MS: number;
 export const MAX_DECIDE_TIMEOUT_MS: number;
 export function permissionGateTimings(budgetMs?: number): { budgetMs: number; gatewayMs: number; helperMs: number; hookSeconds: number };
 export function helperDeadlineMs(env: Record<string, string | undefined> | undefined): number;
+export const CLAUDE_HTTP_HOOK: Readonly<{
+  pathPrefix: string;
+  sessionHeader: string;
+  capabilityHeader: string;
+  minimumVersion: string;
+}>;
