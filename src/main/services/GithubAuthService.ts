@@ -226,16 +226,36 @@ export class GithubAuthService {
         device_code: deviceCode,
         grant_type: "urn:ietf:params:oauth:grant-type:device_code"
       });
-      const response = await this.request("https://github.com/login/oauth/access_token", {
-        method: "POST",
-        headers: oauthHeaders(),
-        body: body.toString()
-      }, signal);
-      if (!response.ok) continue;
-      const payload: unknown = await response.json();
-      if (!isRecord(payload)) continue;
+      // A dropped connection, the 15 s request timeout or a GitHub 5xx is not
+      // the end of the flow: the person may still approve the code. Back off
+      // (RFC 8628 section 3.5) and poll again until the code expires.
+      let payload: unknown;
+      try {
+        const response = await this.request("https://github.com/login/oauth/access_token", {
+          method: "POST",
+          headers: oauthHeaders(),
+          body: body.toString()
+        }, signal);
+        if (!response.ok) {
+          interval = backedOff(interval);
+          continue;
+        }
+        payload = await response.json();
+      } catch (error) {
+        if (signal.aborted) throw error;
+        interval = backedOff(interval);
+        continue;
+      }
+      if (!isRecord(payload)) {
+        interval = backedOff(interval);
+        continue;
+      }
       if (payload.error === "authorization_pending" || payload.error === "slow_down") {
-        if (payload.error === "slow_down") interval += 5;
+        if (payload.error === "slow_down") {
+          // +5 s for this and later polls; GitHub may name a longer interval.
+          const requested = typeof payload.interval === "number" && Number.isFinite(payload.interval) ? payload.interval : 0;
+          interval = Math.max(interval + 5, Math.min(requested, MAX_POLL_INTERVAL_SECONDS));
+        }
         continue;
       }
       if (payload.error === "access_denied" || payload.error === "expired_token") return;
@@ -410,4 +430,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissingFile(error: unknown): boolean {
   return error instanceof Error && "code" in error && (error as { code?: string }).code === "ENOENT";
+}
+
+const MAX_POLL_INTERVAL_SECONDS = 60;
+
+function backedOff(interval: number): number {
+  return Math.min(Math.max(interval * 2, interval + 1), MAX_POLL_INTERVAL_SECONDS);
 }
