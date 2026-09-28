@@ -582,8 +582,28 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
 /** curl and wget short options that take a value (the rest of the cluster, or the next word). */
 const CURL_VALUE_LETTERS = new Set([...'oAbcCdDeEFHKmPQrtTuUwxXyYz']);
 const WGET_VALUE_LETTERS = new Set([...'OPoaeiBtTwQUlADIXR']);
-/** Of those, the letters whose value is a file the program writes besides the download (cookie jar, headers, log). */
-const FETCH_SIDE_FILES: Record<string, ReadonlySet<string>> = { curl: new Set(['c', 'D']), wget: new Set(['o', 'a']) };
+/**
+ * Per program, how each option that names a file it writes is read: `output` (the download itself), `dir` (the
+ * folder downloads land in), `side` (a file written besides the download: cookie jar, headers, trace, log),
+ * `format` (curl's --write-out, whose `%output{FILE}` writes FILE). Short letters and long names alike; a long
+ * name also takes `--name=value`.
+ */
+const FETCH_FILE_OPTIONS: Record<'curl' | 'wget', Record<string, 'output' | 'dir' | 'side' | 'format'>> = {
+  curl: {
+    o: 'output', '--output': 'output', '--output-dir': 'dir', c: 'side', '--cookie-jar': 'side', D: 'side', '--dump-header': 'side',
+    '--trace': 'side', '--trace-ascii': 'side', '--stderr': 'side', '--libcurl': 'side', '--etag-save': 'side', '--hsts': 'side',
+    '--alt-svc': 'side', w: 'format', '--write-out': 'format'
+  },
+  wget: {
+    O: 'output', '--output-document': 'output', P: 'dir', '--directory-prefix': 'dir', o: 'side', '--output-file': 'side', a: 'side',
+    '--append-output': 'side', '--save-cookies': 'side', '--rejected-log': 'side', '--warc-file': 'side'
+  }
+};
+/** Long options of curl and wget whose next word is their value (so it is not taken for a URL or a flag). */
+const FETCH_LONG_VALUES: Record<'curl' | 'wget', ReadonlySet<string>> = {
+  curl: new Set(['--header', '--data', '--data-raw', '--data-binary', '--data-urlencode', '--form', '--user', '--user-agent', '--referer', '--cookie', '--config', '--request', '--proxy', '--resolve', '--connect-to', '--max-time', '--connect-timeout', '--retry', '--upload-file', '--url', '--cacert', '--cert', '--key', '--netrc-file', '--range', '--interface', '--variable', '--json', '--etag-compare']),
+  wget: new Set(['--user', '--password', '--header', '--user-agent', '--referer', '--load-cookies', '--post-data', '--post-file', '--input-file', '--tries', '--timeout', '--wait', '--execute', '--level', '--accept', '--reject', '--domains', '--base', '--config'])
+};
 
 /** `-t DIR`, `-tDIR`, `--target-directory DIR`, `--target-directory=DIR` of GNU cp, mv, install and ln. */
 function targetDirectory(program: string, argWords: readonly Word[]): Word | undefined {
@@ -597,51 +617,107 @@ function targetDirectory(program: string, argWords: readonly Word[]): Word | und
   return undefined;
 }
 
-/** Where a download lands: `-o file`, `-O` (the URL's name), wget's default. */
+/**
+ * Where a download lands and what else it writes. curl and wget are read option by option (a flag of its own, a
+ * short cluster like `-fsSLo FILE` or `-c@FILE`, `--long VALUE` and `--long=VALUE`); curl's -o and -O files land
+ * in --output-dir wherever it stands on the line (curl joins the folder even to an absolute -o path), each URL
+ * of -O or --remote-name-all under its own name. Other fetchers: `-o`/`--output`/`-OutFile` and their folder
+ * flags.
+ */
 function classifyFetch(program: string, argWords: Word[], cwd: string | null, acc: Acc, downloadedHere: Target[]): void {
   const args = argWords.map(word => word.text);
   const target = (word: Word | string): Target => resolveTarget(word, cwd, acc.ctx);
   const urls = args.filter(arg => /^[a-z]+:\/\//iu.test(arg) || /^[\w.-]+\.[a-z]{2,}(?:[:/]|$)/iu.test(arg));
   const land = (t: Target): void => { acc.writes.push(t); downloadedHere.push(t); };
-  const urlName = (): string => (urls[0] ?? '').replace(/[?#].*$/u, '').split('/').pop() || 'index.html';
-  let explicit = false;
-  let outputDir: string | null = null;
-  const output = (value: Word | string): void => { explicit = true; if ((typeof value === 'string' ? value : value.text) !== '-') land(target(value)); };
-  const remoteName = (): void => { explicit = true; land(target(outputDir ? join(outputDir, urlName()) : urlName())); };
-  const curlish = program === 'curl';
-  const wget = program === 'wget';
+  const urlName = (url: string): string => url.replace(/[?#].*$/u, '').split('/').pop() || 'index.html';
+  // Standard output (`-`) and /dev/null, NUL and the like write no file.
+  const sink = (value: Word | string): boolean => { const text = typeof value === 'string' ? value : value.text; return text === '-' || HARMLESS_DEVICE.test(text); };
+  if (program !== 'curl' && program !== 'wget') {
+    let explicit = false;
+    let outputDir: string | null = null;
+    for (let i = 0; i < args.length; i++) {
+      const arg = args[i]!, next = argWords[i + 1];
+      const long = /^(--output|--output-document|--directory-prefix|--output-dir)=(.*)$/u.exec(arg);
+      if (long) {
+        if (long[1] === '--output-dir') outputDir = expand(long[2]!, cwd, acc.ctx);
+        else { explicit = true; if (!sink(long[2]!)) land(target(long[2]!)); }
+        continue;
+      }
+      if (arg === '--output-dir' && next) { outputDir = expand(next, cwd, acc.ctx); i++; continue; }
+      if ((arg === '-o' || arg === '--output' || arg === '--output-document' || /^-outfile$/iu.test(arg) || arg === '-P' || arg === '--directory-prefix') && next) {
+        explicit = true;
+        if (!sink(next)) land(target(next));
+        i++; continue;
+      }
+      if (arg === '-O' || arg === '--remote-name' || arg === '--remote-name-all') { explicit = true; land(target(outputDir ? join(outputDir, urlName(urls[0] ?? '')) : urlName(urls[0] ?? ''))); }
+    }
+    if (outputDir && !explicit) acc.writes.push(target(outputDir));
+    return;
+  }
+  const options = FETCH_FILE_OPTIONS[program];
+  const outputs: Array<Word | string> = [];
+  let dir: Word | string | null = null;
+  let remoteNames = 0;
+  const take = (kind: 'output' | 'dir' | 'side' | 'format', value: Word | string): void => {
+    if (kind === 'output') outputs.push(value);
+    else if (kind === 'dir') dir = value;
+    else if (kind === 'side') { if (!sink(value)) acc.writes.push(target(value)); }
+    // `%output{FILE}` and `%output{>>FILE}` send the rest of the format to FILE.
+    else for (const match of (typeof value === 'string' ? value : value.text).matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) if (match[1] && !sink(match[1])) acc.writes.push(target(match[1]));
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!, next = argWords[i + 1];
-    const long = /^(--output|--output-document|--directory-prefix|--output-dir)=(.*)$/u.exec(arg);
-    if (long) {
-      if (long[1] === '--output-dir') outputDir = expand(long[2]!, cwd, acc.ctx);
-      else output(long[2]!);
+    if (arg.startsWith('--')) {
+      const eq = arg.indexOf('=');
+      const name = eq < 0 ? arg : arg.slice(0, eq);
+      const kind = options[name];
+      if (name === '--remote-name' || name === '--remote-name-all') { remoteNames += name === '--remote-name' ? 1 : Math.max(1, urls.length); continue; }
+      if (eq >= 0) { if (kind) take(kind, arg.slice(eq + 1)); continue; }
+      if (kind) { if (next) take(kind, next); i++; continue; }
+      if (FETCH_LONG_VALUES[program].has(name)) i++;
       continue;
     }
-    if (arg === '--output-dir' && next) { outputDir = expand(next, cwd, acc.ctx); i++; continue; }
-    if ((arg === '-o' || arg === '--output' || arg === '-O' && wget || arg === '--output-document' || /^-outfile$/iu.test(arg) || arg === '-P' || arg === '--directory-prefix') && next) {
-      output(next);
-      i++; continue;
-    }
-    if (arg === '-O' || arg === '--remote-name' || arg === '--remote-name-all') { remoteName(); continue; }
-    // Bundled short flags: `curl -fsSLo out`, `curl -sLoout`, `wget -qO out`, `wget -qP dir`.
-    if ((curlish || wget) && /^-[a-zA-Z]{2,}/u.test(arg) && !arg.startsWith('--')) {
-      const takes = curlish ? CURL_VALUE_LETTERS : WGET_VALUE_LETTERS;
-      for (let k = 1; k < arg.length; k++) {
-        const letter = arg[k]!;
-        if (curlish && letter === 'O') { remoteName(); continue; }
-        if (!takes.has(letter)) continue;
-        const value: Word | string | undefined = arg.slice(k + 1) || next;
-        if (!arg.slice(k + 1)) i++;
-        if (value === undefined) break;
-        if (curlish && letter === 'o' || wget && (letter === 'O' || letter === 'P')) output(value);
-        else if (FETCH_SIDE_FILES[program]!.has(letter)) acc.writes.push(target(value));
-        break;
-      }
+    if (!/^-[^-]/u.test(arg)) continue;
+    // A short option of its own or a cluster: `-c FILE`, `-cFILE`, `-sSc FILE`, `-fsSLo FILE`, `-qO FILE`.
+    const takes = program === 'curl' ? CURL_VALUE_LETTERS : WGET_VALUE_LETTERS;
+    for (let k = 1; k < arg.length; k++) {
+      const letter = arg[k]!;
+      if (program === 'curl' && letter === 'O') { remoteNames++; continue; }
+      if (!takes.has(letter)) continue;
+      const attached = arg.slice(k + 1);
+      const value: Word | string | undefined = attached || next;
+      if (!attached) i++;
+      const kind = options[letter];
+      if (kind && value !== undefined) take(kind, value);
+      break;
     }
   }
-  if (outputDir && !explicit) acc.writes.push(target(outputDir));
-  if (program === 'wget' && !explicit && !args.some(arg => arg === '-O-' || arg === '-qO-' || arg === '--spider')) land(target(urlName()));
+  // curl puts its -o and -O files in --output-dir, joined as curl joins them: `--output-dir D -o F` writes D/F.
+  const landing = (file: Word | string): Target => {
+    if (dir === null || program !== 'curl') return target(file);
+    const dirText = expand(dir, cwd, acc.ctx);
+    const fileText = typeof file === 'string' ? file : expand(file, cwd, acc.ctx);
+    // A folder or name that cannot be expanded leaves the place unknown.
+    if (dirText === null) return target(dir);
+    if (fileText === null) return target(file);
+    return target(join(dirText, fileText));
+  };
+  let landed = false;
+  for (const file of outputs) {
+    landed = true;
+    if (!sink(file)) land(landing(file));
+  }
+  if (program === 'curl') {
+    // Each -O takes the next URL's name; --remote-name-all names them all.
+    const named = urls.slice(0, remoteNames);
+    if (remoteNames > 0 && named.length === 0) named.push('');
+    for (const url of named) { land(landing(urlName(url))); landed = true; }
+    if (dir !== null && !landed) acc.writes.push(target(dir));
+    return;
+  }
+  // wget: -O sets the file (-P does not apply to it); otherwise the URL's name lands in -P's folder or here.
+  if (landed || args.includes('--spider')) return;
+  land(dir === null ? target(urlName(urls[0] ?? '')) : target(dir));
 }
 
 function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
