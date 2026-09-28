@@ -84,6 +84,7 @@ import { snapMove } from "./snap";
 import { useCanvasPointerNavigation } from "./useCanvasPointerNavigation";
 import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
+import { webglContextPool } from "../terminal/webglContextPool";
 
 const CANVAS_OVERLAY_PLACEMENTS: CanvasOverlayPlacement[] = [
   "top-left",
@@ -246,6 +247,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     cameraRef.current = next;
     onCameraChange(next);
   }, [onCameraChange]);
+  useEffect(() => {
+    // What each terminal card covers on screen decides which ones draw with WebGL. The pool waits for the
+    // camera to settle, so a pan only restarts its timer.
+    webglContextPool().viewportChanged();
+  }, [camera.x, camera.y, camera.zoom, homeEditing, fullscreenSessionId]);
 
   const updateRegionMovePreview = useCallback((regionId: string, bounds: SessionBounds | null): void => {
     setRegionMovePreview((current) => {

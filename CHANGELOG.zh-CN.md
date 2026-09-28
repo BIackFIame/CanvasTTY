@@ -30,7 +30,7 @@
 - 新增 HOME 关注队列：列出需要确认或已失败的会话，仅由 session snapshot 推导；标题行与显式空状态始终渲染，点击某一行会聚焦该会话。失败详情（触发入口、浮层、复制）已抽出一份共享实现，队列与既有会话行共用。
 - 新增关注环：需要确认或已失败的会话所在卡片会显示持续的关注环；General 新增设置 “Notify when attention is needed”（默认开启），只在会话真正转入需要确认或失败状态时发出一次系统通知（绝不用于 done/idle/working/unavailable）：重复 snapshot 与恢复时已看过的失败保持安静，而用户通过重启触发的失败同样会通知。切换该设置会持久化。
 - 卡片现在会上报是否渲染实时输出：处于语义摘要模式（缩放低于 0.5）的卡片停止接收流式输出，而其 scrollback 在有界历史范围内保持完整且为准；卡片重新可见时，缺失的输出会被重放一次；如果隐藏期间产生的输出超过有界历史的容量，该段最早的部分已经丢失，重放会如实说明，而不会假装输出是连续的。
-- WebGL 仅用于聚焦的终端卡片：同一时间只有一个 context，焦点离开时释放；context 丢失时回退到 DOM renderer。调色板与透明度渲染保持不变。
+- 屏幕上的终端卡片从一个 10 个 context 的池中使用 WebGL 绘制（Chromium 每个 renderer 进程最多允许 16 个）：先是聚焦的卡片，其次是占屏幕面积最大的卡片，再次是最近使用的卡片。离开屏幕、缩放超过 1× 或进入摘要模式的卡片会释放 context；平移或缩放时，池会等镜头停下再调整，因此移动画布不会反复重建 context。其余卡片继续使用 DOM renderer；context 丢失的卡片会回退到 DOM renderer，内容不丢失，并在一段时间内保持该状态。调色板与透明度渲染保持不变。
 - Settings → Updates 新增一行自更新，状态如实呈现：idle、checking、update available（含版本号）、downloading（已知时显示百分比）、ready to install 以及 unavailable（dev、offline 或 error）。下载与安装都是显式操作，只有在更新下载完成后才提供 install-and-restart；开发模式下该行报告 unavailable 而不会抛错。
 - 仓库密钥审计不再把标识符内部的密钥前缀当作命中，因此 `disk-…`、`task-…` 这类名称不再产生误报，而真实密钥仍会被检出。
 - 新增 Cursor、MiniMax Code、Devin 和 Antigravity 智能体（PR #63）。

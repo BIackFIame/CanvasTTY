@@ -45,6 +45,7 @@ import type { ResizeDirection } from "../workspace/snap";
 import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
 import { renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
+import { webglContextPool } from "./webglContextPool";
 
 interface TerminalCardProps {
   session: SessionSnapshot;
@@ -59,7 +60,7 @@ interface TerminalCardProps {
   focused: boolean;
   focusChangeSource: "explicit" | "hover";
   selected: boolean;
-  /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
+  /** Multi-select group member: gets the selected outline without focus side effects. */
   groupSelected?: boolean;
   renaming: boolean;
   fullscreen: boolean;
@@ -93,7 +94,8 @@ const TERMINAL_FOCUS_IN = "\u001b[I";
 const TERMINAL_FOCUS_OUT = "\u001b[O";
 // The WebGL canvas backing store is layout x devicePixelRatio and xterm 6 has no
 // DPR option, so above 1x its raster would be upscaled by the scene transform.
-// The DOM renderer measures the same font metrics, so the swap needs no fit().
+// Its cells are the DOM renderer's width snapped down to whole device pixels, so a
+// grid fitted on DOM always fits on WebGL; going back to DOM refits (disableWebgl).
 const WEBGL_MAX_SCALE = 1;
 
 const SEARCH_DECORATIONS = {
@@ -191,6 +193,7 @@ function TerminalCardView({
   const terminalBackground = terminalTheme(palette).background;
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
+  const fitRef = useRef<(() => void) | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchOpenRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -276,10 +279,14 @@ function TerminalCardView({
       window.canvasTTY.terminal.resize(session.id, cols, rows);
     };
     const resize = terminal.onResize(({ cols, rows }) => reportGrid(cols, rows));
+    const pool = webglContextPool();
     const unsubscribe = attachTerminalOutput(
       window.canvasTTY.terminal,
       session.id,
-      (data) => terminal.write(data),
+      (data) => {
+        pool.touch(session.id);
+        terminal.write(data);
+      },
       (error) => {
         console.error("CanvasTTY could not load terminal history.", error);
         terminal.write(`\r\n[CanvasTTY] ${t(locale, "terminalHistoryFailed")}\r\n`);
@@ -295,6 +302,7 @@ function TerminalCardView({
         // A hidden semantic-zoom surface has no measurable rows yet.
       }
     };
+    fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
       if (shouldSearchTerminalOutput(event)) {
         // Ctrl+Shift+F belongs to the card's scrollback search, never the shell.
@@ -359,8 +367,17 @@ function TerminalCardView({
     fit();
 
     const frame = requestAnimationFrame(fit);
-    const resizeObserver = new ResizeObserver(fit);
+    const resizeObserver = new ResizeObserver(() => {
+      fit();
+      pool.viewportChanged();
+    });
     resizeObserver.observe(host);
+    // Renderer choice: the pool decides which on-screen cards draw with WebGL; the rest keep the DOM renderer.
+    const unregisterWebgl = pool.register(session.id, {
+      measure: () => host.checkVisibility({ visibilityProperty: true }) ? host.getBoundingClientRect() : null,
+      attach: () => enableWebgl(terminal),
+      detach: () => disableWebgl(terminal)
+    });
 
     const input = terminal.onData((data) => {
       // Hover focus routes keyboard input locally without reporting a synthetic focus transition to the TUI.
@@ -375,6 +392,9 @@ function TerminalCardView({
       });
     });
     return () => {
+      // No refit on the way out: the card is going away, its PTY size must not change.
+      fitRef.current = null;
+      unregisterWebgl();
       cancelAnimationFrame(frame);
       detachMouseCoordinateAdapter();
       detachScrollbarCoordinateAdapter();
@@ -384,7 +404,6 @@ function TerminalCardView({
       titleChange.dispose();
       searchResults.dispose();
       searchAddonRef.current = null;
-      webglAddonRef.current = null;
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
       detachRedrawViewport();
@@ -397,42 +416,64 @@ function TerminalCardView({
     if (terminal) terminal.options.theme = terminalTheme(palette);
   }, [palette]);
 
-  const enableWebgl = (): void => {
-    const terminal = terminalRef.current;
-    if (!terminal || webglAddonRef.current) return;
+  const enableWebgl = (terminal: Terminal): boolean => {
+    if (webglAddonRef.current) return true;
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
     // terminal options, and this terminal is constructed with allowTransparency,
     // so cell backgrounds stay transparent and the card's palette background
     // keeps showing through the canvas exactly as it does in the DOM renderer.
     const webgl = new WebglAddon();
     webgl.onContextLoss(() => {
-      // GPU context gone: drop the renderer, xterm falls back to the DOM renderer.
-      webgl.dispose();
-      if (webglAddonRef.current === webgl) webglAddonRef.current = null;
+      // GPU context gone and not restored: drop the renderer, xterm falls back to the DOM renderer with
+      // the buffer intact, and the pool keeps this card off WebGL for a while.
+      if (webglAddonRef.current !== webgl) return;
+      disableWebgl(terminal);
+      webglContextPool().contextLost(session.id);
     });
     try {
       terminal.loadAddon(webgl);
-      webglAddonRef.current = webgl;
     } catch {
       // WebGL2 unavailable — stay on the DOM renderer.
       webgl.dispose();
+      return false;
+    }
+    webglAddonRef.current = webgl;
+    terminal.element?.setAttribute("data-renderer", "webgl");
+    return true;
+  };
+
+  const disableWebgl = (terminal: Terminal): void => {
+    const webgl = webglAddonRef.current;
+    if (!webgl) return;
+    webglAddonRef.current = null;
+    // The WebGL canvas is the one xterm-screen child without a layer class (the link layer is a 2D canvas).
+    const canvas = terminal.element?.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not([class])");
+    webgl.dispose();
+    terminal.element?.setAttribute("data-renderer", "dom");
+    // WebGL snaps the cell width down to whole device pixels, so its cells can be narrower than the DOM
+    // renderer's. A grid fitted while on WebGL may then be too wide for DOM: fit again. A grid fitted on
+    // DOM always fits WebGL, so attaching needs no fit and the PTY size stays put across swaps.
+    fitRef.current?.();
+    // Disposing the addon drops the canvas but not its context, which counts against Chromium's
+    // per-renderer limit until it is collected. Lose it now so the slot is really free. getContext
+    // returns the canvas's existing context here; it creates nothing.
+    try {
+      canvas?.getContext("webgl2")?.getExtension("WEBGL_lose_context")?.loseContext();
+    } catch {
+      // Already lost.
     }
   };
 
-  const disableWebgl = (): void => {
-    const webgl = webglAddonRef.current;
-    if (!webgl) return;
-    webgl.dispose();
-    webglAddonRef.current = null;
-  };
+  useEffect(() => {
+    // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
+    // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
+    webglContextPool().update(session.id, { eligible: !summaryMode && zoom <= WEBGL_MAX_SCALE, focused });
+  }, [session.id, focused, summaryMode, zoom]);
 
   useEffect(() => {
-    // One WebGL context per card: only the focused/frontmost terminal owns one,
-    // every other card keeps the DOM renderer. Above WEBGL_MAX_SCALE the canvas
-    // raster would be an upscale, so the DOM renderer takes over instead.
-    if (focused && !summaryMode && zoom <= WEBGL_MAX_SCALE) enableWebgl();
-    else disableWebgl();
-  }, [focused, summaryMode, zoom]);
+    // Moving or resizing the card changes what it covers on screen.
+    webglContextPool().viewportChanged();
+  }, [position, size]);
 
   useEffect(() => {
     // Gate the main-process output stream: in summary mode the card is a cheap
