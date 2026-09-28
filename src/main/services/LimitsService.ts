@@ -20,6 +20,11 @@ import {
 
 const CACHE_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+// `codex app-server` holds about 55-60 MB while it runs. It is started by the
+// first Codex limits read and stopped after this long without one, so it is not
+// kept for the whole session when nothing reads limits (window hidden, no
+// widget, Even G2 idle). The renderer reads every 60 s while it is visible.
+const CODEX_IDLE_MS = 3 * 60_000;
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES * 2;
 const MAX_WINDOWS = 12;
@@ -71,10 +76,13 @@ export class LimitsService {
   private lastGoodGrok: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
   private disposed = false;
 
-  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown") {
+  private readonly codexIdleMs: number;
+
+  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown", options: { codexIdleMs?: number } = {}) {
     this.providerClis = providerClis;
     this.clientVersion = clientVersion;
-    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion);
+    this.codexIdleMs = options.codexIdleMs ?? CODEX_IDLE_MS;
+    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(providerClis, "kimi"));
   }
 
@@ -105,7 +113,7 @@ export class LimitsService {
     if (this.disposed) return;
     this.codex.dispose();
     this.kimi.dispose();
-    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion);
+    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(this.providerClis, "kimi"));
     this.cache = null;
     this.lastGoodCodex = null;
@@ -691,24 +699,49 @@ class CodexAppServerClient {
   private nextId = 1;
   private buffer = "";
   private disposed = false;
+  private idleTimer: NodeJS.Timeout | null = null;
   private readonly cli: AvailableProviderCli | null;
   private readonly clientVersion: string;
+  private readonly idleMs: number;
 
-  constructor(cli: AvailableProviderCli | null, clientVersion: string) {
+  constructor(cli: AvailableProviderCli | null, clientVersion: string, idleMs: number) {
     this.cli = cli;
     this.clientVersion = clientVersion;
+    this.idleMs = idleMs;
   }
 
   async readRateLimits(): Promise<unknown> {
-    await this.ensureConnected();
-    return this.request("account/rateLimits/read");
+    this.clearIdleTimer();
+    try {
+      await this.ensureConnected();
+      return await this.request("account/rateLimits/read");
+    } finally {
+      this.scheduleIdleStop();
+    }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearIdleTimer();
     this.rejectPending("protocol-error");
     this.stopChild();
+  }
+
+  /** Stops the app-server once no read came for `idleMs`; the next read starts it again. */
+  private scheduleIdleStop(): void {
+    this.clearIdleTimer();
+    if (this.disposed || !this.child || this.pending.size > 0) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.pending.size === 0) this.resetConnection();
+    }, this.idleMs);
+    this.idleTimer.unref();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   private ensureConnected(): Promise<void> {

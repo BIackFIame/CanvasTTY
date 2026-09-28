@@ -323,13 +323,27 @@ export function App(): React.JSX.Element {
     };
 
     const refreshAndSchedule = async (): Promise<void> => {
+      // A hidden window reads no limits: nobody sees them, and each Codex read keeps a
+      // `codex app-server` process (about 55-60 MB) alive in the main process. Reading
+      // resumes the moment the window is visible again.
+      if (document.visibilityState === "hidden") return;
       await refreshLimits();
-      if (active) timer = window.setTimeout(() => void refreshAndSchedule(), 60_000);
+      if (active && timer === null) {
+        timer = window.setTimeout(() => {
+          timer = null;
+          void refreshAndSchedule();
+        }, 60_000);
+      }
+    };
+    const resumeWhenVisible = (): void => {
+      if (active && timer === null && document.visibilityState === "visible") void refreshAndSchedule();
     };
 
     void refreshAndSchedule();
+    document.addEventListener("visibilitychange", resumeWhenVisible);
     return () => {
       active = false;
+      document.removeEventListener("visibilitychange", resumeWhenVisible);
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [limitsRevision]);
