@@ -363,6 +363,49 @@ test("an entry that changed after it was trusted never runs", async (t) => {
   await assert.rejects(instance.request("com.example.a", "probe", "ping", null), /not running/);
 });
 
+test("an entry swapped after the host checked it is not run: the child runs only the bytes that match the trusted hash", { skip: process.platform === "win32" }, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-swap-")));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const marker = join(root, "tampered-ran");
+  const tampered = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");\n${PROBE}`;
+  const swapped = join(root, "swapped.mjs");
+  await writeFile(swapped, tampered);
+  // Stands in for a file replaced between the host's hash check and node reading it:
+  // the "node" the supervisor starts first swaps the entry, then runs the real node.
+  const wrapper = join(root, "node-with-swap.sh");
+  await writeFile(wrapper, `#!/bin/sh\nfor entry; do :; done\ncp ${JSON.stringify(swapped)} "$entry"\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o700 });
+  const { instance } = supervisor({ command: wrapper, restartDelaysMs: [10_000] });
+  t.after(() => instance.dispose());
+  const spec = await specFor(join(root, "plugin"), "com.example.a", "probe", PROBE);
+  await instance.sync([spec]);
+  const markerExists = () => stat(marker).then(() => true, () => false);
+  const exited = () => instance.report("com.example.a").log.some((entry) => /exit|crash|stopped/i.test(entry.message));
+  await waitFor(async () => (await markerExists()) || exited(), 5_000);
+  assert.equal(await markerExists(), false, "the swapped entry must not run");
+  await assert.rejects(instance.request("com.example.a", "probe", "ping", null));
+});
+
+test("a verified entry still runs from its own location with the guard in place", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-guard-")));
+  const { instance } = supervisor();
+  t.after(async () => { await instance.dispose(); await rm(root, { recursive: true, force: true }); });
+  const cjs = `
+const { createInterface } = require("node:readline");
+const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "where") send({ id: m.id, result: { file: __filename, argv: process.argv[1] } });
+});`;
+  const spec = await specFor(root, "com.example.a", "probe", PROBE);
+  const cjsSpec = { ...(await specFor(root, "com.example.b", "cjs", cjs)), entryPath: join(root, "cjs.cjs") };
+  await writeFile(cjsSpec.entryPath, cjs);
+  await instance.sync([spec, cjsSpec]);
+  assert.equal(await instance.request("com.example.a", "probe", "ping", null), "pong");
+  const where = await instance.request("com.example.b", "cjs", "where", null);
+  assert.equal(where.file, cjsSpec.entryPath);
+  assert.equal(where.argv, cjsSpec.entryPath);
+});
+
 test("a service that ignores shutdown is terminated", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "canvastty-service-stubborn-"));
   const { instance } = supervisor({ stopGraceMs: 200 });
