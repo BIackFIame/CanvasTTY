@@ -100,10 +100,16 @@ const INHERITED_ENVIRONMENT = new Set([
  * Module hooks for the service process: the entry is loaded from bytes the
  * hook read and hashed itself, and a mismatch stops the load. They run
  * before the entry through `--import`, off the main thread (module.register).
+ *
+ * The hooks take their modules with `await import(...)`, never a static
+ * `import ... from`: electron-vite puts its CommonJS shim (`__dirname`,
+ * `require`) after the last static import it finds in the main bundle, and a
+ * static import inside this string would pull the shim into the string, which
+ * leaves the whole main process without `__dirname`.
  */
 const ENTRY_GUARD_HOOKS = `
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+const { createHash } = await import("node:crypto");
+const { readFile } = await import("node:fs/promises");
 let entryUrl = null;
 let expected = null;
 export function initialize(data) { entryUrl = data.url; expected = data.sha256; }

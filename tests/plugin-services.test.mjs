@@ -7,6 +7,7 @@ import test from "node:test";
 import { PluginManager, validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import {
   PluginServiceSupervisor,
+  entryGuardArguments,
   pluginServiceEnvironment
 } from "../src/main/services/PluginServiceSupervisor.ts";
 
@@ -383,6 +384,19 @@ test("an entry swapped after the host checked it is not run: the child runs only
   await waitFor(async () => (await markerExists()) || exited(), 5_000);
   assert.equal(await markerExists(), false, "the swapped entry must not run");
   await assert.rejects(instance.request("com.example.a", "probe", "ping", null));
+});
+
+test("the entry guard hooks carry no static import the main bundle's CommonJS shim could land after", () => {
+  // electron-vite's esm shim puts `__dirname`/`require` after the LAST match of this
+  // pattern in the whole main bundle, string literals included. A static import inside
+  // the hooks source once pulled the shim into the string and the app could not open.
+  const staticImport = /(?<=\s|^|;)import\s*([\s"']*(?<imports>[\p{L}\p{M}\w\t\n\r $*,/{}@.]+)from\s*)?["']\s*(?<specifier>(?<="\s*)[^"]*[^\s"](?=\s*")|(?<='\s*)[^']*[^\s'](?=\s*'))\s*["'][\s;]*/gmu;
+  const [, boot] = entryGuardArguments("file:///service.mjs", "0".repeat(64));
+  const register = decodeURIComponent(boot.slice("data:text/javascript,".length));
+  const hooksUrl = JSON.parse(register.match(/register\(("[^"]+")/)[1]);
+  const hooks = decodeURIComponent(hooksUrl.slice("data:text/javascript,".length));
+  assert.match(hooks, /createHash/);
+  assert.deepEqual([...hooks.matchAll(staticImport)].map((match) => match[0]), []);
 });
 
 test("a verified entry still runs from its own location with the guard in place", async (t) => {
