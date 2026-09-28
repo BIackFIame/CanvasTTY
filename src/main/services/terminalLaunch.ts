@@ -6,6 +6,7 @@ import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
 import {
   providerTerminalBatchCommandLine,
+  windowsCommandPromptPath,
   type ProviderCliResolution
 } from "./providerCliRegistry.ts";
 
@@ -207,13 +208,9 @@ function resolveWindowsCommandPrompt(
   environment: Readonly<NodeJS.ProcessEnv>,
   fileExists: (path: string) => boolean
 ): string {
-  const configured = environment.ComSpec || environment.COMSPEC;
-  if (configured && fileExists(configured)) return configured;
-  const fromPath = findWindowsNativeCommand("cmd", environment, fileExists);
-  if (fromPath) return fromPath;
-  const systemRoot = environment.SystemRoot || environment.WINDIR;
-  const systemCommandPrompt = systemRoot ? win32.join(systemRoot, "System32", "cmd.exe") : null;
-  if (systemCommandPrompt && fileExists(systemCommandPrompt)) return systemCommandPrompt;
+  // The same lookup as batch provider launches: no PATH search for cmd.exe.
+  const commandPrompt = windowsCommandPromptPath(environment, fileExists);
+  if (commandPrompt) return commandPrompt;
   throw new Error("No supported Windows shell was found (PowerShell, pwsh, or cmd.exe).");
 }
 

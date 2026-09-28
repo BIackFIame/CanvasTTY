@@ -414,12 +414,24 @@ function resolveWindowsCommandPrompt(
   environment: Readonly<NodeJS.ProcessEnv>,
   inspectCandidate: ResolveProviderCliInput["inspectCandidate"]
 ): string | null {
+  return windowsCommandPromptPath(environment, (path) => inspectCandidate(path, "win32") === null);
+}
+
+/**
+ * cmd.exe for batch providers and the terminal fallback: ComSpec, then
+ * %SystemRoot%\System32\cmd.exe. PATH is never searched, so a cmd.exe in a
+ * project folder or another PATH entry cannot stand in for it.
+ */
+export function windowsCommandPromptPath(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  usable: (path: string) => boolean
+): string | null {
   const configured = environment.ComSpec || environment.COMSPEC;
-  if (configured && inspectCandidate(configured, "win32") === null) return configured;
+  if (configured && usable(configured)) return configured;
   const systemRoot = environment.SystemRoot || environment.WINDIR;
   if (!systemRoot) return null;
   const candidate = win32.join(systemRoot, "System32", "cmd.exe");
-  return inspectCandidate(candidate, "win32") === null ? candidate : null;
+  return usable(candidate) ? candidate : null;
 }
 
 function pathEntries(value: string | undefined, platform: NodeJS.Platform, startupDirectory: string): string[] {
