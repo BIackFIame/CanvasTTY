@@ -1457,7 +1457,7 @@ export class TerminalManager {
         launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
         secretEnvNames,
         takenEnv: new Set(Object.keys(planned.launchEnvironment)),
-        path: planned.env.PATH
+        path: launchSearchPath(planned.env)
       });
       if (!live()) {
         abandon();
@@ -1622,6 +1622,21 @@ function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProvi
   metadata.status = "failed";
   metadata.exitCode = 127;
   metadata.failureDetails = failure.diagnostic;
+}
+
+/**
+ * The launch's program search path. The environment is a plain copy of
+ * process.env, which on Windows is case-insensitive but keeps the spelling it
+ * was given ("Path"), so env.PATH alone finds nothing there.
+ */
+export function launchSearchPath(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform = process.platform
+): string | undefined {
+  if (platform !== "win32") return environment.PATH;
+  if (environment.PATH !== undefined) return environment.PATH;
+  const key = Object.keys(environment).find((name) => name.toUpperCase() === "PATH");
+  return key === undefined ? undefined : environment[key];
 }
 
 export function terminalEnvironment(
