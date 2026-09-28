@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isHomeMediaPath } from "./homeMedia.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
@@ -436,9 +437,11 @@ export function normalizeSettings(
   }
 
   const source = candidate as Partial<AppSettings> & { zoomOverApplications?: unknown };
-  const mediaPath = source.mediaPath === null || typeof source.mediaPath === "string"
+  // Only an absolute path to a supported image is kept; anything else keeps the
+  // previous choice. The main process reads this file for the Home screen.
+  const mediaPath = source.mediaPath === null || isHomeMediaPath(source.mediaPath)
     ? source.mediaPath
-    : fallback.mediaPath;
+    : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
       (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)
