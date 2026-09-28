@@ -8,11 +8,13 @@
  * pool hands them out by priority (the focused card, then by on-screen area, then by most recent use) and
  * every card without one keeps the DOM renderer, exactly as before.
  *
- * Changes that come from moving the camera settle before the pool acts, and a card that holds a context
- * keeps it unless another card is clearly larger on screen, so a pan or a wheel zoom does not create and
- * drop contexts on every frame. A holder that has been idle for a while loses that edge: a card of the same
- * size that is printing output takes its place. A card leaving the screen or losing eligibility (semantic zoom, zoom above
- * the raster limit) gives its context back straight away.
+ * Changes that come from moving the camera settle before the pool acts, and so does every other re-plan
+ * (output on a waiting card, a pin running out, a backoff ending): none moves a context until the settle
+ * time has passed since the last camera or layout change. A card that holds a context keeps it unless
+ * another card is clearly larger on screen, so a pan or a wheel zoom does not create and drop contexts on
+ * every frame. A holder that has been idle for a while loses that edge: a card of the same size that is
+ * printing output takes its place. A card losing eligibility (semantic zoom, zoom above the raster limit)
+ * gives its context back straight away; a card that left the screen gives it back at the next plan.
  *
  * The pool knows nothing about xterm or the DOM: a card registers a client that measures its on-screen
  * rectangle and attaches or detaches the renderer. That keeps the policy testable in node.
@@ -125,6 +127,8 @@ export class WebglContextPool {
   private readonly budget: number;
   private cancelSettle: (() => void) | null = null;
   private activityPlanPending = false;
+  /** When viewportChanged() last ran; no context moves until the settle time has passed since then. */
+  private lastViewportChange = Number.NEGATIVE_INFINITY;
 
   constructor(options: WebglPoolOptions) {
     this.options = options;
@@ -172,12 +176,13 @@ export class WebglContextPool {
     this.activityPlanPending = true;
     this.options.schedule(() => {
       this.activityPlanPending = false;
-      this.plan();
+      this.planWhenSettled();
     }, WEBGL_ACTIVITY_REPLAN_MS);
   }
 
   /** The camera, the window or a card's bounds changed. Acts once things are still. */
   viewportChanged(): void {
+    this.lastViewportChange = this.options.now();
     this.settle();
   }
 
@@ -198,11 +203,16 @@ export class WebglContextPool {
     return [...this.entries].filter(([, entry]) => entry.holding).map(([id]) => id);
   }
 
-  /** Recompute now. Normally reached through the settle timer. */
+  /**
+   * Recompute now. Normally reached through the settle timer. While the camera is still settling the
+   * pending settle timer is kept, so the plan for where the camera comes to rest still runs.
+   */
   plan(): void {
-    this.cancelSettle?.();
-    this.cancelSettle = null;
     const now = this.options.now();
+    if (this.settleRemaining(now) <= 0) {
+      this.cancelSettle?.();
+      this.cancelSettle = null;
+    }
     const viewport = this.options.viewport();
     const candidates: WebglCandidate[] = [];
     for (const [id, entry] of this.entries) {
@@ -258,7 +268,22 @@ export class WebglContextPool {
 
   private settle(ms = this.options.settleMs ?? WEBGL_SETTLE_MS): void {
     this.cancelSettle?.();
-    this.cancelSettle = this.options.schedule(() => this.plan(), ms);
+    this.cancelSettle = this.options.schedule(() => {
+      this.cancelSettle = null;
+      this.planWhenSettled();
+    }, ms);
+  }
+
+  /** Time left until the settle time has passed since the last camera or layout change. */
+  private settleRemaining(now: number): number {
+    return this.lastViewportChange + (this.options.settleMs ?? WEBGL_SETTLE_MS) - now;
+  }
+
+  /** Every timer re-plans through here: while the camera is still moving it waits for the quiet interval. */
+  private planWhenSettled(): void {
+    const remaining = this.settleRemaining(this.options.now());
+    if (remaining > 0) this.settle(remaining);
+    else this.plan();
   }
 
   private release(entry: Entry): void {

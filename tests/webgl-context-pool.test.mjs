@@ -118,6 +118,54 @@ test("a pan restarts the settle timer instead of reshuffling on every frame", ()
   assert.deepEqual(h.log, ["+a", "-a", "+b"]);
 });
 
+test("output replanning waits for the camera too: no context moves mid-pan, the swap comes once it is quiet", () => {
+  const h = harness({ budget: 2 });
+  h.card("a", rect(0, 0, 100, 100), { focused: true });
+  h.card("b", rect(200, 0, 100, 100));
+  h.card("c", rect(400, 0, 100, 100));
+  h.advance(WEBGL_SETTLE_MS);
+  assert.deepEqual(h.attached(), ["a", "b"], "the pool is full and c waits");
+  // b prints nothing and becomes idle; then output reaches c, which schedules an activity replan.
+  h.advance(WEBGL_IDLE_MS);
+  h.pool.touch("c");
+  const before = h.log.length;
+  // The camera moves every frame for longer than the activity replan delay, never quiet for the settle time.
+  let panned = 0;
+  for (; panned <= WEBGL_ACTIVITY_REPLAN_MS + 500; panned += 16) {
+    h.pool.viewportChanged();
+    h.pool.touch("c");
+    h.advance(16);
+  }
+  assert.ok(panned > WEBGL_ACTIVITY_REPLAN_MS);
+  assert.deepEqual(h.log.slice(before), [], "no context attached or detached while the camera moves");
+  h.advance(WEBGL_SETTLE_MS - 17);
+  assert.deepEqual(h.log.slice(before), [], "still inside the quiet interval after the last move");
+  h.advance(1);
+  assert.deepEqual(h.attached(), ["a", "c"], "the idle holder's slot goes to the busy card once the camera is still");
+  assert.deepEqual(h.log.slice(before), ["-b", "+c"]);
+});
+
+test("an activity replan with the camera still also defers to a later move, and loss of eligibility stays immediate", () => {
+  const h = harness({ budget: 1 });
+  h.card("a", rect(0, 0, 100, 100));
+  h.card("b", rect(200, 0, 100, 100));
+  h.advance(WEBGL_SETTLE_MS);
+  assert.deepEqual(h.attached(), ["a"]);
+  h.advance(WEBGL_IDLE_MS);
+  h.pool.touch("b");
+  // One camera move just before the activity replan is due pushes the swap to the end of the settle time.
+  h.advance(WEBGL_ACTIVITY_REPLAN_MS - 50);
+  h.pool.viewportChanged();
+  h.advance(50);
+  assert.deepEqual(h.attached(), ["a"]);
+  h.advance(WEBGL_SETTLE_MS - 50);
+  assert.deepEqual(h.attached(), ["b"]);
+  // Mid-pan, a card losing eligibility still gives its context back at once.
+  h.pool.viewportChanged();
+  h.pool.update("b", { eligible: false, focused: false });
+  assert.deepEqual(h.attached(), []);
+});
+
 test("a card leaving the screen or losing eligibility releases its context", () => {
   const h = harness({ budget: 3 });
   const a = h.card("a", rect(0, 0, 100, 100));
