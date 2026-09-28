@@ -2,6 +2,7 @@ import type {
   AgentProviderId,
   CreateSessionRequest,
   LaunchProfileId,
+  SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
@@ -63,7 +64,7 @@ export class AgentControlService {
    * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
    * start; the card stays, so the caller can inspect or cancel it.
    */
-  spawn(request: SpawnAgentRequest): Promise<SessionSnapshot> {
+  spawn(request: SpawnAgentRequest): Promise<SessionMetadata> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
@@ -93,7 +94,7 @@ export class AgentControlService {
     });
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
-      .then(() => this.terminals.list().find((session) => session.id === created.id) ?? created);
+      .then(() => this.terminals.getMetadata(created.id) ?? created);
   }
 
   /** Validates at once (throws); resolves once the text reached the agent, and rejects when it did not. */
@@ -107,13 +108,13 @@ export class AgentControlService {
     return this.deliver(sessionId, submit ? `${text}\r` : text, "text");
   }
 
-  status(sessionId: string): SessionSnapshot {
+  status(sessionId: string): SessionMetadata {
     return this.requireSession(sessionId);
   }
 
-  children(parentSessionId: string): SessionSnapshot[] {
+  children(parentSessionId: string): SessionMetadata[] {
     this.requireSession(parentSessionId);
-    return this.terminals.list()
+    return this.terminals.listMetadata()
       .filter((session) => session.parentSessionId === parentSessionId)
       .sort((a, b) => a.startedAt - b.startedAt);
   }
@@ -121,7 +122,7 @@ export class AgentControlService {
   /** True when sessionId is parentSessionId itself or any of its descendants. */
   isInSubtree(parentSessionId: string, sessionId: string): boolean {
     if (typeof parentSessionId !== "string" || typeof sessionId !== "string") return false;
-    const snapshots = new Map(this.terminals.list().map((session) => [session.id, session]));
+    const snapshots = new Map(this.terminals.listMetadata().map((session) => [session.id, session]));
     let current: string | undefined = sessionId;
     const seen = new Set<string>();
     while (current !== undefined) {
@@ -184,11 +185,12 @@ export class AgentControlService {
     return typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text;
   }
 
-  private requireSession(sessionId: string): SessionSnapshot {
+  /** A lookup by id: metadata only, so no other session's scrollback is copied. */
+  private requireSession(sessionId: string): SessionMetadata {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
       throw new Error("A session id is required.");
     }
-    const session = this.terminals.list().find((candidate) => candidate.id === sessionId);
+    const session = this.terminals.getMetadata(sessionId);
     if (!session) throw new Error("Terminal session does not exist.");
     return session;
   }

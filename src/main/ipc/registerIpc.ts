@@ -477,7 +477,7 @@ export function registerIpc({
     }
     if (method === "sessions.list") {
       plugins.assertPermission(pluginId, "sessions:read");
-      return terminals.list().map((session) => ({
+      return terminals.listMetadata().map((session) => ({
         id: session.id,
         provider: session.provider,
         title: session.title,

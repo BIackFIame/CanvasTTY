@@ -562,3 +562,27 @@ test("the control CLI screen masks a custom secret the viewport's top edge cuts"
   assert.equal(/marmalade|loudly/u.test(text), false);
   assert.match(text, /<redacted:secret>/u, "masked where it stood, as one value");
 });
+
+test("an orchestrator tool call looks its sessions up by id: no other card's scrollback is copied", async () => {
+  const { terminals, control } = serviceFixture();
+  const parent = terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "codex", cwd: process.cwd() });
+  const bystanders = Array.from({ length: 5 }, () => terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } }));
+  assert.equal(bystanders.length, 5);
+  const copied = [];
+  const list = terminals.list.bind(terminals);
+  const readBuffer = terminals.readBuffer.bind(terminals);
+  terminals.list = () => { copied.push("list"); return list(); };
+  terminals.readBuffer = (id) => { copied.push(id); return readBuffer(id); };
+
+  // What observe_agent, get_agent_result, list_agents and the ownership check do.
+  assert.equal(control.status(child.id).id, child.id);
+  assert.equal(control.isInSubtree(parent.id, child.id), true);
+  assert.deepEqual(control.children(parent.id).map((session) => session.id), [child.id]);
+  control.observe(child.id);
+  control.result(child.id);
+  assert.throws(() => control.status("missing"), /does not exist/u);
+
+  assert.deepEqual(copied, [child.id, child.id], "only the observed card's own scrollback is read, and no list() snapshot of every card");
+  terminals.disposeAll();
+});

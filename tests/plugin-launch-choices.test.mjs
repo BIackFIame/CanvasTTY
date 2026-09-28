@@ -155,7 +155,8 @@ test("spawn_agent takes plugin launch options and hands them to the launch", () 
   const parent = { id: "orch", provider: "claude", role: "orchestrator", position: { x: 0, y: 0 }, exitCode: null };
   const terminals = {
     get: (id) => (id === "orch" ? parent : undefined),
-    list: () => [parent],
+    getMetadata: (id) => (id === "orch" ? parent : null),
+    listMetadata: () => [parent],
     create: (request) => { created.push(request); return { id: "child", ...request, status: "starting", title: "c" }; }
   };
   const control = new AgentControlService(terminals);

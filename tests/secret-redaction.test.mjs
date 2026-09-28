@@ -143,7 +143,7 @@ test("the vault hands every value it reads or writes to the registry; agent-read
   const manager = new TerminalManager(() => undefined, { get: () => ({ state: "unavailable" }), snapshot: () => ({}) });
   manager.configureRedaction(registry);
   const control = new AgentControlService({
-    list: () => [{ id: "s1", provider: "claude", status: "working", exitCode: null }],
+    getMetadata: (id) => (id === "s1" ? { id: "s1", provider: "claude", status: "working", exitCode: null } : null),
     readBuffer: () => ({ buffer: `env OPENAI=${value}\n${secrets.github}\n` }),
     redactSecrets: (text) => manager.redactSecrets(text)
   });

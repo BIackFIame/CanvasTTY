@@ -376,6 +376,12 @@ export class TerminalManager {
     return [...this.sessions.values()].map((session) => structuredClone(session.metadata));
   }
 
+  /** One session's metadata by id, or null. Unlike list(), a lookup never copies any scrollback. */
+  getMetadata(id: string): SessionMetadata | null {
+    const session = this.sessions.get(id);
+    return session ? structuredClone(session.metadata) : null;
+  }
+
   geometry(id: string): { cols: number; rows: number } {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
