@@ -1,3 +1,4 @@
+import { NdjsonDecoderBase } from "../../../agent-runtime/ndjson.mjs";
 import type {
   BrowserActivityEvent,
   BrowserActor,
@@ -239,35 +240,14 @@ export function encodeServerMessage(message: ServerMessage): Buffer {
   return Buffer.from(`${json}\n`, "utf8");
 }
 
-export class NdjsonDecoder {
-  private remainder = Buffer.alloc(0);
-
-  push(chunk: Buffer): unknown[] {
-    const messages: unknown[] = [];
-    let buffer = this.remainder.length === 0 ? chunk : Buffer.concat([this.remainder, chunk]);
-    let lineStart = 0;
-
-    for (let index = 0; index < buffer.length; index += 1) {
-      if (buffer[index] !== 0x0a) continue;
-      const line = buffer.subarray(lineStart, index);
-      lineStart = index + 1;
-      if (line.length === 0) continue;
-      if (line.length > MAX_BRIDGE_PAYLOAD_BYTES) throw payloadError();
-      messages.push(parseJsonLine(line));
-    }
-
-    buffer = buffer.subarray(lineStart);
-    if (buffer.length > MAX_BRIDGE_PAYLOAD_BYTES) throw payloadError();
-    this.remainder = Buffer.from(buffer);
-    return messages;
-  }
-}
-
-function parseJsonLine(line: Buffer): unknown {
-  try {
-    return JSON.parse(line.toString("utf8"));
-  } catch {
-    throw protocolError("Bridge message is not valid JSON.");
+/** Decodes the bridge's NDJSON stream: lines over 512KB and lines that are not JSON are protocol errors. */
+export class NdjsonDecoder extends NdjsonDecoderBase {
+  constructor() {
+    super({
+      maxLineBytes: MAX_BRIDGE_PAYLOAD_BYTES,
+      tooLarge: payloadError,
+      invalid: () => protocolError("Bridge message is not valid JSON.")
+    });
   }
 }
 

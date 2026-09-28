@@ -19,6 +19,7 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "../../../agent-runtime/runtime-protocol.mjs";
+import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import {
   WindowsPipeHostTransport,
   type AgentGatewaySocket,
@@ -359,7 +360,7 @@ export class RuntimeGateway {
       return;
     }
     this.sockets.add(socket);
-    let pending = Buffer.alloc(0);
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_RUNTIME_MESSAGE_BYTES });
     let handled = false;
     const close = () => {
       clearTimeout(firstMessage);
@@ -371,15 +372,17 @@ export class RuntimeGateway {
     socket.setNoDelay(true);
     socket.on("data", (chunk) => {
       if (handled) return;
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-      pending = Buffer.concat([pending, bytes]);
-      if (pending.length > MAX_RUNTIME_MESSAGE_BYTES) return close();
-      const newline = pending.indexOf(0x0a);
-      if (newline < 0) return;
+      let line: Buffer | undefined;
+      try {
+        [line] = lines.push(chunk);
+      } catch {
+        return close();
+      }
+      if (!line) return;
       handled = true;
       clearTimeout(firstMessage);
       try {
-        const value: unknown = JSON.parse(pending.subarray(0, newline).toString("utf8"));
+        const value: unknown = JSON.parse(line.toString("utf8"));
         // Decision hooks keep the socket open for the answer; every other message is unchanged.
         if (isPermissionRequest(value)) return this.acceptPermission(socket, value, close);
         if (isAnswerCaptureCheck(value)) {

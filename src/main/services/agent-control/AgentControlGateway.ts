@@ -4,6 +4,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import type { CreateSessionRequest, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
@@ -269,7 +270,7 @@ export class AgentControlGateway {
   private accept(socket: AgentGatewaySocket): void {
     if (this.closed || this.sockets.size >= 32) { socket.destroy(); return; }
     this.sockets.add(socket);
-    let buffer = Buffer.alloc(0);
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_REQUEST_BYTES });
     let handled = false;
     const timer = setTimeout(() => socket.destroy(), 10_000);
     timer.unref();
@@ -286,13 +287,12 @@ export class AgentControlGateway {
     };
     socket.on("data", (chunk) => {
       if (handled) return;
-      buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > MAX_REQUEST_BYTES) { socket.destroy(); return; }
-      const newline = buffer.indexOf(10);
-      if (newline < 0) return;
+      let line: Buffer | undefined;
+      try { [line] = lines.push(chunk); } catch { socket.destroy(); return; }
+      if (!line) return;
       handled = true;
       let request: ControlRequest;
-      try { request = this.parse(JSON.parse(buffer.subarray(0, newline).toString("utf8"))); }
+      try { request = this.parse(JSON.parse(line.toString("utf8"))); }
       catch { reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: "Invalid or unauthenticated control request." } }); return; }
       void this.dispatch(request).then(
         (result) => reply({ v: 1, id: request.id, ok: true, result }),

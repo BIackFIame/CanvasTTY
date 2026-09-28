@@ -10,6 +10,7 @@ import type {
   PluginServiceStatus
 } from "../../shared/contracts";
 import { MAX_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
 
 /** One trusted service the supervisor should keep running. Built by PluginManager. */
 export interface PluginServiceSpec {
@@ -168,8 +169,6 @@ interface ServiceRecord {
   child: ChildProcess | null;
   pending: Map<number, PendingRequest>;
   nextId: number;
-  stdout: string;
-  discarding: boolean;
   crashes: number[];
   restarts: number;
   restartTimer: NodeJS.Timeout | null;
@@ -227,8 +226,6 @@ export class PluginServiceSupervisor {
           child: null,
           pending: new Map(),
           nextId: 1,
-          stdout: "",
-          discarding: false,
           crashes: [],
           restarts: 0,
           restartTimer: null,
@@ -381,8 +378,6 @@ export class PluginServiceSupervisor {
       windowsHide: true
     });
     record.child = child;
-    record.stdout = "";
-    record.discarding = false;
     record.exited = new Promise((resolve) => {
       let settled = false;
       const finish = (code: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
@@ -399,8 +394,11 @@ export class PluginServiceSupervisor {
       this.log(spec, "host", "info", `Started (pid ${child.pid ?? "?"}).`);
     });
     child.stdin?.on("error", () => undefined);
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.stdout(record, chunk));
+    // Frames over the limit are dropped up to their newline instead of buffered.
+    const frames = new NdjsonLineReader({ maxLineBytes: this.options.maxFrameBytes, onOversize: () => this.dropFrame(record) });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const line of frames.push(chunk)) this.frame(record, line.toString("utf8"));
+    });
     child.stderr?.setEncoding("utf8");
     let stderr = "";
     child.stderr?.on("data", (chunk: string) => {
@@ -499,25 +497,6 @@ export class PluginServiceSupervisor {
     if (!stdin || stdin.destroyed || !stdin.writable) return false;
     stdin.write(`${frame}\n`);
     return true;
-  }
-
-  private stdout(record: ServiceRecord, chunk: string): void {
-    record.stdout += chunk;
-    let newline = record.stdout.indexOf("\n");
-    while (newline >= 0) {
-      const line = record.stdout.slice(0, newline);
-      record.stdout = record.stdout.slice(newline + 1);
-      if (record.discarding) record.discarding = false;
-      else if (Buffer.byteLength(line, "utf8") > this.options.maxFrameBytes) this.dropFrame(record);
-      else this.frame(record, line);
-      newline = record.stdout.indexOf("\n");
-    }
-    if (Buffer.byteLength(record.stdout, "utf8") > this.options.maxFrameBytes) {
-      // Skip the rest of an oversized frame up to its newline instead of buffering it.
-      if (!record.discarding) this.dropFrame(record);
-      record.discarding = true;
-      record.stdout = "";
-    }
   }
 
   private dropFrame(record: ServiceRecord): void {

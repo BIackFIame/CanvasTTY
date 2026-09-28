@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { NdjsonLineReader } from "./ndjson.mjs";
 import {
   AGENT_RUNTIME_ENV,
   DECISION_FAIL_CLOSED_ENV,
@@ -135,7 +136,7 @@ export function exchange(address, message, deadlineMs) {
     const payload = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
     const socket = createConnection(address);
     let settled = false;
-    let response = Buffer.alloc(0);
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_RUNTIME_MESSAGE_BYTES });
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -146,12 +147,10 @@ export function exchange(address, message, deadlineMs) {
     const timer = setTimeout(() => finish(null), deadlineMs);
     socket.on("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      response = Buffer.concat([response, typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk]);
-      if (response.length > MAX_RUNTIME_MESSAGE_BYTES) return finish(null);
-      const newline = response.indexOf(0x0a);
-      if (newline < 0) return;
       try {
-        finish(parseDecision(JSON.parse(response.subarray(0, newline).toString("utf8")), message.requestId));
+        const [line] = lines.push(chunk);
+        if (!line) return;
+        finish(parseDecision(JSON.parse(line.toString("utf8")), message.requestId));
       } catch {
         finish(null);
       }

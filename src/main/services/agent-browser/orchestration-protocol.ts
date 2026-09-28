@@ -1,3 +1,4 @@
+import { NdjsonDecoderBase } from "../../../agent-runtime/ndjson.mjs";
 import {
   MAX_ORCHESTRATION_PAYLOAD_BYTES,
   canonicalStringify,
@@ -227,27 +228,14 @@ export function encodeOrchestrationServerMessage(message: OrchestrationServerMes
   return Buffer.from(`${json}\n`, "utf8");
 }
 
-export class OrchestrationNdjsonDecoder {
-  private remainder = Buffer.alloc(0);
-
-  push(chunk: Buffer): unknown[] {
-    const messages: unknown[] = [];
-    let buffer = this.remainder.length === 0 ? chunk : Buffer.concat([this.remainder, chunk]);
-    let lineStart = 0;
-
-    for (let index = 0; index < buffer.length; index += 1) {
-      if (buffer[index] !== 0x0a) continue;
-      const line = buffer.subarray(lineStart, index);
-      lineStart = index + 1;
-      if (line.length === 0) continue;
-      if (line.length > MAX_ORCHESTRATION_PAYLOAD_BYTES) throw orchestrationPayloadError();
-      messages.push(parseJsonLine(line));
-    }
-
-    buffer = buffer.subarray(lineStart);
-    if (buffer.length > MAX_ORCHESTRATION_PAYLOAD_BYTES) throw orchestrationPayloadError();
-    this.remainder = Buffer.from(buffer);
-    return messages;
+/** Decodes the orchestration NDJSON stream: lines over 128KB and lines that are not JSON are protocol errors. */
+export class OrchestrationNdjsonDecoder extends NdjsonDecoderBase {
+  constructor() {
+    super({
+      maxLineBytes: MAX_ORCHESTRATION_PAYLOAD_BYTES,
+      tooLarge: orchestrationPayloadError,
+      invalid: () => orchestrationProtocolError("Orchestration message is not valid JSON.")
+    });
   }
 }
 
@@ -281,14 +269,6 @@ function orchestrationProtocolError(message: string): Error & { bridgeError: Orc
 
 function orchestrationPayloadError(): Error & { bridgeError: OrchestrationBridgeErrorPayload } {
   return orchestrationBridgeError("PAYLOAD_TOO_LARGE", "Orchestration message exceeds 128KB.", false);
-}
-
-function parseJsonLine(line: Buffer): unknown {
-  try {
-    return JSON.parse(line.toString("utf8"));
-  } catch {
-    throw orchestrationProtocolError("Orchestration message is not valid JSON.");
-  }
 }
 
 function strictObject(value: unknown, name: string): Record<string, unknown> {

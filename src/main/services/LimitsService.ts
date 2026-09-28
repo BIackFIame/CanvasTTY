@@ -17,6 +17,7 @@ import {
   type AvailableProviderCli,
   type ProviderCliRegistry
 } from "./providerCliRegistry.ts";
+import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
 
 const CACHE_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -697,7 +698,6 @@ class CodexAppServerClient {
   private ready: Promise<void> | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
-  private buffer = "";
   private disposed = false;
   private idleTimer: NodeJS.Timeout | null = null;
   private readonly cli: AvailableProviderCli | null;
@@ -779,9 +779,8 @@ class CodexAppServerClient {
     }
 
     this.child = child;
-    this.buffer = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => this.consume(chunk));
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_LINE_BYTES });
+    child.stdout.on("data", (chunk: Buffer) => this.consume(child, lines, chunk));
     child.stdin.on("error", () => this.connectionFailed("protocol-error", child));
     child.stderr.resume();
     child.once("error", (error: NodeJS.ErrnoException) => {
@@ -834,25 +833,19 @@ class CodexAppServerClient {
     }
   }
 
-  private consume(chunk: string): void {
-    if (this.disposed) return;
-    this.buffer += chunk;
-    if (Buffer.byteLength(this.buffer) > MAX_BUFFER_BYTES) {
-      this.connectionFailed("protocol-error", this.child);
+  private consume(child: ChildProcessWithoutNullStreams, lines: NdjsonLineReader, chunk: Buffer): void {
+    if (this.disposed || child !== this.child) return;
+    let complete: Buffer[];
+    try {
+      complete = lines.push(chunk);
+    } catch {
+      this.connectionFailed("protocol-error", child);
       return;
     }
-
-    for (;;) {
-      const newline = this.buffer.indexOf("\n");
-      if (newline < 0) return;
-      const line = this.buffer.slice(0, newline).trim();
-      this.buffer = this.buffer.slice(newline + 1);
-      if (!line) continue;
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
-        this.connectionFailed("protocol-error", this.child);
-        return;
-      }
-      this.consumeLine(line);
+    for (const raw of complete) {
+      if (child !== this.child) return;
+      const line = raw.toString("utf8").trim();
+      if (line) this.consumeLine(line);
     }
   }
 
@@ -901,7 +894,6 @@ class CodexAppServerClient {
   private stopChild(): void {
     const child = this.child;
     this.child = null;
-    this.buffer = "";
     if (!child) return;
 
     child.removeAllListeners("error");
