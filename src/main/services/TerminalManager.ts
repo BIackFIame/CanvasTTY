@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { basename, relative, isAbsolute } from "node:path";
+import { basename } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
@@ -1334,8 +1335,7 @@ export class TerminalManager {
     if (!root || root.extras.environment) return undefined;
     try {
       const folder = realpathSync(cwd);
-      const inside = relative(realpathSync(root.metadata.cwd), folder);
-      return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? folder : undefined;
+      return isPathInside(realpathSync(root.metadata.cwd), folder) ? folder : undefined;
     } catch {
       return undefined;
     }

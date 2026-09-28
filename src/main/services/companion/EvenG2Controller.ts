@@ -7,7 +7,8 @@ import {
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { readFile, writeFile, mkdir, rename, stat, rm } from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
-import { join, resolve, sep, extname } from "node:path";
+import { join, resolve, extname } from "node:path";
+import { isPathInside } from "../../../agent-runtime/path-inside.mjs";
 import { hostname } from "node:os";
 import type { TerminalManager } from "../TerminalManager.ts";
 import type { LimitsSnapshot, ProviderId } from "../../../shared/contracts.ts";
@@ -775,7 +776,7 @@ export class EvenG2Controller {
     ) {
       const root = resolve(this.webRoot),
         path = resolve(root, url.pathname.slice(4) || "index.html");
-      if (!path.startsWith(root + sep) || !existsSync(path))
+      if (!isPathInside(root, path, { allowRoot: false }) || !existsSync(path))
         return this.json(res, 404, { error: "not-found" });
       const types: Record<string, string> = {
         ".html": "text/html; charset=utf-8",

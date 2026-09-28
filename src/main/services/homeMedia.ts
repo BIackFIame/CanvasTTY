@@ -1,4 +1,5 @@
-import { dirname, extname, isAbsolute, relative, sep } from "node:path";
+import { dirname, extname, isAbsolute } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 
@@ -30,8 +31,7 @@ export function isHomeMediaPath(value: unknown): value is string {
 export async function readHomeMedia(path: string): Promise<string> {
   if (!isHomeMediaPath(path)) throw new Error("Unsupported media type.");
   const [target, folder] = await Promise.all([realpath(path), realpath(dirname(path))]);
-  const fromFolder = relative(folder, target);
-  if (!fromFolder || fromFolder.startsWith(`..${sep}`) || fromFolder === ".." || isAbsolute(fromFolder)) {
+  if (!isPathInside(folder, target, { allowRoot: false })) {
     throw new Error("Media link points outside the chosen folder.");
   }
   const mime = HOME_MEDIA_MIME[extname(target).toLowerCase()];

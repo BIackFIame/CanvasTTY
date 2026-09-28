@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isPathInside } from '../../../agent-runtime/path-inside.mjs';
 import { lexShell, shellQuote, type Segment, type Word } from './shellParse.ts';
 
 /**
@@ -84,8 +85,7 @@ const AGENT_SERVICE_DIR = /^(?:plans|projects[\\/][^\\/]+[\\/]memory)(?:[\\/]|$)
 /** The path is inside an agent config folder's `plans/` or `projects/<project>/memory/` (already resolved, so no `..`). */
 export function isAgentServicePath(abs: string, ctx: PathContext): boolean {
   return ctx.agentRoots.some(dir => {
-    const rel = relative(dir, abs);
-    return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel) && AGENT_SERVICE_DIR.test(rel);
+    return isPathInside(dir, abs, { allowRoot: false }) && AGENT_SERVICE_DIR.test(relative(dir, abs));
   });
 }
 
@@ -133,9 +133,8 @@ export function resolveTarget(word: Word | string, cwd: string | null, ctx: Path
   if (!isAbsolute(text) && cwd === null) return blank;
   const full = resolve(cwd ?? ctx.root, text);
   const abs = noFollow && !/[\\/]$/u.test(text) && basename(full) !== '..' && basename(full) !== '.' && dirname(full) !== full ? join(realish(dirname(full)), basename(full)) : realish(full);
-  const rel = relative(ctx.rootReal, abs);
-  const inside = rel === '' || !rel.startsWith('..') && !isAbsolute(rel);
-  return { raw, abs, where: inside ? 'inside' : 'outside', device: false, root: rel === '' && !globbed };
+  const inside = isPathInside(ctx.rootReal, abs);
+  return { raw, abs, where: inside ? 'inside' : 'outside', device: false, root: relative(ctx.rootReal, abs) === '' && !globbed };
 }
 
 // ---------------------------------------------------------------------------

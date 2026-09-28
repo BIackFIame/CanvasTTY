@@ -14,7 +14,8 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import type {
   AgentProviderId,
   GithubPluginSearchResult,
@@ -1906,8 +1907,7 @@ async function containedFile(root: string, relativePath: string): Promise<string
   const rootRealPath = await realpath(root);
   const candidate = resolve(rootRealPath, decoded);
   const candidateRealPath = await realpath(candidate);
-  const relation = relative(rootRealPath, candidateRealPath);
-  if (relation.startsWith(`..${sep}`) || relation === ".." || resolve(rootRealPath, relation) !== candidateRealPath) {
+  if (!isPathInside(rootRealPath, candidateRealPath)) {
     throw new Error("Plugin asset escapes its package root.");
   }
   const metadata = await stat(candidateRealPath);
