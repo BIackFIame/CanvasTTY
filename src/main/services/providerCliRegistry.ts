@@ -285,10 +285,25 @@ function escapeCommandPromptCommand(value: string): string {
   return value.replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
 }
 
+// Arguments are escaped twice. cmd.exe removes one level of carets when it
+// reads the /c line, then a batch file (an npm shim runs `node cli.js %*`)
+// parses the text %* expands to again. cmd.exe does not treat \" as an
+// escaped quote, so with one level an argument holding a quote followed by
+// & or | (the --settings hook command, for example) was cut there and the
+// rest ran as a separate command. With every quote escaped at both levels
+// cmd.exe never sees a quoted region and every operator stays escaped.
+//
+// Program-side quoting follows the MSVC rules: backslashes before a quote and
+// at the end are doubled. The old lookahead regex doubled only one of two or
+// more backslashes before a quote, so in `a\\"b` the quote ended the argument
+// instead of being part of it.
 function escapeCommandPromptArgument(value: string): string {
-  let escaped = value.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
-  escaped = escaped.replace(/(?=(\\+?)?)\1$/, "$1$1");
-  return `"${escaped}"`.replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
+  const escaped = value
+    .replace(/(\\*)"/g, (_match, slashes: string) => `${slashes}${slashes}\\"`)
+    .replace(/(\\+)$/, "$1$1");
+  return `"${escaped}"`
+    .replace(COMMAND_PROMPT_META_CHARACTERS, "^$1")
+    .replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
 }
 
 function providerCandidates(commands: readonly string[], directories: string[], platform: NodeJS.Platform, commandFirst = false): string[] {
