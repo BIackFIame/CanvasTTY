@@ -175,3 +175,33 @@ test("BrowserAuditStore propagates storage failures instead of pretending to aud
   });
   await assert.rejects(store.verify());
 });
+
+test("BrowserAuditStore repairs a line torn by a crash instead of refusing every later action", async (t) => {
+  const root = await fixture(t, "canvastty-audit-torn-");
+  const store = new BrowserAuditStore(root);
+  await store.append(auditInput("torn-1"));
+  await store.append(auditInput("torn-2"));
+  const complete = await readFile(store.filePath, "utf8");
+  // A crash or ENOSPC during the append left half a record and no newline.
+  const third = JSON.stringify({ ...JSON.parse(complete.trim().split("\n")[1]), sequence: 3 });
+  await writeFile(store.filePath, complete + third.slice(0, 40));
+
+  const reopened = new BrowserAuditStore(root);
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    const appended = await reopened.append(auditInput("after-crash"));
+    assert.equal(appended.sequence, 3);
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(await reopened.verify(), { valid: true, records: 3, lastHash: (await reopened.verify()).lastHash });
+  assert.equal((await readFile(reopened.filePath, "utf8")).split("\n").filter(Boolean).length, 3);
+
+  // A complete last record that only lost its newline is kept, not dropped.
+  const whole = await readFile(reopened.filePath, "utf8");
+  await writeFile(reopened.filePath, whole.slice(0, -1));
+  const again = new BrowserAuditStore(root);
+  assert.equal((await again.append(auditInput("after-newline"))).sequence, 4);
+  assert.equal((await again.verify()).valid, true);
+});
