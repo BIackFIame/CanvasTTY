@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -18,6 +18,8 @@ const MAX_RECEIPTS = 4096;
 // request id must be performed again instead of replaying the refusal.
 const RETRYABLE_REFUSALS = new Set(["BUSY", "NOT_READY", "LIMIT_REACHED", "LIFECYCLE_DISABLED", "CLOSED"]);
 const MAX_SESSIONS = 32;
+const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const SECRET = /^[a-f0-9]{64}$/;
@@ -73,6 +75,8 @@ export interface AgentControlGatewayOptions {
   windowsPipeHostFactory?: (options: { hostPath: string; platform: NodeJS.Platform; parentPid: number }) => WindowsPipeHostTransport;
   /** Receipts kept for request-id replay (default 4096); the oldest settled ones are dropped first. */
   maxReceipts?: number;
+  /** Called after the Windows pipe host was restarted and connection.json names the new endpoint. */
+  onTransportRestarted?(connectionPath: string): void;
 }
 
 export class ControlError extends Error {
@@ -91,42 +95,119 @@ export class AgentControlGateway {
   private readonly busy = new Set<string>();
   private server: Server | null = null;
   private windows: WindowsPipeHostTransport | null = null;
+  private socketDirectory: string | null = null;
+  private tokenFileWritten = false;
+  private starting = false;
+  private restartTimer: ReturnType<typeof setTimeout> | undefined;
+  private restartAttempts = 0;
   private closed = false;
 
   constructor(options: AgentControlGatewayOptions) { this.options = options; }
 
   async start(): Promise<string> {
-    if (this.server || this.windows || this.closed) throw new Error("Agent control is already started or closed.");
+    if (this.starting || this.server || this.windows || this.closed) throw new Error("Agent control is already started or closed.");
+    this.starting = true;
+    try {
+      const endpoint = await this.openEndpoint();
+      return await this.writeDiscovery(endpoint);
+    } catch (error) {
+      // Leave nothing listening and no dead transport behind, so a later start() can succeed.
+      await this.closeEndpoint();
+      throw error;
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  private async openEndpoint(): Promise<string> {
     const platform = this.options.platform ?? process.platform;
-    let endpoint: string;
     if (platform === "win32") {
       if (!this.options.windowsHostPath) throw new Error("Agent control requires the current-user Windows pipe host.");
-      this.windows = (this.options.windowsPipeHostFactory ?? ((options) => new WindowsPipeHostTransport(options)))({
+      const transport = (this.options.windowsPipeHostFactory ?? ((options) => new WindowsPipeHostTransport(options)))({
         hostPath: this.options.windowsHostPath, platform, parentPid: process.pid
       });
-      endpoint = await this.windows.start((socket) => this.accept(socket));
-    } else {
-      const directory = await mkdtemp(join(tmpdir(), "ctty-control-"));
-      await chmod(directory, 0o700);
-      endpoint = join(directory, "c.sock");
-      if (Buffer.byteLength(endpoint) > 100) throw new Error("Agent control socket path is too long.");
-      this.server = createServer((socket) => this.accept(socket));
-      await new Promise<void>((resolve, reject) => {
-        this.server!.once("error", reject);
-        this.server!.listen(endpoint, () => { this.server!.off("error", reject); resolve(); });
-      });
-      await chmod(endpoint, 0o600);
+      this.windows = transport;
+      transport.on("fatal", () => this.handleTransportFatal(transport));
+      const endpoint = await transport.start((socket) => this.accept(socket));
+      if (this.windows !== transport || this.closed) {
+        await transport.close();
+        throw new Error("Agent control is shutting down.");
+      }
+      return endpoint;
     }
+    const directory = await mkdtemp(join(tmpdir(), "ctty-control-"));
+    this.socketDirectory = directory;
+    await chmod(directory, 0o700);
+    const endpoint = join(directory, "c.sock");
+    if (Buffer.byteLength(endpoint) > 100) throw new Error("Agent control socket path is too long.");
+    const server = createServer((socket) => this.accept(socket));
+    this.server = server;
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(endpoint, () => { server.off("error", reject); resolve(); });
+    });
+    await chmod(endpoint, 0o600);
+    return endpoint;
+  }
+
+  private async writeDiscovery(endpoint: string): Promise<string> {
     const directory = join(this.options.userDataPath, "agent-control");
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     const tokenFile = join(directory, `token-${this.instanceId}`);
-    await writeFile(tokenFile, this.token, { flag: "wx", mode: 0o600 });
+    if (!this.tokenFileWritten) {
+      await writeFile(tokenFile, this.token, { flag: "wx", mode: 0o600 });
+      this.tokenFileWritten = true;
+    }
     const connection = join(directory, "connection.json");
-    await writeFile(connection, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
-      endpoint, tokenFile, pid: process.pid }, null, 2) + "\n", { mode: 0o600 });
-    await chmod(connection, 0o600);
+    // Written to a temp file and renamed: a controller reading the record while
+    // a restarted host republishes it must never see it empty or half written.
+    const temporary = `${connection}.${randomBytes(8).toString("hex")}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
+        endpoint, tokenFile, pid: process.pid }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      await chmod(temporary, 0o600);
+      await rename(temporary, connection);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
     return connection;
+  }
+
+  private async closeEndpoint(): Promise<void> {
+    const server = this.server;
+    const transport = this.windows;
+    const directory = this.socketDirectory;
+    this.server = null;
+    this.windows = null;
+    this.socketDirectory = null;
+    if (transport) await transport.close().catch(() => undefined);
+    if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  /** The Windows pipe host died: drop its connections and bring up a new one with a fresh discovery record. */
+  private handleTransportFatal(transport: WindowsPipeHostTransport): void {
+    if (this.windows !== transport) return;
+    this.windows = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.scheduleTransportRestart();
+  }
+
+  private scheduleTransportRestart(): void {
+    if (this.closed || this.restartTimer || this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) return;
+    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    this.restartAttempts += 1;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      if (this.closed || this.windows || this.starting) return;
+      this.start().then((connection) => {
+        this.restartAttempts = 0;
+        this.options.onTransportRestarted?.(connection);
+      }, () => this.scheduleTransportRestart());
+    }, delay);
+    this.restartTimer.unref?.();
   }
 
   observe(channel: string, payload: unknown): void {
@@ -173,11 +254,12 @@ export class AgentControlGateway {
 
   async close(): Promise<void> {
     this.closed = true;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
     for (const socket of this.sockets) socket.destroy();
     for (const owned of this.sessions.values()) { await owned.ready; owned.terminal.dispose(); }
     this.sessions.clear();
-    if (this.windows) await this.windows.close();
-    if (this.server?.listening) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    await this.closeEndpoint();
     // Retain inert discovery/diagnostic records; a new app instance gets a new token and instanceId.
   }
 

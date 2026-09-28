@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -110,6 +111,52 @@ test("request receipts are bounded without locking the gateway, and a refused re
   const retried = await f.request("send", { sessionId: session.id, text: "second" }, "send-second");
   assert.equal(retried.sessionId, session.id);
   assert.equal(f.calls[0].pty.writes.length, 2);
+});
+
+test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-start-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const userDataPath = join(root, "user-data");
+  await writeFile(userDataPath, "a file where the folder should be");
+  const gateway = new AgentControlGateway({ userDataPath, terminals: {}, lifecycleEnabled: () => true });
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.start());
+  await rm(userDataPath);
+  const connection = await gateway.start();
+  const descriptor = JSON.parse(await readFile(connection, "utf8"));
+  assert.equal((await stat(descriptor.endpoint)).isSocket(), true);
+});
+
+test("agent control brings the Windows pipe host back after it fails and republishes the endpoint", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-win-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const transports = [];
+  let restarted;
+  const republished = new Promise((resolve) => { restarted = resolve; });
+  const gateway = new AgentControlGateway({
+    userDataPath: root, terminals: {}, lifecycleEnabled: () => true, platform: "win32", windowsHostPath: "C:\\fake\\host.exe",
+    onTransportRestarted: (path) => restarted(path),
+    windowsPipeHostFactory: () => {
+      const transport = new EventEmitter();
+      const index = transports.length;
+      transport.start = async () => `\\\\.\\pipe\\canvastty-agent-${index}`;
+      transport.close = async () => undefined;
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+  const connection = await gateway.start();
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-0$/);
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  assert.equal(await republished, connection);
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-1$/);
+  await gateway.close();
+  transports[1].emit("fatal", new Error("late"));
+  t.mock.timers.tick(10_000);
+  assert.equal(transports.length, 2);
 });
 
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {

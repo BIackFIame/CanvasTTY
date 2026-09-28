@@ -25,6 +25,8 @@ const AGENT_PROVIDERS = new Set<ProviderId>([
   "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
 ]);
 const MAX_RUNTIME_SESSIONS = 32;
+const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 /** Decision checks in flight, per session and in total; over a cap the call is refused with advice to slow down. */
 const MAX_DECISIONS_PER_SESSION = 8;
 const MAX_DECISIONS_TOTAL = 32;
@@ -124,6 +126,9 @@ export class RuntimeGateway {
   private readonly checks = new Set<AbortController>();
   private readonly leases = new Map<string, RuntimeLease>();
   private readonly sockets = new Set<AgentGatewaySocket>();
+  private closed = false;
+  private restartTimer: ReturnType<typeof setTimeout> | undefined;
+  private restartAttempts = 0;
   private server: Server | null = null;
   private windowsTransport: WindowsPipeHostTransport | null = null;
   private endpoint: string | null = null;
@@ -152,15 +157,31 @@ export class RuntimeGateway {
       if (!this.windowsHostPath) {
         throw new Error("Agent runtime access on Windows requires the packaged current-user-only named-pipe host.");
       }
+      this.closed = false;
       const transport = this.windowsPipeHostFactory({
         hostPath: this.windowsHostPath,
         platform: this.platform,
         parentPid: process.pid
       });
       this.windowsTransport = transport;
-      const endpoint = await transport.start((socket) => this.accept(socket));
-      this.endpoint = endpoint;
-      return endpoint;
+      // The pipe host can die later (crash, EPIPE, FATAL frame). Without this
+      // every later launch failed with "must be started" until restart.
+      transport.on("fatal", () => this.handleTransportFatal(transport));
+      try {
+        const endpoint = await transport.start((socket) => this.accept(socket));
+        if (this.windowsTransport !== transport) {
+          await transport.close();
+          throw new Error("Windows agent pipe host was superseded during startup.");
+        }
+        this.endpoint = endpoint;
+        this.restartAttempts = 0;
+        return endpoint;
+      } catch (error) {
+        await transport.close();
+        if (this.windowsTransport === transport) this.windowsTransport = null;
+        this.endpoint = null;
+        throw error;
+      }
     }
 
     const created = await createEndpoint(this.requestedRuntimeDirectory);
@@ -238,7 +259,31 @@ export class RuntimeGateway {
     }
   }
 
+  private handleTransportFatal(transport: WindowsPipeHostTransport): void {
+    if (this.windowsTransport !== transport) return;
+    this.windowsTransport = null;
+    this.endpoint = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    this.scheduleTransportRestart();
+  }
+
+  private scheduleTransportRestart(): void {
+    if (this.closed || this.restartTimer || this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) return;
+    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    this.restartAttempts += 1;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      if (this.closed || this.windowsTransport) return;
+      this.start().catch(() => this.scheduleTransportRestart());
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
   async close(): Promise<void> {
+    this.closed = true;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();
     for (const lease of this.leases.values()) {
