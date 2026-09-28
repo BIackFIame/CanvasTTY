@@ -6,7 +6,9 @@
  * 1. Known values: keys from the provider secret vault as this process reads them, plugin `secretEnv` values
  *    of open cards, and values a trusted plugin service registers. Each is removed where it stands, also when
  *    the terminal's wrapping put a line break, indentation or a box side between its characters, and in its
- *    JSON-escaped form.
+ *    JSON-escaped form. They are found by a linear search over the text with those gaps taken out, never by a
+ *    pattern built from the value: a pattern for a key of a few thousand characters exceeds what the regular
+ *    expression engine accepts, and the error broke every masking call.
  * 2. JSON string values under key-like names (`"apiKey"`, `"token"`, `"authorization"`, …), across lines too.
  * 3. Generic shapes: PEM private keys, `sk-…`, GitHub, Slack, AWS, Google, xAI tokens, JWTs, `Bearer …`,
  *    `Authorization:` values, URL credentials, secret-looking query values and assignments, and long
@@ -19,11 +21,12 @@
 const SECRET_MARKER = '<redacted:secret>';
 /** Shorter values are not keys, and removing them would only garble ordinary text. */
 const MIN_SECRET_CHARS = 8;
-const MAX_SECRET_CHARS = 4_096;
+/** Long enough for a PEM key or a service-account JSON; the search costs the same for any length. */
+const MAX_SECRET_CHARS = 65_536;
 const MAX_VALUES_PER_OWNER = 64;
 const MAX_OWNERS = 512;
 /** What wrapping may put between two characters of a key: whitespace and line breaks, box-drawing sides. */
-const WRAP_GAP = '[\\s\\u2500-\\u257f]{0,64}';
+const MAX_WRAP_GAP = 64;
 /**
  * redactTail masks a window that starts this far (at least) before the tail it returns. Every rule except the
  * PEM block (handled apart) and runs of one character class matches at most a few thousand characters, so a
@@ -37,7 +40,8 @@ const JSON_SECRET_VALUE = /("(?:[A-Za-z0-9_.-]{0,40}(?:api[_-]?key|token|secret|
 
 export class SecretRedactionRegistry {
   private readonly owners = new Map<string, Set<string>>();
-  private pattern: RegExp | null = null;
+  /** Every held value and its JSON-escaped form without wrap characters, longest first. */
+  private forms: string[] = [];
   /** The longest text one held value can match: its characters plus a full wrap gap between each two. */
   private knownSpan = 0;
   private dirty = false;
@@ -67,9 +71,7 @@ export class SecretRedactionRegistry {
 
   redact(text: string): string {
     if (typeof text !== 'string' || text.length === 0) return typeof text === 'string' ? text : '';
-    let result = text;
-    const known = this.knownPattern();
-    if (known) result = result.replace(known, SECRET_MARKER);
+    let result = maskKnownValues(text, this.knownForms());
     result = result.replace(JSON_SECRET_VALUE, (_match, prefix: string, closing: string) => `${prefix}${SECRET_MARKER}${closing}`);
     return redactCredentials(result);
   }
@@ -82,7 +84,7 @@ export class SecretRedactionRegistry {
    */
   redactTail(text: string, maxChars: number): string {
     if (typeof text !== 'string' || text.length === 0 || maxChars <= 0) return '';
-    this.knownPattern();
+    this.knownForms();
     const margin = Math.max(TAIL_MARGIN_CHARS, 2 * this.knownSpan + 4_096);
     if (text.length <= maxChars + margin) return lastChars(this.redact(text), maxChars);
     let start = text.length - maxChars - margin;
@@ -96,22 +98,104 @@ export class SecretRedactionRegistry {
     return lastChars(masked, maxChars);
   }
 
-  /** One pattern for every held value and its JSON-escaped form, longest first; rebuilt only after a change. */
-  private knownPattern(): RegExp | null {
-    if (!this.dirty) return this.pattern;
+  /** The search forms of every held value; rebuilt only after a change. */
+  private knownForms(): readonly string[] {
+    if (!this.dirty) return this.forms;
     const forms = new Set<string>();
+    let longest = 0;
     for (const values of this.owners.values()) {
       for (const value of values) {
-        forms.add(value);
-        forms.add(JSON.stringify(value).slice(1, -1));
+        for (const form of [value, JSON.stringify(value).slice(1, -1)]) {
+          longest = Math.max(longest, form.length);
+          const bare = withoutWrapCharacters(form);
+          // A value that is mostly spaces would leave a fragment that garbles ordinary text.
+          if (bare.length >= MIN_SECRET_CHARS) forms.add(bare);
+        }
       }
     }
-    const sources = [...forms].sort((a, b) => b.length - a.length).map(form => [...form].map(escapeCharacter).join(WRAP_GAP));
-    this.pattern = sources.length ? new RegExp(sources.join('|'), 'gu') : null;
-    // A form of n characters matches at most n characters plus a 64-character gap between each two.
-    this.knownSpan = [...forms].reduce((longest, form) => Math.max(longest, form.length * 65), 0);
+    this.forms = [...forms].sort((a, b) => b.length - a.length);
+    // A form of n characters matches at most n characters plus a full wrap gap between each two.
+    this.knownSpan = longest * (MAX_WRAP_GAP + 1);
     this.dirty = false;
-    return this.pattern;
+    return this.forms;
+  }
+}
+
+/** Whitespace (as `\s` has it) and the box-drawing block: what terminal wrapping may put inside a key. */
+function isWrapCharacter(code: number): boolean {
+  if (code <= 0x20) return code === 0x20 || (code >= 0x09 && code <= 0x0d);
+  if (code < 0xa0) return false;
+  return code === 0xa0 || code === 0x1680 || (code >= 0x2000 && code <= 0x200a) || code === 0x2028 || code === 0x2029
+    || code === 0x202f || code === 0x205f || code === 0x3000 || code === 0xfeff || (code >= 0x2500 && code <= 0x257f);
+}
+
+function withoutWrapCharacters(text: string): string {
+  let result = "";
+  let from = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (!isWrapCharacter(text.charCodeAt(i))) continue;
+    result += text.slice(from, i);
+    from = i + 1;
+  }
+  return from === 0 ? text : result + text.slice(from);
+}
+
+/**
+ * Replaces every held value in `text`, also where wrapping put up to MAX_WRAP_GAP wrap characters between two of
+ * its characters. The text is searched with its wrap characters taken out (a map leads back to the original
+ * positions), each form with Knuth-Morris-Pratt: linear in the text plus the form, whatever either holds. Matches
+ * are taken leftmost first, the longest at a position, and never overlap.
+ */
+function maskKnownValues(text: string, forms: readonly string[]): string {
+  if (forms.length === 0) return text;
+  const bare = withoutWrapCharacters(text);
+  const present = forms.filter(form => bare.includes(form));
+  if (present.length === 0) return text;
+  // Where each character of `bare` stands in `text`, and how many oversized gaps lie before it (a match may
+  // not cross one).
+  const positions = new Int32Array(bare.length);
+  const oversized = new Int32Array(bare.length + 1);
+  for (let i = 0, count = 0, previous = -1; i < text.length; i++) {
+    if (isWrapCharacter(text.charCodeAt(i))) continue;
+    oversized[count + 1] = oversized[count] + (previous >= 0 && i - previous - 1 > MAX_WRAP_GAP ? 1 : 0);
+    positions[count++] = i;
+    previous = i;
+  }
+  // The longest match that starts at each position of `bare`.
+  const longestAt = new Int32Array(bare.length);
+  for (const form of present) {
+    for (const start of occurrences(bare, form)) {
+      // Only the gaps inside the match count, not the one before its first character.
+      if (oversized[start + form.length] - oversized[start + 1] === 0 && form.length > longestAt[start]) longestAt[start] = form.length;
+    }
+  }
+  let result = "";
+  let kept = 0;
+  for (let at = 0; at < bare.length;) {
+    const length = longestAt[at];
+    if (length === 0) { at++; continue; }
+    result += text.slice(kept, positions[at]) + SECRET_MARKER;
+    kept = positions[at + length - 1] + 1;
+    at += length;
+  }
+  return kept === 0 ? text : result + text.slice(kept);
+}
+
+/** Every start of `pattern` in `text`, overlapping ones included (Knuth-Morris-Pratt). */
+function* occurrences(text: string, pattern: string): Generator<number> {
+  const failure = new Int32Array(pattern.length);
+  for (let i = 1, k = 0; i < pattern.length; i++) {
+    while (k > 0 && pattern.charCodeAt(i) !== pattern.charCodeAt(k)) k = failure[k - 1];
+    if (pattern.charCodeAt(i) === pattern.charCodeAt(k)) k++;
+    failure[i] = k;
+  }
+  for (let i = 0, k = 0; i < text.length; i++) {
+    while (k > 0 && text.charCodeAt(i) !== pattern.charCodeAt(k)) k = failure[k - 1];
+    if (text.charCodeAt(i) === pattern.charCodeAt(k)) k++;
+    if (k === pattern.length) {
+      yield i - k + 1;
+      k = failure[k - 1];
+    }
   }
 }
 
@@ -139,10 +223,6 @@ function openPrivateKeyStart(text: string, start: number): number | null {
     if (begin === 0) return null;
     from = begin - 1;
   }
-}
-
-function escapeCharacter(character: string): string {
-  return character.replace(/[\\^$.*+?()[\]{}|/]/gu, '\\$&');
 }
 
 type Rule = { kind: string; pattern: RegExp; replace?: (match: string, ...groups: string[]) => string };
