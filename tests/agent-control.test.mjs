@@ -32,7 +32,7 @@ function registry() {
     environment: {}, checked: [] }), snapshot: () => ({}) };
 }
 
-async function fixture(t) {
+async function fixture(t, gatewayOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-test-")));
   const calls = [];
   let gateway;
@@ -47,7 +47,7 @@ async function fixture(t) {
       return pty;
     });
   let lifecycleEnabled = true;
-  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled });
+  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled, ...gatewayOptions });
   const connectionPath = await gateway.start();
   const clientPath = join(root, "client-a.json");
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
@@ -91,6 +91,25 @@ test("CLI creates native YOLO with requested directory/title, including concurre
   await assert.rejects(runCli([...args.slice(0, 6), "create", "--cwd", f.root, "--title", "Different"]),
     (e) => e.code === "REQUEST_CONFLICT");
   assert.equal(f.calls.length, 1);
+});
+
+test("request receipts are bounded without locking the gateway, and a refused request can be retried", localSocket, async (t) => {
+  const f = await fixture(t, { maxReceipts: 3 });
+  for (let index = 0; index < 5; index += 1) {
+    await assert.rejects(f.request("interrupt", { sessionId: `missing-${index}` }, `missing-${index}`), (e) => e.code === "SESSION_NOT_FOUND");
+  }
+  // Before: the fourth mutating request (successful or not) got LIMIT_REACHED until restart.
+  const { session } = await f.create("create-after-limit");
+  assert.equal((await f.create("create-after-limit")).session.id, session.id, "a recent receipt still replays");
+  await f.ready(session.id);
+  await f.request("send", { sessionId: session.id, text: "first" }, "send-first");
+  f.signal(session.id, "working", "turn-one");
+  await assert.rejects(f.request("send", { sessionId: session.id, text: "second" }, "send-second"), (e) => e.code === "BUSY");
+  f.signal(session.id, "idle", "turn-one", { text: "done", truncated: false });
+  // BUSY wrote nothing, so the same request id is performed on retry instead of replaying BUSY.
+  const retried = await f.request("send", { sessionId: session.id, text: "second" }, "send-second");
+  assert.equal(retried.sessionId, session.id);
+  assert.equal(f.calls[0].pty.writes.length, 2);
 });
 
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {

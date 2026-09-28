@@ -14,6 +14,9 @@ import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 4096;
+// Refusals that happen before anything is written: a retry with the same
+// request id must be performed again instead of replaying the refusal.
+const RETRYABLE_REFUSALS = new Set(["BUSY", "NOT_READY", "LIMIT_REACHED", "LIFECYCLE_DISABLED", "CLOSED"]);
 const MAX_SESSIONS = 32;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -68,6 +71,8 @@ export interface AgentControlGatewayOptions {
   platform?: NodeJS.Platform;
   windowsHostPath?: string;
   windowsPipeHostFactory?: (options: { hostPath: string; platform: NodeJS.Platform; parentPid: number }) => WindowsPipeHostTransport;
+  /** Receipts kept for request-id replay (default 4096); the oldest settled ones are dropped first. */
+  maxReceipts?: number;
 }
 
 export class ControlError extends Error {
@@ -82,7 +87,7 @@ export class AgentControlGateway {
   private readonly instanceId = randomBytes(16).toString("hex");
   private readonly sessions = new Map<string, OwnedSession>();
   private readonly sockets = new Set<AgentGatewaySocket>();
-  private readonly receipts = new Map<string, { digest: string; result: Promise<unknown> }>();
+  private readonly receipts = new Map<string, { digest: string; result: Promise<unknown>; settled: boolean }>();
   private readonly busy = new Set<string>();
   private server: Server | null = null;
   private windows: WindowsPipeHostTransport | null = null;
@@ -236,10 +241,29 @@ export class AgentControlGateway {
       if (previous.digest !== digest) throw new ControlError("REQUEST_CONFLICT", "Request ID was already used for different input.");
       return previous.result;
     }
-    if (this.receipts.size >= MAX_RECEIPTS) throw new ControlError("LIMIT_REACHED", "Control request capacity reached; existing receipts remain available.");
+    if (!this.makeReceiptRoom()) throw new ControlError("LIMIT_REACHED", "Too many control requests are still running.");
     const result = this.perform(owner, request);
-    this.receipts.set(key, { digest, result });
+    const receipt = { digest, result, settled: false };
+    this.receipts.set(key, receipt);
+    result.then(() => { receipt.settled = true; }, (error: unknown) => {
+      receipt.settled = true;
+      if (error instanceof ControlError && RETRYABLE_REFUSALS.has(error.code) && this.receipts.get(key) === receipt) {
+        this.receipts.delete(key);
+      }
+    });
     return result;
+  }
+
+  /** Drops the oldest finished receipts once the cap is reached; running ones are kept. */
+  private makeReceiptRoom(): boolean {
+    const limit = this.options.maxReceipts ?? MAX_RECEIPTS;
+    if (this.receipts.size < limit) return true;
+    for (const [key, receipt] of this.receipts) {
+      if (!receipt.settled) continue;
+      this.receipts.delete(key);
+      if (this.receipts.size < limit) return true;
+    }
+    return this.receipts.size < limit;
   }
 
   private async perform(owner: string, request: ControlRequest): Promise<unknown> {
