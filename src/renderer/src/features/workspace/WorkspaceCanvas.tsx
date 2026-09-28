@@ -101,6 +101,20 @@ const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefi
 };
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
+const NO_SNAP_TARGETS: readonly SessionBounds[] = [];
+
+/** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
+interface TerminalCardHandlers {
+  activate(selectedSession: SessionSnapshot, fullscreen: boolean): void;
+  select(id: string, fullscreen: boolean): void;
+  toggleFullscreen(id: string): void;
+  rename(id: string, title: string): Promise<void>;
+  renameEnd(): void;
+  boundsChange(id: string, bounds: SessionBounds): void;
+  restart(id: string, resume?: boolean): Promise<void>;
+  dispose(id: string, keepEnvironmentData?: boolean): void;
+  openUrl(url: string): void;
+}
 
 /** A group drag's commit basis, frozen once when the press activates: the pressed layer's start
  * bounds plus every member's, so nothing the gesture itself previews can feed back into it. */
@@ -510,6 +524,62 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   );
   const widgetFocus = focusController.state;
   const routeWidgetWheelToCanvas = wheelNavigation.routeWidgetWheelToCanvas;
+  // TerminalCard is memoized: its callbacks are the same functions on every render and call the latest
+  // handlers through this ref, so a pan (a workspace render per pointer move) renders no card.
+  const terminalCardHandlers = useRef<TerminalCardHandlers | null>(null);
+  terminalCardHandlers.current = {
+    activate(selectedSession, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(selectedSession.id));
+      focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
+      onFocusSession(selectedSession);
+    },
+    select(id, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(id));
+      focusController.cancelHover();
+      focusController.focus(terminalCanvasWidgetId(id), "explicit");
+      onSelectSession(id);
+    },
+    toggleFullscreen: onToggleFullscreen,
+    rename: onRenameSession,
+    renameEnd: onRenameEnd,
+    boundsChange: onSessionBoundsChange,
+    restart: onRestartSession,
+    dispose: onDisposeSession,
+    openUrl: onOpenTerminalUrl
+  };
+  const terminalCardCallbacks = useMemo(() => {
+    const latest = terminalCardHandlers;
+    const shared = {
+      onRename: (id: string, title: string) => latest.current!.rename(id, title),
+      onRenameEnd: () => latest.current!.renameEnd(),
+      onRestart: (id: string, resume?: boolean) => latest.current!.restart(id, resume),
+      onDispose: (id: string, keepEnvironmentData?: boolean) => latest.current!.dispose(id, keepEnvironmentData),
+      onOpenUrl: (url: string) => latest.current!.openUrl(url)
+    };
+    return {
+      canvas: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, false),
+        onSelect: (id: string) => latest.current!.select(id, false),
+        onBoundsChange: (id: string, bounds: SessionBounds) => latest.current!.boundsChange(id, bounds)
+      },
+      fullscreen: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, true),
+        onSelect: (id: string) => latest.current!.select(id, true),
+        onBoundsChange: () => {}
+      }
+    };
+  }, []);
+  const fullscreenToggles = useRef(new Map<string, () => void>());
+  const toggleFullscreenFor = (id: string): (() => void) => {
+    let toggle = fullscreenToggles.current.get(id);
+    if (!toggle) {
+      toggle = () => terminalCardHandlers.current!.toggleFullscreen(id);
+      fullscreenToggles.current.set(id, toggle);
+    }
+    return toggle;
+  };
   const canvasOverrideActive = wheelNavigation.canvasOverrideActive;
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
   const editedRegion = regionEditor?.mode === "edit"
@@ -843,30 +913,14 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
               renaming={renamingSessionId === session.id}
               fullscreen={fullscreenSessionId === session.id}
-              onToggleFullscreen={() => onToggleFullscreen(session.id)}
+              onToggleFullscreen={toggleFullscreenFor(session.id)}
               snapTargets={[
                 homeBounds,
                 ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                 ...allWindowBounds.filter((candidate) => candidate !== session)
               ]}
-              onActivate={(selectedSession) => {
-                raiseLayer(terminalLayerId(selectedSession.id));
-                focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
-                onFocusSession(selectedSession);
-              }}
-              onSelect={(id) => {
-                raiseLayer(terminalLayerId(id));
-                focusController.cancelHover();
-                focusController.focus(terminalCanvasWidgetId(id), "explicit");
-                onSelectSession(id);
-              }}
-              onRename={onRenameSession}
-              onRenameEnd={onRenameEnd}
-              onBoundsChange={onSessionBoundsChange}
-              onRestart={onRestartSession}
-              onDispose={onDisposeSession}
+              {...terminalCardCallbacks.canvas}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
-              onOpenUrl={onOpenTerminalUrl}
             />
           ))}
           {renderedPluginCanvas.map((instance) => {
@@ -1002,24 +1056,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               groupSelected={false}
               renaming={renamingSessionId === session.id}
               fullscreen={true}
-              onToggleFullscreen={() => onToggleFullscreen(session.id)}
-              snapTargets={[]}
-              onActivate={(selectedSession) => {
-                focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
-                onFocusSession(selectedSession);
-              }}
-              onSelect={(id) => {
-                focusController.cancelHover();
-                focusController.focus(terminalCanvasWidgetId(id), "explicit");
-                onSelectSession(id);
-              }}
-              onRename={onRenameSession}
-              onRenameEnd={onRenameEnd}
-              onBoundsChange={() => {}}
-              onRestart={onRestartSession}
-              onDispose={onDisposeSession}
+              onToggleFullscreen={toggleFullscreenFor(session.id)}
+              snapTargets={NO_SNAP_TARGETS}
+              {...terminalCardCallbacks.fullscreen}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
-              onOpenUrl={onOpenTerminalUrl}
             />
           ))}
       </div>

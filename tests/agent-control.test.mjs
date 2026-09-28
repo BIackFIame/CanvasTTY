@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -32,7 +33,7 @@ function registry() {
     environment: {}, checked: [] }), snapshot: () => ({}) };
 }
 
-async function fixture(t) {
+async function fixture(t, gatewayOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-test-")));
   const calls = [];
   let gateway;
@@ -47,7 +48,7 @@ async function fixture(t) {
       return pty;
     });
   let lifecycleEnabled = true;
-  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled });
+  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled, ...gatewayOptions });
   const connectionPath = await gateway.start();
   const clientPath = join(root, "client-a.json");
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
@@ -91,6 +92,71 @@ test("CLI creates native YOLO with requested directory/title, including concurre
   await assert.rejects(runCli([...args.slice(0, 6), "create", "--cwd", f.root, "--title", "Different"]),
     (e) => e.code === "REQUEST_CONFLICT");
   assert.equal(f.calls.length, 1);
+});
+
+test("request receipts are bounded without locking the gateway, and a refused request can be retried", localSocket, async (t) => {
+  const f = await fixture(t, { maxReceipts: 3 });
+  for (let index = 0; index < 5; index += 1) {
+    await assert.rejects(f.request("interrupt", { sessionId: `missing-${index}` }, `missing-${index}`), (e) => e.code === "SESSION_NOT_FOUND");
+  }
+  // Before: the fourth mutating request (successful or not) got LIMIT_REACHED until restart.
+  const { session } = await f.create("create-after-limit");
+  assert.equal((await f.create("create-after-limit")).session.id, session.id, "a recent receipt still replays");
+  await f.ready(session.id);
+  await f.request("send", { sessionId: session.id, text: "first" }, "send-first");
+  f.signal(session.id, "working", "turn-one");
+  await assert.rejects(f.request("send", { sessionId: session.id, text: "second" }, "send-second"), (e) => e.code === "BUSY");
+  f.signal(session.id, "idle", "turn-one", { text: "done", truncated: false });
+  // BUSY wrote nothing, so the same request id is performed on retry instead of replaying BUSY.
+  const retried = await f.request("send", { sessionId: session.id, text: "second" }, "send-second");
+  assert.equal(retried.sessionId, session.id);
+  assert.equal(f.calls[0].pty.writes.length, 2);
+});
+
+test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-start-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const userDataPath = join(root, "user-data");
+  await writeFile(userDataPath, "a file where the folder should be");
+  const gateway = new AgentControlGateway({ userDataPath, terminals: {}, lifecycleEnabled: () => true });
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.start());
+  await rm(userDataPath);
+  const connection = await gateway.start();
+  const descriptor = JSON.parse(await readFile(connection, "utf8"));
+  assert.equal((await stat(descriptor.endpoint)).isSocket(), true);
+});
+
+test("agent control brings the Windows pipe host back after it fails and republishes the endpoint", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-win-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const transports = [];
+  let restarted;
+  const republished = new Promise((resolve) => { restarted = resolve; });
+  const gateway = new AgentControlGateway({
+    userDataPath: root, terminals: {}, lifecycleEnabled: () => true, platform: "win32", windowsHostPath: "C:\\fake\\host.exe",
+    onTransportRestarted: (path) => restarted(path),
+    windowsPipeHostFactory: () => {
+      const transport = new EventEmitter();
+      const index = transports.length;
+      transport.start = async () => `\\\\.\\pipe\\canvastty-agent-${index}`;
+      transport.close = async () => undefined;
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+  const connection = await gateway.start();
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-0$/);
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  assert.equal(await republished, connection);
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-1$/);
+  await gateway.close();
+  transports[1].emit("fatal", new Error("late"));
+  t.mock.timers.tick(10_000);
+  assert.equal(transports.length, 2);
 });
 
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {
@@ -561,4 +627,28 @@ test("the control CLI screen masks a custom secret the viewport's top edge cuts"
   assert.equal(text.includes(secret.slice(10)), false, "the tail on the top row is masked");
   assert.equal(/marmalade|loudly/u.test(text), false);
   assert.match(text, /<redacted:secret>/u, "masked where it stood, as one value");
+});
+
+test("an orchestrator tool call looks its sessions up by id: no other card's scrollback is copied", async () => {
+  const { terminals, control } = serviceFixture();
+  const parent = terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "codex", cwd: process.cwd() });
+  const bystanders = Array.from({ length: 5 }, () => terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } }));
+  assert.equal(bystanders.length, 5);
+  const copied = [];
+  const list = terminals.list.bind(terminals);
+  const readBuffer = terminals.readBuffer.bind(terminals);
+  terminals.list = () => { copied.push("list"); return list(); };
+  terminals.readBuffer = (id) => { copied.push(id); return readBuffer(id); };
+
+  // What observe_agent, get_agent_result, list_agents and the ownership check do.
+  assert.equal(control.status(child.id).id, child.id);
+  assert.equal(control.isInSubtree(parent.id, child.id), true);
+  assert.deepEqual(control.children(parent.id).map((session) => session.id), [child.id]);
+  control.observe(child.id);
+  control.result(child.id);
+  assert.throws(() => control.status("missing"), /does not exist/u);
+
+  assert.deepEqual(copied, [child.id, child.id], "only the observed card's own scrollback is read, and no list() snapshot of every card");
+  terminals.disposeAll();
 });

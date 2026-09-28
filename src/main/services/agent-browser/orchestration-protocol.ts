@@ -45,7 +45,8 @@ export type OrchestrationResult =
 /** The only implementation the gateway accepts; AgentControlService is
  * wrapped by a scoping adapter, never called directly by the protocol. */
 export interface OrchestrationCommandHandler {
-  execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>>;
+  /** `signal` aborts when the orchestrator cancels the request or disconnects. */
+  execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>>;
   /** The tools this session sees (core tools for orchestrators, plugin tools by role). */
   listTools?(sessionId: string): McpToolDefinition[];
 }

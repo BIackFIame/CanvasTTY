@@ -143,6 +143,13 @@ interface PlannedSpawn {
 }
 /** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
 const QUIT_RELEASE_TIMEOUT_MS = 3_000;
+/**
+ * Quitting waits this long for the PTYs it hung up to exit, then kills the rest and waits `PTY_KILL_WAIT_MS` more.
+ * node-pty reports an exit through a native callback into JavaScript; one that arrives while Electron tears the
+ * Node environment down cannot run there, and node-pty turns that into a C++ exception that aborts the app.
+ */
+export const PTY_EXIT_WAIT_MS = 2_000;
+export const PTY_KILL_WAIT_MS = 1_000;
 /** Longer than every plugin step of a launch together (prepare, resume, launch options, wrap). */
 export const LAUNCH_INPUT_WAIT_MS = 60_000;
 
@@ -197,6 +204,8 @@ export class TerminalManager {
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
+  // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
+  private readonly liveProcesses = new Map<IPty, Promise<void>>();
   private suppressPersistence = false;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
@@ -249,6 +258,11 @@ export class TerminalManager {
   /** Masks known secrets and key shapes in text another agent reads (observe, result, control screen, failures). */
   redactSecrets<T extends string | null>(text: T): T {
     return (text === null ? text : this.redaction.redact(text)) as T;
+  }
+
+  /** `redactSecrets(text)` cut to its last `maxChars` characters, masking only a window around that tail. */
+  redactSecretsTail(text: string, maxChars: number): string {
+    return this.redaction.redactTail(text, maxChars);
   }
 
   /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
@@ -357,6 +371,35 @@ export class TerminalManager {
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
   }
 
+  /**
+   * Resolves once every PTY this manager started has exited, so the app never finishes quitting while a native
+   * exit watcher is still pending. Called after `shutdown()` (which hung every card up): a process still running
+   * after `exitWaitMs` is killed, and after `killWaitMs` more the wait gives up. Returns how many never exited.
+   */
+  async waitForProcessExits(exitWaitMs = PTY_EXIT_WAIT_MS, killWaitMs = PTY_KILL_WAIT_MS): Promise<number> {
+    if (this.liveProcesses.size === 0) return 0;
+    if (!await this.allProcessesExited(exitWaitMs)) {
+      for (const process of this.liveProcesses.keys()) {
+        try {
+          // Windows PTYs take no signal.
+          if (globalThis.process.platform === "win32") process.kill();
+          else process.kill("SIGKILL");
+        } catch {
+          // Already gone.
+        }
+      }
+      await this.allProcessesExited(killWaitMs);
+    }
+    return this.liveProcesses.size;
+  }
+
+  private allProcessesExited(timeoutMs: number): Promise<boolean> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
+    const exited = Promise.all(this.liveProcesses.values()).then(() => true as const);
+    return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
+  }
+
   list(): SessionSnapshot[] {
     return [...this.sessions.values()].map((session) => snapshot(session));
   }
@@ -374,6 +417,12 @@ export class TerminalManager {
 
   listMetadata(): SessionMetadata[] {
     return [...this.sessions.values()].map((session) => structuredClone(session.metadata));
+  }
+
+  /** One session's metadata by id, or null. Unlike list(), a lookup never copies any scrollback. */
+  getMetadata(id: string): SessionMetadata | null {
+    const session = this.sessions.get(id);
+    return session ? structuredClone(session.metadata) : null;
   }
 
   geometry(id: string): { cols: number; rows: number } {
@@ -801,11 +850,13 @@ export class TerminalManager {
 
     // Hidden -> visible: first hand the observers whatever is still batched
     // (still addressed to them alone, since the card has not seen it and the
-    // replay below covers it), then replay the retained scrollback ending at
-    // the current outputOffset to the renderer alone. The card drops everything
-    // it already wrote (its offset is absolute;
-    // features/terminal/terminalOutput.ts), so the missed suffix arrives —
-    // once. The observers get no replay: they already received every chunk.
+    // replay below covers it), then replay the output produced since
+    // hiddenSince, ending at the current outputOffset, to the renderer alone.
+    // The card already wrote everything up to hiddenSince (the batch pending at
+    // hide time was flushed to it), and it drops anything it already wrote (its
+    // offset is absolute; features/terminal/terminalOutput.ts), so the missed
+    // suffix arrives — once — without resending the history before it. The
+    // observers get no replay: they already received every chunk.
     //
     // The window is bounded by MAX_SCROLLBACK_CHARS: when the hidden stretch
     // was longer than the ring, the buffer no longer reaches back to
@@ -818,7 +869,7 @@ export class TerminalManager {
     this.flushOutput(id, session);
     this.hiddenSinceOffset.delete(id);
     if (hiddenSince === undefined || session.outputOffset === hiddenSince) return;
-    const data = session.bufferChunks.slice(session.bufferStart).join("");
+    const data = scrollbackTail(session, session.outputOffset - hiddenSince);
     if (data.length > 0) {
       this.emit(IPC.terminalData, { id, data, outputOffset: session.outputOffset, audience: "renderer" });
     }
@@ -1161,14 +1212,25 @@ export class TerminalManager {
     role: SessionRole,
     answerCaptureGrantExpiresAt: number | undefined,
     contribution: LaunchContribution | null,
-    trustedFolder?: string
+    trustedFolder?: string,
+    environmentWrapped = false
   ): PlannedSpawn | { failure: UnavailableProviderCli } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") return { failure: providerCli };
+    // What decides whether Claude's lifecycle hooks may go over HTTP (ClaudeHttpHooks.ts): where and how it runs.
+    const claudeHttp = provider === "claude" && providerCli?.state === "available" ? {
+      executable: providerCli.executable,
+      profile,
+      environmentWrapped,
+      env: { ...terminalEnvironment(), ...providerCli.environment, ...(contribution?.env ?? {}) },
+      args: contribution?.args ?? [],
+      cwd
+    } : undefined;
     const agentRuntime = provider === "terminal"
       ? null
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd,
         ...(captureResult ? { captureResult: true } : {}),
+        ...(claudeHttp ? { claudeHttp } : {}),
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
     let pluginTools: string[] = [];
     try {
@@ -1425,7 +1487,7 @@ export class TerminalManager {
     let planned: PlannedSpawn | { failure: UnavailableProviderCli };
     try {
       planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder);
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment));
     } catch (error) {
       dropContribution();
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
@@ -1457,7 +1519,7 @@ export class TerminalManager {
         launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
         secretEnvNames,
         takenEnv: new Set(Object.keys(planned.launchEnvironment)),
-        path: planned.env.PATH
+        path: launchSearchPath(planned.env)
       });
       if (!live()) {
         abandon();
@@ -1525,28 +1587,40 @@ export class TerminalManager {
       this.queueOutput(id, current, data);
     });
 
+    let exited!: () => void;
+    this.liveProcesses.set(process, new Promise<void>((resolve) => { exited = resolve; }));
     process.onExit(({ exitCode }) => {
+      this.liveProcesses.delete(process);
+      exited();
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
-
-      this.flushOutput(id, current);
-      current.metadata.exitCode = exitCode;
-      current.metadata.status = exitCode === 0 ? "done" : "failed";
-      current.metadata.failureDetails = exitCode === 0
-        ? null
-        : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
-      current.agentBrowser?.cleanup();
-      current.agentBrowser = null;
-      current.agentRuntime?.cleanup();
-      current.agentRuntime = null;
-      current.agentOrchestration?.cleanup();
-      current.agentOrchestration = null;
-      void current.launchCleanup?.().catch(() => undefined);
-      current.launchCleanup = null;
-      this.emitSession(current.metadata);
-      // Recorded at the moment of exit, so a finished agent is never relaunched.
-      this.schedulePersistence();
+      // node-pty calls this from a native callback that aborts the whole app when JavaScript throws in it.
+      try {
+        this.recordExit(id, current, exitCode);
+      } catch (error) {
+        console.warn(`PTY ${id} exit could not be recorded.`, error);
+      }
     });
+  }
+
+  private recordExit(id: string, current: ManagedSession, exitCode: number): void {
+    this.flushOutput(id, current);
+    current.metadata.exitCode = exitCode;
+    current.metadata.status = exitCode === 0 ? "done" : "failed";
+    current.metadata.failureDetails = exitCode === 0
+      ? null
+      : terminalFailureDetails(this.redactSecrets(current.bufferChunks.slice(current.bufferStart).join("")));
+    current.agentBrowser?.cleanup();
+    current.agentBrowser = null;
+    current.agentRuntime?.cleanup();
+    current.agentRuntime = null;
+    current.agentOrchestration?.cleanup();
+    current.agentOrchestration = null;
+    void current.launchCleanup?.().catch(() => undefined);
+    current.launchCleanup = null;
+    this.emitSession(current.metadata);
+    // Recorded at the moment of exit, so a finished agent is never relaunched.
+    this.schedulePersistence();
   }
 
   private queueOutput(id: string, session: ManagedSession, data: string): void {
@@ -1622,6 +1696,21 @@ function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProvi
   metadata.status = "failed";
   metadata.exitCode = 127;
   metadata.failureDetails = failure.diagnostic;
+}
+
+/**
+ * The launch's program search path. The environment is a plain copy of
+ * process.env, which on Windows is case-insensitive but keeps the spelling it
+ * was given ("Path"), so env.PATH alone finds nothing there.
+ */
+export function launchSearchPath(
+  environment: Readonly<Record<string, string | undefined>>,
+  platform: NodeJS.Platform = process.platform
+): string | undefined {
+  if (platform !== "win32") return environment.PATH;
+  if (environment.PATH !== undefined) return environment.PATH;
+  const key = Object.keys(environment).find((name) => name.toUpperCase() === "PATH");
+  return key === undefined ? undefined : environment[key];
 }
 
 export function terminalEnvironment(
@@ -1725,6 +1814,19 @@ function snapshot(session: ManagedSession): SessionSnapshot {
   };
 }
 
+/** The last `chars` characters of the scrollback (all of it when it holds fewer), joined from the end. */
+function scrollbackTail(session: ManagedSession, chars: number): string {
+  if (chars >= session.bufferLength) return session.bufferChunks.slice(session.bufferStart).join("");
+  const parts: string[] = [];
+  let needed = chars;
+  for (let index = session.bufferChunks.length - 1; index >= session.bufferStart && needed > 0; index--) {
+    const chunk = session.bufferChunks[index]!;
+    parts.push(chunk.length <= needed ? chunk : chunk.slice(chunk.length - needed));
+    needed -= chunk.length;
+  }
+  return parts.reverse().join("");
+}
+
 function appendScrollback(session: ManagedSession, data: string): void {
   session.outputOffset += data.length;
   session.bufferChunks.push(data);
@@ -1740,6 +1842,8 @@ function appendScrollback(session: ManagedSession, data: string): void {
     }
     const overflow = session.bufferLength - MAX_SCROLLBACK_CHARS;
     if (first.length <= overflow) {
+      // Release the dropped chunk now: the slot stays until the array is compacted, the text must not.
+      session.bufferChunks[session.bufferStart] = "";
       session.bufferStart += 1;
       session.bufferLength -= first.length;
       continue;

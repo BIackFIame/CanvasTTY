@@ -1,4 +1,4 @@
-import { buildRequest, exchange, identityFrom } from "./permission-gate.mjs";
+import { FAIL_CLOSED_MESSAGE, buildRequest, exchange, identityFrom } from "./permission-gate.mjs";
 import { OPENCODE_DECISIONS_ENV, helperDeadlineMs } from "./runtime-protocol.mjs";
 
 /**
@@ -11,6 +11,10 @@ import { OPENCODE_DECISIONS_ENV, helperDeadlineMs } from "./runtime-protocol.mjs
  * asks for that call (`permission.asked`), `permissionAsked` answers `once` through OpenCode's own API
  * (POST /permission/{requestID}/reply), never `always`. Anything else (ask, no verdict, an error) leaves OpenCode's
  * own flow as it is.
+ *
+ * `CANVASTTY_RUNTIME_DECISIONS` is set only when the launch wanted decisions (base protection on, or a decision plugin
+ * applies), so the guard fails closed like the PreToolUse gate: a checked call it could not send, or that got no
+ * readable answer, or the gateway's own failure, throws FAIL_CLOSED_MESSAGE and does not run.
  */
 
 const MAX_ALLOWED = 64;
@@ -29,16 +33,17 @@ export function createOpenCodeDecisions({ client, env = process.env, send = exch
       const call = guardedCall(stringOf(input?.tool), output && typeof output === "object" ? output.args : null);
       if (!call) return;
       const message = buildRequest({ tool_name: call.toolName, tool_input: call.toolInput }, identity);
-      if (!message) return;
-      decision = await send(identity.address, message, helperDeadlineMs(env));
+      if (message) decision = await send(identity.address, message, helperDeadlineMs(env));
     } catch {
-      return;
+      decision = null;
     }
-    if (decision?.behavior === "deny") {
+    // OpenCode cannot take an ask from here, so the gateway's own failure is a deny too.
+    if (!decision || (decision.unavailable && decision.behavior === "ask")) throw new Error(FAIL_CLOSED_MESSAGE);
+    if (decision.behavior === "deny") {
       throw new Error(decision.message || "CanvasTTY blocked this tool call. Ask the person how to proceed.");
     }
     const callID = stringOf(input?.callID);
-    if (decision?.behavior === "allow" && callID) {
+    if (decision.behavior === "allow" && callID) {
       allowed.add(callID);
       while (allowed.size > MAX_ALLOWED) allowed.delete(allowed.values().next().value);
     }

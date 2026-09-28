@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import test from "node:test";
@@ -215,6 +215,41 @@ test("BrowserStore safely restores, atomically normalizes, and persists only the
   assert.deepEqual(JSON.parse(await readFile(store.filePath, "utf8")), expected);
   assert.deepEqual(await new BrowserStore(root).load(), expected);
   assert.equal((await readdir(root)).some((name) => name.endsWith(".tmp")), false);
+});
+
+test("BrowserStore recovers after one failed write instead of rejecting every later save", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
+  const root = await fixture(t, "canvastty-store-fail-");
+  const dataDir = join(root, "data");
+  await mkdir(dataDir);
+  const store = new BrowserStore(dataDir);
+  await store.load();
+
+  await chmod(dataDir, 0o500);
+  try {
+    await assert.rejects(store.replace([{ id: "tab-a", url: "https://a.example/" }], "tab-a"));
+  } finally {
+    await chmod(dataDir, 0o700);
+  }
+  // The in-memory state keeps the change the caller asked for.
+  assert.equal(store.get().activeTabId, "tab-a");
+
+  const next = await store.replace([{ id: "tab-b", url: "https://b.example/" }], "tab-b");
+  assert.equal(next.activeTabId, "tab-b");
+  assert.deepEqual(JSON.parse(await readFile(store.filePath, "utf8")).tabs, [{ id: "tab-b", url: "https://b.example/" }]);
+  await store.clear();
+  assert.deepEqual(JSON.parse(await readFile(store.filePath, "utf8")).tabs, []);
+});
+
+test("BrowserService keeps tab state when saving fails and settings do not leave the save unhandled", async () => {
+  const service = await readFile(new URL("../src/main/services/BrowserService.ts", import.meta.url), "utf8");
+  const main = await readFile(new URL("../src/main/index.ts", import.meta.url), "utf8");
+  const persistRuntime = service.slice(service.indexOf("private async persistRuntime"), service.indexOf("private destroyRuntimeTabs"));
+  assert.match(persistRuntime, /try \{[\s\S]*this\.store\.replace[\s\S]*\} catch/);
+  assert.match(persistRuntime, /this\.persisted = this\.store\.get\(\)/);
+  const clearSaved = service.slice(service.indexOf("private async clearSavedTabs"), service.indexOf("private destroyRuntimeTabs"));
+  assert.match(clearSaved, /try \{\s*await this\.store\.clear\(\);\s*\} catch/);
+  assert.equal(service.match(/this\.store\.clear\(\)/g).length, 1, "every clear goes through clearSavedTabs");
+  assert.match(main, /browserService\?\.setRestoreTabs\(next\.browserRestoreTabs\)\.catch\(/);
 });
 
 test("BrowserStore treats corrupt persisted input as an empty safe session", async (t) => {

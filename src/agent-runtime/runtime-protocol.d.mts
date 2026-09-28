@@ -26,8 +26,15 @@ export const PERMISSION_GATE: Readonly<{
 }>;
 export const OPENCODE_DECISIONS_ENV: "CANVASTTY_RUNTIME_DECISIONS";
 export const DECISION_BUDGET_ENV: "CANVASTTY_RUNTIME_DECISION_MS";
+export const DECISION_FAIL_CLOSED_ENV: "CANVASTTY_RUNTIME_FAIL_CLOSED";
 export const DEFAULT_DECIDE_TIMEOUT_MS: number;
 export const MIN_DECIDE_TIMEOUT_MS: number;
 export const MAX_DECIDE_TIMEOUT_MS: number;
 export function permissionGateTimings(budgetMs?: number): { budgetMs: number; gatewayMs: number; helperMs: number; hookSeconds: number };
 export function helperDeadlineMs(env: Record<string, string | undefined> | undefined): number;
+export const CLAUDE_HTTP_HOOK: Readonly<{
+  pathPrefix: string;
+  sessionHeader: string;
+  capabilityHeader: string;
+  minimumVersion: string;
+}>;

@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import type {
   PluginPermission,
   PluginServiceLogEntry,
@@ -94,6 +95,55 @@ const INHERITED_ENVIRONMENT = new Set([
   "SystemRoot", "SYSTEMROOT", "windir", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
   "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "HOMEDRIVE", "HOMEPATH"
 ]);
+
+/**
+ * Module hooks for the service process: the entry is loaded from bytes the
+ * hook read and hashed itself, and a mismatch stops the load. They run
+ * before the entry through `--import`, off the main thread (module.register).
+ *
+ * The entry checked is the main module node actually resolved (the one
+ * resolve without a parent), not only the URL the host computed: when the
+ * entry or a folder above it is replaced by a symlink after the host's check,
+ * node resolves the main module to another file, and that file must match the
+ * hash too. The host's URL stays checked as well.
+ *
+ * The hooks take their modules with `await import(...)`, never a static
+ * `import ... from`: electron-vite puts its CommonJS shim (`__dirname`,
+ * `require`) after the last static import it finds in the main bundle, and a
+ * static import inside this string would pull the shim into the string, which
+ * leaves the whole main process without `__dirname`.
+ */
+const ENTRY_GUARD_HOOKS = `
+const { createHash } = await import("node:crypto");
+const { readFile } = await import("node:fs/promises");
+let entryUrl = null;
+let mainUrl = null;
+let expected = null;
+export function initialize(data) { entryUrl = data.url; expected = data.sha256; }
+export async function resolve(specifier, context, nextResolve) {
+  const resolved = await nextResolve(specifier, context);
+  if (mainUrl === null && context.parentURL === undefined) mainUrl = resolved.url;
+  return resolved;
+}
+export async function load(url, context, nextLoad) {
+  if (url !== entryUrl && url !== mainUrl) return nextLoad(url, context);
+  const source = await readFile(new URL(url));
+  if (createHash("sha256").update(source).digest("hex") !== expected) {
+    throw new Error("The service entry changed after it was trusted.");
+  }
+  const loaded = await nextLoad(url, context);
+  return { format: loaded.format, source, shortCircuit: true };
+}
+`;
+
+export function entryGuardArguments(entryUrl: string, sha256: string): string[] {
+  const boot = [
+    'import { register } from "node:module";',
+    `register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(ENTRY_GUARD_HOOKS)}`)},`
+      + ` { data: ${JSON.stringify({ url: entryUrl, sha256 })} });`
+  ].join("\n");
+  return ["--import", `data:text/javascript,${encodeURIComponent(boot)}`];
+}
 
 export function pluginServiceEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   const environment: Record<string, string> = {};
@@ -300,7 +350,10 @@ export class PluginServiceSupervisor {
     await this.hostGate;
     if (record.removed || this.disposed) return;
     record.state = "starting";
+    let entryUrl: string;
     try {
+      // Node loads the main entry by its real path; the guard matches that URL.
+      entryUrl = pathToFileURL(await realpath(spec.entryPath)).href;
       const content = await readFile(spec.entryPath);
       if (createHash("sha256").update(content).digest("hex") !== spec.sha256) {
         // The file changed after the user trusted it: never run it, and do not retry.
@@ -317,7 +370,11 @@ export class PluginServiceSupervisor {
       return;
     }
 
-    const child = spawn(this.options.command, [spec.entryPath], {
+    // The check above and node's own read of the entry are separate reads: a file
+    // replaced in between would run as trusted. The guard makes node run only
+    // bytes it read and hashed itself, so what runs is what matched the hash,
+    // wherever node resolves `spec.entryPath` by then.
+    const child = spawn(this.options.command, [...entryGuardArguments(entryUrl, spec.sha256), spec.entryPath], {
       cwd: spec.root,
       env: pluginServiceEnvironment(this.options.environment),
       stdio: ["pipe", "pipe", "pipe"],

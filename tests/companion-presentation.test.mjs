@@ -122,3 +122,34 @@ test("old status warnings are not prepended to an active Codex menu title", () =
   assert.match(menu.title, /^Select Model/);
   assert.doesNotMatch(menu.title, /Heads up/);
 });
+
+test("only sessions the glasses read get a headless screen; a first read later shows what live parsing shows", async () => {
+  const ids = ["s0", "s1", "s2"];
+  const buffers = new Map(ids.map((id) => [id, ""]));
+  const port = {
+    listMetadata: () => ids.map((id) => ({ id, provider: "claude", status: "idle", title: id })),
+    geometry: () => ({ cols: 60, rows: 12 }),
+    readBuffer: (id) => ({ buffer: buffers.get(id), outputOffset: buffers.get(id).length })
+  };
+  const lazy = new TerminalPresentation(port);
+  const live = new TerminalPresentation(port);
+  await lazy.read("s0");
+  await live.read("s1");
+  for (let i = 0; i < 400; i++) {
+    for (const id of ids) {
+      const data = `\x1b[3${i % 7}m${id} line ${i}\x1b[0m ${"·".repeat(i % 50)}\r\n${i % 40 === 0 ? "\x1b[2J\x1b[H" : ""}`;
+      buffers.set(id, buffers.get(id) + data);
+      const event = { id, data, outputOffset: buffers.get(id).length };
+      lazy.observe("terminal:data", event);
+      live.observe("terminal:data", event);
+    }
+  }
+  const parsed = (presentation) => [...presentation.screens].filter(([, screen]) => screen.terminal).map(([id]) => id);
+  assert.deepEqual(parsed(lazy), ["s0"], "output of sessions nobody reads is not parsed");
+  assert.deepEqual(await lazy.read("s1"), await live.read("s1"), "a first read from the scrollback matches the live screen");
+  assert.deepEqual(parsed(lazy), ["s0", "s1"]);
+  lazy.observe("terminal:removed", { id: "s1" });
+  assert.deepEqual(parsed(lazy), ["s0"]);
+  lazy.close();
+  live.close();
+});

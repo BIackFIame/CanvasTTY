@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isHomeMediaPath } from "./homeMedia.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
@@ -234,11 +235,17 @@ export class SettingsStore {
 
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
     this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
+    // Filter in queue order: a snapshot taken while an update() is still
+    // writing lacks that update, and persisting it afterwards dropped the
+    // update from the file (it stayed only in memory).
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (!providerSelectionsChanged(this.value, filtered)) return;
+      await this.persist(filtered);
       this.value = filtered;
-      await this.queuePersist();
-    }
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 
@@ -436,9 +443,11 @@ export function normalizeSettings(
   }
 
   const source = candidate as Partial<AppSettings> & { zoomOverApplications?: unknown };
-  const mediaPath = source.mediaPath === null || typeof source.mediaPath === "string"
+  // Only an absolute path to a supported image is kept; anything else keeps the
+  // previous choice. The main process reads this file for the Home screen.
+  const mediaPath = source.mediaPath === null || isHomeMediaPath(source.mediaPath)
     ? source.mediaPath
-    : fallback.mediaPath;
+    : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
       (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)

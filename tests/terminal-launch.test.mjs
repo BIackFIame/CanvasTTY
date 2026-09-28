@@ -251,3 +251,26 @@ test("unavailable provider reports the structured diagnostic before PTY launch",
     /\/opt\/homebrew\/bin\/kimi: missing/u
   );
 });
+
+test("the Windows terminal falls back to the system cmd.exe, never one found on PATH, like provider launches", () => {
+  const system = "C:\\Windows\\System32\\cmd.exe";
+  const planted = "C:\\Users\\Kisa\\project\\cmd.exe";
+  const launch = resolveTerminalLaunch("terminal", "normal", [], {
+    platform: "win32",
+    environment: { SystemRoot: "C:\\Windows", Path: "C:\\Users\\Kisa\\project;C:\\Windows\\System32" },
+    fileExists: (path) => path === planted || path === system
+  });
+  assert.deepEqual(launch, { command: system, args: ["/d"] });
+
+  const configured = resolveTerminalLaunch("terminal", "normal", [], {
+    platform: "win32",
+    environment: { ComSpec: "D:\\Windows\\System32\\cmd.exe", Path: "C:\\Users\\Kisa\\project" },
+    fileExists: (path) => path === planted || path === "D:\\Windows\\System32\\cmd.exe"
+  });
+  assert.equal(configured.command, "D:\\Windows\\System32\\cmd.exe");
+  assert.throws(() => resolveTerminalLaunch("terminal", "normal", [], {
+    platform: "win32",
+    environment: { Path: "C:\\Users\\Kisa\\project" },
+    fileExists: (path) => path === planted
+  }), /No supported Windows shell/);
+});

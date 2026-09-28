@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
   SessionRole,
@@ -131,9 +131,15 @@ export class TerminalSessionStore {
     const snapshot = `${JSON.stringify(this.value, null, 2)}\n`;
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-      await rename(temporaryPath, this.filePath);
+      await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
+      try {
+        await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
+        await rename(temporaryPath, this.filePath);
+      } catch (error) {
+        // A failed rename (a locked file on Windows) must not leave the temp file behind.
+        await unlink(temporaryPath).catch(() => undefined);
+        throw error;
+      }
     });
     return this.writeQueue;
   }

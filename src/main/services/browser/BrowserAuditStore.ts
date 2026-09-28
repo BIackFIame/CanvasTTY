@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { mkdir, open, readFile, readdir, rename, stat, unlink } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
 
 const AUDIT_VERSION = 1;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
@@ -111,8 +111,16 @@ export class BrowserAuditStore {
       await mkdir(dirname(this.filePath), { recursive: true });
       const handle = await open(this.filePath, "a", 0o600);
       try {
-        await handle.writeFile(line, "utf8");
-        await handle.sync();
+        const sizeBefore = (await handle.stat()).size;
+        try {
+          await handle.writeFile(line, "utf8");
+          await handle.sync();
+        } catch (error) {
+          // A partial append (ENOSPC) would merge with the next record and break
+          // the chain for good; cut the file back to the last whole record.
+          await handle.truncate(sizeBefore).catch(() => undefined);
+          throw error;
+        }
       } finally {
         await handle.close();
       }
@@ -140,7 +148,7 @@ export class BrowserAuditStore {
           return { valid: false, records, lastHash: previousHash };
         }
         const { hash, ...base } = record;
-        if ((records > 0 && record.previousHash !== previousHash) || hashRecord(base) !== hash) {
+        if ((records > 0 && record.previousHash !== previousHash) || !recordHashMatches(base, hash)) {
           return { valid: false, records, lastHash: previousHash };
         }
         previousHash = hash;
@@ -157,6 +165,7 @@ export class BrowserAuditStore {
 
   private async initialize(): Promise<void> {
     await mkdir(dirname(this.filePath), { recursive: true });
+    await this.repairTornTail();
     await this.pruneExpired();
     const files = await this.auditFiles();
     let previousHash: string | null = null;
@@ -169,7 +178,7 @@ export class BrowserAuditStore {
         try {
           const record = JSON.parse(line) as BrowserAuditRecord;
           const { hash, ...base } = record;
-          if ((records > 0 && record.previousHash !== previousHash) || hashRecord(base) !== hash) {
+          if ((records > 0 && record.previousHash !== previousHash) || !recordHashMatches(base, hash)) {
             throw new Error("Browser audit hash chain is invalid.");
           }
           previousHash = hash;
@@ -183,6 +192,37 @@ export class BrowserAuditStore {
     }
     this.previousHash = previousHash;
     this.sequence = sequence;
+  }
+
+  /**
+   * Every append ends with a newline, so an active file without one was cut
+   * during a write (crash, full disk). A last record that is whole only gets
+   * its newline back; a partial one is removed. Anything else that does not
+   * verify still fails closed.
+   */
+  private async repairTornTail(): Promise<void> {
+    let content: Buffer;
+    try {
+      content = await readFile(this.filePath);
+    } catch {
+      return;
+    }
+    if (content.length === 0 || content[content.length - 1] === 0x0a) return;
+    const lineStart = content.lastIndexOf(0x0a) + 1;
+    const tail = content.subarray(lineStart).toString("utf8");
+    let whole = false;
+    try {
+      const { hash, ...base } = JSON.parse(tail) as BrowserAuditRecord;
+      whole = recordHashMatches(base, hash);
+    } catch {
+      whole = false;
+    }
+    if (whole) {
+      await appendFile(this.filePath, "\n", { mode: 0o600 });
+      return;
+    }
+    console.warn(`CanvasTTY removed a browser audit record cut off during a write (${content.length - lineStart} bytes).`);
+    await truncate(this.filePath, lineStart);
   }
 
   private async rotateIfNeeded(incomingBytes: number): Promise<void> {
@@ -217,7 +257,7 @@ export class BrowserAuditStore {
     const rotated = entries
       .filter((entry) => entry.isFile() && /^browser-audit-.+\.jsonl$/.test(entry.name))
       .map((entry) => join(directory, entry.name))
-      .sort((left, right) => basename(left).localeCompare(basename(right)));
+      .sort((left, right) => byCodeUnit(basename(left), basename(right)));
     try {
       await stat(this.filePath);
       rotated.push(this.filePath);
@@ -260,15 +300,29 @@ function redactUrl(value: string): string {
 }
 
 function hashRecord(record: Omit<BrowserAuditRecord, "hash">): string {
-  return createHash("sha256").update(stableJson(record)).digest("hex");
+  return createHash("sha256").update(stableJson(record, byCodeUnit)).digest("hex");
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+/**
+ * Records written before keys were sorted by code unit were hashed with
+ * localeCompare, whose order follows the system locale. They are still
+ * accepted when they verify under the current locale, as they did before.
+ */
+function recordHashMatches(record: Omit<BrowserAuditRecord, "hash">, hash: unknown): boolean {
+  if (typeof hash !== "string") return false;
+  return hashRecord(record) === hash
+    || createHash("sha256").update(stableJson(record, byLocale)).digest("hex") === hash;
+}
+
+const byCodeUnit = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
+const byLocale = (left: string, right: string): number => left.localeCompare(right);
+
+function stableJson(value: unknown, order: (left: string, right: string) => number): string {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item, order)).join(",")}]`;
   if (value && typeof value === "object") {
     return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
+      .sort(([left], [right]) => order(left, right))
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry, order)}`)
       .join(",")}}`;
   }
   return JSON.stringify(value);

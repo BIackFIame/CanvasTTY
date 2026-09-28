@@ -572,6 +572,9 @@ class KimiWebUsageClient {
   private async startChild(): Promise<void> {
     if (!this.cli) throw new LimitsAdapterError("cli-not-found");
     const port = await reserveLoopbackPort();
+    // dispose() during the await found no child to stop; starting one now would
+    // leave `kimi web` (a local server with a token in its URL) running.
+    if (this.disposed) throw new LimitsAdapterError("protocol-error");
     const launch = providerChildProcessLaunch(
       this.cli,
       ["web", "--no-open", "--port", String(port), "--log-level", "silent"]

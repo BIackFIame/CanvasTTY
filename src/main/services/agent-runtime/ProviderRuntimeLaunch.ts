@@ -15,8 +15,15 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
+import { DECISION_FAIL_CLOSED_ENV } from "../../../agent-runtime/runtime-protocol.mjs";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
-import { DECISION_BUDGET_ENV, OPENCODE_DECISIONS_ENV, permissionGateTimings } from "../../../agent-runtime/runtime-protocol.mjs";
+import {
+  AGENT_RUNTIME_ENV,
+  CLAUDE_HTTP_HOOK,
+  DECISION_BUDGET_ENV,
+  OPENCODE_DECISIONS_ENV,
+  permissionGateTimings
+} from "../../../agent-runtime/runtime-protocol.mjs";
 
 const FILE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -47,6 +54,8 @@ interface ProviderHookCommand {
   command: string;
   matcher?: string;
   timeout: number;
+  /** Claude Code only: POST the hook input to this URL instead of running `command`. */
+  url?: string;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -156,13 +165,16 @@ export class ProviderRuntimeLaunchAdapters {
    * `decisions` adds the decision hook: PreToolUse for Claude Code, Codex and Qwen Code, the CanvasTTY plugin's
    * guard for OpenCode. Without it the arguments are exactly what they were before decision hooks existed.
    * `decisionBudgetMs` (a decision service's `decide.timeoutMs`) lengthens the hook's deadlines to fit it.
+   * `claudeHttpHookBase` (Claude Code only) sends its lifecycle events, except SessionStart, as HTTP hooks to the
+   * gateway's loopback listener instead of running the helper; the decision hook stays a command.
    */
   prepare(
     provider: AgentProvider,
     terminalSessionId: string,
     coreHooksEnabled = true,
     decisions = false,
-    decisionBudgetMs?: number
+    decisionBudgetMs?: number,
+    claudeHttpHookBase?: string
   ): PreparedProviderRuntimeLaunch {
     const pluginRegistrations = this.options.pluginHooks?.list(provider) ?? [];
     const gate = decisions && this.decisionsSupported(provider);
@@ -187,7 +199,7 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], environment);
     }
     if (provider === "claude") {
-      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands), environment);
+      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, claudeHttpHookBase), environment);
     }
     if (provider === "codex") {
       return prepared(codexHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands), environment);
@@ -533,7 +545,12 @@ export function decisionHookCommands(
   return [{
     event: "PreToolUse",
     matcher: DECISION_TOOL_MATCHERS[provider],
-    command: commandWithEnvironment([gate.command, ...gate.args, "pretool"], { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs) }, platform),
+    // The hook is installed only when something decides for this session, so it always fails closed.
+    command: commandWithEnvironment(
+      [gate.command, ...gate.args, "pretool"],
+      { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs), [DECISION_FAIL_CLOSED_ENV]: "1" },
+      platform
+    ),
     // Qwen hook timeouts are milliseconds; Claude's and Codex's are seconds.
     timeout: provider === "qwen" ? hookSeconds * 1_000 : hookSeconds
   }];
@@ -556,16 +573,48 @@ function claudeHookArgs(
   helper: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform,
   coreHooksEnabled: boolean,
-  pluginCommands: readonly ProviderHookCommand[]
+  pluginCommands: readonly ProviderHookCommand[],
+  httpHookBase?: string
 ): string[] {
   validateHelper(helper);
+  const base = httpHookBase === undefined ? null : claudeHttpHookBase(httpHookBase);
   return ["--settings", JSON.stringify({
     ...(coreHooksEnabled ? { showStatusInTerminalTab: true } : {}),
     hooks: groupProviderHookCommands([
-      ...(coreHooksEnabled ? lifecycleCommands(CLAUDE_HOOKS, helper, platform) : []),
+      ...(coreHooksEnabled ? lifecycleCommands(CLAUDE_HOOKS, helper, platform).map((command, index) => (
+        base && CLAUDE_HOOKS[index]!.event !== "SessionStart"
+          ? { ...command, url: `${base}${CLAUDE_HTTP_HOOK.pathPrefix}${CLAUDE_HOOKS[index]!.state}/${CLAUDE_HOOKS[index]!.event}` }
+          : command
+      )) : []),
       ...pluginCommands
     ])
   })];
+}
+
+/** Only this machine's loopback listener: `http://127.0.0.1:<port>`. */
+function claudeHttpHookBase(value: string): string {
+  const match = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/u.exec(value);
+  const port = match ? Number(match[1]) : 0;
+  if (!match || port < 1 || port > 65_535) throw new Error("Claude HTTP hook base must be a loopback URL with a port.");
+  return value;
+}
+
+/**
+ * Claude Code (2.1.281) interpolates header values only from the variables its hook lists in `allowedEnvVars`, and
+ * takes them from the session's environment: the capability reaches the gateway without ever being written into the
+ * `--settings` argument, which any local user can read in the process list.
+ */
+function claudeHttpHook(url: string, timeout: number): Record<string, unknown> {
+  return {
+    type: "http",
+    url,
+    timeout,
+    headers: {
+      [CLAUDE_HTTP_HOOK.sessionHeader]: `\${${AGENT_RUNTIME_ENV.terminalSessionId}}`,
+      [CLAUDE_HTTP_HOOK.capabilityHeader]: `\${${AGENT_RUNTIME_ENV.capabilityToken}}`
+    },
+    allowedEnvVars: [AGENT_RUNTIME_ENV.terminalSessionId, AGENT_RUNTIME_ENV.capabilityToken]
+  };
 }
 
 export function codexLifecycleArgs(
@@ -1010,7 +1059,7 @@ function groupProviderHookCommands(commands: readonly ProviderHookCommand[]): Re
   for (const [event, entries] of Object.entries(mappings)) {
     grouped[event] = entries.map((mapping) => ({
       ...(mapping.matcher ? { matcher: mapping.matcher } : {}),
-      hooks: [{
+      hooks: [mapping.url ? claudeHttpHook(mapping.url, mapping.timeout) : {
         type: "command",
         command: mapping.command,
         timeout: mapping.timeout
@@ -1026,7 +1075,7 @@ function groupProviderHookMappings(
   const grouped: Record<string, ProviderHookCommand[]> = {};
   const seen = new Set<string>();
   for (const mapping of commands) {
-    const identity = `${mapping.event}\0${mapping.matcher ?? ""}\0${mapping.command}\0${mapping.timeout}`;
+    const identity = `${mapping.event}\0${mapping.matcher ?? ""}\0${mapping.url ?? mapping.command}\0${mapping.timeout}`;
     if (seen.has(identity)) continue;
     seen.add(identity);
     (grouped[mapping.event] ??= []).push(mapping);
@@ -1149,9 +1198,15 @@ function mkdirPrivate(path: string): void {
 function atomicWrite(path: string, value: string, mode = FILE_MODE): void {
   mkdirPrivate(dirname(path));
   const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, value, { mode });
-  chmodSync(temporary, mode);
-  renameSync(temporary, path);
+  try {
+    writeFileSync(temporary, value, { mode });
+    chmodSync(temporary, mode);
+    renameSync(temporary, path);
+  } catch (error) {
+    // The name is random, so a leftover would never be reused or cleaned up.
+    rmSync(temporary, { force: true });
+    throw error;
+  }
 }
 
 function readOptional(path: string): string | null {

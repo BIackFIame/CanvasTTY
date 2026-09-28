@@ -330,13 +330,23 @@ export class OrchestrationGateway {
     const controller = new AbortController();
     connection.controllers.set(id, controller);
     connection.inflight += 1;
+    // Cancel answers at once; a handler that cannot stop (a plugin call) is
+    // no longer waited for, and its late result is dropped.
+    const canceled = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(new Error("canceled")), { once: true });
+    });
+    canceled.catch(() => undefined);
     try {
-      const value = await this.handler.execute(connection.lease!.terminalSessionId, {
-        id,
-        tool: tool as never,
-        arguments: args
-      });
+      const value = await Promise.race([
+        this.handler.execute(connection.lease!.terminalSessionId, {
+          id,
+          tool: tool as never,
+          arguments: args
+        }, controller.signal),
+        canceled
+      ]);
       if (connection.closed) return;
+      if (controller.signal.aborted) throw new Error("canceled");
       this.send(connection, { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "response", id, result: value });
     } catch (error) {
       if (connection.closed) return;

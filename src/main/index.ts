@@ -65,6 +65,7 @@ import {
 import type { StdioHelperLaunch } from "./services/agent-browser/ProviderLaunch";
 import {
   AgentRuntimeBridge,
+  ClaudeHttpHookPolicy,
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
@@ -397,6 +398,9 @@ async function initializeServices(): Promise<void> {
       hermesHomeDirectory,
       kimiHomeDirectory
     });
+    // Off the startup path: the first Kimi launch then finds the probe answered instead of blocking on it.
+    const bridge = agentBrowserBridge;
+    setTimeout(() => void bridge.warmProviderProbes().catch(() => undefined), 5_000).unref();
 
     const lifecycleRuntimeDirectory = join(userDataPath, "lifecycle", "runtime");
     runtimeGateway = new RuntimeGateway({
@@ -420,7 +424,9 @@ async function initializeServices(): Promise<void> {
         }
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
-      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal)
+      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal),
+      // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
+      httpHooks: true
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
@@ -440,6 +446,7 @@ async function initializeServices(): Promise<void> {
       args: [runtimeHelperPath],
       env: { ELECTRON_RUN_AS_NODE: "1" }
     };
+    const claudeHttpHookPolicy = new ClaudeHttpHookPolicy();
     agentRuntimeBridge = new AgentRuntimeBridge(runtimeGateway, {
       helper: agentRuntimeHelper,
       runtimeDirectory: lifecycleRuntimeDirectory,
@@ -451,6 +458,7 @@ async function initializeServices(): Promise<void> {
       permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
       wantsDecisions: (provider) => decisionHooks.wanted(provider),
       decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
+      claudeHttpHooks: (facts) => claudeHttpHookPolicy.verdict(facts),
       pluginHooks: {
         runner: {
           command: process.execPath,
@@ -651,6 +659,7 @@ async function initializeServices(): Promise<void> {
     recheckProviderClis: async () => {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();
+      void agentBrowserBridge?.warmProviderProbes().catch(() => undefined);
       await limitsService!.providerClisRefreshed();
       const availability = providerCliAvailability(providerClis!);
       const updatedSettings = await settings.setAvailableProviders(availability);
@@ -676,7 +685,9 @@ async function initializeServices(): Promise<void> {
       // (the launch dialog enables it right before launching an orchestrator).
       await applyAgentControlSetting(next.agentControlEnabled);
       agentBrowserBridge?.setEnabled(next.browserAgentAccess);
-      browserService?.setRestoreTabs(next.browserRestoreTabs);
+      browserService?.setRestoreTabs(next.browserRestoreTabs).catch((error: unknown) => {
+        console.warn("CanvasTTY browser tab restore setting could not be applied.", error);
+      });
       browserService?.cancelCanvasNavigationGesture();
       browserService?.setCanvasWheelCaptureMode(next.canvasWheelCaptureMode);
       canvasNavigationInput?.setBindings({
@@ -1033,12 +1044,17 @@ async function shutdownServices(): Promise<void> {
   browserRequests.clear();
   await evenG2?.close();
   if (terminalManager) await terminalManager.shutdown();
+  // The hung-up PTYs exit while the other services close; quitting waits for them (see waitForProcessExits).
+  const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
+    if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
+  });
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
   if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
+  await ptyExits;
 }
 
 async function openPluginWindow(pluginId: string, contributionId: string): Promise<void> {

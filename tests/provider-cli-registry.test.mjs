@@ -3,7 +3,8 @@ import test from "node:test";
 import {
   createProviderCliRegistry,
   providerCliAvailability,
-  providerChildProcessLaunch
+  providerChildProcessLaunch,
+  providerTerminalBatchCommandLine
 } from "../src/main/services/providerCliRegistry.ts";
 
 function inspection(results) {
@@ -360,4 +361,136 @@ test("refresh detects installed and removed CLIs without changing an earlier sna
   present.delete(executable);
   registry.refresh();
   assert.equal(registry.get("codex").state, "unavailable");
+});
+
+// A model of how cmd.exe reads `cmd /d /s /c "<line>"` that starts an npm-style
+// .cmd shim (`"node.exe" "cli.js" %*`), and how the program then splits its
+// command line. It covers what matters here: %VAR% expansion on the command
+// line, caret escapes and quote toggling (phase 2), operators outside quotes,
+// the second phase-2 pass over the text %* expands to, and MSVC argv rules.
+// This is a model, not cmd.exe; real-Windows verification is still pending.
+const CMD_ENV = new Map([["PATH", "C:\\Windows"], ["APPDATA", "C:\\Users\\Kisa\\AppData\\Roaming"]]);
+
+function cmdExpandPercent(line) {
+  let out = "";
+  for (let index = 0; index < line.length;) {
+    if (line[index] === "%") {
+      const end = line.indexOf("%", index + 1);
+      const name = end > index ? line.slice(index + 1, end) : "";
+      if (end > index && CMD_ENV.has(name.toUpperCase())) {
+        out += CMD_ENV.get(name.toUpperCase());
+        index = end + 1;
+        continue;
+      }
+    }
+    out += line[index];
+    index += 1;
+  }
+  return out;
+}
+
+function cmdPhase2(line) {
+  let out = "";
+  let quoted = false;
+  const operators = [];
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (char === "\"") {
+      quoted = !quoted;
+      out += char;
+    } else if (!quoted && char === "^") {
+      index += 1;
+      out += line[index] ?? "";
+    } else {
+      if (!quoted && "&|<>".includes(char)) operators.push(`${char}@${index}`);
+      out += char;
+    }
+  }
+  return { out, operators };
+}
+
+function msvcArgv(line) {
+  const args = [];
+  let index = 0;
+  while (index < line.length) {
+    while (line[index] === " " || line[index] === "\t") index += 1;
+    if (index >= line.length) break;
+    let current = "";
+    let quoted = false;
+    while (index < line.length) {
+      const char = line[index];
+      if ((char === " " || char === "\t") && !quoted) break;
+      if (char === "\\") {
+        let count = 0;
+        while (line[index + count] === "\\") count += 1;
+        if (line[index + count] === "\"") {
+          current += "\\".repeat(Math.floor(count / 2));
+          if (count % 2 === 1) {
+            current += "\"";
+            index += count + 1;
+          } else {
+            index += count;
+          }
+        } else {
+          current += "\\".repeat(count);
+          index += count;
+        }
+        continue;
+      }
+      if (char === "\"") {
+        if (quoted && line[index + 1] === "\"") {
+          current += "\"";
+          index += 2;
+          continue;
+        }
+        quoted = !quoted;
+        index += 1;
+        continue;
+      }
+      current += char;
+      index += 1;
+    }
+    args.push(current);
+  }
+  return args;
+}
+
+function runBatchShimModel(commandLine, batchPath) {
+  assert.match(commandLine, /^\/d \/s \/c "/u);
+  // /s: drop the first and the last quote of the /c text.
+  const inner = commandLine.slice("/d /s /c \"".length, -1);
+  const first = cmdPhase2(cmdExpandPercent(inner));
+  assert.ok(first.out.startsWith(`${batchPath} `), "cmd.exe starts the batch file");
+  const percentStar = first.out.slice(batchPath.length + 1);
+  const shimLine = `"C:\\Program Files\\nodejs\\node.exe" "C:\\npm\\cli.js" ${percentStar}`;
+  const second = cmdPhase2(shimLine);
+  return {
+    operators: [...first.operators, ...second.operators],
+    argv: msvcArgv(second.out).slice(2)
+  };
+}
+
+test("Windows batch arguments survive cmd.exe and the shim's %* re-parse unchanged (cmd.exe model)", () => {
+  const claude = "C:\\Users\\Kisa\\AppData\\Roaming\\npm\\claude.cmd";
+  const hook = "set \"ELECTRON_RUN_AS_NODE=1\" && \"C:\\Program Files\\CanvasTTY\\CanvasTTY.exe\" \"C:\\hooks\\hook.cjs\" pretool";
+  const settings = JSON.stringify({ hooks: { PreToolUse: [{ matcher: "*", hooks: [{ type: "command", command: hook }] }] } });
+  const args = [
+    "--settings", settings,
+    "a b", "", "x&y", "p|q", "<in>", "(group)", "100%", "%PATH%", "%%", "^caret", "!bang!",
+    "quote\"inside", "trailing\\", "C:\\dir with space\\", "back\\\\\"slash", "semi;comma,", "star*?"
+  ];
+  const commandLine = providerTerminalBatchCommandLine(claude, args);
+  const result = runBatchShimModel(commandLine, claude);
+  assert.deepEqual(result.operators, [], "no operator reaches cmd.exe outside quotes");
+  assert.deepEqual(result.argv, args);
+
+  const registry = createProviderCliRegistry({
+    platform: "win32",
+    environment: { APPDATA: "C:\\Users\\Kisa\\AppData\\Roaming", ComSpec: "C:\\Windows\\System32\\cmd.exe" },
+    homeDirectory: "C:\\Users\\Kisa",
+    inspectCandidate: inspection(new Map([[claude, null], ["C:\\Windows\\System32\\cmd.exe", null]])),
+    directoryExists: () => true
+  });
+  const launch = providerChildProcessLaunch(registry.get("claude"), args);
+  assert.equal(`/d /s /c ${launch.args[3]}`, commandLine);
 });
