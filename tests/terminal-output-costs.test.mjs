@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { TerminalManager, reachesRenderer } from "../src/main/services/TerminalManager.ts";
 import { IPC } from "../src/shared/contracts.ts";
+import { attachTerminalOutput } from "../src/renderer/src/features/terminal/terminalOutput.ts";
 
 // What terminal output costs the main process: the scrollback ring holds only what it keeps, and a card
 // that becomes visible again is sent the output it missed, not its whole history.
@@ -51,4 +52,49 @@ test("the scrollback ring references only the text it keeps: dropped chunks are 
   let expected = "";
   for (let i = 0; i < 64; i++) expected += chunkOf(i, 65_536);
   assert.equal(manager.readBuffer(id).buffer, expected.slice(-MAX_SCROLLBACK_CHARS));
+});
+
+test("a card that becomes visible again is sent the output it missed, not its whole scrollback", async (t) => {
+  const { manager, id, rendered, rendererApi, data, flush } = createManager(t);
+  const written = [];
+  const detach = attachTerminalOutput(rendererApi, id, (chunk) => written.push(chunk), assert.fail, () => {
+    throw new Error("unexpected replay gap in a sub-limit stretch");
+  });
+  t.after(detach);
+  const history = "h".repeat(200_000);
+  data(history);
+  flush();
+  await settle();
+  manager.setVisible(id, false);
+  data("missed one\r\n");
+  flush();
+  data("missed two\r\n");
+  flush();
+  const before = rendered.length;
+
+  manager.setVisible(id, true);
+  await settle();
+
+  assert.equal(rendered.length, before + 1, "exactly one replay");
+  const replay = rendered.at(-1);
+  assert.equal(replay.data, "missed one\r\nmissed two\r\n", "only the missed stretch crosses IPC");
+  assert.equal(replay.outputOffset, manager.readBuffer(id).outputOffset);
+  assert.equal(written.join(""), `${history}missed one\r\nmissed two\r\n`, "the card shows the same text as before, each byte once");
+});
+
+test("zooming every card out and back in costs the missed output only, however long the history", (t) => {
+  const cards = Array.from({ length: 8 }, () => createManager(t));
+  for (const card of cards) {
+    card.data("y".repeat(MAX_SCROLLBACK_CHARS + 5_000));
+    card.flush();
+    card.manager.setVisible(card.id, false);
+    card.data("z".repeat(1_024));
+    card.flush();
+  }
+  const sent = cards.map((card) => {
+    const before = card.rendered.length;
+    card.manager.setVisible(card.id, true);
+    return card.rendered.slice(before).reduce((sum, event) => sum + event.data.length, 0);
+  });
+  assert.deepEqual(sent, Array(8).fill(1_024));
 });

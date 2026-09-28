@@ -801,11 +801,13 @@ export class TerminalManager {
 
     // Hidden -> visible: first hand the observers whatever is still batched
     // (still addressed to them alone, since the card has not seen it and the
-    // replay below covers it), then replay the retained scrollback ending at
-    // the current outputOffset to the renderer alone. The card drops everything
-    // it already wrote (its offset is absolute;
-    // features/terminal/terminalOutput.ts), so the missed suffix arrives —
-    // once. The observers get no replay: they already received every chunk.
+    // replay below covers it), then replay the output produced since
+    // hiddenSince, ending at the current outputOffset, to the renderer alone.
+    // The card already wrote everything up to hiddenSince (the batch pending at
+    // hide time was flushed to it), and it drops anything it already wrote (its
+    // offset is absolute; features/terminal/terminalOutput.ts), so the missed
+    // suffix arrives — once — without resending the history before it. The
+    // observers get no replay: they already received every chunk.
     //
     // The window is bounded by MAX_SCROLLBACK_CHARS: when the hidden stretch
     // was longer than the ring, the buffer no longer reaches back to
@@ -818,7 +820,7 @@ export class TerminalManager {
     this.flushOutput(id, session);
     this.hiddenSinceOffset.delete(id);
     if (hiddenSince === undefined || session.outputOffset === hiddenSince) return;
-    const data = session.bufferChunks.slice(session.bufferStart).join("");
+    const data = scrollbackTail(session, session.outputOffset - hiddenSince);
     if (data.length > 0) {
       this.emit(IPC.terminalData, { id, data, outputOffset: session.outputOffset, audience: "renderer" });
     }
@@ -1723,6 +1725,19 @@ function snapshot(session: ManagedSession): SessionSnapshot {
     ...structuredClone(session.metadata),
     buffer: session.bufferChunks.slice(session.bufferStart).join("")
   };
+}
+
+/** The last `chars` characters of the scrollback (all of it when it holds fewer), joined from the end. */
+function scrollbackTail(session: ManagedSession, chars: number): string {
+  if (chars >= session.bufferLength) return session.bufferChunks.slice(session.bufferStart).join("");
+  const parts: string[] = [];
+  let needed = chars;
+  for (let index = session.bufferChunks.length - 1; index >= session.bufferStart && needed > 0; index--) {
+    const chunk = session.bufferChunks[index]!;
+    parts.push(chunk.length <= needed ? chunk : chunk.slice(chunk.length - needed));
+    needed -= chunk.length;
+  }
+  return parts.reverse().join("");
 }
 
 function appendScrollback(session: ManagedSession, data: string): void {
