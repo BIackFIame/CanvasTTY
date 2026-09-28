@@ -1,22 +1,11 @@
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import {
   accessSync,
   chmodSync,
-  closeSync,
   constants,
-  copyFileSync,
   existsSync,
-  fstatSync,
-  fsyncSync,
-  lstatSync,
   mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  rmdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync
+  statSync
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
@@ -31,14 +20,25 @@ import {
   canonicalStringify
 } from "../../agent-browser/tool-catalog.mjs";
 import { AGENT_BROWSER_ENV } from "./agent-browser/protocol.ts";
+import {
+  acquireConfigurationLock,
+  atomicWrite,
+  backupFile,
+  existingMode,
+  hashCanonical,
+  hashText,
+  readOptional,
+  releaseConfigurationLock,
+  removeEmptyDirectory,
+  restoreFromBackup,
+  unlinkIfExists,
+  writeExactWithCas
+} from "./configOverlay.ts";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 
 // YAML is only parsed for Hermes configs; it is loaded then, not with the app.
 const yaml = lazyRequire<typeof import("yaml")>("yaml");
-const CONFIG_FILE_MODE = 0o600;
 const CONFIG_DIRECTORY_MODE = 0o700;
-const MAX_LOCK_FILE_BYTES = 4 * 1024;
-const MAX_STALE_LOCK_RETRIES = 3;
 const ALLOWED_HELPER_ENVIRONMENT_KEYS = new Set(["ELECTRON_RUN_AS_NODE"]);
 const RESERVED_AGENT_ENVIRONMENT_PATTERN = /^CANVASTTY_AGENT_/i;
 
@@ -67,27 +67,6 @@ interface HermesRecoveryJournal {
   backupDirectory: string;
 }
 
-interface ConfigurationLock {
-  descriptor: number;
-  nonce: string;
-  device: number;
-  inode: number;
-}
-
-interface ConfigurationLockFile {
-  version: 1;
-  pid: number;
-  createdAt: number;
-  nonce: string;
-}
-
-interface ExistingConfigurationLock {
-  value: ConfigurationLockFile;
-  raw: string;
-  device: number;
-  inode: number;
-}
-
 export class HermesTemporaryConfiguration {
   readonly hasOrchestrationEntry: boolean;
   private readonly paths: ReturnType<typeof hermesPaths>;
@@ -108,7 +87,7 @@ export class HermesTemporaryConfiguration {
     if (options.orchestrationHelper) validateHelper(options.orchestrationHelper);
     mkdirSync(options.homeDirectory, { recursive: true, mode: CONFIG_DIRECTORY_MODE });
     const paths = hermesPaths(options.homeDirectory);
-    const lock = acquireLock(paths.lock);
+    const lock = acquireConfigurationLock(paths.lock, "Hermes");
     try {
       this.recoverLocked(paths);
       const ownershipId = randomUUID();
@@ -134,7 +113,7 @@ export class HermesTemporaryConfiguration {
       const backupDirectory = join(paths.backupRoot, ownershipId);
       mkdirSync(backupDirectory, { recursive: true, mode: CONFIG_DIRECTORY_MODE });
       chmodSync(backupDirectory, CONFIG_DIRECTORY_MODE);
-      if (configOriginal !== null) backup(paths.config, join(backupDirectory, "config.yaml"));
+      if (configOriginal !== null) backupFile(paths.config, join(backupDirectory, "config.yaml"));
 
       const journal: HermesRecoveryJournal = {
         version: 1,
@@ -147,7 +126,7 @@ export class HermesTemporaryConfiguration {
         backupDirectory
       };
       atomicWrite(paths.journal, `${canonicalStringify(journal)}\n`);
-      writeExactWithCas(paths.config, configOriginal, configMutated);
+      writeExactWithCas(paths.config, configOriginal, configMutated, "Hermes");
       return new HermesTemporaryConfiguration(paths, journal);
     } catch (error) {
       try {
@@ -157,30 +136,30 @@ export class HermesTemporaryConfiguration {
       }
       throw error;
     } finally {
-      releaseLock(paths.lock, lock);
+      releaseConfigurationLock(paths.lock, lock, "Hermes");
     }
   }
 
   static recover(homeDirectory: string): void {
     if (!existsSync(homeDirectory)) return;
     const paths = hermesPaths(homeDirectory);
-    const lock = acquireLock(paths.lock);
+    const lock = acquireConfigurationLock(paths.lock, "Hermes");
     try {
       this.recoverLocked(paths);
     } finally {
-      releaseLock(paths.lock, lock);
+      releaseConfigurationLock(paths.lock, lock, "Hermes");
     }
   }
 
   cleanup(): void {
     if (this.cleaned) return;
-    const lock = acquireLock(this.paths.lock);
+    const lock = acquireConfigurationLock(this.paths.lock, "Hermes");
     try {
       cleanupOwnedConfiguration(this.paths, this.journal);
       removeRecoveryArtifacts(this.paths, this.journal);
       this.cleaned = true;
     } finally {
-      releaseLock(this.paths.lock, lock);
+      releaseConfigurationLock(this.paths.lock, lock, "Hermes");
     }
   }
 
@@ -274,10 +253,11 @@ function cleanupOwnedConfiguration(
   const current = readOptional(paths.config);
   if (current === null) return;
   if (hashText(current) === journal.configMutatedHash) {
-    restoreOriginal(
+    restoreFromBackup(
       paths.config,
       journal.configOriginalHash,
-      join(journal.backupDirectory, "config.yaml")
+      join(journal.backupDirectory, "config.yaml"),
+      "CanvasTTY Hermes configuration backup is unavailable or invalid."
     );
     return;
   }
@@ -369,18 +349,6 @@ function parseJournal(
   return value as unknown as HermesRecoveryJournal;
 }
 
-function restoreOriginal(path: string, originalHash: string | null, backupPath: string): void {
-  if (originalHash === null) {
-    unlinkIfExists(path);
-    return;
-  }
-  const backupContent = readOptional(backupPath);
-  if (backupContent === null || hashText(backupContent) !== originalHash) {
-    throw new Error("CanvasTTY Hermes configuration backup is unavailable or invalid.");
-  }
-  atomicWrite(path, backupContent, existingMode(path));
-}
-
 function removeRecoveryArtifacts(
   paths: ReturnType<typeof hermesPaths>,
   journal: HermesRecoveryJournal
@@ -398,222 +366,6 @@ function hermesPaths(homeDirectory: string) {
     journal: join(homeDirectory, ".canvastty-hermes-browser-recovery.json"),
     backupRoot: join(homeDirectory, ".canvastty-hermes-browser-backups")
   };
-}
-
-function acquireLock(path: string): ConfigurationLock {
-  for (let attempt = 0; attempt < MAX_STALE_LOCK_RETRIES; attempt += 1) {
-    try {
-      return createLock(path);
-    } catch (error) {
-      if (!hasErrorCode(error, "EEXIST")) throw error;
-      const existing = readExistingLock(path);
-      if (lockOwnerState(existing.value.pid) === "live") {
-        throw new Error("Another CanvasTTY process is updating Hermes configuration.");
-      }
-      if (!unlinkDeadLock(path, existing)) continue;
-    }
-  }
-  throw new Error("CanvasTTY could not acquire the Hermes configuration lock safely.");
-}
-
-function createLock(path: string): ConfigurationLock {
-  const descriptor = openSync(path, "wx", CONFIG_FILE_MODE);
-  const identity = fstatSync(descriptor);
-  const nonce = randomBytes(16).toString("hex");
-  try {
-    writeFileSync(descriptor, `${canonicalStringify({
-      version: 1,
-      pid: process.pid,
-      createdAt: Date.now(),
-      nonce
-    })}\n`, "utf8");
-    fsyncSync(descriptor);
-    return { descriptor, nonce, device: identity.dev, inode: identity.ino };
-  } catch (error) {
-    closeSync(descriptor);
-    throw error;
-  }
-}
-
-function readExistingLock(path: string): ExistingConfigurationLock {
-  let descriptor: number | null = null;
-  try {
-    const pathIdentity = lstatSync(path);
-    if (!pathIdentity.isFile() || pathIdentity.isSymbolicLink() || pathIdentity.size > MAX_LOCK_FILE_BYTES) {
-      throw invalidLockError();
-    }
-    descriptor = openSync(path, "r");
-    const descriptorIdentity = fstatSync(descriptor);
-    if (
-      !descriptorIdentity.isFile()
-      || descriptorIdentity.size > MAX_LOCK_FILE_BYTES
-      || descriptorIdentity.dev !== pathIdentity.dev
-      || descriptorIdentity.ino !== pathIdentity.ino
-    ) throw invalidLockError();
-    const raw = readFileSync(descriptor, "utf8");
-    const finalIdentity = lstatSync(path);
-    if (
-      !finalIdentity.isFile()
-      || finalIdentity.isSymbolicLink()
-      || finalIdentity.dev !== descriptorIdentity.dev
-      || finalIdentity.ino !== descriptorIdentity.ino
-    ) throw changedLockError();
-    return {
-      value: parseLockFile(raw),
-      raw,
-      device: descriptorIdentity.dev,
-      inode: descriptorIdentity.ino
-    };
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) throw changedLockError();
-    throw error;
-  } finally {
-    if (descriptor !== null) closeSync(descriptor);
-  }
-}
-
-function parseLockFile(raw: string): ConfigurationLockFile {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw invalidLockError();
-  }
-  if (!isRecord(value)) throw invalidLockError();
-  if (
-    Reflect.ownKeys(value).length !== 4
-    || value.version !== 1
-    || !Number.isSafeInteger(value.pid)
-    || (value.pid as number) <= 0
-    || typeof value.createdAt !== "number"
-    || !Number.isFinite(value.createdAt)
-    || typeof value.nonce !== "string"
-    || !/^[0-9a-f]{32}$/iu.test(value.nonce)
-  ) throw invalidLockError();
-  return value as unknown as ConfigurationLockFile;
-}
-
-function lockOwnerState(pid: number): "live" | "dead" {
-  try {
-    process.kill(pid, 0);
-    return "live";
-  } catch (error) {
-    if (hasErrorCode(error, "EPERM")) return "live";
-    if (hasErrorCode(error, "ESRCH")) return "dead";
-    throw new Error("CanvasTTY Hermes configuration lock owner status is ambiguous.");
-  }
-}
-
-function unlinkDeadLock(path: string, existing: ExistingConfigurationLock): boolean {
-  try {
-    const current = readExistingLock(path);
-    if (
-      current.device !== existing.device
-      || current.inode !== existing.inode
-      || current.raw !== existing.raw
-    ) throw changedLockError();
-    unlinkSync(path);
-    return true;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return false;
-    throw error;
-  }
-}
-
-function releaseLock(path: string, lock: ConfigurationLock): void {
-  let descriptorClosed = false;
-  try {
-    assertLockOwnership(path, lock);
-    closeSync(lock.descriptor);
-    descriptorClosed = true;
-    assertLockOwnership(path, lock);
-    unlinkSync(path);
-  } finally {
-    if (!descriptorClosed) closeSync(lock.descriptor);
-  }
-}
-
-function assertLockOwnership(path: string, lock: ConfigurationLock): void {
-  let value: unknown;
-  try {
-    value = JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    throw new Error("CanvasTTY Hermes configuration lock ownership cannot be verified.");
-  }
-  const identity = statSync(path);
-  if (
-    !isRecord(value)
-    || value.version !== 1
-    || value.nonce !== lock.nonce
-    || identity.dev !== lock.device
-    || identity.ino !== lock.inode
-  ) throw new Error("CanvasTTY Hermes configuration lock ownership changed before release.");
-}
-
-function invalidLockError(): Error {
-  return new Error("CanvasTTY Hermes configuration lock is invalid or foreign.");
-}
-
-function changedLockError(): Error {
-  return new Error("CanvasTTY Hermes configuration lock changed during stale recovery.");
-}
-
-function writeExactWithCas(path: string, expected: string | null, next: string): void {
-  if (readOptional(path) !== expected) throw new Error(`Hermes configuration changed concurrently: ${path}`);
-  atomicWrite(path, next, existingMode(path));
-}
-
-function backup(source: string, destination: string): void {
-  copyFileSync(source, destination);
-  chmodSync(destination, CONFIG_FILE_MODE);
-}
-
-function atomicWrite(path: string, content: string, mode = CONFIG_FILE_MODE): void {
-  mkdirSync(dirname(path), { recursive: true, mode: CONFIG_DIRECTORY_MODE });
-  const temporary = `${path}.canvastty-${process.pid}-${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(temporary, content, { encoding: "utf8", mode, flag: "wx" });
-  chmodSync(temporary, mode);
-  try {
-    renameSync(temporary, path);
-    chmodSync(path, mode);
-  } catch (error) {
-    unlinkIfExists(temporary);
-    throw error;
-  }
-}
-
-function existingMode(path: string): number {
-  try {
-    return statSync(path).mode & 0o777;
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return CONFIG_FILE_MODE;
-    throw error;
-  }
-}
-
-function readOptional(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (error) {
-    if (hasErrorCode(error, "ENOENT")) return null;
-    throw error;
-  }
-}
-
-function unlinkIfExists(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT")) throw error;
-  }
-}
-
-function removeEmptyDirectory(path: string): void {
-  try {
-    rmdirSync(path);
-  } catch (error) {
-    if (!hasErrorCode(error, "ENOENT") && !hasErrorCode(error, "ENOTEMPTY")) throw error;
-  }
 }
 
 function validateHelper(helper: HermesStdioHelperLaunch): void {
@@ -636,18 +388,6 @@ function validateHelper(helper: HermesStdioHelperLaunch): void {
       throw new Error(`CanvasTTY browser helper environment value is invalid: ${key}`);
     }
   }
-}
-
-function hashCanonical(value: unknown): string {
-  return hashText(canonicalStringify(value));
-}
-
-function hashText(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function hasErrorCode(error: unknown, code: string): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === code);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
