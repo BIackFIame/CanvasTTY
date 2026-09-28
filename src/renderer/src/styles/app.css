@@ -54,11 +54,13 @@ button { border: 0; }
 /* The scene deliberately has NO will-change in the resting state: promoting it
    would make Chromium reuse a raster cached at the old scale, so text and icons
    would be upscaled bitmaps while the camera zooms. The hint is therefore scoped
-   to the two moments where compositing actually pays off - an active pan and an
-   active zoom - and dropped once the gesture settles, which lets the scene be
-   re-rasterized at the new scale. */
+   to the moments where compositing actually pays off - an active pan (pointer
+   drag or wheel/trackpad) and an active zoom - and dropped once the gesture
+   settles, which lets the scene be re-rasterized at the new scale. Without it a
+   wheel pan repainted the whole scene every frame. */
 .workspace__scene { position: absolute; inset: 0; width: 1px; height: 1px; transform-origin: 0 0; }
 .workspace--panning .workspace__scene,
+.workspace--wheel-panning .workspace__scene,
 .workspace--zooming .workspace__scene { will-change: transform; }
 .workspace__regions { position: absolute; left: 0; top: 0; }
 .workspace__windows { position: absolute; left: 0; top: 0; }

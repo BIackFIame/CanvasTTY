@@ -14,6 +14,7 @@ import {
   type CanvasWheelDeltas
 } from "../../../../shared/canvasNavigation";
 import { routeCanvasWheelEvent } from "./canvasWheelRouting";
+import { createGestureSettle } from "./gestureSettle";
 import type { CanvasWidgetFocusState } from "./useCanvasWidgetFocus";
 
 export interface CanvasWheelInput extends CanvasWheelDeltas {
@@ -37,12 +38,11 @@ export interface CanvasWheelNavigationController {
   routeWidgetWheelToCanvas: boolean;
   /** True from the first zooming step until 160 ms of silence. */
   zooming: boolean;
+  /** True from the first wheel (trackpad) pan step until 160 ms of silence. */
+  wheelPanning: boolean;
   applyCanvasWheel(event: CanvasWheelInput): void;
   zoomBy(factor: number): void;
 }
-
-/** Trail after the last zoom step before the gesture is considered over. */
-const MARK_GESTURE_SETTLE_MS = 160;
 
 export function useCanvasWheelNavigation({
   viewport,
@@ -60,18 +60,12 @@ export function useCanvasWheelNavigation({
   const panFrame = useRef<number | null>(null);
   const pendingPan = useRef<Point>({ x: 0, y: 0 });
   const [zooming, setZooming] = useState(false);
-  const zoomSettleTimer = useRef<number | null>(null);
-
-  // Trailing edge only: every zoom step restarts the timer, so a continuous
-  // wheel or pinch keeps the gesture open and only silence closes it.
-  const markZoomGesture = useCallback((): void => {
-    setZooming(true);
-    if (zoomSettleTimer.current !== null) window.clearTimeout(zoomSettleTimer.current);
-    zoomSettleTimer.current = window.setTimeout(() => {
-      zoomSettleTimer.current = null;
-      setZooming(false);
-    }, MARK_GESTURE_SETTLE_MS);
-  }, []);
+  const [zoomGesture] = useState(() => createGestureSettle(setZooming));
+  const markZoomGesture = zoomGesture.mark;
+  // A wheel pan only translates the scene, so compositing it (app.css) moves the cached raster
+  // instead of repainting every card on every frame; unlike a zoom there is no scale to go stale.
+  const [wheelPanning, setWheelPanning] = useState(false);
+  const [panGesture] = useState(() => createGestureSettle(setWheelPanning));
 
   const zoomAt = useCallback((clientX: number, clientY: number, nextZoom: number): void => {
     const bounds = viewport.current?.getBoundingClientRect();
@@ -110,17 +104,19 @@ export function useCanvasWheelNavigation({
     if (intent.kind === "pan") {
       pendingPan.current.x += intent.deltaX;
       pendingPan.current.y += intent.deltaY;
+      panGesture.mark();
       if (panFrame.current === null) panFrame.current = requestAnimationFrame(flushPan);
       return;
     }
     flushPan();
     zoomAt(event.clientX, event.clientY, clamp(cameraRef.current.zoom * intent.factor, 0.2, 1.35));
-  }, [cameraRef, flushPan, zoomAt]);
+  }, [cameraRef, flushPan, panGesture, zoomAt]);
 
   useEffect(() => () => {
     if (panFrame.current !== null) cancelAnimationFrame(panFrame.current);
-    if (zoomSettleTimer.current !== null) window.clearTimeout(zoomSettleTimer.current);
-  }, []);
+    zoomGesture.dispose();
+    panGesture.dispose();
+  }, [panGesture, zoomGesture]);
 
   useEffect(() => window.canvasTTY.canvasNavigation.onOverrideState(({ wheelActive, navigationActive }) => {
     wheelOverrideActiveRef.current = wheelActive;
@@ -241,6 +237,7 @@ export function useCanvasWheelNavigation({
       navigationOverrideActive: canvasOverrideActive
     }),
     zooming,
+    wheelPanning,
     applyCanvasWheel,
     zoomBy
   };

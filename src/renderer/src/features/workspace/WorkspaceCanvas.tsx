@@ -783,7 +783,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   return (
     <div
       ref={viewport}
-      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
+      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${wheelNavigation.wheelPanning ? "workspace--wheel-panning" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
       onPointerDownCapture={(event) => {
         if (openRadialLauncher(event)) return;
         const element = event.target as HTMLElement;
