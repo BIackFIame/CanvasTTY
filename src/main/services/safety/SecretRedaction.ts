@@ -30,14 +30,20 @@ const MAX_OWNERS = 512;
 /** What wrapping may put between two characters of a key: whitespace and line breaks, box-drawing sides. */
 const MAX_WRAP_GAP = 64;
 /**
- * redactTail masks a window that starts this far (at least) before the tail it returns. Every rule except the
- * PEM block (handled apart) and runs of one character class matches at most a few thousand characters, so a
- * match the window's start cuts short ends long before the tail begins; the tail comes out as masking the whole
- * text would leave it.
+ * redactTail masks a window that starts about this far before the tail it returns, so that masking, which can
+ * shorten the text, still leaves at least the tail after the window's start.
  */
 const TAIL_MARGIN_CHARS = 16_384;
+/**
+ * How much further back than the margin redactTail looks for a line start no match can cross (see
+ * safeWindowStart); where there is none, it masks the whole text.
+ */
+const TAIL_SEARCH_CHARS = 65_536;
+/** The longest value JSON_SECRET_VALUE takes, the one rule whose value may run over a line break. */
+const JSON_VALUE_MAX_CHARS = 2_048;
 const PRIVATE_KEY_HEADER = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
 const PRIVATE_KEY_FOOTER = /-----END [A-Z0-9 ]{0,40}PRIVATE KEY-----/gu;
+const PRIVATE_KEY_HEADER_TEXT = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----/u;
 const JSON_SECRET_VALUE = /("(?:[A-Za-z0-9_.-]{0,40}(?:api[_-]?key|token|secret|password|authorization))"\s*:\s*")(?!<redacted:)[^"]{1,2048}("?)/giu;
 
 /** The search forms of the held values. */
@@ -46,8 +52,10 @@ type KnownForms = {
   bare: readonly string[];
   /** Each value and JSON-escaped form that holds wrap characters, exactly as written. */
   exact: readonly string[];
+  /** A held value holds a PEM armour line (`-----`): masking it can change where a private-key block ends. */
+  armour: boolean;
 };
-const NO_FORMS: KnownForms = { bare: [], exact: [] };
+const NO_FORMS: KnownForms = { bare: [], exact: [], armour: false };
 
 export class SecretRedactionRegistry {
   private readonly owners = new Map<string, Set<string>>();
@@ -88,23 +96,23 @@ export class SecretRedactionRegistry {
 
   /**
    * The same text as `redact(text)` cut to its last `maxChars` characters, without masking the whole text: a
-   * card's 240 000-character scrollback costs as much as its last `maxChars` plus a margin wider than any match
-   * (the margin grows with the longest held value and its wrap gaps). A secret the tail's cut splits lies inside
-   * the window and is masked whole, exactly as before; an open PEM block starts the window at its header.
+   * card's 240 000-character scrollback costs as much as its last `maxChars` plus a margin (wider when a held
+   * value could wrap over it). The window starts at a line start that no match of any rule or held value
+   * crosses (safeWindowStart), so everything after it masks exactly as in the whole text; where no such line
+   * start is near, or masking left less than the tail after it, the whole text is masked.
    */
   redactTail(text: string, maxChars: number): string {
     if (typeof text !== 'string' || text.length === 0 || maxChars <= 0) return '';
-    this.knownForms();
+    const forms = this.knownForms();
     const margin = Math.max(TAIL_MARGIN_CHARS, 2 * this.knownSpan + 4_096);
     if (text.length <= maxChars + margin) return lastChars(this.redact(text), maxChars);
-    let start = text.length - maxChars - margin;
-    start = openPrivateKeyStart(text, start) ?? start;
-    // Begin on a line: the cut then falls where most rules cannot continue anyway.
-    const lineStart = text.lastIndexOf('\n', start);
-    if (lineStart >= 0 && start - lineStart <= 4_096) start = lineStart + 1;
+    // Masking a held value that holds PEM armour can move where a private-key block ends; only the whole text
+    // tells where.
+    if (forms.armour && PRIVATE_KEY_HEADER_TEXT.test(text)) return lastChars(this.redact(text), maxChars);
+    const start = safeWindowStart(text, text.length - maxChars - margin, forms, this.knownSpan);
+    if (start === null) return lastChars(this.redact(text), maxChars);
     const masked = this.redact(text.slice(start));
-    // Masking shortened the window so much that the tail would reach back into its first half: mask everything.
-    if (masked.length - maxChars < margin / 2) return lastChars(this.redact(text), maxChars);
+    if (masked.length < maxChars) return lastChars(this.redact(text), maxChars);
     return lastChars(masked, maxChars);
   }
 
@@ -114,8 +122,10 @@ export class SecretRedactionRegistry {
     const bare = new Set<string>();
     const exact = new Set<string>();
     let longest = 0;
+    let armour = false;
     for (const values of this.owners.values()) {
       for (const value of values) {
+        if (value.includes('-----')) armour = true;
         for (const form of [value, JSON.stringify(value).slice(1, -1)]) {
           longest = Math.max(longest, form.length);
           const stripped = withoutWrapCharacters(form);
@@ -129,7 +139,7 @@ export class SecretRedactionRegistry {
       }
     }
     const longestFirst = (a: string, b: string): number => b.length - a.length;
-    this.forms = { bare: [...bare].sort(longestFirst), exact: [...exact].sort(longestFirst) };
+    this.forms = { bare: [...bare].sort(longestFirst), exact: [...exact].sort(longestFirst), armour };
     // A form of n characters matches at most n characters plus a full wrap gap between each two.
     this.knownSpan = longest * (MAX_WRAP_GAP + 1);
     this.dirty = false;
@@ -237,25 +247,92 @@ function lastChars(text: string, maxChars: number): string {
 }
 
 /**
- * Where a PEM private-key block that is still open at `start` begins (its END is at or after `start`, or
- * missing), or null. Such a block is masked from its header to its END or the end of the text, so the
- * window must include the header.
+ * Where the window of redactTail may start: the start of a line at or before `desired`, and not more than
+ * TAIL_SEARCH_CHARS before it, that no match of a held value or of a rule crosses. From such a line start on,
+ * masking the window yields exactly what masking the whole text yields there: every pass (held values, JSON
+ * values, each rule) finds the same matches after it, and a lookbehind at it sees a line break in the whole text
+ * and the start in the window, which every rule treats alike. Null when there is none.
+ *
+ * Which matches can run over a line break, and what rules each out at a line start `b`:
+ * - a private-key block, from its header to its END or the end of the text: `b` lies in no such block;
+ * - a wrapped token or high-entropy run, which goes on over a line break right after a run character, and a
+ *   separator's whitespace (`Authorization:`, `Bearer`, `name =`, `"key":`): the last character before `b` that is
+ *   not whitespace is none those continue after (a letter, digit, `+ = _ - : " '`, or `>` of `=>`);
+ * - a JSON value under a key-like name, up to JSON_VALUE_MAX_CHARS characters of anything but `"`: no such
+ *   value is open at `b` (the last `"` before `b` is not preceded by `:`, or lies further back);
+ * - a held value, which can hold line breaks: none of their matches crosses `b` or covers the characters the
+ *   two checks above read (masking one there could change what they see).
+ * Masking before `b` only puts `<redacted:…>` markers there, whose last character `>` none of the above
+ * continues after, so the checks hold for every pass, not only on the text as it came.
  */
-function openPrivateKeyStart(text: string, start: number): number | null {
-  let from = start;
-  for (;;) {
-    const begin = text.lastIndexOf('-----BEGIN ', from);
-    if (begin < 0) return null;
-    PRIVATE_KEY_HEADER.lastIndex = begin;
-    const header = PRIVATE_KEY_HEADER.exec(text);
-    if (header && header.index === begin) {
-      PRIVATE_KEY_FOOTER.lastIndex = begin + header[0].length;
-      const footer = PRIVATE_KEY_FOOTER.exec(text);
-      return footer && footer.index + footer[0].length <= start ? null : begin;
+function safeWindowStart(text: string, desired: number, forms: KnownForms, knownSpan: number): number | null {
+  const floor = Math.max(0, desired - TAIL_SEARCH_CHARS);
+  const blocks = privateKeyBlocks(text, desired + 1);
+  const seen = new Map<number, boolean>();
+  let b = text.lastIndexOf('\n', desired - 1) + 1;
+  while (b > floor) {
+    const block = blocks.find(([from, to]) => from < b && b < to);
+    if (block) {
+      b = text.lastIndexOf('\n', block[0] - 1) + 1;
+      continue;
     }
-    if (begin === 0) return null;
-    from = begin - 1;
+    // The last character before `b` that is not whitespace; every line start in the whitespace before it
+    // shares it, so the search goes on from its line.
+    let last = b - 1;
+    while (last >= 0 && WHITESPACE.test(text[last]!)) last--;
+    if (isLineStartUncrossed(text, b, last, forms, knownSpan, seen)) return b;
+    b = last < 0 ? 0 : text.lastIndexOf('\n', Math.min(last, b - 2)) + 1;
   }
+  return null;
+}
+
+/** The private-key blocks the PEM rule masks that start before `limit`: from each header to its END or the end. */
+function privateKeyBlocks(text: string, limit: number): Array<[number, number]> {
+  const blocks: Array<[number, number]> = [];
+  PRIVATE_KEY_HEADER.lastIndex = 0;
+  for (;;) {
+    const header = PRIVATE_KEY_HEADER.exec(text);
+    if (!header || header.index >= limit) return blocks;
+    PRIVATE_KEY_FOOTER.lastIndex = header.index + header[0].length;
+    const footer = PRIVATE_KEY_FOOTER.exec(text);
+    const end = footer ? footer.index + footer[0].length : text.length;
+    blocks.push([header.index, end]);
+    PRIVATE_KEY_HEADER.lastIndex = end;
+  }
+}
+
+const WHITESPACE = /\s/u;
+
+/** Whether the `"` at `quote` follows a `:` (whitespace between); answers are kept per search in `seen`. */
+function opensJsonValue(text: string, quote: number, seen: Map<number, boolean>): boolean {
+  let answer = seen.get(quote);
+  if (answer === undefined) {
+    let before = quote - 1;
+    while (before >= 0 && WHITESPACE.test(text[before]!)) before--;
+    answer = before >= 0 && text[before] === ':';
+    seen.set(quote, answer);
+  }
+  return answer;
+}
+/** Characters after which a wrapped run or a separator's whitespace may go on over a line break. */
+const CONTINUED_AFTER = /[A-Za-z0-9+=_\-:"']/u;
+
+function isLineStartUncrossed(text: string, b: number, last: number, forms: KnownForms, knownSpan: number, seen: Map<number, boolean>): boolean {
+  if (last >= 0 && (CONTINUED_AFTER.test(text[last]!) || (text[last] === '>' && text[last - 1] === '='))) return false;
+  let quote = text.lastIndexOf('"', b - 1);
+  if (quote >= 0 && b - quote <= JSON_VALUE_MAX_CHARS + 2) {
+    if (opensJsonValue(text, quote, seen)) return false;
+  } else quote = b;
+  if (forms.bare.length === 0 && forms.exact.length === 0) return true;
+  // Held-value matches that start before `b` lie within knownSpan of it.
+  const checkFrom = Math.max(0, Math.min(last, quote));
+  const from = Math.max(0, checkFrom - knownSpan);
+  const endAt = knownMatchEnds(text.slice(from, Math.min(text.length, b + knownSpan)), forms);
+  if (!endAt) return true;
+  for (let at = 0; from + at < b; at++) {
+    if (endAt[at] !== 0 && from + endAt[at] > checkFrom) return false;
+  }
+  return true;
 }
 
 type Rule = { kind: string; pattern: RegExp; replace?: (match: string, ...groups: string[]) => string };

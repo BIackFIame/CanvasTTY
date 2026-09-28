@@ -431,3 +431,46 @@ test("registry: an accepted value is masked where it stands even when its wrap c
     assert.equal(registry.redactTail(text, 8_192), registry.redact(text).slice(-8_192), `tail at ${at}`);
   }
 });
+
+test("redactTail equals masking the whole text when a match with no length bound starts before the window", () => {
+  const registry = new SecretRedactionRegistry();
+  const pem = (body) => `-----${"BEGIN"} RSA ${"PRIVATE"} KEY-----\n${body}\n-----${"END"} RSA ${"PRIVATE"} KEY-----`;
+  const wrappedToken = `${sk(run("w", 22))}${`\n${run("1", 3)}${run("x", 76)}`.repeat(500)}`;
+  const long = {
+    "quoted assignment": `password="${"a ".repeat(20_000)}"`,
+    "single-quoted assignment": `api_key='${"b ".repeat(20_000)}'`,
+    "unquoted assignment": `export GITHUB_TOKEN=${"c".repeat(40_000)}`,
+    "assignment over blank lines": `SECRET_KEY =${"\n".repeat(30_000)}${run("d", 12)}`,
+    "authorization over spaces": `Authorization:${" ".repeat(30_000)}${run("e", 12)}`,
+    "bearer over lines": `Bearer${"\r\n".repeat(15_000)}${run("f", 12)}`,
+    "url query": `https://example.test/?token=${"g".repeat(40_000)}`,
+    "url userinfo": `https://${"h".repeat(40_000)}:pw@example.test/`,
+    "json key over lines": `"apiKey":${"\n".repeat(30_000)}"${run("i", 30)}"`,
+    "wrapped token": wrappedToken,
+    "nested private-key header": pem(`${run("N", 64)}\n`.repeat(200) + pem(run("M", 64)).split("\n-----END")[0])
+  };
+  const base = scrollback(40_000);
+  for (const [name, sample] of Object.entries(long)) {
+    for (const maxChars of [300, 8_192]) {
+      // The match ends just inside the tail, a little before it, and far before it.
+      for (const after of [maxChars - 40, maxChars + 200, maxChars + 12_000]) {
+        const at = base.length - after;
+        const text = `${base.slice(0, at)}\n${sample}\n${base.slice(at)}`;
+        assert.equal(registry.redactTail(text, maxChars), registry.redact(text).slice(-maxChars), `${name} ${maxChars} ${after}`);
+      }
+    }
+  }
+  // A held value that holds a private key: masking it decides where the PEM rule sees a block.
+  const armoured = new SecretRedactionRegistry();
+  const keyValue = `{"private_key": "${pem(run("K", 64)).replace(/\n/gu, "\\n")}", "id": "${run("j", 12)}"}`;
+  armoured.add("plugin:p.sa", [pem(`${run("P", 64)}\n`.repeat(3)), keyValue]);
+  for (const after of [8_192 - 40, 8_192 + 200, 8_192 + 16_384 + 100]) {
+    const at = base.length - after;
+    const text = `${base.slice(0, at)}\n${pem(`${run("P", 64)}\n`.repeat(3))}\n${pem(run("Q", 64))}\n${base.slice(at)}`;
+    assert.equal(armoured.redactTail(text, 8_192), armoured.redact(text).slice(-8_192), `held private key ${after}`);
+  }
+  // The case from review: an otherwise empty registry and one long quoted value.
+  const text = `start\n${long["quoted assignment"]}\nend`;
+  assert.equal(registry.redactTail(text, 8_192), registry.redact(text).slice(-8_192));
+  assert.equal(registry.redactTail(text, 8_192).includes("a a a"), false);
+});
