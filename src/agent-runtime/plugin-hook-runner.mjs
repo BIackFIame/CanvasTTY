@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { readFile, realpath } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, resolve } from "node:path";
+import { isPathInside } from "./path-inside.mjs";
 
 const MAX_INPUT_BYTES = 1024 * 1024;
 const MAX_REGISTRY_BYTES = 1024 * 1024;
@@ -42,8 +43,7 @@ try {
 
   const root = await realpath(hook.root);
   const entry = await realpath(resolve(root, hook.entry));
-  const relation = relative(root, entry);
-  if (relation === ".." || relation.startsWith(`..${sep}`) || isAbsolute(relation)) process.exit(0);
+  if (!isPathInside(root, entry)) process.exit(0);
 
   let payload = raw;
   try {

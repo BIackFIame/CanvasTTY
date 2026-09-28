@@ -1,5 +1,5 @@
-import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
-export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS };
+import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
+export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId };
 export type { CanvasLauncherItemId, ProviderId };
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
@@ -44,6 +44,8 @@ export type RadialLauncherItemId = ProviderId | RadialLauncherActionId;
 /** Every agent provider (the launcher list without the plain terminal). */
 export const AGENT_PROVIDERS: readonly AgentProviderId[] = CANVAS_LAUNCHER_ITEMS
   .filter((item): item is AgentProviderId => item !== "terminal");
+/** The providers whose usage limits CanvasTTY reads, in display order. */
+export const LIMIT_PROVIDERS: readonly LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 // Keeps the safe provider subset proposed by @TroopJostle in PR #23 while
 // region, note, Browser, and Settings remain fixed top-level menu actions.
 export const DEFAULT_CANVAS_LAUNCHER_ITEMS: readonly CanvasLauncherItemId[] = [
@@ -54,25 +56,7 @@ export const DEFAULT_CANVAS_LAUNCHER_ITEMS: readonly CanvasLauncherItemId[] = [
   "terminal"
 ];
 
-export const RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [
-  "codex",
-  "claude",
-  "qwen",
-  "kimi",
-  "opencode",
-  "hermes",
-  "grok",
-  "omp",
-  "pi",
-  "cursor",
-  "minimax",
-  "devin",
-  "antigravity",
-  "terminal",
-  "note",
-  "browser",
-  "settings"
-];
+export const RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [...CANVAS_LAUNCHER_ITEMS, "note", "browser", "settings"];
 
 export const DEFAULT_RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [
   "codex",
@@ -1411,7 +1395,8 @@ export interface CanvasTTYApi {
     dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
-    onData(listener: (event: TerminalDataEvent) => void): () => void;
+    /** With `id`, only that session's output (one context-bridge call per batch instead of one per card). */
+    onData(listener: (event: TerminalDataEvent) => void, id?: string): () => void;
     onSession(listener: (event: SessionEvent) => void): () => void;
     onRemoved(listener: (event: SessionRemovedEvent) => void): () => void;
   };
@@ -1548,6 +1533,8 @@ export const IPC = {
   terminalSetRestore: "terminal:set-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
+  /** Main -> renderer: the TerminalDataEvents of one output flush, in order (see TerminalRendererOutbox). */
+  terminalDataBatch: "terminal:data-batch",
   terminalSession: "terminal:session",
   terminalRemoved: "terminal:removed",
   windowMinimize: "window:minimize",

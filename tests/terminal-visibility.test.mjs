@@ -49,9 +49,9 @@ test("a hidden session keeps history but stops streaming, then replays exactly t
   assert.equal(snapshot.outputOffset, visibleOffset + "hidden\r\n".length);
 
   manager.setVisible(id, true);
-  assert.equal(emitted.length, 2, "becoming visible replays the current buffer once");
+  assert.equal(emitted.length, 2, "becoming visible replays the missed output once");
   const replay = emitted[1];
-  assert.equal(replay.data, "visible\r\nhidden\r\n");
+  assert.equal(replay.data, "hidden\r\n", "only the output produced while hidden, not the history the card already has");
   assert.equal(replay.outputOffset, snapshot.outputOffset, "the replay carries the current absolute offset");
   // The renderer slices from its own offset, so the event must cover the whole
   // hidden stretch and start at or before everything the card already wrote.

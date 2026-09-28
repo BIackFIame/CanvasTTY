@@ -1,5 +1,5 @@
 import { tmpdir } from 'node:os';
-import { isAbsolute, relative } from 'node:path';
+import { isPathInside } from '../../../agent-runtime/path-inside.mjs';
 import { analyzeAction, commandFromArgv, realish, type HardFacts, type ToolAction } from './commandFacts.ts';
 
 /**
@@ -9,7 +9,7 @@ import { analyzeAction, commandFromArgv, realish, type HardFacts, type ToolActio
  * model: local rules only, no git, no network.
  */
 
-export const BASE_DENY_RULES = ['elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
+const BASE_DENY_RULES = ['elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
 export type BaseDenyRule = typeof BASE_DENY_RULES[number];
 
 /** What the model reads: why the call was refused and what to do instead. */
@@ -126,7 +126,7 @@ function temporaryRoots(): string[] {
   return [...roots];
 }
 
-const within = (path: string, root: string): boolean => { const rel = relative(root, path); return rel === '' || !rel.startsWith('..') && !isAbsolute(rel); };
+const within = (path: string, root: string): boolean => isPathInside(root, path);
 
 function writesOnlyToTemp(facts: HardFacts): boolean {
   if (facts.deletesOutside || !facts.outsideWrites.length) return false;

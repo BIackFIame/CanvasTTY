@@ -30,8 +30,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     ];
   }
 
-  async execute(sessionId: string, request: OrchestrationRequest): Promise<Record<string, unknown>> {
+  async execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
+      if (signal?.aborted) throw canceledError();
       const session = this.control.status(sessionId);
       if (isPluginOrchestrationTool(request.tool)) return await this.plugin(sessionId, session, request);
       // Plugin tools may reach other roles' sessions through the same bridge; the core tools never do.
@@ -40,7 +41,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       }
       switch (request.tool) {
         case "spawn_agent":
-          return await this.spawn(sessionId, request.arguments);
+          return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
           return await this.send(sessionId, request.arguments);
         case "observe_agent":
@@ -82,7 +83,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
-  private async spawn(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
@@ -91,6 +92,15 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
       ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {})
     });
+    if (signal?.aborted) {
+      // Canceled while the agent was starting: nobody will receive its id, so close it.
+      try {
+        this.control.cancel(created.id);
+      } catch {
+        // It already ended.
+      }
+      throw canceledError();
+    }
     return {
       sessionId: created.id,
       provider: created.provider,
@@ -155,4 +165,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       );
     }
   }
+}
+
+function canceledError(): Error {
+  return orchestrationBridgeError("CANCELED", "Orchestration command was canceled.", true);
 }

@@ -540,3 +540,14 @@ test("a saved environment choice that cannot be read drops the card instead of r
     assert.deepEqual(read(bad), [], JSON.stringify(bad)?.slice(0, 60));
   }
 });
+
+test("the environment wrapper gets the launch's search path even when Windows spells it Path", async () => {
+  const { launchSearchPath } = await import("../src/main/services/TerminalManager.ts");
+  assert.equal(launchSearchPath({ Path: "C:\\Windows\\System32;C:\\tools" }, "win32"), "C:\\Windows\\System32;C:\\tools");
+  assert.equal(launchSearchPath({ PATH: "C:\\a", Path: "C:\\b" }, "win32"), "C:\\a");
+  assert.equal(launchSearchPath({ path: "C:\\lower" }, "win32"), "C:\\lower");
+  assert.equal(launchSearchPath({ Path: "/not/used" }, "linux"), undefined, "POSIX names are case-sensitive");
+  assert.equal(launchSearchPath({ PATH: "/usr/bin" }, "darwin"), "/usr/bin");
+  const source = await readFile(new URL("../src/main/services/TerminalManager.ts", import.meta.url), "utf8");
+  assert.match(source, /path: launchSearchPath\(planned\.env\)/);
+});

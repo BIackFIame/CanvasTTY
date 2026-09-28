@@ -1,5 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, unlink } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import type { Server, Socket } from "node:net";
 import { join } from "node:path";
@@ -23,6 +22,15 @@ import {
 } from "./orchestration-protocol.ts";
 import { ORCHESTRATION_TOOL_DEFINITIONS } from "../../../agent-browser/orchestration-catalog.mjs";
 import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
+import {
+  MAX_UNIX_SOCKET_PATH_BYTES,
+  closeServer,
+  listenOnEndpoint,
+  makePrivateDirectory,
+  removeEndpoint,
+  tokenDigest,
+  tokenMatches
+} from "../gatewaySocket.ts";
 
 const CAPABILITY_TTL_MS = 60_000;
 
@@ -106,26 +114,14 @@ export class OrchestrationGateway {
     let runtimeDirectory = this.runtimeDirectory;
     this.ownedRuntimeDirectory = null;
     let endpoint = join(runtimeDirectory, `orchestration-${randomUUID()}.sock`);
-    if (Buffer.byteLength(endpoint, "utf8") > 100) {
+    if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
       runtimeDirectory = join("/tmp", `ctty-orch-${process.getuid?.() ?? "user"}-${randomUUID().slice(0, 8)}`);
       this.ownedRuntimeDirectory = runtimeDirectory;
       endpoint = join(runtimeDirectory, "orchestration.sock");
     }
-    await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-    await chmod(runtimeDirectory, 0o700);
+    await makePrivateDirectory(runtimeDirectory, { recursive: true });
     this.socketEndpoint = endpoint;
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error): void => {
-        this.server.off("error", onError);
-        reject(error);
-      };
-      this.server.once("error", onError);
-      this.server.listen(this.socketEndpoint!, () => {
-        this.server.off("error", onError);
-        resolve();
-      });
-    });
-    await chmod(this.socketEndpoint, 0o600);
+    await listenOnEndpoint(this.server, endpoint);
     this.running = true;
     this.heartbeatTimer = setInterval(() => this.sweepConnections(), this.heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
@@ -138,19 +134,12 @@ export class OrchestrationGateway {
     }
     for (const connection of [...this.connections]) this.closeConnection(connection, "closed");
     for (const lease of [...this.leases.values()]) this.expireLease(lease);
-    await new Promise<void>((resolve) => {
-      this.server.close(() => resolve());
-    });
+    await closeServer(this.server);
     if (this.socketEndpoint !== null) {
-      await unlink(this.socketEndpoint).catch(() => undefined);
-      this.socketEndpoint = null;
+      await removeEndpoint(this.socketEndpoint, this.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
     }
-    if (this.ownedRuntimeDirectory !== null) {
-      await unlink(join(this.ownedRuntimeDirectory, "orchestration.sock")).catch(() => undefined);
-      const { rmdir } = await import("node:fs/promises");
-      await rmdir(this.ownedRuntimeDirectory).catch(() => undefined);
-      this.ownedRuntimeDirectory = null;
-    }
+    this.socketEndpoint = null;
+    this.ownedRuntimeDirectory = null;
     this.running = false;
   }
 
@@ -168,7 +157,7 @@ export class OrchestrationGateway {
     const lease: CapabilityLease = {
       connectionId,
       terminalSessionId: input.terminalSessionId,
-      tokenDigest: digest(token),
+      tokenDigest: tokenDigest(token),
       reconnectToken: null,
       reconnectTokenDigest: null,
       expiresAt: this.now() + this.capabilityTtlMs,
@@ -270,16 +259,11 @@ export class OrchestrationGateway {
     const failure = orchestrationBridgeError("AUTH_INVALID", "Orchestration capability rejected.", false);
     if (!lease) throw failure;
     if (message.connectionId !== lease.connectionId) throw failure;
-    const presented = digest(message.capabilityToken);
     let accepted = false;
-    if (!lease.used && this.now() <= lease.expiresAt && timingSafeEqual(lease.tokenDigest, presented)) {
+    if (!lease.used && this.now() <= lease.expiresAt && tokenMatches(message.capabilityToken, lease.tokenDigest)) {
       lease.used = true;
       accepted = true;
-    } else if (
-      lease.reconnectTokenDigest !== null
-      && lease.reconnectToken !== null
-      && timingSafeEqual(lease.reconnectTokenDigest, presented)
-    ) {
+    } else if (lease.reconnectToken !== null && tokenMatches(message.capabilityToken, lease.reconnectTokenDigest)) {
       accepted = true;
     }
     if (!accepted) throw failure;
@@ -291,7 +275,7 @@ export class OrchestrationGateway {
     connection.lastHeartbeatAt = this.now();
     const reconnectToken = randomBytes(32).toString("base64url");
     lease.reconnectToken = reconnectToken;
-    lease.reconnectTokenDigest = digest(reconnectToken);
+    lease.reconnectTokenDigest = tokenDigest(reconnectToken);
     lease.resolveAuthenticated();
     this.send(connection, {
       v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION,
@@ -330,13 +314,23 @@ export class OrchestrationGateway {
     const controller = new AbortController();
     connection.controllers.set(id, controller);
     connection.inflight += 1;
+    // Cancel answers at once; a handler that cannot stop (a plugin call) is
+    // no longer waited for, and its late result is dropped.
+    const canceled = new Promise<never>((_resolve, reject) => {
+      controller.signal.addEventListener("abort", () => reject(new Error("canceled")), { once: true });
+    });
+    canceled.catch(() => undefined);
     try {
-      const value = await this.handler.execute(connection.lease!.terminalSessionId, {
-        id,
-        tool: tool as never,
-        arguments: args
-      });
+      const value = await Promise.race([
+        this.handler.execute(connection.lease!.terminalSessionId, {
+          id,
+          tool: tool as never,
+          arguments: args
+        }, controller.signal),
+        canceled
+      ]);
       if (connection.closed) return;
+      if (controller.signal.aborted) throw new Error("canceled");
       this.send(connection, { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "response", id, result: value });
     } catch (error) {
       if (connection.closed) return;
@@ -409,8 +403,4 @@ export class OrchestrationGateway {
       if (!lease.used && this.now() > lease.expiresAt) this.expireLease(lease);
     }
   }
-}
-
-function digest(token: string): Buffer {
-  return createHash("sha256").update(token).digest();
 }

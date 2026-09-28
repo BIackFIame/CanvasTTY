@@ -8,7 +8,7 @@ import type {
 
 export const MINIMAP_SURFACE_SIZE = { width: 172, height: 104 } as const;
 export const MINIMAP_VIEWPORT_MARKER_SIZE = { width: 46, height: 30 } as const;
-export const MINIMAP_HOME_EDGE_MARKER_SIZE = { width: 14, height: 14 } as const;
+const MINIMAP_HOME_EDGE_MARKER_SIZE = { width: 14, height: 14 } as const;
 
 export interface NormalizedMinimapPoint {
   x: number;
@@ -141,7 +141,7 @@ export function minimapCameraForPointerDrag(
   };
 }
 
-export function boundsCenter(bounds: SessionBounds): Point {
+function boundsCenter(bounds: SessionBounds): Point {
   return {
     x: bounds.position.x + bounds.size.width / 2,
     y: bounds.position.y + bounds.size.height / 2

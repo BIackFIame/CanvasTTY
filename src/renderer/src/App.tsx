@@ -52,7 +52,7 @@ import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
-import { AGENT_PROVIDERS } from "./lib/providers";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
 import {
   mergeSessionSnapshots,
   upsertSession,
@@ -82,9 +82,9 @@ const FALLBACK_SETTINGS: AppSettings = {
   homeAccentPreset: "classic",
   homeAccentColors: { ...DEFAULT_HOME_ACCENT_COLORS },
   sessionRowColorMode: "status",
-  homeLauncherProviders: ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"],
+  homeLauncherProviders: [...AGENT_PROVIDERS],
   apiProfiles: [],
-  homeLimitProviders: ["codex", "claude", "qwen", "kimi", "opencode", "grok"],
+  homeLimitProviders: [...LIMIT_PROVIDERS],
   canvasLauncherItems: [...DEFAULT_CANVAS_LAUNCHER_ITEMS],
   radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
   radialLauncherEnabled: false,
@@ -323,13 +323,27 @@ export function App(): React.JSX.Element {
     };
 
     const refreshAndSchedule = async (): Promise<void> => {
+      // A hidden window reads no limits: nobody sees them, and each Codex read keeps a
+      // `codex app-server` process (about 55-60 MB) alive in the main process. Reading
+      // resumes the moment the window is visible again.
+      if (document.visibilityState === "hidden") return;
       await refreshLimits();
-      if (active) timer = window.setTimeout(() => void refreshAndSchedule(), 60_000);
+      if (active && timer === null) {
+        timer = window.setTimeout(() => {
+          timer = null;
+          void refreshAndSchedule();
+        }, 60_000);
+      }
+    };
+    const resumeWhenVisible = (): void => {
+      if (active && timer === null && document.visibilityState === "visible") void refreshAndSchedule();
     };
 
     void refreshAndSchedule();
+    document.addEventListener("visibilitychange", resumeWhenVisible);
     return () => {
       active = false;
+      document.removeEventListener("visibilitychange", resumeWhenVisible);
       if (timer !== null) window.clearTimeout(timer);
     };
   }, [limitsRevision]);

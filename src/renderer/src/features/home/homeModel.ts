@@ -6,8 +6,9 @@ import type {
   LocaleId,
   SessionSnapshot
 } from "../../../../shared/contracts";
+import { LIMIT_PROVIDERS } from "../../../../shared/contracts.ts";
 
-const DEFAULT_LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
+const DEFAULT_LIMIT_PROVIDERS = LIMIT_PROVIDERS;
 
 export type LimitsLoadState = "loading" | "ready" | "error";
 export type HomeLimitReason = LimitUnavailableReason | "percentage-unavailable" | "reset-unavailable" | "refresh-error";

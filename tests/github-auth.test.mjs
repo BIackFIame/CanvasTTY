@@ -229,3 +229,45 @@ async function waitFor(predicate, timeoutMs = 1000) {
     await new Promise((resolve) => setImmediate(resolve));
   }
 }
+
+test("device polling survives network errors and timeouts, backs off, and honours slow_down", async () => {
+  const userData = await mkdtemp(`${tmpdir()}/canvastty-github-auth-retry-`);
+  let clock = 1_000_000;
+  const waits = [];
+  const answers = [
+    () => { throw new TypeError("fetch failed"); },
+    () => { throw Object.assign(new Error("The operation was aborted."), { name: "AbortError" }); },
+    () => new Response("unavailable", { status: 503 }),
+    () => Response.json({ error: "slow_down", interval: 20 }),
+    () => Response.json({ error: "authorization_pending" }),
+    () => Response.json({ access_token: "access", token_type: "bearer", scope: "" })
+  ];
+  const fetcher = async (url) => {
+    if (String(url).endsWith("/login/device/code")) {
+      return Response.json({ device_code: "d", user_code: "ABCD-1234", verification_uri: "https://github.com/login/device", expires_in: 900, interval: 5 });
+    }
+    if (String(url).endsWith("/login/oauth/access_token")) return answers.shift()();
+    if (String(url) === "https://api.github.com/user") return Response.json({ login: "howdeploy" });
+    return new Response("missing", { status: 404 });
+  };
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    const service = new GithubAuthService(userData, "client-id", {
+      fetcher,
+      safeStorage,
+      now: () => clock,
+      delay: async (ms) => { waits.push(ms); clock += ms; }
+    });
+    await service.startDeviceFlow();
+    await waitFor(async () => (await service.status()).authorized);
+    assert.equal(answers.length, 0, "every answer was consumed; the poll did not stop at the first error");
+    // 5 s, then doubled after each failure (10, 20, 40), then slow_down's 20 s from GitHub (+5 over
+    // the current interval as a floor), kept for later polls.
+    assert.deepEqual(waits, [5_000, 10_000, 20_000, 40_000, 45_000, 45_000]);
+    await service.signOut();
+  } finally {
+    console.warn = warn;
+    await rm(userData, { recursive: true, force: true });
+  }
+});

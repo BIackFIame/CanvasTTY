@@ -120,6 +120,16 @@ export class WindowsPipeHostTransport extends EventEmitter {
       }
     ) as ChildProcessWithoutNullStreams;
     this.child = child;
+    // A write or end after the host died raises EPIPE on stdin; without a
+    // listener that is an uncaught exception in the main process.
+    const pipeFailure = (name: string) => (error: Error) => {
+      if (this.child !== child) return;
+      this.fail(new Error(`Windows agent pipe host ${name} failed: ${error.message}`));
+    };
+    child.stdin.on("error", pipeFailure("input"));
+    child.stdout.on("error", pipeFailure("output"));
+    // stderr is diagnostics only.
+    child.stderr.on("error", () => undefined);
 
     return await new Promise<string>((resolve, reject) => {
       let settled = false;

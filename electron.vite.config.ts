@@ -36,6 +36,11 @@ export default defineConfig({
   },
   renderer: {
     root: resolve("src/renderer"),
-    plugins: [react()]
+    plugins: [react()],
+    // electron-vite leaves every bundle unminified; the renderer's (React, xterm and the app, about 1.8 MB)
+    // is parsed on every window load, so it is minified. Source maps stay off, as before.
+    build: {
+      minify: "esbuild"
+    }
   }
 });

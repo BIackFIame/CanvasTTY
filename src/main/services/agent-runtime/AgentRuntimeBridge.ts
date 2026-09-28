@@ -10,6 +10,7 @@ import {
   ProviderRuntimeLaunchAdapters,
   type ProviderRuntimeLaunchOptions
 } from "./ProviderRuntimeLaunch.ts";
+import type { ClaudeHttpLaunchFacts, ClaudeHttpVerdict } from "./ClaudeHttpHooks.ts";
 
 export interface PrepareAgentRuntimeLaunchInput {
   terminalSessionId: string;
@@ -20,6 +21,8 @@ export interface PrepareAgentRuntimeLaunchInput {
   answerCaptureGrantExpiresAt?: number;
   /** Install the decision hook (base protection and plugin decisions); by default `wantsDecisions` says. */
   decisions?: boolean;
+  /** Claude Code: what decides whether its lifecycle hooks may go over HTTP (see ClaudeHttpHooks.ts). */
+  claudeHttp?: ClaudeHttpLaunchFacts;
 }
 
 export interface PreparedAgentRuntimePtyLaunch {
@@ -27,6 +30,8 @@ export interface PreparedAgentRuntimePtyLaunch {
   environment: Record<string, string>;
   /** The decision hook was installed (the provider has one and the gateway runs). */
   decisions?: boolean;
+  /** Claude's lifecycle hooks go over HTTP to the gateway (otherwise through the command helper). */
+  httpHooks?: boolean;
   cleanup(): void;
 }
 
@@ -42,6 +47,8 @@ export interface AgentRuntimeBridgeOptions extends ProviderRuntimeLaunchOptions 
   wantsDecisions?(provider: Exclude<ProviderId, "terminal">): boolean;
   /** The longest decision budget for this agent (ms); the session's gate deadlines are sized from it. */
   decisionBudgetMs?(provider: Exclude<ProviderId, "terminal">): number;
+  /** Whether a Claude launch may use HTTP lifecycle hooks; without it every launch uses the command helper. */
+  claudeHttpHooks?(facts: ClaudeHttpLaunchFacts): ClaudeHttpVerdict;
 }
 
 export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
@@ -52,11 +59,13 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
   private coreHooksEnabled: boolean;
   private readonly wantsDecisions: AgentRuntimeBridgeOptions["wantsDecisions"];
   private readonly decisionBudgetMs: AgentRuntimeBridgeOptions["decisionBudgetMs"];
+  private readonly claudeHttpHooks: AgentRuntimeBridgeOptions["claudeHttpHooks"];
 
   constructor(gateway: RuntimeGateway, options: AgentRuntimeBridgeOptions) {
     this.gateway = gateway;
     this.wantsDecisions = options.wantsDecisions;
     this.decisionBudgetMs = options.decisionBudgetMs;
+    this.claudeHttpHooks = options.claudeHttpHooks;
     this.providers = new ProviderRuntimeLaunchAdapters(options);
     this.coreHooksEnabled = options.coreHooksEnabled !== false;
     if (options.recoverOnStart) this.providers.recoverConfigurations();
@@ -78,9 +87,11 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
         budgetMs
       )
       : null;
+    const httpHookBase = capability && this.coreHooksEnabled ? this.claudeHttpHookBase(input) : null;
     let prepared;
     try {
-      prepared = this.providers.prepare(input.provider, input.terminalSessionId, this.coreHooksEnabled, decisions, budgetMs);
+      prepared = this.providers.prepare(input.provider, input.terminalSessionId, this.coreHooksEnabled, decisions, budgetMs,
+        httpHookBase ?? undefined);
     } catch (error) {
       if (capability) this.gateway.revokeTerminalSession(input.terminalSessionId);
       throw error;
@@ -90,6 +101,7 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
     return {
       args: prepared.args,
       decisions,
+      httpHooks: httpHookBase !== null,
       environment: {
         ...prepared.environment,
         ...(input.captureResult ? { [CAPTURE_RESULT_ENV]: "1" } : {}),
@@ -115,6 +127,18 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
         }
       }
     };
+  }
+
+  /** The gateway's HTTP hook URL when this Claude launch may use it; null keeps the command helper. */
+  private claudeHttpHookBase(input: PrepareAgentRuntimeLaunchInput): string | null {
+    if (input.provider !== "claude" || !input.claudeHttp || !this.claudeHttpHooks) return null;
+    const base = this.gateway.httpHookBase;
+    if (!base) return null;
+    try {
+      return this.claudeHttpHooks(input.claudeHttp).ok ? base : null;
+    } catch {
+      return null;
+    }
   }
 
   currentStatus(terminalSessionId: string): RuntimeLifecycleState | null {

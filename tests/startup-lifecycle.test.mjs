@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -34,6 +34,52 @@ test("closing during service startup stops renderer loading without a failure di
   context.initializeServices = async () => { throw new Error("real startup error"); };
   await startApplication();
   assert.equal(failures, 1, "a real error on a live window still reaches the failure page");
+});
+
+test("services start while the startup page is still loading, and only a real page error fails startup", async () => {
+  const source = await readFile(mainPath, "utf8");
+  const start = source.slice(source.indexOf("async function startApplication"), source.indexOf("function buildProviderCliRegistry"));
+  const events = [];
+  let page;
+  const context = {
+    startupRunning: false,
+    shutdownRunning: false,
+    shutdownComplete: false,
+    servicesReady: false,
+    mainWindow: null,
+    process: { env: {} },
+    shellWindowGone: () => false,
+    // The page load never settles here: startup must not wait for it.
+    createWindow: () => { page = { failure: null, superseded: false }; events.push("window"); return { window: {}, startupPage: page }; },
+    initializeServices: async () => { events.push(`services superseded=${page.superseded}`); },
+    initializeUpdater: () => events.push("updater"),
+    loadApplication: async () => { events.push(`app superseded=${page.superseded}`); },
+    showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); }
+  };
+  const startApplication = runInNewContext(`${stripTypeScriptTypes(start)}; startApplication`, context);
+  await startApplication();
+  assert.deepEqual(events, ["window", "services superseded=false", "updater", "app superseded=true"]);
+
+  events.length = 0;
+  context.initializeServices = async () => { page.failure = new Error("startup page failed"); };
+  await startApplication();
+  assert.deepEqual(events, ["window", "failure startup page failed"]);
+});
+
+test("dependencies only some paths need are not imported when the main process starts", async () => {
+  // Each costs its import time on every launch (electron-updater about 30 ms): they load
+  // through lazyRequire on first use. The smoke runners are test code behind env flags.
+  const lazy = ["electron-updater", "yaml", "secure-remote-password/client.js", "secure-remote-password/server.js", "@xterm/headless"];
+  const root = new URL("../src/main/", import.meta.url);
+  const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".ts"));
+  const staticImports = [];
+  for (const file of files) {
+    const source = await readFile(new URL(file, root), "utf8");
+    for (const match of source.matchAll(/^import\s+(?!type\b)[^;]*?from\s+"([^"]+)"/gmu)) {
+      if (lazy.includes(match[1]) || /ElectronSmoke$/u.test(match[1])) staticImports.push(`${file}: ${match[1]}`);
+    }
+  }
+  assert.deepEqual(staticImports, []);
 });
 
 test("main process acquires the single-instance lock before readiness", async () => {

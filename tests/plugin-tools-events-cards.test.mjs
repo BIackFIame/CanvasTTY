@@ -522,3 +522,24 @@ test("collect-demo through the real supervisor: the action and the tool return g
   const other = terminals.create({ provider: "terminal", cwd: repo, profile: "normal", position: at });
   await waitFor(async () => (await tools.call(other.id, "orchestrator", "collect-demo__diffstat", { sessionId: child.id })).isError);
 });
+
+test("badges of plugins whose trust was revoked do not use up a card's badge slots", () => {
+  let trusted = new Set(["p1", "p2", "p3", "p4", "p5"]);
+  const published = [];
+  const cards = new PluginCards({
+    providers: () => [],
+    trustedPlugins: () => trusted,
+    call: async () => ({}),
+    session: (id) => (id === "card-1" ? { id } : null),
+    redact: (text) => text,
+    changed: (decorations) => published.push(decorations)
+  });
+  for (const pluginId of ["p1", "p2", "p3", "p4"]) cards.setBadge(pluginId, { sessionId: "card-1", badge: { text: pluginId } });
+  assert.throws(() => cards.setBadge("p5", { sessionId: "card-1", badge: { text: "p5" } }), /most plugin badges/u);
+  trusted = new Set(["p5"]);
+  cards.refresh();
+  assert.deepEqual(published.at(-1).badges, {});
+  // Four hidden badges of revoked plugins used to keep p5 out.
+  cards.setBadge("p5", { sessionId: "card-1", badge: { text: "p5" } });
+  assert.deepEqual(published.at(-1).badges["card-1"].map((badge) => badge.pluginId), ["p5"]);
+});

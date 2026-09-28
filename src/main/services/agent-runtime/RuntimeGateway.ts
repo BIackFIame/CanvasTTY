@@ -1,12 +1,15 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
+import type { IncomingMessage, Server as HttpServer, ServerResponse } from "node:http";
 import { createServer } from "node:net";
-import type { Server } from "node:net";
+import type { AddressInfo, Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ProviderId } from "../../../shared/contracts.ts";
+import { AGENT_PROVIDERS, type ProviderId } from "../../../shared/contracts.ts";
 import {
+  CLAUDE_HTTP_HOOK,
   MAX_ANSWER_CHARS,
+  MAX_HOOK_INPUT_BYTES,
   MAX_RUNTIME_MESSAGE_BYTES,
   MAX_RESULT_CHARS,
   normalizeThreadId,
@@ -15,19 +18,40 @@ import {
   RUNTIME_PROTOCOL_VERSION,
   RUNTIME_STATES
 } from "../../../agent-runtime/runtime-protocol.mjs";
+import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import {
   WindowsPipeHostTransport,
   type AgentGatewaySocket,
   type WindowsPipeHostTransportOptions
 } from "../agent-browser/WindowsPipeHostTransport.ts";
+import {
+  MAX_UNIX_SOCKET_PATH_BYTES,
+  closeServer,
+  listenOnEndpoint,
+  makePrivateDirectory,
+  removeEndpoint,
+  tokenDigest,
+  tokenMatches
+} from "../gatewaySocket.ts";
 
-const AGENT_PROVIDERS = new Set<ProviderId>([
-  "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
-]);
+const AGENT_PROVIDER_SET = new Set<ProviderId>(AGENT_PROVIDERS);
 const MAX_RUNTIME_SESSIONS = 32;
+const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+// Hook helpers write their one message right after connecting. A connection
+// that stays silent is closed, so idle clients cannot hold all 64 slots.
+const FIRST_MESSAGE_TIMEOUT_MS = 5_000;
+const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 /** Decision checks in flight, per session and in total; over a cap the call is refused with advice to slow down. */
 const MAX_DECISIONS_PER_SESSION = 8;
 const MAX_DECISIONS_TOTAL = 32;
+/** Loopback HTTP listener for Claude Code's HTTP lifecycle hooks: connections, header and time bounds. */
+const HTTP_MAX_CONNECTIONS = 64;
+const HTTP_MAX_HEADER_BYTES = 8 * 1024;
+const HTTP_MAX_HEADERS = 32;
+const HTTP_HEADERS_TIMEOUT_MS = 5_000;
+const HTTP_REQUEST_TIMEOUT_MS = 10_000;
+const HTTP_KEEP_ALIVE_MS = 5_000;
+const HTTP_EVENT_RE = /^[A-Za-z][A-Za-z_]{0,79}$/u;
 const OVERLOADED_MESSAGE = "CanvasTTY is checking too many tool calls from this session at once. Wait a few seconds and run the command again, one at a time.";
 
 export type RuntimeLifecycleState = "idle" | "working" | "needs_approval";
@@ -102,6 +126,8 @@ export interface RuntimeGatewayOptions {
   runtimeDirectory?: string;
   windowsHostPath?: string;
   windowsPipeHostFactory?: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
+  /** A connection must send its one message within this time (default 5 s). */
+  firstMessageTimeoutMs?: number;
   onSignal?(terminalSessionId: string, signal: RuntimeLifecycleSignal): void;
   onAnswerCaptureRevoked?(terminalSessionId: string): void;
   /**
@@ -110,6 +136,11 @@ export interface RuntimeGatewayOptions {
    */
   onPermissionRequest?(terminalSessionId: string, request: RuntimePermissionRequest, signal: AbortSignal): Promise<RuntimePermissionDecision> | RuntimePermissionDecision;
   now?: () => number;
+  /**
+   * Also listen on 127.0.0.1 (random port) for Claude Code's HTTP lifecycle hooks. POSIX only; when the listener
+   * cannot start, launches simply keep the command helper.
+   */
+  httpHooks?: boolean;
 }
 
 export class RuntimeGateway {
@@ -121,13 +152,22 @@ export class RuntimeGateway {
   private readonly onAnswerCaptureRevoked: RuntimeGatewayOptions["onAnswerCaptureRevoked"];
   private readonly onPermissionRequest: RuntimeGatewayOptions["onPermissionRequest"];
   private readonly now: () => number;
+  private readonly firstMessageTimeoutMs: number;
   private readonly checks = new Set<AbortController>();
   private readonly leases = new Map<string, RuntimeLease>();
   private readonly sockets = new Set<AgentGatewaySocket>();
+  private closed = false;
+  private restartTimer: ReturnType<typeof setTimeout> | undefined;
+  private restartAttempts = 0;
   private server: Server | null = null;
   private windowsTransport: WindowsPipeHostTransport | null = null;
   private endpoint: string | null = null;
   private ownedRuntimeDirectory: string | null = null;
+  private readonly httpHooksRequested: boolean;
+  private httpServer: HttpServer | null = null;
+  private httpPort: number | null = null;
+  /** Set when Claude reached the listener without its capability (a settings policy emptied the header). */
+  private httpUnusable = false;
 
   constructor(options: RuntimeGatewayOptions = {}) {
     this.platform = options.platform ?? process.platform;
@@ -135,10 +175,20 @@ export class RuntimeGateway {
     this.windowsHostPath = options.windowsHostPath;
     this.windowsPipeHostFactory = options.windowsPipeHostFactory
       ?? ((transportOptions) => new WindowsPipeHostTransport(transportOptions));
+    this.firstMessageTimeoutMs = options.firstMessageTimeoutMs ?? FIRST_MESSAGE_TIMEOUT_MS;
     this.onSignal = options.onSignal;
     this.onAnswerCaptureRevoked = options.onAnswerCaptureRevoked;
     this.onPermissionRequest = options.onPermissionRequest;
     this.now = options.now ?? Date.now;
+    this.httpHooksRequested = options.httpHooks === true && this.platform !== "win32";
+  }
+
+  /**
+   * Base URL for Claude Code HTTP lifecycle hooks, or null when the listener is not running or proved unusable in
+   * this run (then launches use the command helper).
+   */
+  get httpHookBase(): string | null {
+    return this.httpServer && this.httpPort !== null && !this.httpUnusable ? `http://127.0.0.1:${this.httpPort}` : null;
   }
 
   get address(): string {
@@ -152,15 +202,31 @@ export class RuntimeGateway {
       if (!this.windowsHostPath) {
         throw new Error("Agent runtime access on Windows requires the packaged current-user-only named-pipe host.");
       }
+      this.closed = false;
       const transport = this.windowsPipeHostFactory({
         hostPath: this.windowsHostPath,
         platform: this.platform,
         parentPid: process.pid
       });
       this.windowsTransport = transport;
-      const endpoint = await transport.start((socket) => this.accept(socket));
-      this.endpoint = endpoint;
-      return endpoint;
+      // The pipe host can die later (crash, EPIPE, FATAL frame). Without this
+      // every later launch failed with "must be started" until restart.
+      transport.on("fatal", () => this.handleTransportFatal(transport));
+      try {
+        const endpoint = await transport.start((socket) => this.accept(socket));
+        if (this.windowsTransport !== transport) {
+          await transport.close();
+          throw new Error("Windows agent pipe host was superseded during startup.");
+        }
+        this.endpoint = endpoint;
+        this.restartAttempts = 0;
+        return endpoint;
+      } catch (error) {
+        await transport.close();
+        if (this.windowsTransport === transport) this.windowsTransport = null;
+        this.endpoint = null;
+        throw error;
+      }
     }
 
     const created = await createEndpoint(this.requestedRuntimeDirectory);
@@ -169,15 +235,15 @@ export class RuntimeGateway {
     this.endpoint = created.endpoint;
     this.ownedRuntimeDirectory = created.ownedRuntimeDirectory;
     try {
-      await listen(server, created.endpoint);
-      await chmod(created.endpoint, 0o600);
+      await listenOnEndpoint(server, created.endpoint, this.platform);
+      if (this.httpHooksRequested) await this.startHttp();
       return created.endpoint;
     } catch (error) {
       await closeServer(server);
       this.server = null;
       this.endpoint = null;
       this.ownedRuntimeDirectory = null;
-      await cleanupEndpoint(created.endpoint, created.ownedRuntimeDirectory, this.platform);
+      await removeEndpoint(created.endpoint, created.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
       throw error;
     }
   }
@@ -193,7 +259,7 @@ export class RuntimeGateway {
     if (!this.endpoint || (!this.server && !this.windowsTransport?.isRunning)) {
       throw new Error("Agent runtime gateway must be started before launching agents.");
     }
-    if (!terminalSessionId || !AGENT_PROVIDERS.has(provider)) {
+    if (!terminalSessionId || !AGENT_PROVIDER_SET.has(provider)) {
       throw new Error("Agent runtime launch identity is invalid.");
     }
     if (!this.leases.has(terminalSessionId) && this.leases.size >= MAX_RUNTIME_SESSIONS) {
@@ -206,7 +272,7 @@ export class RuntimeGateway {
     this.leases.set(terminalSessionId, {
       terminalSessionId,
       provider,
-      tokenDigest: digest(capabilityToken),
+      tokenDigest: tokenDigest(capabilityToken),
       activeTurnId: null,
       latest: null,
       captureResult: captureResultOrGrantExpiresAt === true,
@@ -238,7 +304,31 @@ export class RuntimeGateway {
     }
   }
 
+  private handleTransportFatal(transport: WindowsPipeHostTransport): void {
+    if (this.windowsTransport !== transport) return;
+    this.windowsTransport = null;
+    this.endpoint = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.sockets.clear();
+    this.scheduleTransportRestart();
+  }
+
+  private scheduleTransportRestart(): void {
+    if (this.closed || this.restartTimer || this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) return;
+    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    this.restartAttempts += 1;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      if (this.closed || this.windowsTransport) return;
+      this.start().catch(() => this.scheduleTransportRestart());
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
   async close(): Promise<void> {
+    this.closed = true;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
     for (const socket of this.sockets) socket.destroy();
     this.sockets.clear();
     for (const lease of this.leases.values()) {
@@ -249,6 +339,13 @@ export class RuntimeGateway {
       }
     }
     this.leases.clear();
+    const httpServer = this.httpServer;
+    this.httpServer = null;
+    this.httpPort = null;
+    if (httpServer) {
+      httpServer.closeAllConnections();
+      await closeServer(httpServer);
+    }
     const server = this.server;
     const transport = this.windowsTransport;
     const endpoint = this.endpoint;
@@ -259,7 +356,7 @@ export class RuntimeGateway {
     this.ownedRuntimeDirectory = null;
     if (server) await closeServer(server);
     if (transport) await transport.close();
-    if (endpoint) await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+    if (endpoint) await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: this.platform !== "win32", ignoreErrors: true });
   }
 
   private accept(socket: AgentGatewaySocket): void {
@@ -268,23 +365,29 @@ export class RuntimeGateway {
       return;
     }
     this.sockets.add(socket);
-    let pending = Buffer.alloc(0);
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_RUNTIME_MESSAGE_BYTES });
     let handled = false;
     const close = () => {
+      clearTimeout(firstMessage);
       this.sockets.delete(socket);
       socket.destroy();
     };
+    const firstMessage = setTimeout(close, this.firstMessageTimeoutMs);
+    firstMessage.unref?.();
     socket.setNoDelay(true);
     socket.on("data", (chunk) => {
       if (handled) return;
-      const bytes = typeof chunk === "string" ? Buffer.from(chunk, "utf8") : chunk;
-      pending = Buffer.concat([pending, bytes]);
-      if (pending.length > MAX_RUNTIME_MESSAGE_BYTES) return close();
-      const newline = pending.indexOf(0x0a);
-      if (newline < 0) return;
-      handled = true;
+      let line: Buffer | undefined;
       try {
-        const value: unknown = JSON.parse(pending.subarray(0, newline).toString("utf8"));
+        [line] = lines.push(chunk);
+      } catch {
+        return close();
+      }
+      if (!line) return;
+      handled = true;
+      clearTimeout(firstMessage);
+      try {
+        const value: unknown = JSON.parse(line.toString("utf8"));
         // Decision hooks keep the socket open for the answer; every other message is unchanged.
         if (isPermissionRequest(value)) return this.acceptPermission(socket, value, close);
         if (isAnswerCaptureCheck(value)) {
@@ -295,8 +398,10 @@ export class RuntimeGateway {
             answerCapture
           })}\n`, "utf8"));
         } else {
-          this.handleLifecycle(value);
+          // The ack goes out before the app reacts: the hook (and the agent behind it) waits only for the check.
+          const delivery = this.handleLifecycle(value);
           socket.write(Buffer.from(`${JSON.stringify({ v: RUNTIME_PROTOCOL_VERSION, type: "ack" })}\n`, "utf8"));
+          this.deliverLater(delivery);
         }
         const timeout = setTimeout(close, 1_000);
         timeout.unref();
@@ -305,7 +410,10 @@ export class RuntimeGateway {
       }
     });
     socket.on("error", close);
-    socket.on("close", () => this.sockets.delete(socket));
+    socket.on("close", () => {
+      clearTimeout(firstMessage);
+      this.sockets.delete(socket);
+    });
   }
 
   private answerCaptureIsActive(value: unknown): boolean {
@@ -320,11 +428,7 @@ export class RuntimeGateway {
     }
     const lease = this.leases.get(value.terminalSessionId);
     if (!lease || lease.provider !== value.provider) return false;
-    const supplied = digest(value.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length
-      && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid) return false;
+    if (!tokenMatches(value.capabilityToken, lease.tokenDigest)) return false;
     if (lease.answerCaptureGrantExpiresAt === null) return false;
     if (lease.answerCaptureGrantExpiresAt <= this.now()) {
       lease.answerCaptureGrantExpiresAt = null;
@@ -334,15 +438,19 @@ export class RuntimeGateway {
     return true;
   }
 
-  private handleLifecycle(value: unknown): void {
+  /**
+   * Checks one lifecycle message and updates the lease at once (so currentStatus never lags); returns the app's
+   * reaction to run after the hook has its answer, or null when there is nothing to report.
+   */
+  private handleLifecycle(value: unknown): Delivery | null {
     const message = parseLifecycleMessage(value);
     const lease = this.leases.get(message.terminalSessionId);
     if (!lease || lease.provider !== message.provider) throw new Error("Runtime capability is invalid.");
-    const supplied = digest(message.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length
-      && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid) throw new Error("Runtime capability is invalid.");
+    if (!tokenMatches(message.capabilityToken, lease.tokenDigest)) throw new Error("Runtime capability is invalid.");
+    return this.applyLifecycle(lease, message);
+  }
+
+  private applyLifecycle(lease: RuntimeLease, message: Omit<ParsedLifecycleMessage, "capabilityToken">): Delivery | null {
     if (message.result && !lease.captureResult) throw new Error("Result capture is not enabled for this session.");
     if (message.lastAssistantMessage !== undefined && (
       lease.answerCaptureGrantExpiresAt === null
@@ -360,7 +468,7 @@ export class RuntimeGateway {
       && lease.activeTurnId
       && message.turnId !== lease.activeTurnId
     ) {
-      return;
+      return null;
     }
     const signal: RuntimeLifecycleSignal = {
       state: message.state,
@@ -380,7 +488,124 @@ export class RuntimeGateway {
       turnId: signal.turnId,
       ...(signal.threadId === undefined ? {} : { threadId: signal.threadId })
     };
-    this.onSignal?.(message.terminalSessionId, signal);
+    return { terminalSessionId: message.terminalSessionId, signal };
+  }
+
+  /** Runs the app's reaction after the current I/O callback, in arrival order; a failure there never reaches a hook. */
+  private deliverLater(delivery: Delivery | null): void {
+    const onSignal = this.onSignal;
+    if (!delivery || !onSignal) return;
+    setImmediate(() => {
+      try {
+        onSignal(delivery.terminalSessionId, delivery.signal);
+      } catch (error) {
+        console.warn("CanvasTTY could not apply an agent lifecycle event:", error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
+
+  private async startHttp(): Promise<void> {
+    const server = createHttpServer({
+      maxHeaderSize: HTTP_MAX_HEADER_BYTES,
+      headersTimeout: HTTP_HEADERS_TIMEOUT_MS,
+      requestTimeout: HTTP_REQUEST_TIMEOUT_MS,
+      keepAliveTimeout: HTTP_KEEP_ALIVE_MS
+    }, (request, response) => this.acceptHttp(request, response));
+    server.maxHeadersCount = HTTP_MAX_HEADERS;
+    server.maxConnections = HTTP_MAX_CONNECTIONS;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen({ host: "127.0.0.1", port: 0, exclusive: true }, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+    } catch (error) {
+      console.warn("CanvasTTY runs Claude Code lifecycle hooks through its helper: the loopback listener did not start.",
+        error instanceof Error ? error.message : String(error));
+      server.close();
+      return;
+    }
+    server.on("error", () => undefined);
+    this.httpServer = server;
+    this.httpPort = (server.address() as AddressInfo).port;
+  }
+
+  /**
+   * One Claude Code HTTP lifecycle hook: `POST /claude/v1/<state>/<event>` with the session id and capability in
+   * headers Claude fills from the session's environment. Anything a browser could send (another Origin, a form
+   * content type, a rebound Host) is refused before the body is read. The answer is always `{}`: lifecycle hooks
+   * decide nothing, and Claude goes on whatever the status.
+   */
+  private acceptHttp(request: IncomingMessage, response: ServerResponse): void {
+    const finish = (status: number, closeConnection = status !== 200): void => {
+      if (response.headersSent) return;
+      response.writeHead(status, {
+        "content-type": "application/json",
+        "cache-control": "no-store",
+        ...(closeConnection ? { connection: "close" } : {})
+      });
+      response.end("{}");
+    };
+    const route = httpRoute(request, this.httpPort);
+    if (typeof route === "number") return finish(route);
+    const headerValue = (name: string): string | null => {
+      const value = request.headers[name];
+      return typeof value === "string" ? value : null;
+    };
+    const terminalSessionId = headerValue(CLAUDE_HTTP_HOOK.sessionHeader);
+    const capability = headerValue(CLAUDE_HTTP_HOOK.capabilityHeader);
+    const lease = terminalSessionId && terminalSessionId.length <= 160 ? this.leases.get(terminalSessionId) : undefined;
+    if (!lease || lease.provider !== "claude") return finish(401);
+    if (!capability) {
+      // Claude sent the session but not its capability: a settings policy (httpHookAllowedEnvVars) emptied the
+      // header. New launches go back to the helper for the rest of this run.
+      this.httpUnusable = true;
+      return finish(401);
+    }
+    if (capability.length < 32 || !tokenMatches(capability, lease.tokenDigest)) return finish(401);
+    const declared = Number(request.headers["content-length"]);
+    let size = 0;
+    let oversized = Number.isFinite(declared) && declared > MAX_HOOK_INPUT_BYTES;
+    const chunks: Buffer[] = [];
+    const complete = (): void => {
+      if (response.headersSent) return;
+      let input: unknown = null;
+      if (!oversized) {
+        try {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          input = raw.trim().length > 0 ? JSON.parse(raw) : null;
+        } catch {
+          input = null;
+        }
+      }
+      let delivery: Delivery | null = null;
+      try {
+        delivery = this.leases.get(terminalSessionId!) === lease
+          ? this.applyLifecycle(lease, claudeLifecycleMessage(terminalSessionId!, route.state, route.event, input, lease.captureResult))
+          : null;
+      } catch {
+        delivery = null;
+      }
+      finish(200, oversized);
+      this.deliverLater(delivery);
+    };
+    if (oversized) return complete();
+    request.on("data", (chunk: Buffer) => {
+      if (oversized) return;
+      size += chunk.length;
+      if (size > MAX_HOOK_INPUT_BYTES) {
+        // Like the helper: an input over the bound still reports its state, without any of its fields.
+        oversized = true;
+        chunks.length = 0;
+        complete();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    request.on("end", complete);
+    request.on("error", () => undefined);
   }
 
   /**
@@ -388,6 +613,8 @@ export class RuntimeGateway {
    * decision hooks. The socket stays open until the answer; a closed socket, a revoke or the gateway deadline
    * aborts the check, and the answer is then `ask`. Checks are capped per session and in total; over a cap the
    * call is refused with a message asking the model to slow down (a flood must not slip past the rules).
+   * An `ask` that stands for the gateway's own failure (deadline, a handler that threw or answered nonsense) is marked
+   * `unavailable`, so a fail-closed gate for a CLI that cannot ask denies it instead of letting the call run.
    */
   private acceptPermission(socket: AgentGatewaySocket, value: Record<string, unknown>, close: () => void): void {
     let request: RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
@@ -398,13 +625,10 @@ export class RuntimeGateway {
     }
     const lease = this.leases.get(request.terminalSessionId);
     if (!lease || lease.provider !== request.provider) return close();
-    const supplied = digest(request.capabilityToken);
-    const valid = supplied.length === lease.tokenDigest.length && timingSafeEqual(supplied, lease.tokenDigest);
-    supplied.fill(0);
-    if (!valid || !lease.decisions) return close();
+    if (!tokenMatches(request.capabilityToken, lease.tokenDigest) || !lease.decisions) return close();
     const { terminalSessionId, capabilityToken: _token, ...forwarded } = request;
     let answered = false;
-    const answer = (decision: RuntimePermissionDecision): void => {
+    const answer = (decision: RuntimePermissionDecision, unavailable = false): void => {
       if (answered) return;
       answered = true;
       const line = {
@@ -412,7 +636,8 @@ export class RuntimeGateway {
         type: "permission_decision",
         requestId: request.requestId,
         behavior: decision.behavior,
-        ...(decision.message ? { message: decision.message } : {})
+        ...(decision.message ? { message: decision.message } : {}),
+        ...(unavailable ? { unavailable: true } : {})
       };
       try {
         socket.write(Buffer.from(`${JSON.stringify(line)}\n`, "utf8"));
@@ -428,13 +653,14 @@ export class RuntimeGateway {
     this.checks.add(controller);
     const deadline = setTimeout(() => controller.abort(), lease.gatewayMs);
     deadline.unref();
-    const settle = (decision: RuntimePermissionDecision): void => {
+    const settle = (decision: RuntimePermissionDecision | null): void => {
       clearTimeout(deadline);
       lease.checks.delete(controller);
       this.checks.delete(controller);
-      answer(controller.signal.aborted ? { behavior: "ask" } : enforceDecision(forwarded, decision));
+      if (controller.signal.aborted || !isDecision(decision)) return answer({ behavior: "ask" }, true);
+      answer(enforceDecision(forwarded, decision));
     };
-    controller.signal.addEventListener("abort", () => settle({ behavior: "ask" }), { once: true });
+    controller.signal.addEventListener("abort", () => settle(null), { once: true });
     socket.on("close", () => controller.abort());
     const handler = this.onPermissionRequest;
     if (!handler) return settle({ behavior: "none" });
@@ -442,18 +668,87 @@ export class RuntimeGateway {
     try {
       pendingAnswer = Promise.resolve(handler(terminalSessionId, forwarded, controller.signal));
     } catch {
-      return settle({ behavior: "ask" });
+      return settle(null);
     }
-    pendingAnswer.then(settle, () => settle({ behavior: "ask" }));
+    pendingAnswer.then(settle, () => settle(null));
   }
+}
+
+interface Delivery {
+  terminalSessionId: string;
+  signal: RuntimeLifecycleSignal;
+}
+
+/**
+ * The route of a Claude HTTP hook request, or the status that refuses it. Only a JSON POST addressed to this
+ * listener's own loopback Host passes, and only without the headers a browser adds (Origin, Referer, Sec-Fetch-*).
+ */
+function httpRoute(request: IncomingMessage, port: number | null): { state: RuntimeLifecycleState; event: string } | number {
+  if (request.method !== "POST") return 405;
+  if (port === null || request.headers.host !== `127.0.0.1:${port}`) return 403;
+  if (request.headers.origin !== undefined || request.headers.referer !== undefined
+    || request.headers["sec-fetch-site"] !== undefined || request.headers["sec-fetch-mode"] !== undefined) return 403;
+  const type = request.headers["content-type"];
+  if (typeof type !== "string" || type.split(";", 1)[0]!.trim().toLowerCase() !== "application/json") return 415;
+  const path = request.url ?? "";
+  if (!path.startsWith(CLAUDE_HTTP_HOOK.pathPrefix)) return 404;
+  const parts = path.slice(CLAUDE_HTTP_HOOK.pathPrefix.length).split("/");
+  if (parts.length !== 2 || !(RUNTIME_STATES as readonly string[]).includes(parts[0]!) || !HTTP_EVENT_RE.test(parts[1]!)) return 404;
+  return { state: parts[0] as RuntimeLifecycleState, event: parts[1]! };
+}
+
+/** What hook-helper.mjs would have sent for this Claude hook input (same fields, same bounds). */
+function claudeLifecycleMessage(
+  terminalSessionId: string,
+  state: RuntimeLifecycleState,
+  event: string,
+  input: unknown,
+  captureResult: boolean
+): Omit<ParsedLifecycleMessage, "capabilityToken"> {
+  const record = isRecord(input) ? input : {};
+  const turnId = firstString(record.turn_id, record.turnId, record.prompt_id, record.promptId);
+  const threadId = normalizeThreadId("claude", firstString(
+    record.session_id, record.sessionId, record.thread_id, record.threadId, record.conversation_id, record.conversationId
+  ));
+  const finalAnswer = state === "idle" && event === "Stop" && typeof record.last_assistant_message === "string"
+    ? record.last_assistant_message
+    : null;
+  let result: { text: string; truncated: boolean } | undefined;
+  if (captureResult && finalAnswer !== null) {
+    const text = boundedText(finalAnswer, MAX_RESULT_CHARS);
+    result = { text, truncated: text.length < finalAnswer.length };
+  }
+  return {
+    terminalSessionId,
+    provider: "claude",
+    state,
+    event,
+    turnId: turnId !== null && turnId.length <= 160 ? turnId : null,
+    ...(threadId !== undefined ? { threadId } : {}),
+    ...(result === undefined ? {} : { result })
+  };
+}
+
+function firstString(...values: unknown[]): string | null {
+  const found = values.find((value) => typeof value === "string" && value.length > 0);
+  return typeof found === "string" ? found : null;
+}
+
+/** Cuts at the limit without leaving a dangling high surrogate. */
+function boundedText(value: string, limit: number): string {
+  const text = value.slice(0, limit);
+  return /[\uD800-\uDBFF]$/u.test(text) ? text.slice(0, -1) : text;
 }
 
 /** What leaves the gateway, whatever the handler said: never an allow of cut input. */
 function enforceDecision(request: RuntimePermissionRequest, decision: RuntimePermissionDecision): RuntimePermissionDecision {
-  if (!decision || !["allow", "deny", "ask", "none"].includes(decision.behavior)) return { behavior: "ask" };
   if (decision.behavior === "allow" && request.truncated) return { behavior: "ask" };
   const message = typeof decision.message === "string" ? decision.message.slice(0, PERMISSION_GATE.messageChars) : "";
   return { behavior: decision.behavior, ...(message ? { message } : {}) };
+}
+
+function isDecision(decision: RuntimePermissionDecision | null | undefined): decision is RuntimePermissionDecision {
+  return Boolean(decision) && ["allow", "deny", "ask", "none"].includes(decision!.behavior);
 }
 
 function isPermissionRequest(value: unknown): value is Record<string, unknown> {
@@ -470,7 +765,7 @@ function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissi
   if (value.v !== RUNTIME_PROTOCOL_VERSION || value.type !== "permission_request") throw new Error("Permission request version is unsupported.");
   if (
     typeof value.terminalSessionId !== "string" || !value.terminalSessionId || value.terminalSessionId.length > 160
-    || typeof value.provider !== "string" || !AGENT_PROVIDERS.has(value.provider as ProviderId)
+    || typeof value.provider !== "string" || !AGENT_PROVIDER_SET.has(value.provider as ProviderId)
     || typeof value.capabilityToken !== "string" || value.capabilityToken.length < 32
     || typeof value.requestId !== "string" || !/^[A-Za-z0-9-]{8,80}$/u.test(value.requestId)
     || typeof value.toolName !== "string" || !value.toolName || value.toolName.length > PERMISSION_GATE.toolNameChars
@@ -513,7 +808,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     || value.terminalSessionId.length === 0
     || value.terminalSessionId.length > 160
     || typeof value.provider !== "string"
-    || !AGENT_PROVIDERS.has(value.provider as ProviderId)
+    || !AGENT_PROVIDER_SET.has(value.provider as ProviderId)
     || typeof value.capabilityToken !== "string"
     || value.capabilityToken.length < 32
     || typeof value.state !== "string"
@@ -551,10 +846,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function digest(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
 async function createEndpoint(requestedRuntimeDirectory?: string): Promise<{
   endpoint: string;
   ownedRuntimeDirectory: string | null;
@@ -562,46 +853,13 @@ async function createEndpoint(requestedRuntimeDirectory?: string): Promise<{
   const suffix = randomBytes(8).toString("hex");
   const runtimeDirectory = requestedRuntimeDirectory
     ?? join(tmpdir(), `ctty-runtime-${process.getuid?.() ?? "user"}-${suffix}`);
-  await mkdir(runtimeDirectory, { recursive: true, mode: 0o700 });
-  await chmod(runtimeDirectory, 0o700);
+  await makePrivateDirectory(runtimeDirectory, { recursive: true });
   const endpoint = join(runtimeDirectory, `r-${randomBytes(2).toString("hex")}.sock`);
-  if (Buffer.byteLength(endpoint, "utf8") > 100) {
+  if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
     throw new Error("Agent runtime directory is too long for a Unix domain socket.");
   }
   return {
     endpoint,
     ownedRuntimeDirectory: requestedRuntimeDirectory ? null : runtimeDirectory
   };
-}
-
-function listen(server: Server, endpoint: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(endpoint);
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve) => {
-    if (!server.listening) return resolve();
-    server.close(() => resolve());
-  });
-}
-
-async function cleanupEndpoint(
-  endpoint: string,
-  ownedRuntimeDirectory: string | null,
-  platform: NodeJS.Platform
-): Promise<void> {
-  if (platform !== "win32") await unlink(endpoint).catch(() => undefined);
-  if (ownedRuntimeDirectory) await rmdir(ownedRuntimeDirectory).catch(() => undefined);
 }

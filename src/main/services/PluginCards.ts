@@ -35,7 +35,7 @@ export interface CardActionInvocation {
   session: PluginSessionSummary;
 }
 
-export const CARD_ACTION_TIMEOUT_MS = 15_000;
+const CARD_ACTION_TIMEOUT_MS = 15_000;
 const MAX_BADGE_TEXT = 24;
 const MAX_BADGE_TOOLTIP = 200;
 const MAX_MESSAGE = 2_000;
@@ -79,6 +79,12 @@ export class PluginCards {
       throw new Error(`badge.tooltip must be text of at most ${MAX_BADGE_TOOLTIP} characters.`);
     }
     const perCard = this.badges.get(sessionId) ?? new Map<string, PluginCardBadge>();
+    // Badges of plugins that are no longer trusted are hidden; they must not
+    // keep a trusted plugin out of the card's slots.
+    const trusted = this.deps.trustedPlugins();
+    for (const owner of [...perCard.keys()]) {
+      if (owner !== pluginId && !trusted.has(owner)) perCard.delete(owner);
+    }
     if (!perCard.has(pluginId) && perCard.size >= MAX_BADGES_PER_CARD) throw new Error("This card already shows the most plugin badges.");
     perCard.set(pluginId, {
       pluginId,

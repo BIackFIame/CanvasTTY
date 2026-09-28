@@ -5,39 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
-
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = {
-      pid: 20_000 + calls.length,
-      write() {},
-      resize() {},
-      kill() {},
-      pause() {},
-      resume() {},
-      onData() { return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
-    };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 function manager(calls) {
   return new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));

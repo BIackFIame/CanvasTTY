@@ -1,9 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
+import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import xterm from "@xterm/headless";
+import { lazyRequire } from "../../lazyRequire.ts";
+import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
+import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
 import type { CreateSessionRequest, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
@@ -11,10 +13,18 @@ import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-brow
 import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
 
+// Headless terminals are created on demand; the module loads with the first one.
+const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
+
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
 const MAX_RECEIPTS = 4096;
+// Refusals that happen before anything is written: a retry with the same
+// request id must be performed again instead of replaying the refusal.
+const RETRYABLE_REFUSALS = new Set(["BUSY", "NOT_READY", "LIMIT_REACHED", "LIFECYCLE_DISABLED", "CLOSED"]);
 const MAX_SESSIONS = 32;
+const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 const SECRET = /^[a-f0-9]{64}$/;
@@ -68,9 +78,13 @@ export interface AgentControlGatewayOptions {
   platform?: NodeJS.Platform;
   windowsHostPath?: string;
   windowsPipeHostFactory?: (options: { hostPath: string; platform: NodeJS.Platform; parentPid: number }) => WindowsPipeHostTransport;
+  /** Receipts kept for request-id replay (default 4096); the oldest settled ones are dropped first. */
+  maxReceipts?: number;
+  /** Called after the Windows pipe host was restarted and connection.json names the new endpoint. */
+  onTransportRestarted?(connectionPath: string): void;
 }
 
-export class ControlError extends Error {
+class ControlError extends Error {
   readonly code: string;
   constructor(code: string, message: string) { super(message); this.code = code; }
 }
@@ -79,49 +93,123 @@ export class ControlError extends Error {
 export class AgentControlGateway {
   private readonly options: AgentControlGatewayOptions;
   private readonly token = randomBytes(32).toString("hex");
+  private readonly tokenHash = tokenDigest(this.token);
   private readonly instanceId = randomBytes(16).toString("hex");
   private readonly sessions = new Map<string, OwnedSession>();
   private readonly sockets = new Set<AgentGatewaySocket>();
-  private readonly receipts = new Map<string, { digest: string; result: Promise<unknown> }>();
+  private readonly receipts = new Map<string, { digest: string; result: Promise<unknown>; settled: boolean }>();
   private readonly busy = new Set<string>();
   private server: Server | null = null;
   private windows: WindowsPipeHostTransport | null = null;
+  private socketDirectory: string | null = null;
+  private tokenFileWritten = false;
+  private starting = false;
+  private restartTimer: ReturnType<typeof setTimeout> | undefined;
+  private restartAttempts = 0;
   private closed = false;
 
   constructor(options: AgentControlGatewayOptions) { this.options = options; }
 
   async start(): Promise<string> {
-    if (this.server || this.windows || this.closed) throw new Error("Agent control is already started or closed.");
+    if (this.starting || this.server || this.windows || this.closed) throw new Error("Agent control is already started or closed.");
+    this.starting = true;
+    try {
+      const endpoint = await this.openEndpoint();
+      return await this.writeDiscovery(endpoint);
+    } catch (error) {
+      // Leave nothing listening and no dead transport behind, so a later start() can succeed.
+      await this.closeEndpoint();
+      throw error;
+    } finally {
+      this.starting = false;
+    }
+  }
+
+  private async openEndpoint(): Promise<string> {
     const platform = this.options.platform ?? process.platform;
-    let endpoint: string;
     if (platform === "win32") {
       if (!this.options.windowsHostPath) throw new Error("Agent control requires the current-user Windows pipe host.");
-      this.windows = (this.options.windowsPipeHostFactory ?? ((options) => new WindowsPipeHostTransport(options)))({
+      const transport = (this.options.windowsPipeHostFactory ?? ((options) => new WindowsPipeHostTransport(options)))({
         hostPath: this.options.windowsHostPath, platform, parentPid: process.pid
       });
-      endpoint = await this.windows.start((socket) => this.accept(socket));
-    } else {
-      const directory = await mkdtemp(join(tmpdir(), "ctty-control-"));
-      await chmod(directory, 0o700);
-      endpoint = join(directory, "c.sock");
-      if (Buffer.byteLength(endpoint) > 100) throw new Error("Agent control socket path is too long.");
-      this.server = createServer((socket) => this.accept(socket));
-      await new Promise<void>((resolve, reject) => {
-        this.server!.once("error", reject);
-        this.server!.listen(endpoint, () => { this.server!.off("error", reject); resolve(); });
-      });
-      await chmod(endpoint, 0o600);
+      this.windows = transport;
+      transport.on("fatal", () => this.handleTransportFatal(transport));
+      const endpoint = await transport.start((socket) => this.accept(socket));
+      if (this.windows !== transport || this.closed) {
+        await transport.close();
+        throw new Error("Agent control is shutting down.");
+      }
+      return endpoint;
     }
+    const directory = await mkdtemp(join(tmpdir(), "ctty-control-"));
+    this.socketDirectory = directory;
+    await chmod(directory, 0o700);
+    const endpoint = join(directory, "c.sock");
+    if (Buffer.byteLength(endpoint) > MAX_UNIX_SOCKET_PATH_BYTES) throw new Error("Agent control socket path is too long.");
+    const server = createServer((socket) => this.accept(socket));
+    this.server = server;
+    await listenOnEndpoint(server, endpoint, platform);
+    return endpoint;
+  }
+
+  private async writeDiscovery(endpoint: string): Promise<string> {
     const directory = join(this.options.userDataPath, "agent-control");
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     const tokenFile = join(directory, `token-${this.instanceId}`);
-    await writeFile(tokenFile, this.token, { flag: "wx", mode: 0o600 });
+    if (!this.tokenFileWritten) {
+      await writeFile(tokenFile, this.token, { flag: "wx", mode: 0o600 });
+      this.tokenFileWritten = true;
+    }
     const connection = join(directory, "connection.json");
-    await writeFile(connection, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
-      endpoint, tokenFile, pid: process.pid }, null, 2) + "\n", { mode: 0o600 });
-    await chmod(connection, 0o600);
+    // Written to a temp file and renamed: a controller reading the record while
+    // a restarted host republishes it must never see it empty or half written.
+    const temporary = `${connection}.${randomBytes(8).toString("hex")}.tmp`;
+    try {
+      await writeFile(temporary, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
+        endpoint, tokenFile, pid: process.pid }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
+      await chmod(temporary, 0o600);
+      await rename(temporary, connection);
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
     return connection;
+  }
+
+  private async closeEndpoint(): Promise<void> {
+    const server = this.server;
+    const transport = this.windows;
+    const directory = this.socketDirectory;
+    this.server = null;
+    this.windows = null;
+    this.socketDirectory = null;
+    if (transport) await transport.close().catch(() => undefined);
+    if (server) await closeServer(server);
+    if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  }
+
+  /** The Windows pipe host died: drop its connections and bring up a new one with a fresh discovery record. */
+  private handleTransportFatal(transport: WindowsPipeHostTransport): void {
+    if (this.windows !== transport) return;
+    this.windows = null;
+    for (const socket of this.sockets) socket.destroy();
+    this.scheduleTransportRestart();
+  }
+
+  private scheduleTransportRestart(): void {
+    if (this.closed || this.restartTimer || this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) return;
+    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    this.restartAttempts += 1;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = undefined;
+      if (this.closed || this.windows || this.starting) return;
+      this.start().then((connection) => {
+        this.restartAttempts = 0;
+        this.options.onTransportRestarted?.(connection);
+      }, () => this.scheduleTransportRestart());
+    }, delay);
+    this.restartTimer.unref?.();
   }
 
   observe(channel: string, payload: unknown): void {
@@ -168,18 +256,19 @@ export class AgentControlGateway {
 
   async close(): Promise<void> {
     this.closed = true;
+    clearTimeout(this.restartTimer);
+    this.restartTimer = undefined;
     for (const socket of this.sockets) socket.destroy();
     for (const owned of this.sessions.values()) { await owned.ready; owned.terminal.dispose(); }
     this.sessions.clear();
-    if (this.windows) await this.windows.close();
-    if (this.server?.listening) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+    await this.closeEndpoint();
     // Retain inert discovery/diagnostic records; a new app instance gets a new token and instanceId.
   }
 
   private accept(socket: AgentGatewaySocket): void {
     if (this.closed || this.sockets.size >= 32) { socket.destroy(); return; }
     this.sockets.add(socket);
-    let buffer = Buffer.alloc(0);
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_REQUEST_BYTES });
     let handled = false;
     const timer = setTimeout(() => socket.destroy(), 10_000);
     timer.unref();
@@ -196,13 +285,12 @@ export class AgentControlGateway {
     };
     socket.on("data", (chunk) => {
       if (handled) return;
-      buffer = Buffer.concat([buffer, chunk]);
-      if (buffer.length > MAX_REQUEST_BYTES) { socket.destroy(); return; }
-      const newline = buffer.indexOf(10);
-      if (newline < 0) return;
+      let line: Buffer | undefined;
+      try { [line] = lines.push(chunk); } catch { socket.destroy(); return; }
+      if (!line) return;
       handled = true;
       let request: ControlRequest;
-      try { request = this.parse(JSON.parse(buffer.subarray(0, newline).toString("utf8"))); }
+      try { request = this.parse(JSON.parse(line.toString("utf8"))); }
       catch { reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: "Invalid or unauthenticated control request." } }); return; }
       void this.dispatch(request).then(
         (result) => reply({ v: 1, id: request.id, ok: true, result }),
@@ -221,7 +309,7 @@ export class AgentControlGateway {
       || typeof value.controller !== "string" || !SECRET.test(value.controller)
       || !["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss"].includes(String(value.method))
       || !record(value.params)) throw new Error("Invalid envelope");
-    if (!timingSafeEqual(Buffer.from(value.token), Buffer.from(this.token))) throw new Error("Invalid credential");
+    if (!tokenMatches(value.token, this.tokenHash)) throw new Error("Invalid credential");
     return value as unknown as ControlRequest;
   }
 
@@ -236,10 +324,29 @@ export class AgentControlGateway {
       if (previous.digest !== digest) throw new ControlError("REQUEST_CONFLICT", "Request ID was already used for different input.");
       return previous.result;
     }
-    if (this.receipts.size >= MAX_RECEIPTS) throw new ControlError("LIMIT_REACHED", "Control request capacity reached; existing receipts remain available.");
+    if (!this.makeReceiptRoom()) throw new ControlError("LIMIT_REACHED", "Too many control requests are still running.");
     const result = this.perform(owner, request);
-    this.receipts.set(key, { digest, result });
+    const receipt = { digest, result, settled: false };
+    this.receipts.set(key, receipt);
+    result.then(() => { receipt.settled = true; }, (error: unknown) => {
+      receipt.settled = true;
+      if (error instanceof ControlError && RETRYABLE_REFUSALS.has(error.code) && this.receipts.get(key) === receipt) {
+        this.receipts.delete(key);
+      }
+    });
     return result;
+  }
+
+  /** Drops the oldest finished receipts once the cap is reached; running ones are kept. */
+  private makeReceiptRoom(): boolean {
+    const limit = this.options.maxReceipts ?? MAX_RECEIPTS;
+    if (this.receipts.size < limit) return true;
+    for (const [key, receipt] of this.receipts) {
+      if (!receipt.settled) continue;
+      this.receipts.delete(key);
+      if (this.receipts.size < limit) return true;
+    }
+    return this.receipts.size < limit;
   }
 
   private async perform(owner: string, request: ControlRequest): Promise<unknown> {
@@ -261,7 +368,7 @@ export class AgentControlGateway {
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
       const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
-      const terminal = new xterm.Terminal({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
       const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
         ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
@@ -382,7 +489,7 @@ export function codexComposerReady(screen: string): boolean {
   return screen.split("\n").some((line) => /^\s*›\s*(?:Ask Codex to do anything)?\s*$/.test(line));
 }
 
-export function codexChoices(screen: string): { revision: string; selected: number; options: Array<{ number: number; label: string }> } | null {
+function codexChoices(screen: string): { revision: string; selected: number; options: Array<{ number: number; label: string }> } | null {
   const matches = screen.split("\n").map((line) => line.match(/^\s*(›\s*)?(\d+)\.\s+(.+)$/)).filter((m) => m !== null);
   if (matches.length < 2 || matches.length > 12 || matches.filter((m) => m[1]).length !== 1) return null;
   if (matches.some((m, i) => Number(m[2]) !== i + 1)) return null;

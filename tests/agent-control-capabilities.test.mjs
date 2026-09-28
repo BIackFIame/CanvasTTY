@@ -12,30 +12,12 @@ import {
   launchRole
 } from "../src/main/services/agent-control/controlCapabilities.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const CONNECTION = { connectionPath: "/data/agent-control/connection.json", cliPath: "/app/scripts/canvastty-control.mjs" };
 
-function availableRegistry() {
-  return {
-    get(provider) {
-      return { state: "available", provider, executable: `/resolved/${provider}`, launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" }, checked: [{ path: `/resolved/${provider}`, result: "selected" }] };
-    },
-    snapshot() { return {}; }
-  };
-}
-
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = { pid: 30_000 + calls.length, process: command, write() {}, resize() {}, kill() {}, pause() {}, resume() {},
-      onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; } };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
-
 function manager(calls) {
-  return new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
+  return new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls, { pidBase: 30_000 }));
 }
 
 test("the control provider list is the shared agent provider list, never a plain terminal", () => {

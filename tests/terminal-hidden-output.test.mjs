@@ -130,7 +130,7 @@ test("the renderer gets nothing while hidden, then exactly one replay, and write
   assert.equal(rendered.length, 2, "becoming visible delivers exactly one replay to the renderer");
   const replay = rendered[1];
   assert.equal(replay.audience, "renderer");
-  assert.equal(replay.data, "first\r\nhidden one\r\nhidden two\r\n", "the replay is the current buffer, not stale content");
+  assert.equal(replay.data, "hidden one\r\nhidden two\r\n", "the replay is what the card missed, not stale content or the whole history");
   assert.equal(replay.outputOffset, manager.readBuffer(id).outputOffset, "the replay carries the current absolute offset");
   assert.equal(written.join(""), "first\r\nhidden one\r\nhidden two\r\n", "the real renderer dedup writes the hidden stretch once");
 
@@ -175,8 +175,8 @@ test("a batch still pending when the card is shown goes to the observers before 
 
   assert.deepEqual(emitted.slice(1).map((event) => [event.audience, event.data]), [
     ["observers", "pending\r\n"],
-    ["renderer", "first\r\npending\r\n"]
-  ], "the observers get the batch, the renderer gets the replay, in that order");
+    ["renderer", "pending\r\n"]
+  ], "the observers get the batch, the renderer gets the replay of what it missed, in that order");
   assert.equal(observerScreen(observed), "first\r\npending\r\n");
   assert.equal(rendered.length, 2);
   // The timer that would have flushed the same batch must not fire a duplicate.

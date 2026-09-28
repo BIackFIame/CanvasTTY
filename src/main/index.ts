@@ -4,7 +4,6 @@ import { isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
 import { app, BrowserWindow, dialog, net, Notification, protocol, safeStorage, session } from "electron";
-import electronUpdater from "electron-updater";
 import {
   IPC,
   type LocaleId,
@@ -17,6 +16,7 @@ import {
 import { registerIpc } from "./ipc/registerIpc";
 import { SettingsStore } from "./services/SettingsStore";
 import { TerminalManager, reachesObservers, reachesRenderer } from "./services/TerminalManager";
+import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { LimitsService } from "./services/LimitsService";
@@ -43,11 +43,7 @@ import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
 import { activeCanvasWheelBinding } from "../shared/canvasNavigation";
-import { runBrowserElectronSmoke } from "./services/browser/BrowserElectronSmoke";
-import {
-  runProviderElectronSmoke,
-  type ProviderSmokeTarget
-} from "./services/browser/ProviderElectronSmoke";
+import type { ProviderSmokeTarget } from "./services/browser/ProviderElectronSmoke";
 import {
   AgentBrowserBridge,
   OrchestrationGateway,
@@ -65,6 +61,7 @@ import {
 import type { StdioHelperLaunch } from "./services/agent-browser/ProviderLaunch";
 import {
   AgentRuntimeBridge,
+  ClaudeHttpHookPolicy,
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
@@ -74,9 +71,11 @@ import {
 } from "./services/hermesConfig";
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
+import { lazyRequire } from "./lazyRequire";
 
-// electron-updater is CommonJS; a default import is the only ESM-safe form.
-const { autoUpdater } = electronUpdater;
+// electron-updater (and what it pulls in) is loaded only by a packaged app that
+// checks for updates, never at startup of a dev build.
+const electronUpdater = lazyRequire<typeof import("electron-updater")>("electron-updater");
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
   app.setPath("userData", process.env.CANVASTTY_USER_DATA_DIR);
@@ -172,7 +171,12 @@ let updaterInitialized = false;
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
-async function createWindow(): Promise<BrowserWindow> {
+/**
+ * Creates the shell window and starts loading the startup page into it. The
+ * page load is not awaited: services start next to it, and the application
+ * surface may replace the page before it finished (see startApplication).
+ */
+function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
   const window = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -224,8 +228,8 @@ async function createWindow(): Promise<BrowserWindow> {
   });
 
   // Both handlers are registered before the startup page load: a close landing
-  // inside that load has to be visible to the load's own catch below, and the
-  // dead window must not stay in `mainWindow` until the load settles.
+  // inside that load has to be visible to the load's own failure handling, and
+  // the dead window must not stay in `mainWindow` until the load settles.
   window.on("close", () => {
     mainWindowClosing = true;
   });
@@ -237,16 +241,27 @@ async function createWindow(): Promise<BrowserWindow> {
     }
   });
 
-  try {
-    await window.loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" }));
-  } catch (error) {
+  const startupPage: StartupPageLoad = { failure: null, superseded: false };
+  window.loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" })).catch((error) => {
     // A close during this load aborts the navigation (ERR_ABORTED / ERR_FAILED).
-    // That is a quit, not a failed startup, so it must not reach the caller's
-    // failure handling; a real error on a live window still propagates.
-    if (!shellWindowGone(window)) throw error;
-    console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
-  }
-  return window;
+    // That is a quit, not a failed startup; the application surface replacing a
+    // page that was still loading aborts it the same way. Neither is a failure;
+    // a real error on a live window is kept for startApplication to report.
+    if (shellWindowGone(window)) {
+      console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
+      return;
+    }
+    if (!startupPage.superseded) startupPage.failure = error;
+  });
+  return { window, startupPage };
+}
+
+/** The startup page load of a fresh shell window, as startApplication sees it. */
+interface StartupPageLoad {
+  /** A real load error of the page, reported as a failed startup. */
+  failure: unknown;
+  /** Set once the application surface starts loading: aborting the page is expected then. */
+  superseded: boolean;
 }
 
 /**
@@ -397,6 +412,9 @@ async function initializeServices(): Promise<void> {
       hermesHomeDirectory,
       kimiHomeDirectory
     });
+    // Off the startup path: the first Kimi launch then finds the probe answered instead of blocking on it.
+    const bridge = agentBrowserBridge;
+    setTimeout(() => void bridge.warmProviderProbes().catch(() => undefined), 5_000).unref();
 
     const lifecycleRuntimeDirectory = join(userDataPath, "lifecycle", "runtime");
     runtimeGateway = new RuntimeGateway({
@@ -420,7 +438,9 @@ async function initializeServices(): Promise<void> {
         }
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
-      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal)
+      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal),
+      // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
+      httpHooks: true
     });
     await runtimeGateway.start();
     const runtimeHelperPath = app.isPackaged
@@ -440,6 +460,7 @@ async function initializeServices(): Promise<void> {
       args: [runtimeHelperPath],
       env: { ELECTRON_RUN_AS_NODE: "1" }
     };
+    const claudeHttpHookPolicy = new ClaudeHttpHookPolicy();
     agentRuntimeBridge = new AgentRuntimeBridge(runtimeGateway, {
       helper: agentRuntimeHelper,
       runtimeDirectory: lifecycleRuntimeDirectory,
@@ -451,6 +472,7 @@ async function initializeServices(): Promise<void> {
       permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
       wantsDecisions: (provider) => decisionHooks.wanted(provider),
       decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
+      claudeHttpHooks: (facts) => claudeHttpHookPolicy.verdict(facts),
       pluginHooks: {
         runner: {
           command: process.execPath,
@@ -465,6 +487,10 @@ async function initializeServices(): Promise<void> {
     console.warn(WINDOWS_AGENT_GATEWAY_UNAVAILABLE);
   }
 
+  // Output batches of every session flushed in one task leave as one IPC message.
+  const rendererOutbox = new TerminalRendererOutbox((channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  });
   terminalManager = new TerminalManager((channel, payload) => {
     // Output produced while a card is hidden is addressed to the observers
     // only, and the replay when it is shown again to the renderer only; the
@@ -475,9 +501,7 @@ async function initializeServices(): Promise<void> {
       pluginSessions?.observe(channel, payload);
       if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }
-    if (reachesRenderer(payload) && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send(channel, payload);
-    }
+    if (reachesRenderer(payload)) rendererOutbox.push(channel, payload);
     // Attention notifications ride the session-status stream, never the output
     // stream: a transition into needs_approval/failed notifies once, and the
     // removal event clears the dedup entry so a later session (or restart) can
@@ -651,6 +675,7 @@ async function initializeServices(): Promise<void> {
     recheckProviderClis: async () => {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();
+      void agentBrowserBridge?.warmProviderProbes().catch(() => undefined);
       await limitsService!.providerClisRefreshed();
       const availability = providerCliAvailability(providerClis!);
       const updatedSettings = await settings.setAvailableProviders(availability);
@@ -676,7 +701,9 @@ async function initializeServices(): Promise<void> {
       // (the launch dialog enables it right before launching an orchestrator).
       await applyAgentControlSetting(next.agentControlEnabled);
       agentBrowserBridge?.setEnabled(next.browserAgentAccess);
-      browserService?.setRestoreTabs(next.browserRestoreTabs);
+      browserService?.setRestoreTabs(next.browserRestoreTabs).catch((error: unknown) => {
+        console.warn("CanvasTTY browser tab restore setting could not be applied.", error);
+      });
       browserService?.cancelCanvasNavigationGesture();
       browserService?.setCanvasWheelCaptureMode(next.canvasWheelCaptureMode);
       canvasNavigationInput?.setBindings({
@@ -741,6 +768,8 @@ async function loadApplication(window: BrowserWindow): Promise<void> {
   }
   const browserSmokeUrl = process.env.CANVASTTY_BROWSER_SMOKE_URL;
   if (browserSmokeUrl && browserService) {
+    // The smoke runners are test code: they load only when a smoke run asks for them.
+    const { runBrowserElectronSmoke } = await import("./services/browser/BrowserElectronSmoke");
     await runBrowserElectronSmoke(browserService, browserSmokeUrl, app.getPath("userData"));
     console.log("CANVASTTY_BROWSER_SMOKE_READY");
     app.quit();
@@ -751,6 +780,7 @@ async function loadApplication(window: BrowserWindow): Promise<void> {
       throw new Error("Provider smoke requires the local agent browser gateway.");
     }
     const targets = parseProviderSmokeTargets(providerSmoke);
+    const { runProviderElectronSmoke } = await import("./services/browser/ProviderElectronSmoke");
     await runProviderElectronSmoke({
       bridge: agentBrowserBridge,
       helper: agentBrowserHelper,
@@ -778,9 +808,12 @@ async function startApplication(): Promise<void> {
   if (startupRunning || shutdownRunning || shutdownComplete) return;
   startupRunning = true;
   let window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
+  let startupPage: StartupPageLoad | null = null;
 
   try {
-    if (!window) window = await createWindow();
+    // Services start while the startup page is still loading; the page is only
+    // there until the application surface replaces it.
+    if (!window) ({ window, startupPage } = createWindow());
     if (process.env.CANVASTTY_CLI_RESOLUTION_SMOKE === "1") {
       const registry = buildProviderCliRegistry();
       console.log(`CANVASTTY_CLI_RESOLUTION_SMOKE_READY ${JSON.stringify(registry.snapshot())}`);
@@ -793,6 +826,10 @@ async function startApplication(): Promise<void> {
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
     if (!servicesReady) await initializeServices();
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
+    if (startupPage) {
+      if (startupPage.failure) throw startupPage.failure;
+      startupPage.superseded = true;
+    }
     initializeUpdater();
     await loadApplication(window);
   } catch (error) {
@@ -907,6 +944,7 @@ function initializeUpdater(): void {
 
   // The user decides when to download (the settings row), while an update that
   // is already on disk installs itself on quit.
+  const { autoUpdater } = electronUpdater();
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
   let availableVersion = "";
@@ -943,6 +981,7 @@ async function requestUpdaterCheck(): Promise<void> {
   }
   if (updaterState.status === "downloading" || updaterState.status === "downloaded") return;
   try {
+    const { autoUpdater } = electronUpdater();
     if (updaterState.status === "available") await autoUpdater.downloadUpdate();
     else {
       publishUpdaterState({ status: "checking" });
@@ -956,7 +995,7 @@ async function requestUpdaterCheck(): Promise<void> {
 /** Renderer "install" intent; only meaningful once a download finished. */
 function installUpdaterUpdate(): void {
   if (updaterState.status !== "downloaded") return;
-  autoUpdater.quitAndInstall();
+  electronUpdater().autoUpdater.quitAndInstall();
 }
 
 function updaterFailureReason(error: unknown): "offline" | "error" {
@@ -1033,12 +1072,17 @@ async function shutdownServices(): Promise<void> {
   browserRequests.clear();
   await evenG2?.close();
   if (terminalManager) await terminalManager.shutdown();
+  // The hung-up PTYs exit while the other services close; quitting waits for them (see waitForProcessExits).
+  const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
+    if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
+  });
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
   if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
+  await ptyExits;
 }
 
 async function openPluginWindow(pluginId: string, contributionId: string): Promise<void> {

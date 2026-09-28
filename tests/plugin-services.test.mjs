@@ -7,6 +7,7 @@ import test from "node:test";
 import { PluginManager, validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import {
   PluginServiceSupervisor,
+  entryGuardArguments,
   pluginServiceEnvironment
 } from "../src/main/services/PluginServiceSupervisor.ts";
 
@@ -363,6 +364,62 @@ test("an entry that changed after it was trusted never runs", async (t) => {
   await assert.rejects(instance.request("com.example.a", "probe", "ping", null), /not running/);
 });
 
+test("an entry swapped after the host checked it is not run: the child runs only the bytes that match the trusted hash", { skip: process.platform === "win32" }, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-swap-")));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const marker = join(root, "tampered-ran");
+  const tampered = `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");\n${PROBE}`;
+  const swapped = join(root, "swapped.mjs");
+  await writeFile(swapped, tampered);
+  // Stands in for a file replaced between the host's hash check and node reading it:
+  // the "node" the supervisor starts first swaps the entry, then runs the real node.
+  const wrapper = join(root, "node-with-swap.sh");
+  await writeFile(wrapper, `#!/bin/sh\nfor entry; do :; done\ncp ${JSON.stringify(swapped)} "$entry"\nexec ${JSON.stringify(process.execPath)} "$@"\n`, { mode: 0o700 });
+  const { instance } = supervisor({ command: wrapper, restartDelaysMs: [10_000] });
+  t.after(() => instance.dispose());
+  const spec = await specFor(join(root, "plugin"), "com.example.a", "probe", PROBE);
+  await instance.sync([spec]);
+  const markerExists = () => stat(marker).then(() => true, () => false);
+  const exited = () => instance.report("com.example.a").log.some((entry) => /exit|crash|stopped/i.test(entry.message));
+  await waitFor(async () => (await markerExists()) || exited(), 5_000);
+  assert.equal(await markerExists(), false, "the swapped entry must not run");
+  await assert.rejects(instance.request("com.example.a", "probe", "ping", null));
+});
+
+test("the entry guard hooks carry no static import the main bundle's CommonJS shim could land after", () => {
+  // electron-vite's esm shim puts `__dirname`/`require` after the LAST match of this
+  // pattern in the whole main bundle, string literals included. A static import inside
+  // the hooks source once pulled the shim into the string and the app could not open.
+  const staticImport = /(?<=\s|^|;)import\s*([\s"']*(?<imports>[\p{L}\p{M}\w\t\n\r $*,/{}@.]+)from\s*)?["']\s*(?<specifier>(?<="\s*)[^"]*[^\s"](?=\s*")|(?<='\s*)[^']*[^\s'](?=\s*'))\s*["'][\s;]*/gmu;
+  const [, boot] = entryGuardArguments("file:///service.mjs", "0".repeat(64));
+  const register = decodeURIComponent(boot.slice("data:text/javascript,".length));
+  const hooksUrl = JSON.parse(register.match(/register\(("[^"]+")/)[1]);
+  const hooks = decodeURIComponent(hooksUrl.slice("data:text/javascript,".length));
+  assert.match(hooks, /createHash/);
+  assert.deepEqual([...hooks.matchAll(staticImport)].map((match) => match[0]), []);
+});
+
+test("a verified entry still runs from its own location with the guard in place", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-guard-")));
+  const { instance } = supervisor();
+  t.after(async () => { await instance.dispose(); await rm(root, { recursive: true, force: true }); });
+  const cjs = `
+const { createInterface } = require("node:readline");
+const send = (m) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", ...m }) + "\\n");
+createInterface({ input: process.stdin }).on("line", (line) => {
+  const m = JSON.parse(line);
+  if (m.method === "where") send({ id: m.id, result: { file: __filename, argv: process.argv[1] } });
+});`;
+  const spec = await specFor(root, "com.example.a", "probe", PROBE);
+  const cjsSpec = { ...(await specFor(root, "com.example.b", "cjs", cjs)), entryPath: join(root, "cjs.cjs") };
+  await writeFile(cjsSpec.entryPath, cjs);
+  await instance.sync([spec, cjsSpec]);
+  assert.equal(await instance.request("com.example.a", "probe", "ping", null), "pong");
+  const where = await instance.request("com.example.b", "cjs", "where", null);
+  assert.equal(where.file, cjsSpec.entryPath);
+  assert.equal(where.argv, cjsSpec.entryPath);
+});
+
 test("a service that ignores shutdown is terminated", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "canvastty-service-stubborn-"));
   const { instance } = supervisor({ stopGraceMs: 200 });
@@ -416,4 +473,51 @@ test("end to end: trust starts the service, disable and uninstall stop it", asyn
   await manager.uninstall(manifest.id);
   await assert.rejects(instance.request(manifest.id, "echo", "echo", { text: "x" }), /not running/);
   assert.equal(instance.report(manifest.id).services.length, 0);
+});
+
+/**
+ * Runs a trusted entry through a "node" that first changes the plugin files with `swap` (a shell snippet; `$entry`
+ * is the entry path the supervisor passed, `$tampered` an untrusted module writing the marker), then runs the real
+ * node. The untrusted module must never run, however the swap changes the path node resolves.
+ */
+async function assertSwapNeverRuns(t, { swap, extension = "mjs", command = process.execPath }) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-service-resolve-")));
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const marker = join(root, "tampered-ran");
+  const cjs = extension === "cjs";
+  const tamperedSource = cjs
+    ? `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`
+    : `import { writeFileSync } from "node:fs"; writeFileSync(${JSON.stringify(marker)}, "ran");\n${PROBE}`;
+  await mkdir(join(root, "untrusted"), { recursive: true });
+  const tampered = join(root, "untrusted", `probe.${extension}`);
+  await writeFile(tampered, tamperedSource);
+  const wrapper = join(root, "node-with-swap.sh");
+  await writeFile(wrapper, `#!/bin/sh\nfor entry; do :; done\ntampered=${JSON.stringify(tampered)}\n${swap}\nexec ${JSON.stringify(command)} "$@"\n`, { mode: 0o700 });
+  const { instance } = supervisor({ command: wrapper, restartDelaysMs: [10_000] });
+  t.after(() => instance.dispose());
+  const trusted = cjs ? `require("node:readline");\n` : PROBE;
+  const base = await specFor(join(root, "plugin"), "com.example.a", "probe", trusted);
+  const spec = cjs ? { ...base, entryPath: join(root, "plugin", "probe.cjs") } : base;
+  if (cjs) await writeFile(spec.entryPath, trusted);
+  await instance.sync([spec]);
+  const markerExists = () => stat(marker).then(() => true, () => false);
+  const exited = () => instance.report("com.example.a").log.some((entry) => /exit|crash|stopped/i.test(entry.message));
+  await waitFor(async () => (await markerExists()) || exited(), 5_000);
+  assert.equal(await markerExists(), false, "the untrusted module must not run");
+}
+
+test("an entry replaced by a symlink to another module after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { swap: `rm -f "$entry"; ln -s "$tampered" "$entry"` });
+});
+
+test("an entry whose folder is replaced by a symlink after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { swap: `dir=$(dirname "$entry"); mv "$dir" "$dir.trusted"; ln -s "$(dirname "$tampered")" "$dir"` });
+});
+
+test("a CommonJS entry swapped after the host checked it is not run, by content", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { extension: "cjs", swap: `cp "$tampered" "$entry"` });
+});
+
+test("a CommonJS entry replaced by a symlink after the host checked it is not run", { skip: process.platform === "win32" }, async (t) => {
+  await assertSwapNeverRuns(t, { extension: "cjs", swap: `rm -f "$entry"; ln -s "$tampered" "$entry"` });
 });

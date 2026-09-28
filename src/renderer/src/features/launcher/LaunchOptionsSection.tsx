@@ -25,7 +25,7 @@ interface EnvironmentOption {
 }
 
 /** Plugins whose trusted launch service offers options for this agent. A plain terminal takes none. */
-export function launchOptionPlugins(plugins: readonly InstalledPlugin[], provider: ProviderId): LaunchOptionPlugin[] {
+function launchOptionPlugins(plugins: readonly InstalledPlugin[], provider: ProviderId): LaunchOptionPlugin[] {
   if (provider === "terminal") return [];
   return plugins.flatMap((plugin) => {
     const launch = plugin.manifest.services?.find((service) => service.launch)?.launch;

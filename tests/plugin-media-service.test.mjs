@@ -82,3 +82,24 @@ async function createService(userDataPath) {
   await service.load();
   return service;
 }
+
+test("a playlist write does not follow a link planted at its temporary name", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-plugin-playlist-link-"));
+  const libraryPath = join(root, "Music");
+  const outside = join(root, "outside.txt");
+  try {
+    await mkdir(join(libraryPath, "Playlists"), { recursive: true });
+    await writeFile(outside, "untouched");
+    const { symlink, readdir } = await import("node:fs/promises");
+    await symlink(outside, join(libraryPath, "Playlists", "road-trip.m3u8.tmp"));
+    const service = await createService(root);
+    const library = await service.addLibrary(PLUGIN_ID, libraryPath);
+    const written = await service.writePlaylist(PLUGIN_ID, library.id, "road-trip.m3u8", "#EXTM3U\nsong.flac\n");
+    assert.equal(written.relativePath, "Playlists/road-trip.m3u8");
+    assert.equal(await readFile(outside, "utf8"), "untouched");
+    assert.equal(await readFile(join(libraryPath, "Playlists", "road-trip.m3u8"), "utf8"), "#EXTM3U\nsong.flac\n");
+    assert.deepEqual((await readdir(join(libraryPath, "Playlists"))).filter((name) => name.endsWith(".tmp") && name !== "road-trip.m3u8.tmp"), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

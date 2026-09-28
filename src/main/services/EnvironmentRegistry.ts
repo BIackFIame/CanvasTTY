@@ -32,7 +32,7 @@ export interface EnvironmentRegistryDependencies {
 }
 
 /** The core never waits longer and never falls back to a local launch when a step runs out. */
-export const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
+const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
   prepare: 15_000,
   wrap: 5_000,
   resume: 10_000,

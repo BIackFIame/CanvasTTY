@@ -317,8 +317,7 @@ export class BrowserService {
     this.restoreTabsEnabled = enabled;
     if (enabled) await this.persistRuntime();
     else {
-      await this.store.clear();
-      this.persisted = this.store.get();
+      await this.clearSavedTabs();
     }
   }
 
@@ -431,8 +430,7 @@ export class BrowserService {
     ]);
     this.downloads = [];
     this.pendingDialogs.clear();
-    await this.store.clear();
-    this.persisted = this.store.get();
+    await this.clearSavedTabs();
     if (this.visible) return this.newTab();
     this.emit();
     return this.getState();
@@ -469,10 +467,7 @@ export class BrowserService {
 
   private async initialize(): Promise<void> {
     this.persisted = await this.store.load();
-    if (!this.restoreTabsEnabled) {
-      await this.store.clear();
-      this.persisted = this.store.get();
-    }
+    if (!this.restoreTabsEnabled) await this.clearSavedTabs();
     this.activeTabId = this.persisted.activeTabId;
     await mkdir(this.policy.downloadRoot, { recursive: true });
     this.configureSession();
@@ -1000,7 +995,23 @@ export class BrowserService {
     const tabs = [...this.tabs.values()]
       .map((tab) => ({ id: tab.id, url: this.tabUrl(tab) }))
       .filter((tab) => isSafeBrowserUrl(tab.url));
-    this.persisted = await this.store.replace(tabs, this.activeTabId);
+    try {
+      this.persisted = await this.store.replace(tabs, this.activeTabId);
+    } catch (error) {
+      // The tabs on screen stay as they are; only the copy restored at the next
+      // start is stale. The store already holds the new state in memory.
+      this.persisted = this.store.get();
+      console.warn("CanvasTTY browser tabs could not be saved.", error);
+    }
+  }
+
+  private async clearSavedTabs(): Promise<void> {
+    try {
+      await this.store.clear();
+    } catch (error) {
+      console.warn("CanvasTTY saved browser tabs could not be cleared.", error);
+    }
+    this.persisted = this.store.get();
   }
 
   private destroyRuntimeTabs(): void {

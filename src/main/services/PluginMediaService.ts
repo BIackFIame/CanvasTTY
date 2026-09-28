@@ -7,9 +7,11 @@ import {
   realpath,
   rename,
   stat,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import type {
@@ -177,14 +179,22 @@ export class PluginMediaService {
       await mkdir(playlistDirectory);
     }
     const canonicalDirectory = await realpath(playlistDirectory);
-    if (!isContainedPath(await realpath(library.rootPath), canonicalDirectory)) {
+    if (!isPathInside(await realpath(library.rootPath), canonicalDirectory)) {
       throw new Error("The library Playlists directory is outside the selected library.");
     }
 
     const path = join(canonicalDirectory, fileName);
-    const temporaryPath = `${path}.tmp`;
-    await writeFile(temporaryPath, content, "utf8");
-    await rename(temporaryPath, path);
+    // A fixed `<name>.tmp` could already be a link pointing outside the
+    // library, and writeFile follows it. A new random name created with O_EXCL
+    // ("wx") fails on any existing entry, link or not.
+    const temporaryPath = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx" });
+      await rename(temporaryPath, path);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    }
     const metadata = await stat(path);
     return publicPlaylist({ relativePath: `Playlists/${fileName}`, size: metadata.size });
   }
@@ -263,7 +273,7 @@ async function scanFiles(
 async function containedExistingFile(rootPath: string, relativePath: string): Promise<string> {
   const root = await realpath(rootPath);
   const candidate = await realpath(resolve(root, safeRelativePath(relativePath)));
-  if (!isContainedPath(root, candidate)) throw new Error("Media file is outside the selected library.");
+  if (!isPathInside(root, candidate)) throw new Error("Media file is outside the selected library.");
   const metadata = await stat(candidate);
   if (!metadata.isFile()) throw new Error("Media file is unavailable.");
   return candidate;
@@ -292,10 +302,6 @@ function isReadablePlaylistPath(relativePath: string): boolean {
   const extension = extname(relativePath).toLowerCase();
   return PLAYLIST_EXTENSIONS.has(extension)
     && (extension !== ".json" || relativePath.startsWith("Playlists/"));
-}
-
-function isContainedPath(root: string, candidate: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}${sep}`);
 }
 
 function publicLibrary(library: StoredLibrary): PluginMediaLibrary {

@@ -17,9 +17,15 @@ import {
   type AvailableProviderCli,
   type ProviderCliRegistry
 } from "./providerCliRegistry.ts";
+import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
 
 const CACHE_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+// `codex app-server` holds about 55-60 MB while it runs. It is started by the
+// first Codex limits read and stopped after this long without one, so it is not
+// kept for the whole session when nothing reads limits (window hidden, no
+// widget, Even G2 idle). The renderer reads every 60 s while it is visible.
+const CODEX_IDLE_MS = 3 * 60_000;
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES * 2;
 const MAX_WINDOWS = 12;
@@ -71,10 +77,13 @@ export class LimitsService {
   private lastGoodGrok: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
   private disposed = false;
 
-  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown") {
+  private readonly codexIdleMs: number;
+
+  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown", options: { codexIdleMs?: number } = {}) {
     this.providerClis = providerClis;
     this.clientVersion = clientVersion;
-    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion);
+    this.codexIdleMs = options.codexIdleMs ?? CODEX_IDLE_MS;
+    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(providerClis, "kimi"));
   }
 
@@ -105,7 +114,7 @@ export class LimitsService {
     if (this.disposed) return;
     this.codex.dispose();
     this.kimi.dispose();
-    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion);
+    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(this.providerClis, "kimi"));
     this.cache = null;
     this.lastGoodCodex = null;
@@ -572,6 +581,9 @@ class KimiWebUsageClient {
   private async startChild(): Promise<void> {
     if (!this.cli) throw new LimitsAdapterError("cli-not-found");
     const port = await reserveLoopbackPort();
+    // dispose() during the await found no child to stop; starting one now would
+    // leave `kimi web` (a local server with a token in its URL) running.
+    if (this.disposed) throw new LimitsAdapterError("protocol-error");
     const launch = providerChildProcessLaunch(
       this.cli,
       ["web", "--no-open", "--port", String(port), "--log-level", "silent"]
@@ -686,26 +698,50 @@ class CodexAppServerClient {
   private ready: Promise<void> | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
-  private buffer = "";
   private disposed = false;
+  private idleTimer: NodeJS.Timeout | null = null;
   private readonly cli: AvailableProviderCli | null;
   private readonly clientVersion: string;
+  private readonly idleMs: number;
 
-  constructor(cli: AvailableProviderCli | null, clientVersion: string) {
+  constructor(cli: AvailableProviderCli | null, clientVersion: string, idleMs: number) {
     this.cli = cli;
     this.clientVersion = clientVersion;
+    this.idleMs = idleMs;
   }
 
   async readRateLimits(): Promise<unknown> {
-    await this.ensureConnected();
-    return this.request("account/rateLimits/read");
+    this.clearIdleTimer();
+    try {
+      await this.ensureConnected();
+      return await this.request("account/rateLimits/read");
+    } finally {
+      this.scheduleIdleStop();
+    }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearIdleTimer();
     this.rejectPending("protocol-error");
     this.stopChild();
+  }
+
+  /** Stops the app-server once no read came for `idleMs`; the next read starts it again. */
+  private scheduleIdleStop(): void {
+    this.clearIdleTimer();
+    if (this.disposed || !this.child || this.pending.size > 0) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.pending.size === 0) this.resetConnection();
+    }, this.idleMs);
+    this.idleTimer.unref();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   private ensureConnected(): Promise<void> {
@@ -743,9 +779,8 @@ class CodexAppServerClient {
     }
 
     this.child = child;
-    this.buffer = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => this.consume(chunk));
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_LINE_BYTES });
+    child.stdout.on("data", (chunk: Buffer) => this.consume(child, lines, chunk));
     child.stdin.on("error", () => this.connectionFailed("protocol-error", child));
     child.stderr.resume();
     child.once("error", (error: NodeJS.ErrnoException) => {
@@ -798,25 +833,19 @@ class CodexAppServerClient {
     }
   }
 
-  private consume(chunk: string): void {
-    if (this.disposed) return;
-    this.buffer += chunk;
-    if (Buffer.byteLength(this.buffer) > MAX_BUFFER_BYTES) {
-      this.connectionFailed("protocol-error", this.child);
+  private consume(child: ChildProcessWithoutNullStreams, lines: NdjsonLineReader, chunk: Buffer): void {
+    if (this.disposed || child !== this.child) return;
+    let complete: Buffer[];
+    try {
+      complete = lines.push(chunk);
+    } catch {
+      this.connectionFailed("protocol-error", child);
       return;
     }
-
-    for (;;) {
-      const newline = this.buffer.indexOf("\n");
-      if (newline < 0) return;
-      const line = this.buffer.slice(0, newline).trim();
-      this.buffer = this.buffer.slice(newline + 1);
-      if (!line) continue;
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
-        this.connectionFailed("protocol-error", this.child);
-        return;
-      }
-      this.consumeLine(line);
+    for (const raw of complete) {
+      if (child !== this.child) return;
+      const line = raw.toString("utf8").trim();
+      if (line) this.consumeLine(line);
     }
   }
 
@@ -865,7 +894,6 @@ class CodexAppServerClient {
   private stopChild(): void {
     const child = this.child;
     this.child = null;
-    this.buffer = "";
     if (!child) return;
 
     child.removeAllListeners("error");

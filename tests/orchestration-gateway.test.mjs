@@ -9,41 +9,9 @@ import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { OrchestrationGateway } from "../src/main/services/agent-browser/OrchestrationGateway.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
 import { ORCHESTRATION_BRIDGE_PROTOCOL_VERSION } from "../src/main/services/agent-browser/orchestration-protocol.ts";
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const writes = [];
-
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = {
-      pid: 20_000 + calls.length,
-      write(data) { writes.push(data); },
-      resize() {},
-      kill() {},
-      pause() {},
-      resume() {},
-      onData() { return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
-    };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
 
 class TestClient {
   constructor(socket) {
@@ -97,7 +65,7 @@ async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const calls = [];
-  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls, { onWrite: (data) => writes.push(data) }));
   const control = new AgentControlService(terminals);
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
@@ -358,4 +326,57 @@ test("unknown tools and invalid arguments never reach the handler", async (t) =>
   assert.equal(failure.error.code, "INVALID_REQUEST");
   assert.match(failure.error.message, /cwd/u);
   terminals.disposeAll();
+});
+
+test("cancel reaches the running command and the answer is CANCELED, not the late result", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-cancel-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  let signal = null;
+  let finish;
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: join(directory, "runtime"),
+    handler: {
+      execute: (_sessionId, _request, abortSignal) => {
+        signal = abortSignal ?? null;
+        return new Promise((resolve) => { finish = resolve; });
+      }
+    }
+  });
+  await gateway.start();
+  t.after(() => gateway.stop());
+  const capability = gateway.registerOrchestrator({ terminalSessionId: "orchestrator-1" });
+  const { client } = await authenticatedClient(gateway, capability);
+  t.after(() => client.socket.destroy());
+
+  const answer = line(client, { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "request", id: "slow-1", tool: "list_agents", arguments: {} });
+  for (let i = 0; i < 100 && !finish; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+  client.send({ v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type: "cancel", id: "slow-1" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  finish({ agents: [] });
+  const response = await answer;
+  assert.equal(signal?.aborted, true, "the handler received the abort signal");
+  assert.equal(response.error?.code, "CANCELED");
+});
+
+test("a spawn_agent canceled while it was starting closes the agent it created", async () => {
+  const controller = new AbortController();
+  const canceled = [];
+  const control = {
+    status: () => ({ role: "orchestrator", provider: "codex" }),
+    spawn: async () => {
+      controller.abort();
+      return { id: "child-1", provider: "codex", status: "running", title: "worker" };
+    },
+    cancel: (id) => canceled.push(id)
+  };
+  const handler = new ScopedOrchestrationHandler(control);
+  await assert.rejects(
+    handler.execute("orchestrator-1", { id: "spawn-1", tool: "spawn_agent", arguments: { provider: "codex", cwd: process.cwd() } }, controller.signal),
+    (error) => error.bridgeError?.code === "CANCELED" || error.code === "CANCELED"
+  );
+  assert.deepEqual(canceled, ["child-1"]);
+  const late = new AbortController();
+  late.abort();
+  await assert.rejects(handler.execute("orchestrator-1", { id: "spawn-2", tool: "spawn_agent", arguments: {} }, late.signal));
+  assert.deepEqual(canceled, ["child-1"], "nothing is spawned after cancel");
 });

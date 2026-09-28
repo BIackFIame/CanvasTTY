@@ -14,7 +14,8 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import type {
   AgentProviderId,
   GithubPluginSearchResult,
@@ -51,6 +52,7 @@ import type { DecisionService } from "./DecisionHooks.ts";
 import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 import type { AgentToolProvider } from "./PluginAgentTools.ts";
 import type { CardActionProvider } from "./PluginCards.ts";
+import { AGENT_PROVIDERS } from "../../shared/contracts.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -89,9 +91,7 @@ const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
 const MAX_PLUGIN_SERVICES = 8;
 const PLUGIN_DATA_DIR = "plugin-data";
 const PLUGIN_INPUT_BRIDGE_URL = "canvastty-plugin://host/input-bridge.js";
-const AGENT_PROVIDERS = new Set<AgentProviderId>([
-  "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"
-]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const PLUGIN_HOOK_EVENTS = new Set<PluginAgentHookEvent>([
   "session-start",
   "prompt-submit",
@@ -729,6 +729,11 @@ export class PluginManager {
     }
     await rm(join(this.pluginRoot, plugin.manifest.id), { recursive: true, force: true });
     await rm(join(this.storageRoot, `${plugin.manifest.id}.json`), { force: true });
+    // Copies of unreadable storage kept aside by storageSet go with the plugin.
+    const kept = `${plugin.manifest.id}.json.unreadable-`;
+    for (const name of await readdir(this.storageRoot).catch(() => [] as string[])) {
+      if (name.startsWith(kept)) await rm(join(this.storageRoot, name), { force: true });
+    }
     await rm(join(this.dataRoot, plugin.manifest.id), { recursive: true, force: true });
   }
 
@@ -1083,7 +1088,7 @@ export class PluginManager {
     assertStorageKey(key);
     const previous = this.storageWrites.get(pluginId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(async () => {
-      const storage = await this.readStorage(pluginId);
+      const storage = await this.readStorageForWrite(pluginId);
       storage[key] = jsonClone(value);
       const snapshot = JSON.stringify(storage, null, 2);
       if (Buffer.byteLength(snapshot) > MAX_STORAGE_BYTES) {
@@ -1177,6 +1182,34 @@ export class PluginManager {
       if (!isMissingFile(error)) console.warn(`CanvasTTY plugin storage for ${pluginId} could not be read.`, error);
       return {};
     }
+  }
+
+  /**
+   * The storage a write starts from. Reading {} on any failure made the next
+   * write replace every other key with just the new one. A read error
+   * (permissions, a locked file) now refuses the write; a file that is not
+   * valid storage is kept aside under a new name before a fresh one starts.
+   */
+  private async readStorageForWrite(pluginId: string): Promise<Record<string, unknown>> {
+    const path = join(this.storageRoot, `${pluginId}.json`);
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if (isMissingFile(error)) return {};
+      throw new Error("Plugin storage could not be read; nothing was written.", { cause: error });
+    }
+    let parsed: unknown = null;
+    try {
+      parsed = Buffer.byteLength(raw) > MAX_STORAGE_BYTES ? null : JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+    if (isRecord(parsed)) return { ...parsed };
+    const kept = `${path}.unreadable-${Date.now()}`;
+    await rename(path, kept);
+    console.warn(`CanvasTTY plugin storage for ${pluginId} was not valid and was kept as ${kept}.`);
+    return {};
   }
 
   private cleanupExpiredPreviews(): void {
@@ -1472,7 +1505,7 @@ function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): Plu
     }
     const providers: AgentProviderId[] = [];
     for (const provider of candidate.providers) {
-      if (!AGENT_PROVIDERS.has(provider as AgentProviderId)) {
+      if (!AGENT_PROVIDER_SET.has(provider as AgentProviderId)) {
         throw new Error(`Plugin hook ${id} has an unknown provider: ${String(provider)}.`);
       }
       if (providers.includes(provider as AgentProviderId)) {
@@ -1578,7 +1611,7 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
-      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
       throw new Error("Plugin launch appliesTo must list agent providers.");
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
@@ -1599,7 +1632,7 @@ function validateServiceDecide(value: unknown): PluginServiceDecide {
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
-      || value.appliesTo.some((provider) => !AGENT_PROVIDERS.has(provider as AgentProviderId))) {
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
       throw new Error("Plugin decide appliesTo must list agent providers.");
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
@@ -1673,7 +1706,7 @@ function validateCardActions(value: unknown): PluginCardAction[] {
 }
 
 const MAX_ENVIRONMENT_KINDS = 8;
-const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDERS]);
+const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDER_SET]);
 
 function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ENVIRONMENT_KINDS) {
@@ -1873,8 +1906,7 @@ async function containedFile(root: string, relativePath: string): Promise<string
   const rootRealPath = await realpath(root);
   const candidate = resolve(rootRealPath, decoded);
   const candidateRealPath = await realpath(candidate);
-  const relation = relative(rootRealPath, candidateRealPath);
-  if (relation.startsWith(`..${sep}`) || relation === ".." || resolve(rootRealPath, relation) !== candidateRealPath) {
+  if (!isPathInside(rootRealPath, candidateRealPath)) {
     throw new Error("Plugin asset escapes its package root.");
   }
   const metadata = await stat(candidateRealPath);
@@ -3049,7 +3081,7 @@ function isRuntimeHookRecord(value: unknown): value is RuntimeHookRecord {
     && !isAbsolute(value.entry)
     && Array.isArray(value.providers)
     && value.providers.length > 0
-    && value.providers.every((provider) => AGENT_PROVIDERS.has(provider as AgentProviderId))
+    && value.providers.every((provider) => AGENT_PROVIDER_SET.has(provider as AgentProviderId))
     && new Set(value.providers).size === value.providers.length
     && Array.isArray(value.events)
     && value.events.length > 0

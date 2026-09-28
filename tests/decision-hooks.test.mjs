@@ -134,7 +134,11 @@ test("the gate prints only what each CLI takes: deny for all; ask and allow for 
     assert.equal(hookOutput("codex", { behavior, message: "" }), null);
     assert.equal(hookOutput("qwen", { behavior, message: "" }), null);
   }
-  assert.equal(parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "none" }, "x"), null);
+  // "none" is a real answer (no verdict), told apart from an unreadable one (null), and prints nothing.
+  const none = parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "none" }, "x");
+  assert.deepEqual(none, { behavior: "none", message: "", unavailable: false });
+  for (const provider of ["claude", "codex", "qwen"]) assert.equal(hookOutput(provider, none), null);
+  assert.equal(parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "maybe" }, "x"), null);
   const identity = { terminalSessionId: "t", provider: "claude", capabilityToken: "c" };
   const big = buildRequest({ tool_name: "Write", tool_input: { file_path: "/x", content: "x".repeat(50_000) } }, identity);
   assert.equal(big.truncated, true);

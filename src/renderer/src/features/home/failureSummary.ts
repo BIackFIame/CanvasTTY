@@ -2,7 +2,7 @@ import type { LocaleId, SessionStatus } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n.ts";
 
 /** Exit status the shell and the launcher both use for "command not found / not runnable". */
-export const LAUNCH_FAILURE_EXIT_CODE = 127;
+const LAUNCH_FAILURE_EXIT_CODE = 127;
 const MAX_CAUSE_LINE_CHARS = 160;
 
 /**

@@ -9,7 +9,7 @@ export function isPrivateIpv4(address: string): boolean {
     a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
   );
 }
-export function isPrivateIpv6(address: string): boolean {
+function isPrivateIpv6(address: string): boolean {
   return isIP(address) === 6 && /^f[cd]/i.test(address);
 }
 export function addressOrigin(address: string, port: number): string {

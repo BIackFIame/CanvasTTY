@@ -1,4 +1,5 @@
 import { createConnection } from "node:net";
+import { NdjsonLineReader } from "./ndjson.mjs";
 import {
   AGENT_RUNTIME_ENV,
   CAPTURE_ANSWER_ENV,
@@ -71,7 +72,7 @@ function sendMessage(address, payload, accepted) {
   return new Promise((resolve) => {
     const socket = createConnection(address);
     let settled = false;
-    let response = "";
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_RUNTIME_MESSAGE_BYTES });
     const finish = (value) => {
       if (settled) return;
       settled = true;
@@ -83,12 +84,10 @@ function sendMessage(address, payload, accepted) {
     timeout.unref?.();
     socket.on("connect", () => socket.write(payload));
     socket.on("data", (chunk) => {
-      response += chunk.toString("utf8");
-      if (Buffer.byteLength(response, "utf8") > MAX_RUNTIME_MESSAGE_BYTES) return finish(false);
-      const newline = response.indexOf("\n");
-      if (newline < 0) return;
       try {
-        const parsed = JSON.parse(response.slice(0, newline));
+        const [line] = lines.push(chunk);
+        if (!line) return;
+        const parsed = JSON.parse(line.toString("utf8"));
         finish(parsed?.v === RUNTIME_PROTOCOL_VERSION && accepted(parsed));
       } catch {
         finish(false);

@@ -34,7 +34,7 @@ function defineProviderCli(
   });
 }
 
-export const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, ProviderCliDefinition>> = Object.freeze({
+const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, ProviderCliDefinition>> = Object.freeze({
   codex: defineProviderCli("codex", ["codex"], [
     { root: "windows-local-appdata", segments: ["Programs", "OpenAI", "Codex", "bin"] }
   ]),
@@ -56,7 +56,7 @@ export const PROVIDER_CLI_DEFINITIONS: Readonly<Record<AgentProviderId, Provider
   antigravity: defineProviderCli("antigravity", ["agy"])
 });
 
-export const PROVIDER_CLI_IDS: readonly AgentProviderId[] = Object.freeze(
+const PROVIDER_CLI_IDS: readonly AgentProviderId[] = Object.freeze(
   Object.keys(PROVIDER_CLI_DEFINITIONS) as AgentProviderId[]
 );
 
@@ -121,14 +121,32 @@ export function createProviderCliRegistry(options: ProviderCliRegistryOptions = 
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
   const startupDirectory = options.startupDirectory ?? process.cwd();
-  const inspectCandidate = options.inspectCandidate ?? inspectProviderCandidate;
-  const directoryExists = options.directoryExists ?? isDirectory;
   const pathKey = environmentPathKey(environment);
   const inputDirectories = pathEntries(environment[pathKey], platform, startupDirectory);
   const platformDirectories = defaultPlatformDirectories(platform, options.platformRoot);
   const sharedDirectories = sharedUserDirectories(platform, environment, homeDirectory);
   const definitions = normalizeProviderCliDefinitions(options.definitions);
   const resolveAll = (): Readonly<Record<AgentProviderId, ProviderCliResolution>> => {
+    // Every provider checks every search directory for its commands: about 500
+    // candidate paths on a normal PATH, most of them in directories that do not
+    // exist (per-provider install locations). Each directory is checked once per
+    // resolution, and a candidate in a missing one is "missing" without its own
+    // stat, the answer the stat would give.
+    const knownDirectories = new Map<string, boolean>();
+    const directoryExistsOnce = (directory: string): boolean => {
+      let exists = knownDirectories.get(directory);
+      if (exists === undefined) {
+        exists = isDirectory(directory);
+        knownDirectories.set(directory, exists);
+      }
+      return exists;
+    };
+    const directoryExists = options.directoryExists ?? directoryExistsOnce;
+    const inspectCandidate = options.inspectCandidate ?? ((path: string, candidatePlatform: NodeJS.Platform) => (
+      directoryExistsOnce((candidatePlatform === "win32" ? win32 : posix).dirname(path))
+        ? inspectProviderCandidate(path, candidatePlatform)
+        : "missing"
+    ));
     const childDirectories = uniquePaths(
       [...inputDirectories, ...platformDirectories, ...sharedDirectories].filter(directoryExists),
       platform
@@ -235,7 +253,7 @@ function resolveProviderCli(input: ResolveProviderCliInput): ProviderCliResoluti
   return Object.freeze(unavailable);
 }
 
-export function providerCliDiagnostic(provider: AgentProviderId, checked: readonly ProviderCliCheck[]): string {
+function providerCliDiagnostic(provider: AgentProviderId, checked: readonly ProviderCliCheck[]): string {
   const paths = checked.length === 0
     ? "  (no candidate paths were available)"
     : checked.map((candidate) => `  - ${candidate.path}: ${candidate.result}`).join("\n");
@@ -285,10 +303,25 @@ function escapeCommandPromptCommand(value: string): string {
   return value.replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
 }
 
+// Arguments are escaped twice. cmd.exe removes one level of carets when it
+// reads the /c line, then a batch file (an npm shim runs `node cli.js %*`)
+// parses the text %* expands to again. cmd.exe does not treat \" as an
+// escaped quote, so with one level an argument holding a quote followed by
+// & or | (the --settings hook command, for example) was cut there and the
+// rest ran as a separate command. With every quote escaped at both levels
+// cmd.exe never sees a quoted region and every operator stays escaped.
+//
+// Program-side quoting follows the MSVC rules: backslashes before a quote and
+// at the end are doubled. The old lookahead regex doubled only one of two or
+// more backslashes before a quote, so in `a\\"b` the quote ended the argument
+// instead of being part of it.
 function escapeCommandPromptArgument(value: string): string {
-  let escaped = value.replace(/(?=(\\+?)?)\1"/g, "$1$1\\\"");
-  escaped = escaped.replace(/(?=(\\+?)?)\1$/, "$1$1");
-  return `"${escaped}"`.replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
+  const escaped = value
+    .replace(/(\\*)"/g, (_match, slashes: string) => `${slashes}${slashes}\\"`)
+    .replace(/(\\+)$/, "$1$1");
+  return `"${escaped}"`
+    .replace(COMMAND_PROMPT_META_CHARACTERS, "^$1")
+    .replace(COMMAND_PROMPT_META_CHARACTERS, "^$1");
 }
 
 function providerCandidates(commands: readonly string[], directories: string[], platform: NodeJS.Platform, commandFirst = false): string[] {
@@ -399,12 +432,24 @@ function resolveWindowsCommandPrompt(
   environment: Readonly<NodeJS.ProcessEnv>,
   inspectCandidate: ResolveProviderCliInput["inspectCandidate"]
 ): string | null {
+  return windowsCommandPromptPath(environment, (path) => inspectCandidate(path, "win32") === null);
+}
+
+/**
+ * cmd.exe for batch providers and the terminal fallback: ComSpec, then
+ * %SystemRoot%\System32\cmd.exe. PATH is never searched, so a cmd.exe in a
+ * project folder or another PATH entry cannot stand in for it.
+ */
+export function windowsCommandPromptPath(
+  environment: Readonly<NodeJS.ProcessEnv>,
+  usable: (path: string) => boolean
+): string | null {
   const configured = environment.ComSpec || environment.COMSPEC;
-  if (configured && inspectCandidate(configured, "win32") === null) return configured;
+  if (configured && usable(configured)) return configured;
   const systemRoot = environment.SystemRoot || environment.WINDIR;
   if (!systemRoot) return null;
   const candidate = win32.join(systemRoot, "System32", "cmd.exe");
-  return inspectCandidate(candidate, "win32") === null ? candidate : null;
+  return usable(candidate) ? candidate : null;
 }
 
 function pathEntries(value: string | undefined, platform: NodeJS.Platform, startupDirectory: string): string[] {

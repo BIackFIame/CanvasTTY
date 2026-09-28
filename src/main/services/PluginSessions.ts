@@ -60,6 +60,7 @@ interface TerminalPort {
   deliverInput(id: string, text: string): Promise<{ delivered: boolean }>;
   dispose(id: string, options?: { keepEnvironmentData?: boolean }): void;
   redactSecrets(text: string): string;
+  redactSecretsTail(text: string, maxChars: number): string;
 }
 
 export interface PluginSessionsDependencies {
@@ -203,8 +204,8 @@ export class PluginSessions {
   private screen(sessionId: string): string {
     try {
       const { buffer } = this.deps.terminals.readBuffer(sessionId);
-      // Masked whole before the cut, so a secret the cut splits leaves no readable tail.
-      return this.deps.terminals.redactSecrets(plainText(buffer)).slice(-MAX_SCREEN_CHARS);
+      // Masked before the cut (over a window wider than any match), so a secret the cut splits leaves no readable tail.
+      return this.deps.terminals.redactSecretsTail(plainText(buffer), MAX_SCREEN_CHARS);
     } catch {
       return "";
     }

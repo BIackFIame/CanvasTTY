@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import type {
   AgentBrowserBridge,
@@ -437,7 +438,8 @@ class JsonLineRpc {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly timeoutMs: number;
   private readonly pending = new Map<number, { resolve(value: any): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
-  private buffer = "";
+  // The 256KB output budget below bounds every line too.
+  private readonly lines = new NdjsonLineReader({ maxLineBytes: MAX_OUTPUT_BYTES });
   private nextId = 1;
   private bytes = 0;
 
@@ -483,13 +485,9 @@ class JsonLineRpc {
       terminate(this.child);
       return;
     }
-    this.buffer += chunk.toString("utf8");
-    let newline = this.buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = this.buffer.slice(0, newline);
-      this.buffer = this.buffer.slice(newline + 1);
+    for (const raw of this.lines.push(chunk)) {
+      const line = raw.toString("utf8");
       if (line.trim()) this.message(line);
-      newline = this.buffer.indexOf("\n");
     }
   }
 

@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isHomeMediaPath } from "./homeMedia.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
@@ -62,6 +63,7 @@ import {
   normalizeCanvasOverrideBinding,
   type CanvasNavigationPlatform
 } from "../../shared/canvasNavigation.ts";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "../../shared/contracts.ts";
 
 const LOCALES = new Set<LocaleId>(["ru", "en"]);
 const SESSION_RESTORE_MODES = new Set<SessionRestoreMode>(["off", "reopen", "continue"]);
@@ -81,10 +83,9 @@ const PROVIDER_ADDITIONS_SETTINGS_VERSION = 19;
 const ADDED_AGENT_PROVIDERS: AgentProviderId[] = ["omp", "pi", "cursor", "minimax", "devin", "antigravity"];
 const LEGACY_AGENT_PROVIDERS: AgentProviderId[] = ["codex", "claude", "kimi", "opencode", "hermes"];
 const PRE_QWEN_AGENT_PROVIDERS: AgentProviderId[] = [...LEGACY_AGENT_PROVIDERS, "grok"];
-const AGENT_PROVIDERS = new Set<AgentProviderId>(["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const LEGACY_LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "kimi"];
 const PRE_QWEN_LIMIT_PROVIDERS: LimitProviderId[] = [...LEGACY_LIMIT_PROVIDERS, "opencode", "grok"];
-const LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 const LIMIT_PROVIDER_SET = new Set<LimitProviderId>(LIMIT_PROVIDERS);
 const CANVAS_LAUNCHER_ITEM_SET = new Set<CanvasLauncherItemId>(CANVAS_LAUNCHER_ITEMS);
 const RADIAL_LAUNCHER_ITEM_SET = new Set<RadialLauncherItemId>(RADIAL_LAUNCHER_ITEMS);
@@ -113,7 +114,7 @@ export class SettingsStore {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
     this.availableProviders = new Set(availability
-      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
+      ? AGENT_PROVIDERS.filter((provider) => availability[provider])
       : AGENT_PROVIDERS);
     this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
   }
@@ -233,12 +234,18 @@ export class SettingsStore {
   }
 
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
-    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
+    this.availableProviders = new Set(AGENT_PROVIDERS.filter((provider) => availability[provider]));
+    // Filter in queue order: a snapshot taken while an update() is still
+    // writing lacks that update, and persisting it afterwards dropped the
+    // update from the file (it stayed only in memory).
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (!providerSelectionsChanged(this.value, filtered)) return;
+      await this.persist(filtered);
       this.value = filtered;
-      await this.queuePersist();
-    }
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 
@@ -436,12 +443,14 @@ export function normalizeSettings(
   }
 
   const source = candidate as Partial<AppSettings> & { zoomOverApplications?: unknown };
-  const mediaPath = source.mediaPath === null || typeof source.mediaPath === "string"
+  // Only an absolute path to a supported image is kept; anything else keeps the
+  // previous choice. The main process reads this file for the Home screen.
+  const mediaPath = source.mediaPath === null || isHomeMediaPath(source.mediaPath)
     ? source.mediaPath
-    : fallback.mediaPath;
+    : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
-      (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)
+      (provider): provider is AgentProviderId => AGENT_PROVIDER_SET.has(provider as AgentProviderId)
     )
     : fallback.acknowledgedDangerousProfiles;
   const shortcuts = normalizeShortcuts(source.shortcuts, fallback.shortcuts);
@@ -677,9 +686,9 @@ function normalizeAgentProviderSelection(
 ): AgentProviderId[] {
   if (!Array.isArray(candidate)) return [...fallback];
   const selected = new Set(candidate.filter((provider): provider is AgentProviderId => (
-    typeof provider === "string" && AGENT_PROVIDERS.has(provider as AgentProviderId)
+    typeof provider === "string" && AGENT_PROVIDER_SET.has(provider as AgentProviderId)
   )));
-  return [...AGENT_PROVIDERS].filter((provider) => selected.has(provider));
+  return AGENT_PROVIDERS.filter((provider) => selected.has(provider));
 }
 
 function filterUnavailableProviders(settings: AppSettings, available: ReadonlySet<AgentProviderId>): AppSettings {
@@ -841,7 +850,7 @@ function normalizePluginCanvas(candidate: unknown, fallback: readonly PluginCanv
   return instances;
 }
 
-export function normalizeCanvasRegions(
+function normalizeCanvasRegions(
   candidate: unknown,
   fallback: readonly CanvasRegion[] = []
 ): CanvasRegion[] {
