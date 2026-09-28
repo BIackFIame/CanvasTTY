@@ -295,3 +295,42 @@ test("curl and wget: every spelling of an output or side file, and --output-dir 
     `curl -D /dev/null -c /dev/null ${URL}`, `curl -w '%output{/dev/stderr}x' ${URL}`, `wget -O /dev/null ${URL}`, `wget -a /dev/null -O- ${URL}`
   ]) assert.equal(rule(shell(command)), null, command);
 });
+
+test("curl: each operation between --next / -: uses its own --output-dir, and --output-dir alone writes nothing", () => {
+  const URL = "https://example.com";
+  for (const sep of ["--next", "-:"]) {
+    for (const away of [outside, "../elsewhere"]) {
+      // The folder of one operation does not carry over to the next, in either order.
+      for (const command of [
+        `curl --output-dir ${away} -o a ${URL}/a ${sep} --output-dir . -o b ${URL}/b`,
+        `curl --output-dir . -o a ${URL}/a ${sep} --output-dir ${away} -o b ${URL}/b`,
+        `curl --output-dir ${away} -O ${URL}/a ${sep} --output-dir build -O ${URL}/b`,
+        `curl --output-dir build -O ${URL}/a ${sep} --output-dir=${away} -O ${URL}/b`,
+        `curl -o a --output-dir ${away} ${URL}/a ${sep} -o b ${URL}/b`,
+        `curl -o a ${URL}/a ${sep} -o b --output-dir ${away} ${URL}/b`,
+        // `-:` also ends the operation inside a short cluster, as curl reads it.
+        `curl --output-dir ${away} -o a ${URL}/a -s: --output-dir . -o b ${URL}/b`
+      ]) assert.equal(rule(shell(command)), "write-outside", command);
+      // A folder given in another operation does not move this operation's file.
+      for (const command of [
+        `curl -o a ${URL}/a ${sep} --output-dir ${away} ${URL}/b`,
+        `curl --output-dir ${away} ${URL}/a ${sep} -o b ${URL}/b`
+      ]) assert.equal(rule(shell(command)), null, command);
+    }
+    for (const command of [
+      `curl --output-dir build -o a ${URL}/a ${sep} --output-dir . -o b ${URL}/b`,
+      `curl -O ${URL}/a ${sep} --output-dir build -O ${URL}/b`
+    ]) assert.equal(rule(shell(command)), null, command);
+    // A file downloaded by the later operation, run from its own folder, is still download-and-run.
+    assert.equal(rule(shell(`curl -o a ${URL}/a ${sep} --output-dir build -o i.sh ${URL}/i.sh && sh build/i.sh`)), "download-exec", sep);
+  }
+  // Without -o / -O the response goes to standard output: --output-dir alone names no file.
+  for (const away of [outside, "../elsewhere"]) {
+    for (const command of [`curl --output-dir ${away} ${URL}`, `curl --output-dir=${away} ${URL}`, `curl -sS ${URL} --output-dir ${away}`]) {
+      assert.equal(rule(shell(command)), null, command);
+    }
+    // Side files and actual outputs next to a lone --output-dir are still judged.
+    assert.equal(rule(shell(`curl --output-dir ${away} -D ${away}/h ${URL}`)), "write-outside");
+    assert.equal(rule(shell(`curl --output-dir build -c ${away}/jar ${URL}`)), "write-outside");
+  }
+});

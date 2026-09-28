@@ -620,8 +620,9 @@ function targetDirectory(program: string, argWords: readonly Word[]): Word | und
 /**
  * Where a download lands and what else it writes. curl and wget are read option by option (a flag of its own, a
  * short cluster like `-fsSLo FILE` or `-c@FILE`, `--long VALUE` and `--long=VALUE`); curl's -o and -O files land
- * in --output-dir wherever it stands on the line (curl joins the folder even to an absolute -o path), each URL
- * of -O or --remote-name-all under its own name. Other fetchers: `-o`/`--output`/`-OutFile` and their folder
+ * in the --output-dir of their own operation (curl resets it at `--next` / `-:`) wherever it stands in that
+ * operation (curl joins the folder even to an absolute -o path), each URL of -O or --remote-name-all under its own
+ * name; --output-dir alone writes no file. Other fetchers: `-o`/`--output`/`-OutFile` and their folder
  * flags.
  */
 function classifyFetch(program: string, argWords: Word[], cwd: string | null, acc: Acc, downloadedHere: Target[]): void {
@@ -655,9 +656,13 @@ function classifyFetch(program: string, argWords: Word[], cwd: string | null, ac
     return;
   }
   const options = FETCH_FILE_OPTIONS[program];
-  const outputs: Array<Word | string> = [];
+  // curl resets its per-transfer options at `--next` (`-:`): each operation keeps its own outputs, -O count and
+  // --output-dir. wget has no such boundary, so its whole line is one operation.
+  let outputs: Array<Word | string> = [];
   let dir: Word | string | null = null;
   let remoteNames = 0;
+  let remoteAll = false;
+  let opStart = 0;
   const take = (kind: 'output' | 'dir' | 'side' | 'format', value: Word | string): void => {
     if (kind === 'output') outputs.push(value);
     else if (kind === 'dir') dir = value;
@@ -665,23 +670,48 @@ function classifyFetch(program: string, argWords: Word[], cwd: string | null, ac
     // `%output{FILE}` and `%output{>>FILE}` send the rest of the format to FILE.
     else for (const match of (typeof value === 'string' ? value : value.text).matchAll(/%output\{(?:>>)?([^}]*)\}/gu)) if (match[1] && !sink(match[1])) acc.writes.push(target(match[1]));
   };
+  // The curl operation that ends before word `end`: its -o and -O files land in its own --output-dir, joined as
+  // curl joins them (`--output-dir D -o F` writes D/F, even for an absolute F). --output-dir with no -o or -O
+  // writes nothing: the response goes to standard output.
+  const finishCurl = (end: number): void => {
+    const opDir: Word | string | null = dir;
+    const landing = (file: Word | string): Target => {
+      if (opDir === null) return target(file);
+      const dirText = expand(opDir, cwd, acc.ctx);
+      const fileText = typeof file === 'string' ? file : expand(file, cwd, acc.ctx);
+      // A folder or name that cannot be expanded leaves the place unknown.
+      if (dirText === null) return target(opDir);
+      if (fileText === null) return target(file);
+      return target(join(dirText, fileText));
+    };
+    for (const file of outputs) if (!sink(file)) land(landing(file));
+    // Each -O takes the next URL's name; --remote-name-all names them all.
+    const opUrls = args.slice(opStart, end).filter(arg => urls.includes(arg));
+    const named = remoteAll ? opUrls : opUrls.slice(0, remoteNames);
+    if ((remoteAll || remoteNames > 0) && named.length === 0) named.push('');
+    for (const url of named) land(landing(urlName(url)));
+    outputs = []; dir = null; remoteNames = 0; remoteAll = false;
+  };
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!, next = argWords[i + 1];
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       const name = eq < 0 ? arg : arg.slice(0, eq);
       const kind = options[name];
-      if (name === '--remote-name' || name === '--remote-name-all') { remoteNames += name === '--remote-name' ? 1 : Math.max(1, urls.length); continue; }
+      if (program === 'curl' && arg === '--next') { finishCurl(i); opStart = i + 1; continue; }
+      if (name === '--remote-name') { remoteNames++; continue; }
+      if (name === '--remote-name-all') { if (program === 'curl') remoteAll = true; else remoteNames++; continue; }
       if (eq >= 0) { if (kind) take(kind, arg.slice(eq + 1)); continue; }
       if (kind) { if (next) take(kind, next); i++; continue; }
       if (FETCH_LONG_VALUES[program].has(name)) i++;
       continue;
     }
     if (!/^-[^-]/u.test(arg)) continue;
-    // A short option of its own or a cluster: `-c FILE`, `-cFILE`, `-sSc FILE`, `-fsSLo FILE`, `-qO FILE`.
+    // A short option of its own or a cluster: `-c FILE`, `-cFILE`, `-sSc FILE`, `-fsSLo FILE`, `-qO FILE`, `-:`.
     const takes = program === 'curl' ? CURL_VALUE_LETTERS : WGET_VALUE_LETTERS;
     for (let k = 1; k < arg.length; k++) {
       const letter = arg[k]!;
+      if (program === 'curl' && letter === ':') { finishCurl(i); opStart = i; continue; }
       if (program === 'curl' && letter === 'O') { remoteNames++; continue; }
       if (!takes.has(letter)) continue;
       const attached = arg.slice(k + 1);
@@ -692,30 +722,13 @@ function classifyFetch(program: string, argWords: Word[], cwd: string | null, ac
       break;
     }
   }
-  // curl puts its -o and -O files in --output-dir, joined as curl joins them: `--output-dir D -o F` writes D/F.
-  const landing = (file: Word | string): Target => {
-    if (dir === null || program !== 'curl') return target(file);
-    const dirText = expand(dir, cwd, acc.ctx);
-    const fileText = typeof file === 'string' ? file : expand(file, cwd, acc.ctx);
-    // A folder or name that cannot be expanded leaves the place unknown.
-    if (dirText === null) return target(dir);
-    if (fileText === null) return target(file);
-    return target(join(dirText, fileText));
-  };
+  if (program === 'curl') { finishCurl(args.length); return; }
+  // wget: -O sets the file (-P does not apply to it); otherwise the URL's name lands in -P's folder or here.
   let landed = false;
   for (const file of outputs) {
     landed = true;
-    if (!sink(file)) land(landing(file));
+    if (!sink(file)) land(target(file));
   }
-  if (program === 'curl') {
-    // Each -O takes the next URL's name; --remote-name-all names them all.
-    const named = urls.slice(0, remoteNames);
-    if (remoteNames > 0 && named.length === 0) named.push('');
-    for (const url of named) { land(landing(urlName(url))); landed = true; }
-    if (dir !== null && !landed) acc.writes.push(target(dir));
-    return;
-  }
-  // wget: -O sets the file (-P does not apply to it); otherwise the URL's name lands in -P's folder or here.
   if (landed || args.includes('--spider')) return;
   land(dir === null ? target(urlName(urls[0] ?? '')) : target(dir));
 }
