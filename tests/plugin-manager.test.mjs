@@ -1790,3 +1790,44 @@ test("the anonymous showcase search reports when GitHub's rate limit resets", as
   assert.match(message, /Signing in to GitHub raises the limit/u);
   assert.match(githubRateLimitMessage(new Response("", { status: 429 })), /try again in a minute/u);
 });
+
+test("plugin storage that cannot be read is not replaced by the next write", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-storage-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await manager.load();
+    const installed = await manager.install((await manager.previewInstall("https://github.com/example/studio-kit")).token);
+    const id = installed.manifest.id;
+    const path = join(userData, "plugin-storage", `${id}.json`);
+    await manager.storageSet(id, "a", 1);
+    await manager.storageSet(id, "b", 2);
+
+    // A read error (permissions, a locked file) refuses the write instead of saving only the new key.
+    const { chmod, readdir } = await import("node:fs/promises");
+    await chmod(path, 0o000);
+    try {
+      await assert.rejects(manager.storageSet(id, "c", 3), /could not be read/);
+    } finally {
+      await chmod(path, 0o600);
+    }
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { a: 1, b: 2 });
+
+    // A file that is not valid storage is kept aside before a new one is started.
+    await writeFile(path, "{\"a\": 1, \"b\":");
+    await manager.storageSet(id, "c", 3);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { c: 3 });
+    const kept = (await readdir(join(userData, "plugin-storage"))).filter((name) => name.startsWith(`${id}.json.unreadable-`));
+    assert.equal(kept.length, 1);
+    assert.equal(await readFile(join(userData, "plugin-storage", kept[0]), "utf8"), "{\"a\": 1, \"b\":");
+    await manager.uninstall(id);
+    assert.deepEqual((await readdir(join(userData, "plugin-storage"))).filter((name) => name.startsWith(id)), []);
+  } finally {
+    console.warn = warn;
+    await rm(userData, { recursive: true, force: true });
+  }
+});
