@@ -37,7 +37,7 @@ export function attachTerminalOutput(
     if (disposed || event.id !== id) return;
     if (outputOffset === undefined) queuedLiveOutput.push(event);
     else writeLive(event);
-  });
+  }, id);
   const dispose = (): void => {
     if (disposed) return;
     disposed = true;

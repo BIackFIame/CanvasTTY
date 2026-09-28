@@ -1395,7 +1395,8 @@ export interface CanvasTTYApi {
     dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
-    onData(listener: (event: TerminalDataEvent) => void): () => void;
+    /** With `id`, only that session's output (one context-bridge call per batch instead of one per card). */
+    onData(listener: (event: TerminalDataEvent) => void, id?: string): () => void;
     onSession(listener: (event: SessionEvent) => void): () => void;
     onRemoved(listener: (event: SessionRemovedEvent) => void): () => void;
   };
