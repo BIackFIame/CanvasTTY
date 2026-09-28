@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   createProviderCliRegistry,
@@ -361,6 +364,39 @@ test("refresh detects installed and removed CLIs without changing an earlier sna
   present.delete(executable);
   registry.refresh();
   assert.equal(registry.get("codex").state, "unavailable");
+});
+
+test("on the real file system, candidates in missing directories are missing and a directory created later is found on refresh", { skip: process.platform === "win32" }, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "canvastty-cli-dirs-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const tools = join(root, "tools");
+  const later = join(root, "later");
+  const gone = join(root, "gone");
+  mkdirSync(tools);
+  writeFileSync(join(tools, "claude"), "");
+  chmodSync(join(tools, "claude"), 0o644);
+  writeFileSync(join(tools, "codex"), "#!/bin/sh\n");
+  chmodSync(join(tools, "codex"), 0o755);
+  const registry = createProviderCliRegistry({
+    platform: process.platform,
+    environment: { PATH: [tools, gone, later].join(":") },
+    homeDirectory: join(root, "home"),
+    platformRoot: join(root, "platform")
+  });
+  assert.equal(registry.get("codex").executable, join(tools, "codex"));
+  const claude = registry.get("claude");
+  assert.equal(claude.state, "unavailable");
+  const result = (path) => claude.checked.find((check) => check.path === path)?.result;
+  assert.equal(result(join(tools, "claude")), "not-executable");
+  assert.equal(result(join(gone, "claude")), "missing");
+  assert.equal(result(join(later, "claude")), "missing");
+  assert.equal(registry.get("codex").environment.PATH.split(":").includes(gone), false);
+
+  mkdirSync(later);
+  writeFileSync(join(later, "claude"), "#!/bin/sh\n");
+  chmodSync(join(later, "claude"), 0o755);
+  registry.refresh();
+  assert.equal(registry.get("claude").executable, join(later, "claude"));
 });
 
 // A model of how cmd.exe reads `cmd /d /s /c "<line>"` that starts an npm-style

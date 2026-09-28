@@ -121,14 +121,32 @@ export function createProviderCliRegistry(options: ProviderCliRegistryOptions = 
   const environment = options.environment ?? process.env;
   const homeDirectory = options.homeDirectory ?? homedir();
   const startupDirectory = options.startupDirectory ?? process.cwd();
-  const inspectCandidate = options.inspectCandidate ?? inspectProviderCandidate;
-  const directoryExists = options.directoryExists ?? isDirectory;
   const pathKey = environmentPathKey(environment);
   const inputDirectories = pathEntries(environment[pathKey], platform, startupDirectory);
   const platformDirectories = defaultPlatformDirectories(platform, options.platformRoot);
   const sharedDirectories = sharedUserDirectories(platform, environment, homeDirectory);
   const definitions = normalizeProviderCliDefinitions(options.definitions);
   const resolveAll = (): Readonly<Record<AgentProviderId, ProviderCliResolution>> => {
+    // Every provider checks every search directory for its commands: about 500
+    // candidate paths on a normal PATH, most of them in directories that do not
+    // exist (per-provider install locations). Each directory is checked once per
+    // resolution, and a candidate in a missing one is "missing" without its own
+    // stat, the answer the stat would give.
+    const knownDirectories = new Map<string, boolean>();
+    const directoryExistsOnce = (directory: string): boolean => {
+      let exists = knownDirectories.get(directory);
+      if (exists === undefined) {
+        exists = isDirectory(directory);
+        knownDirectories.set(directory, exists);
+      }
+      return exists;
+    };
+    const directoryExists = options.directoryExists ?? directoryExistsOnce;
+    const inspectCandidate = options.inspectCandidate ?? ((path: string, candidatePlatform: NodeJS.Platform) => (
+      directoryExistsOnce((candidatePlatform === "win32" ? win32 : posix).dirname(path))
+        ? inspectProviderCandidate(path, candidatePlatform)
+        : "missing"
+    ));
     const childDirectories = uniquePaths(
       [...inputDirectories, ...platformDirectories, ...sharedDirectories].filter(directoryExists),
       platform
