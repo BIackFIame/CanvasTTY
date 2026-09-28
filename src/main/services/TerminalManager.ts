@@ -88,7 +88,6 @@ interface ManagedSession {
   bufferLength: number;
   outputOffset: number;
   pendingOutput: string[];
-  outputTimer: ReturnType<typeof setTimeout> | null;
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
@@ -190,6 +189,11 @@ export class TerminalManager {
   // Output keeps flowing through emit while hidden, addressed to the observers
   // only (see flushOutput), so the batch queue never holds renderer output.
   private readonly hiddenSinceOffset = new Map<string, number>();
+  // Sessions with output waiting for the next batch, flushed together by one
+  // timer: every session's batch leaves in the same task, so the renderer
+  // transport can send them as one message (main/index.ts).
+  private readonly queuedOutput = new Map<string, ManagedSession>();
+  private outputTimer: ReturnType<typeof setTimeout> | null = null;
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
   // Plugin tools a session of this role and agent gets in canvastty_agents (EP-6), read at launch.
@@ -511,7 +515,6 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
-      outputTimer: null,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
       agentOrchestration: launched.agentOrchestration,
@@ -1053,7 +1056,6 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
-      outputTimer: null,
       agentBrowser,
       agentRuntime,
       agentOrchestration,
@@ -1625,15 +1627,25 @@ export class TerminalManager {
 
   private queueOutput(id: string, session: ManagedSession, data: string): void {
     session.pendingOutput.push(data);
-    if (session.outputTimer !== null) return;
+    this.queuedOutput.set(id, session);
+    if (this.outputTimer !== null) return;
     // Keep a TUI's clear-and-redraw sequence in one renderer update whenever possible.
-    session.outputTimer = setTimeout(() => this.flushOutput(id, session), OUTPUT_BATCH_MS);
+    this.outputTimer = setTimeout(() => this.flushQueuedOutput(), OUTPUT_BATCH_MS);
+  }
+
+  /** Flushes every session with queued output, in the order its output first arrived. */
+  private flushQueuedOutput(): void {
+    this.outputTimer = null;
+    for (const [id, session] of [...this.queuedOutput]) this.flushOutput(id, session);
   }
 
   private flushOutput(id: string, session: ManagedSession): void {
-    if (session.outputTimer !== null) {
-      clearTimeout(session.outputTimer);
-      session.outputTimer = null;
+    if (this.queuedOutput.get(id) === session) {
+      this.queuedOutput.delete(id);
+      if (this.queuedOutput.size === 0 && this.outputTimer !== null) {
+        clearTimeout(this.outputTimer);
+        this.outputTimer = null;
+      }
     }
     if (session.pendingOutput.length === 0) return;
 

@@ -16,6 +16,7 @@ import {
 import { registerIpc } from "./ipc/registerIpc";
 import { SettingsStore } from "./services/SettingsStore";
 import { TerminalManager, reachesObservers, reachesRenderer } from "./services/TerminalManager";
+import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { LimitsService } from "./services/LimitsService";
@@ -486,6 +487,10 @@ async function initializeServices(): Promise<void> {
     console.warn(WINDOWS_AGENT_GATEWAY_UNAVAILABLE);
   }
 
+  // Output batches of every session flushed in one task leave as one IPC message.
+  const rendererOutbox = new TerminalRendererOutbox((channel, payload) => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
+  });
   terminalManager = new TerminalManager((channel, payload) => {
     // Output produced while a card is hidden is addressed to the observers
     // only, and the replay when it is shown again to the renderer only; the
@@ -496,9 +501,7 @@ async function initializeServices(): Promise<void> {
       pluginSessions?.observe(channel, payload);
       if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }
-    if (reachesRenderer(payload) && mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
-      mainWindow.webContents.send(channel, payload);
-    }
+    if (reachesRenderer(payload)) rendererOutbox.push(channel, payload);
     // Attention notifications ride the session-status stream, never the output
     // stream: a transition into needs_approval/failed notifies once, and the
     // removal event clears the dedup entry so a later session (or restart) can

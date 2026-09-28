@@ -74,7 +74,7 @@ test("a card calls one listener per batch no matter how many other cards are bus
 
 test("the preload routes terminal output through one IPC listener and the card subscribes by its id", async () => {
   const preload = await readFile(new URL("../src/preload/index.ts", import.meta.url), "utf8");
-  assert.match(preload, /ipcRenderer\.on\(IPC\.terminalData, [^\n]*terminalData\.dispatch\(payload\)\)/);
+  assert.match(preload, /ipcRenderer\.on\(IPC\.terminalDataBatch, [^\n]*\n\s*for \(const payload of batch\) terminalData\.dispatch\(payload\);/);
   assert.match(preload, /onData: \(listener[^\n]*id\?: string\) => terminalData\.subscribe\(listener, id\)/);
   assert.doesNotMatch(preload, /subscribe\(IPC\.terminalData/);
 });

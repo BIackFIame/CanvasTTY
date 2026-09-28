@@ -81,7 +81,7 @@ App
 
 一个实时 `TerminalCard` 在对应 session ID 的整个生命周期内拥有同一个 xterm instance。切换 palette 时就地更新 `terminal.options.theme`；title/settings 变化不得销毁 terminal 或 renderer scrollback。窗口标题通过 `terminal:rename` 作为 session metadata 更新。与进程退出竞态的 PTY input/resize event 在主进程边界内处理，不会形成未捕获 Electron error。
 
-输出 batching 是 IPC/rendering 边界，而不是历史边界：每个 PTY chunk 都立即追加到有界 scrollback；待发送的 renderer 输出在 16ms timer、exit 前和 dispose 前 flush。Scrollback trimming 通过推进 chunk 完成，不会每次写入都重建整个 buffer；snapshot 只 join 保留的后缀。
+输出 batching 是 IPC/rendering 边界，而不是历史边界：每个 PTY chunk 都立即追加到有界 scrollback；待发送的 renderer 输出在 16ms timer、exit 前和 dispose 前 flush。所有会话共用一个 timer：同一次 flush 的 renderer 输出由 `TerminalRendererOutbox` 作为一条 `terminal:data-batch` 消息发送（session/removed 事件会先 flush 之前收集的输出，保持顺序）；preload 只把事件交给对应会话的卡片（`TerminalDataRouter`）。Scrollback trimming 通过推进 chunk 完成，不会每次写入都重建整个 buffer；snapshot 只 join 保留的后缀。
 
 终端指针坐标在 selection/wheel handling 前，从画布视觉变换后的矩形转换回 xterm layout 坐标。终端与画布滚轮方向从持久化设置中独立规范化。选中文字通过类型化 clipboard bridge 使用 `Ctrl+C`、`Ctrl+Shift+C` 或 `Cmd+C` 复制；使用 `Ctrl+Shift+V`、`Cmd+V` 或 `Shift+Insert` 粘贴，并通过 `Terminal.paste` 而非 synthetic keystroke 进入 xterm。`Shift+Enter` 直接向 PTY 发送 CSI-u modified Enter。
 

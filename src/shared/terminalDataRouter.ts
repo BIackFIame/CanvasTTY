@@ -3,8 +3,8 @@ import type { TerminalDataEvent } from "./contracts.ts";
 type Listener = (event: TerminalDataEvent) => void;
 
 /**
- * Routes terminal output to the card it belongs to. The preload receives every
- * terminal:data message once; handing each one to every card's listener made
+ * Routes terminal output to the card it belongs to. The preload receives each
+ * output message once; handing every event to every card's listener made
  * the renderer cross the context bridge once per card for every batch (24 cards
  * printing a spinner: about 7 000 crossings a second, 23 of every 24 thrown away
  * by the card's own id check). A listener registered for an id gets only that

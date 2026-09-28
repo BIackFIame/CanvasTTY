@@ -25,7 +25,7 @@ because the app's Unix sockets live in userData and macOS caps a socket path at 
 | --- | --- | --- |
 | idle | 8 s after the workspace is ready, 10 s window | RSS per process kind, CPU % per kind |
 | terminals | N plain terminal cards (`--terminals`, default 8), 8 s settle, 10 s window | same |
-| flood | every card runs `scripts/bench-runtime/flood.mjs` at `--kbps` KB/s (default 1024) | same, peak RSS, MB of `terminal:data` sent to the renderer |
+| flood | every card runs `scripts/bench-runtime/flood.mjs` at `--kbps` KB/s (default 1024) | same, peak RSS, MB of terminal output sent to the renderer (`terminal:data` or `terminal:data-batch`) |
 | after | 10 s after the flood ended, 5 s window | same |
 | pan | a middle-button drag of 300 moves, 16 ms apart, over the N cards | React commits, components rendered with new props per move, TerminalCard renders per move, renderer main-thread ms per move (script, style, layout, all tasks, from the DevTools Performance domain), the most rendered components, renderer CPU % |
 

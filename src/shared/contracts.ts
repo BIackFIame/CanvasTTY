@@ -1533,6 +1533,8 @@ export const IPC = {
   terminalSetRestore: "terminal:set-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
+  /** Main -> renderer: the TerminalDataEvents of one output flush, in order (see TerminalRendererOutbox). */
+  terminalDataBatch: "terminal:data-batch",
   terminalSession: "terminal:session",
   terminalRemoved: "terminal:removed",
   windowMinimize: "window:minimize",

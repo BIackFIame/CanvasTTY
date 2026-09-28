@@ -12,6 +12,10 @@ export class BrowserWindow extends Base {
     const send = contents.send.bind(contents);
     contents.send = (channel, ...args) => {
       if (channel === "terminal:data" && typeof args[0]?.data === "string") globalThis.__benchIpc.terminalDataBytes += args[0].data.length;
+      // Builds that send each output flush as one batch message.
+      if (channel === "terminal:data-batch" && Array.isArray(args[0])) {
+        for (const event of args[0]) if (typeof event?.data === "string") globalThis.__benchIpc.terminalDataBytes += event.data.length;
+      }
       return send(channel, ...args);
     };
   }

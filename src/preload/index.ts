@@ -41,7 +41,9 @@ function subscribe<T>(channel: string, listener: (event: T) => void): () => void
 
 // One IPC listener for all terminal output; each card subscribes for its own session id.
 const terminalData = new TerminalDataRouter();
-ipcRenderer.on(IPC.terminalData, (_event: Electron.IpcRendererEvent, payload: TerminalDataEvent) => terminalData.dispatch(payload));
+ipcRenderer.on(IPC.terminalDataBatch, (_event: Electron.IpcRendererEvent, batch: TerminalDataEvent[]) => {
+  for (const payload of batch) terminalData.dispatch(payload);
+});
 
 // Main pushes the updater state on every transition and on each renderer load,
 // so `state()` can answer from this cache instead of asking over IPC.
