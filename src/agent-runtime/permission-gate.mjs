@@ -5,6 +5,7 @@ import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
   AGENT_RUNTIME_ENV,
+  DECISION_FAIL_CLOSED_ENV,
   MAX_HOOK_INPUT_BYTES,
   MAX_RUNTIME_MESSAGE_BYTES,
   PERMISSION_GATE,
@@ -22,12 +23,23 @@ import {
  * - allow (Claude Code): the call runs without Claude's own prompt (only from plugins the person let allow);
  * - no verdict, or anything Codex and Qwen Code cannot take: nothing, and the CLI goes on as it would without us.
  *
- * Exit code is always 0 (exit 2 means something else for some CLIs). A CLI runs the call when this hook crashes or
- * times out, so this is a guard, not a sandbox.
+ * Fail closed: the launch sets `CANVASTTY_RUNTIME_FAIL_CLOSED=1` in this hook's command whenever it installs it (base
+ * protection on, or a decision plugin applies). Then a call the gate could not check (no socket, refused, no answer
+ * within the deadline, an unreadable answer, the gateway's own failure where the CLI cannot ask, unreadable hook input)
+ * is denied with FAIL_CLOSED_MESSAGE instead of left to run. Without the flag such a call gets nothing, as before.
+ *
+ * Every answer, the fail-closed deny included, is the CLI's documented deny JSON on stdout with exit code 0, the same
+ * path base protection's own deny takes (exit 2 means something else for some CLIs). The helper answers well inside
+ * the hook timeout. Only a hook that cannot start at all (a broken install) still leaves the call to the CLI.
  */
 
+/** What the model reads when CanvasTTY could not check a call and did not let it run. */
+export const FAIL_CLOSED_MESSAGE = "CanvasTTY safety check unavailable: this tool call was not run. Retry it, or ask the person how to proceed.";
+
 if (invokedDirectly() && process.argv[2] === "pretool") {
-  await run().catch(() => undefined);
+  const failClosed = process.env[DECISION_FAIL_CLOSED_ENV] === "1";
+  const output = await decide(process.env, failClosed).catch(() => (failClosed ? unavailableOutput() : null));
+  if (output) await writeOut(`${JSON.stringify(output)}\n`).catch(() => undefined);
 }
 
 function invokedDirectly() {
@@ -38,17 +50,26 @@ function invokedDirectly() {
   }
 }
 
-async function run() {
-  const identity = identityFrom(process.env);
+/** What to print for this call, or null to print nothing. Anything that stops the check is `unavailable()`. */
+async function decide(env, failClosed) {
+  const unavailable = () => (failClosed ? unavailableOutput() : null);
+  const identity = identityFrom(env);
   const raw = await readInput();
-  if (!identity || raw === null) return;
+  if (!identity || raw === null) return unavailable();
   let input;
-  try { input = JSON.parse(raw); } catch { return; }
+  try { input = JSON.parse(raw); } catch { return unavailable(); }
   const message = buildRequest(input, identity);
-  if (!message) return;
-  const decision = await exchange(identity.address, message, helperDeadlineMs(process.env));
-  const output = hookOutput(identity.provider, decision);
-  if (output) await writeOut(`${JSON.stringify(output)}\n`);
+  if (!message) return unavailable();
+  const decision = await exchange(identity.address, message, helperDeadlineMs(env));
+  if (!decision) return unavailable();
+  // The gateway itself failed and asks the person: Claude Code can ask, Codex and Qwen Code cannot.
+  if (decision.unavailable && decision.behavior === "ask" && identity.provider !== "claude") return unavailable();
+  return hookOutput(identity.provider, decision);
+}
+
+/** The deny for a call CanvasTTY could not check. */
+export function unavailableOutput() {
+  return hookOutput("claude", { behavior: "deny", message: FAIL_CLOSED_MESSAGE });
 }
 
 export function identityFrom(env) {
@@ -105,7 +126,10 @@ export function buildRequest(input, identity) {
   return { ...base, toolInput: null, toolInputPreview: boundedText(json, 2_048), truncated: true };
 }
 
-/** Sends one line and waits for the matching decision; null on anything else (close, timeout, garbage). */
+/**
+ * Sends one line and waits for the matching decision; null on anything else (no socket, refused, close, timeout,
+ * garbage), which a fail-closed gate turns into a deny.
+ */
 export function exchange(address, message, deadlineMs) {
   return new Promise((resolve) => {
     const payload = Buffer.from(`${JSON.stringify(message)}\n`, "utf8");
@@ -140,14 +164,15 @@ export function exchange(address, message, deadlineMs) {
 export function parseDecision(value, requestId) {
   if (!value || typeof value !== "object" || value.v !== RUNTIME_PROTOCOL_VERSION
     || value.type !== "permission_decision" || value.requestId !== requestId) return null;
-  if (value.behavior !== "allow" && value.behavior !== "deny" && value.behavior !== "ask") return null;
+  if (!["allow", "deny", "ask", "none"].includes(value.behavior)) return null;
   const message = typeof value.message === "string" ? cleanMessage(value.message) : "";
-  return { behavior: value.behavior, message };
+  // `unavailable`: the gateway could not get an answer (its handler failed or ran out of time) and says ask.
+  return { behavior: value.behavior, message, unavailable: value.unavailable === true };
 }
 
 /** What the CLI reads on stdout, or null to print nothing. Only Claude Code takes ask and allow from a hook. */
 export function hookOutput(provider, decision) {
-  if (!decision) return null;
+  if (!decision || decision.behavior === "none") return null;
   if (decision.behavior === "deny") {
     return {
       hookSpecificOutput: {

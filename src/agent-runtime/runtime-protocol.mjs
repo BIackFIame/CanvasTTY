@@ -55,6 +55,9 @@ export const OPENCODE_DECISIONS_ENV = "CANVASTTY_RUNTIME_DECISIONS";
 // local model. The session's hook, helper and gateway deadlines are set at launch from the longest such budget and
 // passed to the helper in this variable; without it the defaults above hold.
 export const DECISION_BUDGET_ENV = "CANVASTTY_RUNTIME_DECISION_MS";
+// Set to "1" in the decision hook's own command when the session was launched with it (base protection on, or a
+// decision plugin applies). The gate then fails closed: a call it could not check is denied instead of left to run.
+export const DECISION_FAIL_CLOSED_ENV = "CANVASTTY_RUNTIME_FAIL_CLOSED";
 export const DEFAULT_DECIDE_TIMEOUT_MS = 3_000;
 export const MIN_DECIDE_TIMEOUT_MS = 1_000;
 export const MAX_DECIDE_TIMEOUT_MS = 60_000;

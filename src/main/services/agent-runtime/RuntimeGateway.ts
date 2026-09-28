@@ -388,6 +388,8 @@ export class RuntimeGateway {
    * decision hooks. The socket stays open until the answer; a closed socket, a revoke or the gateway deadline
    * aborts the check, and the answer is then `ask`. Checks are capped per session and in total; over a cap the
    * call is refused with a message asking the model to slow down (a flood must not slip past the rules).
+   * An `ask` that stands for the gateway's own failure (deadline, a handler that threw or answered nonsense) is marked
+   * `unavailable`, so a fail-closed gate for a CLI that cannot ask denies it instead of letting the call run.
    */
   private acceptPermission(socket: AgentGatewaySocket, value: Record<string, unknown>, close: () => void): void {
     let request: RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
@@ -404,7 +406,7 @@ export class RuntimeGateway {
     if (!valid || !lease.decisions) return close();
     const { terminalSessionId, capabilityToken: _token, ...forwarded } = request;
     let answered = false;
-    const answer = (decision: RuntimePermissionDecision): void => {
+    const answer = (decision: RuntimePermissionDecision, unavailable = false): void => {
       if (answered) return;
       answered = true;
       const line = {
@@ -412,7 +414,8 @@ export class RuntimeGateway {
         type: "permission_decision",
         requestId: request.requestId,
         behavior: decision.behavior,
-        ...(decision.message ? { message: decision.message } : {})
+        ...(decision.message ? { message: decision.message } : {}),
+        ...(unavailable ? { unavailable: true } : {})
       };
       try {
         socket.write(Buffer.from(`${JSON.stringify(line)}\n`, "utf8"));
@@ -428,13 +431,14 @@ export class RuntimeGateway {
     this.checks.add(controller);
     const deadline = setTimeout(() => controller.abort(), lease.gatewayMs);
     deadline.unref();
-    const settle = (decision: RuntimePermissionDecision): void => {
+    const settle = (decision: RuntimePermissionDecision | null): void => {
       clearTimeout(deadline);
       lease.checks.delete(controller);
       this.checks.delete(controller);
-      answer(controller.signal.aborted ? { behavior: "ask" } : enforceDecision(forwarded, decision));
+      if (controller.signal.aborted || !isDecision(decision)) return answer({ behavior: "ask" }, true);
+      answer(enforceDecision(forwarded, decision));
     };
-    controller.signal.addEventListener("abort", () => settle({ behavior: "ask" }), { once: true });
+    controller.signal.addEventListener("abort", () => settle(null), { once: true });
     socket.on("close", () => controller.abort());
     const handler = this.onPermissionRequest;
     if (!handler) return settle({ behavior: "none" });
@@ -442,18 +446,21 @@ export class RuntimeGateway {
     try {
       pendingAnswer = Promise.resolve(handler(terminalSessionId, forwarded, controller.signal));
     } catch {
-      return settle({ behavior: "ask" });
+      return settle(null);
     }
-    pendingAnswer.then(settle, () => settle({ behavior: "ask" }));
+    pendingAnswer.then(settle, () => settle(null));
   }
 }
 
 /** What leaves the gateway, whatever the handler said: never an allow of cut input. */
 function enforceDecision(request: RuntimePermissionRequest, decision: RuntimePermissionDecision): RuntimePermissionDecision {
-  if (!decision || !["allow", "deny", "ask", "none"].includes(decision.behavior)) return { behavior: "ask" };
   if (decision.behavior === "allow" && request.truncated) return { behavior: "ask" };
   const message = typeof decision.message === "string" ? decision.message.slice(0, PERMISSION_GATE.messageChars) : "";
   return { behavior: decision.behavior, ...(message ? { message } : {}) };
+}
+
+function isDecision(decision: RuntimePermissionDecision | null | undefined): decision is RuntimePermissionDecision {
+  return Boolean(decision) && ["allow", "deny", "ask", "none"].includes(decision!.behavior);
 }
 
 function isPermissionRequest(value: unknown): value is Record<string, unknown> {

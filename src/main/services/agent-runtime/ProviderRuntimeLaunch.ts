@@ -15,6 +15,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseDocument } from "yaml";
+import { DECISION_FAIL_CLOSED_ENV } from "../../../agent-runtime/runtime-protocol.mjs";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
 import { DECISION_BUDGET_ENV, OPENCODE_DECISIONS_ENV, permissionGateTimings } from "../../../agent-runtime/runtime-protocol.mjs";
 
@@ -533,7 +534,12 @@ export function decisionHookCommands(
   return [{
     event: "PreToolUse",
     matcher: DECISION_TOOL_MATCHERS[provider],
-    command: commandWithEnvironment([gate.command, ...gate.args, "pretool"], { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs) }, platform),
+    // The hook is installed only when something decides for this session, so it always fails closed.
+    command: commandWithEnvironment(
+      [gate.command, ...gate.args, "pretool"],
+      { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs), [DECISION_FAIL_CLOSED_ENV]: "1" },
+      platform
+    ),
     // Qwen hook timeouts are milliseconds; Claude's and Codex's are seconds.
     timeout: provider === "qwen" ? hookSeconds * 1_000 : hookSeconds
   }];
