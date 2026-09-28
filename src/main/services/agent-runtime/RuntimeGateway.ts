@@ -26,6 +26,9 @@ const AGENT_PROVIDERS = new Set<ProviderId>([
 ]);
 const MAX_RUNTIME_SESSIONS = 32;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+// Hook helpers write their one message right after connecting. A connection
+// that stays silent is closed, so idle clients cannot hold all 64 slots.
+const FIRST_MESSAGE_TIMEOUT_MS = 5_000;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 /** Decision checks in flight, per session and in total; over a cap the call is refused with advice to slow down. */
 const MAX_DECISIONS_PER_SESSION = 8;
@@ -104,6 +107,8 @@ export interface RuntimeGatewayOptions {
   runtimeDirectory?: string;
   windowsHostPath?: string;
   windowsPipeHostFactory?: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
+  /** A connection must send its one message within this time (default 5 s). */
+  firstMessageTimeoutMs?: number;
   onSignal?(terminalSessionId: string, signal: RuntimeLifecycleSignal): void;
   onAnswerCaptureRevoked?(terminalSessionId: string): void;
   /**
@@ -123,6 +128,7 @@ export class RuntimeGateway {
   private readonly onAnswerCaptureRevoked: RuntimeGatewayOptions["onAnswerCaptureRevoked"];
   private readonly onPermissionRequest: RuntimeGatewayOptions["onPermissionRequest"];
   private readonly now: () => number;
+  private readonly firstMessageTimeoutMs: number;
   private readonly checks = new Set<AbortController>();
   private readonly leases = new Map<string, RuntimeLease>();
   private readonly sockets = new Set<AgentGatewaySocket>();
@@ -140,6 +146,7 @@ export class RuntimeGateway {
     this.windowsHostPath = options.windowsHostPath;
     this.windowsPipeHostFactory = options.windowsPipeHostFactory
       ?? ((transportOptions) => new WindowsPipeHostTransport(transportOptions));
+    this.firstMessageTimeoutMs = options.firstMessageTimeoutMs ?? FIRST_MESSAGE_TIMEOUT_MS;
     this.onSignal = options.onSignal;
     this.onAnswerCaptureRevoked = options.onAnswerCaptureRevoked;
     this.onPermissionRequest = options.onPermissionRequest;
@@ -316,9 +323,12 @@ export class RuntimeGateway {
     let pending = Buffer.alloc(0);
     let handled = false;
     const close = () => {
+      clearTimeout(firstMessage);
       this.sockets.delete(socket);
       socket.destroy();
     };
+    const firstMessage = setTimeout(close, this.firstMessageTimeoutMs);
+    firstMessage.unref?.();
     socket.setNoDelay(true);
     socket.on("data", (chunk) => {
       if (handled) return;
@@ -328,6 +338,7 @@ export class RuntimeGateway {
       const newline = pending.indexOf(0x0a);
       if (newline < 0) return;
       handled = true;
+      clearTimeout(firstMessage);
       try {
         const value: unknown = JSON.parse(pending.subarray(0, newline).toString("utf8"));
         // Decision hooks keep the socket open for the answer; every other message is unchanged.
@@ -350,7 +361,10 @@ export class RuntimeGateway {
       }
     });
     socket.on("error", close);
-    socket.on("close", () => this.sockets.delete(socket));
+    socket.on("close", () => {
+      clearTimeout(firstMessage);
+      this.sockets.delete(socket);
+    });
   }
 
   private answerCaptureIsActive(value: unknown): boolean {

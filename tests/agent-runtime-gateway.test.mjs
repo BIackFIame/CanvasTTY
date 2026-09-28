@@ -518,3 +518,16 @@ test("RuntimeGateway drops a Windows transport whose start failed", async (t) =>
   assert.equal(transports[0].closed, true);
   assert.equal(await gateway.start(), "\\\\.\\pipe\\canvastty-agent-1");
 });
+
+test("RuntimeGateway closes a connection that sends no message, so idle clients cannot hold every slot", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, firstMessageTimeoutMs: 100 });
+  const address = await gateway.start();
+  t.after(() => gateway.close());
+  const idle = createConnection(address);
+  await new Promise((resolve, reject) => { idle.once("connect", resolve); idle.once("error", reject); });
+  const closed = new Promise((resolve) => idle.once("close", resolve));
+  const outcome = await Promise.race([closed.then(() => "closed"), new Promise((resolve) => setTimeout(() => resolve("open"), 1_500))]);
+  idle.destroy();
+  assert.equal(outcome, "closed");
+});
