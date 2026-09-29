@@ -40,7 +40,7 @@ import { BrowserCanvasPointerRouter } from "./browser/BrowserCanvasPointerRouter
 import { BrowserCanvasSinkViewportController } from "./browser/BrowserCanvasSinkViewport.ts";
 import { BrowserAuditStore } from "./browser/BrowserAuditStore.ts";
 import { browserPageWheelReply, type BrowserPageWheelReply } from "./browser/BrowserCanvasWheel.ts";
-import { clipBrowserViewportBounds, normalizeBrowserViewportBounds } from "./browser/BrowserViewport.ts";
+import { clipBrowserViewportBounds, normalizeBrowserViewportBounds, sameBrowserViewport } from "./browser/BrowserViewport.ts";
 import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab } from "./browser/BrowserCore.ts";
 import { BrowserKernelError } from "./browser/BrowserErrors.ts";
 import {
@@ -440,6 +440,10 @@ export class BrowserService {
     const normalized = normalizeBrowserViewportBounds(bounds);
     if (!normalized) return;
     const previous = this.viewport;
+    // The card reports its rectangle on every camera step, resize and layout pass; one that rounds to the same
+    // placement changes nothing (the window's own moves and resizes resync on their own). A hidden report always
+    // runs, since it also ends any gesture in progress.
+    if (normalized.surface !== "hidden" && sameBrowserViewport(previous, normalized)) return;
     this.viewport = normalized;
     if (normalized.surface === "hidden") {
       this.canvasPointers.cancelNavigationGesture();
