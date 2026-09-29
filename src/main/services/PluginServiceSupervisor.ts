@@ -397,7 +397,7 @@ export class PluginServiceSupervisor {
     // Frames over the limit are dropped up to their newline instead of buffered.
     const frames = new NdjsonLineReader({ maxLineBytes: this.options.maxFrameBytes, onOversize: () => this.dropFrame(record) });
     child.stdout?.on("data", (chunk: Buffer) => {
-      for (const line of frames.push(chunk)) this.frame(record, line.toString("utf8"));
+      for (const line of frames.push(chunk)) this.frame(record, child, line.toString("utf8"));
     });
     child.stderr?.setEncoding("utf8");
     let stderr = "";
@@ -503,7 +503,7 @@ export class PluginServiceSupervisor {
     this.log(record.spec, "host", "warn", "Dropped a service message larger than 1 MB.");
   }
 
-  private frame(record: ServiceRecord, line: string): void {
+  private frame(record: ServiceRecord, child: ChildProcess, line: string): void {
     if (!line.trim()) return;
     let message: unknown;
     try {
@@ -516,9 +516,14 @@ export class PluginServiceSupervisor {
     const id = message.id;
     if (typeof message.method === "string") {
       if (typeof id === "number" || typeof id === "string") {
+        // The answer belongs to the process that asked. If it exited while the host was working,
+        // a restarted process has its own request ids and must not receive this reply.
+        const reply = (frame: string): void => {
+          if (record.child === child) this.write(record, frame);
+        };
         void this.hostRequest(record, message.method, message.params).then(
-          (result) => this.write(record, JSON.stringify({ jsonrpc: "2.0", id, result: result ?? null })),
-          (error: unknown) => this.write(record, JSON.stringify({
+          (result) => reply(JSON.stringify({ jsonrpc: "2.0", id, result: result ?? null })),
+          (error: unknown) => reply(JSON.stringify({
             jsonrpc: "2.0",
             id,
             error: { code: error instanceof UnknownMethodError ? -32601 : -32000, message: errorText(error) }
