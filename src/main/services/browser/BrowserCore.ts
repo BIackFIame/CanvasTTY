@@ -215,8 +215,16 @@ export class BrowserCore {
         return { data: { hovered: true }, tabId: requiredTabId };
       }
       case "browser_type": {
-        const pointer = await this.automation.type(requiredTabId, revision, command.ref, command.text, signal);
-        this.host.touchActor(actor, requiredTabId, pointer);
+        const { point, typed } = await this.automation.type(requiredTabId, revision, command.ref, command.text, signal);
+        this.host.touchActor(actor, requiredTabId, point);
+        if (!typed) {
+          // Focusing the element opened a dialog: nothing was typed. Handle the dialog, then type again.
+          const dialog = this.host.pendingDialog(requiredTabId);
+          throw new BrowserKernelError("DIALOG_OPEN", "A JavaScript dialog opened before the text was typed; nothing was typed.", {
+            retryable: true,
+            ...(dialog ? { details: { dialogType: dialog.type } } : {})
+          });
+        }
         return { data: { typed: true }, tabId: requiredTabId };
       }
       case "browser_select":
