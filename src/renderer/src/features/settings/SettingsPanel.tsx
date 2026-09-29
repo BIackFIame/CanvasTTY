@@ -1517,7 +1517,7 @@ function Segmented({
   );
 }
 
-const BACKGROUND_ASSETS = import.meta.glob<string>("../../assets/theme-backgrounds/*.png", {
+const BACKGROUND_ASSETS = import.meta.glob<string>("../../assets/theme-backgrounds/*.avif", {
   eager: true, query: "?url", import: "default"
 });
 
@@ -1538,7 +1538,7 @@ function CanvasBackgroundChoices({ locale, value, pixelPacks, onChange }: {
     {BUNDLED_CANVAS_BACKGROUND_IDS.map((id) => <button key={id} type="button" className="border-skin-choice"
       aria-pressed={value === id} onClick={() => onChange(id)}>
       <span className="border-skin-preview border-skin-preview--pixel canvas-background-preview" aria-hidden="true">
-        <img src={BACKGROUND_ASSETS[`../../assets/theme-backgrounds/${id}.png`]} alt="" loading="lazy" />
+        <img src={BACKGROUND_ASSETS[`../../assets/theme-backgrounds/${id}.avif`]} alt="" loading="lazy" />
       </span>
       <span className="border-skin-choice__label">{t(locale, labelKeys[id])}</span>
     </button>)}

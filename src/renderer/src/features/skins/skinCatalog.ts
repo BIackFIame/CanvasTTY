@@ -26,7 +26,7 @@ export function pixelSkinAssetFilename(
   state: PixelSkinArtState
 ): string {
   const definition = PIXEL_SKIN_CATALOG[theme];
-  return `${definition.fileStem}_${definition.detailStems[detail]}_${state}.png`;
+  return `${definition.fileStem}_${definition.detailStems[detail]}_${state}.avif`;
 }
 
 export function isPixelSkinThemeId(value: unknown): value is PixelSkinThemeId {

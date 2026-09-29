@@ -192,50 +192,50 @@ test("pixel cards grow to a readable terminal size and separate neighboring wind
 });
 
 test("asset lookup is exact by theme and status with only same-state LOD fallback", () => {
-  assert.equal(pixelSkinAssetFilename("sakura", "minimal", "working"), "sakura_l1_working.png");
-  assert.equal(pixelSkinAssetFilename("forest-cabin", "master", "idle"), "forest_cabin_master_idle.png");
+  assert.equal(pixelSkinAssetFilename("sakura", "minimal", "working"), "sakura_l1_working.avif");
+  assert.equal(pixelSkinAssetFilename("forest-cabin", "master", "idle"), "forest_cabin_master_idle.avif");
   const assets = {
-    "sakura_l2_working.png": "/assets/sakura-l2-work.png",
-    "sakura_l1_idle.png": "/assets/sakura-l1-idle.png",
-    "matrix_l1_completed.png": "/assets/matrix-completed-candidate.png"
+    "sakura_l2_working.avif": "/assets/sakura-l2-work.png",
+    "sakura_l1_idle.avif": "/assets/sakura-l1-idle.png",
+    "matrix_l1_completed.avif": "/assets/matrix-completed-candidate.png"
   };
   assert.deepEqual(resolvePixelSkinAsset("sakura", "master", "working", assets), {
-    kind: "asset", filename: "sakura_l2_working.png", resolvedDetail: "detailed", url: "/assets/sakura-l2-work.png"
+    kind: "asset", filename: "sakura_l2_working.avif", resolvedDetail: "detailed", url: "/assets/sakura-l2-work.png"
   });
   assert.deepEqual(resolvePixelSkinAsset("sakura", "minimal", "working", assets), {
-    kind: "missing", filename: "sakura_l1_working.png"
+    kind: "missing", filename: "sakura_l1_working.avif"
   });
   assert.deepEqual(resolvePixelSkinAsset("matrix", "minimal", "idle", assets), {
-    kind: "missing", filename: "matrix_l1_idle.png"
+    kind: "missing", filename: "matrix_l1_idle.avif"
   });
 });
 
 test("Gold minimal working reuses only its idle frame and adds a status marker", () => {
   const assets = {
-    "gold_black_l1_idle.png": "/assets/gold-idle.png",
-    "gold_black_detailed_working.png": "/assets/gold-detailed-working.png",
-    "sakura_l1_idle.png": "/assets/sakura-idle.png"
+    "gold_black_l1_idle.avif": "/assets/gold-idle.png",
+    "gold_black_detailed_working.avif": "/assets/gold-detailed-working.png",
+    "sakura_l1_idle.avif": "/assets/sakura-idle.png"
   };
 
   assert.deepEqual(resolvePixelSkinAsset("gold-black", "minimal", "working", assets), {
-    kind: "missing", filename: "gold_black_l1_working.png"
+    kind: "missing", filename: "gold_black_l1_working.avif"
   });
   assert.deepEqual(resolvePixelSkinViewAsset("gold-black", "minimal", "working", assets), {
-    kind: "asset", filename: "gold_black_l1_idle.png", resolvedDetail: "minimal", url: "/assets/gold-idle.png"
+    kind: "asset", filename: "gold_black_l1_idle.avif", resolvedDetail: "minimal", url: "/assets/gold-idle.png"
   });
   assert.deepEqual(resolvePixelSkinViewAsset("gold-black", "detailed", "working", assets), {
-    kind: "asset", filename: "gold_black_detailed_working.png", resolvedDetail: "detailed", url: "/assets/gold-detailed-working.png"
+    kind: "asset", filename: "gold_black_detailed_working.avif", resolvedDetail: "detailed", url: "/assets/gold-detailed-working.png"
   });
   assert.deepEqual(resolvePixelSkinViewAsset("sakura", "minimal", "working", assets), {
-    kind: "missing", filename: "sakura_l1_working.png"
+    kind: "missing", filename: "sakura_l1_working.avif"
   });
   assert.equal(needsGoldMinimalWorkingMarker("gold-black", "minimal", "working", assets), true);
   assert.equal(needsGoldMinimalWorkingMarker("gold-black", "minimal", "working", {}), false);
   assert.equal(needsGoldMinimalWorkingMarker("gold-black", "minimal", "idle", assets), false);
   assert.equal(needsGoldMinimalWorkingMarker("gold-black", "master", "working", assets), false);
   assert.equal(needsGoldMinimalWorkingMarker("gold-black", "minimal", "working", {
-    "gold_black_l1_working.png": "/assets/gold-working.png",
-    "gold_black_l1_idle.png": "/assets/gold-idle.png"
+    "gold_black_l1_working.avif": "/assets/gold-working.png",
+    "gold_black_l1_idle.avif": "/assets/gold-idle.png"
   }), false);
 });
 
@@ -265,7 +265,7 @@ test("pilot runtime contains all three states for all bundled themes", async () 
     for (const level of levels) {
       for (const state of ["idle", "working", "completed"]) {
         if (theme === "gold_black" && level === "l1" && state === "working") continue;
-        assert.ok(files.has(`${theme}_${level}_${state}.png`), `${theme} ${level} ${state} asset`);
+        assert.ok(files.has(`${theme}_${level}_${state}.avif`), `${theme} ${level} ${state} asset`);
       }
     }
   }

@@ -12,7 +12,7 @@ const PACK_SLOTS: readonly PixelSkinSlot[] = [
   "master_idle", "master_working", "master_completed", "background"
 ];
 
-const pilotModules = import.meta.glob<string>("./assets/pilots/*.png", {
+const pilotModules = import.meta.glob<string>("./assets/pilots/*.avif", {
   eager: true,
   query: "?url",
   import: "default"
