@@ -25,6 +25,8 @@ export interface IsolationPathInput {
   grantedPrivate?: readonly string[];
   /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
   socketFolders?: readonly string[];
+  /** Plan: the project is readable only (the CLI's own folders stay writable). */
+  readOnlyProject?: boolean;
 }
 
 export interface IsolationPaths {
@@ -63,8 +65,10 @@ function providerFolders(provider: ProviderId, env: IsolationPathInput["env"], h
       const config = env.CLAUDE_CONFIG_DIR && isAbsolute(env.CLAUDE_CONFIG_DIR) ? env.CLAUDE_CONFIG_DIR : join(home, ".claude");
       return {
         folders: [config, ...named("claude"), join(home, "Library", "Caches", "claude-cli-nodejs")],
-        // Claude Code keeps its state next to HOME (and next to its config folder when CLAUDE_CONFIG_DIR moves it).
-        files: [join(home, ".claude.json"), join(config, ".claude.json")]
+        // Claude Code keeps its state next to HOME (and next to its config folder when CLAUDE_CONFIG_DIR moves it). On
+        // macOS it keeps its sign-in in the login keychain, which the Security framework rewrites from inside the
+        // process (a temporary `.sb-…` sibling renamed over it): refreshing the sign-in needs that one file writable.
+        files: [join(home, ".claude.json"), join(config, ".claude.json"), join(home, "Library", "Keychains", "login.keychain-db")]
       };
     }
     case "grok":
@@ -178,7 +182,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   ];
   return {
     writable: all([
-      project,
+      ...(input.readOnlyProject ? [] : [project]),
       input.sessionTemp,
       ...ownFolders,
       join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")

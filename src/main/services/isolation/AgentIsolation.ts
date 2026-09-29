@@ -58,6 +58,8 @@ export interface IsolationLaunch {
   env: Record<string, string>;
   /** Folders under CanvasTTY's private data this launch was handed (its control grant, its account home). */
   grantedPrivate?: readonly string[];
+  /** The launch profile: in plan the project is not writable. */
+  profile?: LaunchProfile;
 }
 
 export interface WrappedLaunch {
@@ -159,7 +161,8 @@ export class AgentIsolation {
         env: launch.env,
         userDataPath: this.options.userDataPath,
         sessionId: launch.sessionId,
-        ...(launch.grantedPrivate ? { grantedPrivate: launch.grantedPrivate } : {})
+        ...(launch.grantedPrivate ? { grantedPrivate: launch.grantedPrivate } : {}),
+        ...(launch.profile === "plan" ? { readOnlyProject: true } : {})
       });
       // An agent that meets "Operation not permitted" can read why here, instead of trying other ways around it.
       const env = { ...launch.env, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, [ISOLATION_ENV]: ISOLATION_NOTE };

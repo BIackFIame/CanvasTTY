@@ -113,6 +113,14 @@ test("auto: Codex --approve-for-me (its workspace-write sandbox), Claude auto wi
   // Inside CanvasTTY's isolation layer Claude's own sandbox cannot start (macOS refuses a sandbox in a sandbox): left out.
   assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), []);
   assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto"]);
+  // Codex inside the layer: its own seatbelt cannot start in ours, so it is off, never bypassed; approvals stay.
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true }),
+    ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request", "-c", 'approvals_reviewer="auto_review"']);
+  assert.deepEqual(launch("codex", "normal", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "acceptEdits", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true, thirdPartyModel: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.ok(!launch("codex", "auto", [], { isolated: true }).includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.deepEqual(launch("codex", "auto"), ["--approve-for-me"], "outside the layer Codex keeps its own sandbox");
 });
 
 test("a third-party model turns auto into accept-edits, sandbox kept; other profiles ignore the mark", () => {

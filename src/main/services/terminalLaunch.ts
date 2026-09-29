@@ -90,7 +90,9 @@ export function resolveTerminalLaunch(
   const providerArgs = [
     ...(provider === "codex" && agentBrowserArgs.includes("-c") ? ["--no-daemon"] : []),
     ...((profile === "yolo" || containedAuto) && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
-    ...(profile !== "normal" && profile !== "yolo" && !containedAuto ? profileArguments(provider, profile, options.thirdPartyModel === true) : []),
+    ...(provider === "codex" && options.isolated === true && profile !== "yolo"
+      ? codexInsideIsolation(profile, options.thirdPartyModel === true)
+      : profile !== "normal" && profile !== "yolo" && !containedAuto ? profileArguments(provider, profile, options.thirdPartyModel === true) : []),
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
     // Its sandbox joins the same one.
     ...(provider === "claude"
@@ -147,6 +149,21 @@ export function resolveTerminalLaunch(
     args: providerTerminalBatchCommandLine(providerCli.executable, providerArgs),
     environment: combinedEnvironment
   };
+}
+
+/**
+ * Codex inside CanvasTTY's isolation layer. macOS refuses a sandbox inside another one, so Codex's own seatbelt could
+ * not start and every command would fail once before being re-requested. The layer already confines the files, so
+ * Codex runs with its own sandbox off (`-s danger-full-access`, never the bypass flag) and the same approvals as the
+ * mode outside the layer: auto keeps `--approve-for-me`'s reviewer (`approvals_reviewer="auto_review"`,
+ * `approval_policy="on-request"`, verified with `codex debug prompt-input` under a fake HOME: `--approve-for-me` itself
+ * refuses to be combined with `--sandbox`); accept-edits and normal keep on-request; plan is read-only through the
+ * layer (the project is not writable in plan).
+ */
+export function codexInsideIsolation(profile: LaunchProfile, thirdPartyModel: boolean): string[] {
+  const base = ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"];
+  if (profile === "auto" && !thirdPartyModel) return [...base, "-c", 'approvals_reviewer="auto_review"'];
+  return base;
 }
 
 function resolveResumeArguments(

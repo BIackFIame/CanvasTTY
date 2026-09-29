@@ -1397,7 +1397,7 @@ export class TerminalManager {
     let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
     if (decision.apply) {
       try {
-        spawn = this.wrapIsolated(id, provider, planned);
+        spawn = this.wrapIsolated(id, provider, profile, planned);
       } catch (error) {
         planned.cleanup();
         return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
@@ -1461,7 +1461,7 @@ export class TerminalManager {
   }
 
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
-  private wrapIsolated(id: string, provider: ProviderId, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }): { command: string; args: string[]; env: Record<string, string> } {
+  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
     const grant = controlGrantFolder(planned.env);
@@ -1472,6 +1472,7 @@ export class TerminalManager {
       command: planned.command,
       args: planned.args,
       env: planned.env,
+      profile,
       ...(grant ? { grantedPrivate: [grant] } : {})
     });
     this.releaseIsolation(id);
@@ -1857,7 +1858,7 @@ export class TerminalManager {
     }
     if (decision.apply) {
       try {
-        spawn = { ...this.wrapIsolated(id, metadata.provider, spawn), cwd: spawn.cwd };
+        spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
       } catch (error) {
         abandon();
         return refuse(error instanceof Error ? error.message : String(error));

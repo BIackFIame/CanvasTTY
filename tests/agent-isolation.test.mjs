@@ -10,6 +10,7 @@ import { isolationPaths } from "../src/main/services/isolation/isolationPaths.ts
 import { seatbeltProfile } from "../src/main/services/isolation/seatbelt.ts";
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
+import { codexInsideIsolation } from "../src/main/services/terminalLaunch.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
@@ -220,6 +221,33 @@ test("seatbelt, for real: writes stay in the project, secrets stay unread, nothi
   assert.notEqual(spawnSync("defaults", ["read", "ctty.isolation.probe"]).status, 0);
 });
 
+test("seatbelt, for real: Claude saves a refreshed sign-in in the login keychain; nothing else there; plan is read-only", onMac, async (t) => {
+  const w = await world(t);
+  const folder = join(w.home, "Library", "Keychains");
+  await mkdir(folder, { recursive: true });
+  const keychain = join(folder, "login.keychain-db");
+  // A temporary keychain in the fake HOME, never the person's.
+  assert.equal(spawnSync("security", ["create-keychain", "-p", "pw", keychain]).status, 0);
+  t.after(() => spawnSync("security", ["delete-keychain", keychain]));
+  spawnSync("security", ["unlock-keychain", "-p", "pw", keychain]);
+  const script = [
+    `security add-generic-password -a acct -s ctty-probe -w first "${keychain}" >/dev/null 2>&1 && echo ADD-ok || echo ADD-denied`,
+    `security add-generic-password -U -a acct -s ctty-probe -w second "${keychain}" >/dev/null 2>&1 && echo UPDATE-ok || echo UPDATE-denied`,
+    `echo x > "${join(folder, "other.keychain-db")}" 2>/dev/null || echo OTHER-denied`
+  ].join("; ");
+  assert.deepEqual(run(w, script, { provider: "claude" }).lines, ["ADD-ok", "UPDATE-ok", "OTHER-denied"]);
+  assert.equal(spawnSync("security", ["find-generic-password", "-a", "acct", "-s", "ctty-probe", "-w", keychain], { encoding: "utf8" }).stdout.trim(), "second");
+  // Only Claude Code keeps its sign-in there; another CLI cannot write it.
+  assert.deepEqual(run(w, `cat /dev/null >> "${keychain}" 2>/dev/null && echo WRITE-ok || echo WRITE-denied`, { provider: "codex" }).lines, ["WRITE-denied"]);
+  // Plan: the project is readable, not writable; the CLI's own folders still are.
+  const wrapped = isolation(w).wrap({ sessionId: "p", provider: "codex", profile: "plan", cwd: w.project, command: "/bin/sh",
+    args: ["-c", 'ls >/dev/null && echo READ-ok; echo x > plan-file 2>/dev/null || echo WRITE-denied; echo x > "$HOME/.codex/s" && echo OWN-ok'], env: w.env });
+  try {
+    assert.deepEqual(spawnSync(wrapped.command, wrapped.args, { cwd: w.project, env: wrapped.env, encoding: "utf8" }).stdout.split("\n").filter(Boolean),
+      ["READ-ok", "WRITE-denied", "OWN-ok"]);
+  } finally { wrapped.cleanup(); }
+});
+
 test("seatbelt, for real: Unix sockets only to CanvasTTY's own gateways and the session's folder", onMac, async (t) => {
   const w = await world(t);
   const outsideDir = join(w.base, "o");
@@ -264,7 +292,9 @@ test("real CLIs start inside the layer with a fake HOME (version and config only
     ["opencode", "opencode", ["debug", "config"], /"\$schema"|\{/u],
     ["codex", "codex", ["--version"], /codex-cli \d/u],
     ["claude", "claude", ["--version"], /Claude Code/u],
-    ["grok", "grok", ["--version"], /\d+\.\d+/u]
+    ["grok", "grok", ["--version"], /\d+\.\d+/u],
+    // Codex accepts the flags it gets inside the layer: its own sandbox off, the auto reviewer on (offline dry run).
+    ["codex", "codex", [...codexInsideIsolation("auto", false), "debug", "prompt-input"], /`sandbox_mode` is `danger-full-access`[\s\S]*`approvals_reviewer` is `auto_review`/u]
   ];
   let ran = 0;
   for (const [provider, name, args, expected] of cases) {
