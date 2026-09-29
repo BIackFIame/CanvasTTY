@@ -597,7 +597,15 @@ export class RuntimeGateway {
       } catch {
         delivery = null;
       }
-      finish(200, oversized);
+      // An oversized body is still being sent: answer once it has arrived (read and dropped), so the connection is
+      // closed after it rather than reset under the sender, which would lose the answer (ECONNRESET).
+      if (oversized && !request.complete) {
+        request.resume();
+        request.once("end", () => finish(200, true));
+        request.once("close", () => finish(200, true));
+      } else {
+        finish(200, oversized);
+      }
       this.deliverLater(delivery);
     };
     if (oversized) return complete();
