@@ -139,7 +139,7 @@ Lifecycle: every service of an enabled, trusted plugin runs as its own process (
 Protocol: newline-delimited JSON-RPC 2.0 over stdin/stdout, at most 1 MB per message in each direction. A larger message from the host is refused; a larger line from the service is dropped and logged. The host first sends a notification:
 
 ```json
-{"jsonrpc":"2.0","method":"canvastty.initialize","params":{"apiVersion":2,"pluginId":"com.example.service-echo","serviceId":"echo","dataDir":"…/plugin-data/com.example.service-echo","locale":"en","hostVersion":"1.5.2"}}
+{"jsonrpc":"2.0","method":"canvastty.initialize","params":{"apiVersion":2,"pluginId":"com.example.service-echo","serviceId":"echo","dataDir":"…/plugin-data/com.example.service-echo","locale":"en","hostVersion":"1.7.0"}}
 ```
 
 At app start, services are started only after every host API they may call (`sessions.*`, `cards.setBadge`, `secrets.get`, …) is ready, and before saved cards are restored: a service can call them as soon as it gets `canvastty.initialize`, and one that subscribes to session events then receives the restored cards as events or in the `sessions.subscribe` snapshot.

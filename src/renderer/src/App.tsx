@@ -556,13 +556,10 @@ export function App(): React.JSX.Element {
   }, [settings.locale, showToast]);
 
   const changeSessionBounds = useCallback((id: string, bounds: SessionBounds): void => {
-    const pixelSkin = isPixelSkinThemeId(settingsRef.current.terminalBorderSkin)
-      || isPixelSkinPackId(settingsRef.current.terminalBorderSkin);
-    const fixedBounds = pixelSkin ? { position: bounds.position, size: { ...PIXEL_SKIN_CARD_SIZE } } : bounds;
     setSessions((current) => current.map((session) => session.id === id
-      ? { ...session, position: fixedBounds.position, size: fixedBounds.size }
+      ? { ...session, position: bounds.position, size: bounds.size }
       : session));
-    window.canvasTTY.terminal.setBounds(id, fixedBounds);
+    window.canvasTTY.terminal.setBounds(id, bounds);
   }, []);
 
   const toggleSessionFullscreen = useCallback((id: string): void => {
@@ -580,8 +577,15 @@ export function App(): React.JSX.Element {
     }
   }, [fullscreenSessionId]);
 
+  const previousBorderSkin = useRef<AppSettings["terminalBorderSkin"] | null>(null);
   useEffect(() => {
-    if (!ready || !(isPixelSkinThemeId(settings.terminalBorderSkin)
+    if (!ready) return;
+    const previous = previousBorderSkin.current;
+    previousBorderSkin.current = settings.terminalBorderSkin;
+    // Expand only when entering pixel styling; preserve restored and manually resized bounds.
+    if (previous === null || previous === settings.terminalBorderSkin
+      || isPixelSkinThemeId(previous) || isPixelSkinPackId(previous)
+      || !(isPixelSkinThemeId(settings.terminalBorderSkin)
       || isPixelSkinPackId(settings.terminalBorderSkin))) return;
     const expanded = expandedPixelSkinCardBounds(sessions);
     for (const { id, bounds } of expanded) changeSessionBounds(id, bounds);

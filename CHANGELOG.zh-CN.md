@@ -2,7 +2,12 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## Unreleased
+## 1.7.0
+
+- 集成 PR #98 的像素终端皮肤及智能体生成的主题包，画布背景与终端边框可以独立选择。主题创建界面新增简短说明、上传槽位标签、示例和预览提示；画布图案位于背景选择之前，并说明背景图片何时会覆盖图案。
+- 恢复缩小时可读的终端摘要卡片，为编排者自动使用 Master 皮肤，并恢复像素窗口的边缘和角落缩放，不再重置手动调整或恢复的尺寸。
+- 集成 PR #100，修复启动导航竞态、API 密钥粘贴及未捕获界面错误后的恢复，并保护 CanvasTTY 的私有控制数据。该 PR 汇总了 #96、#97 和 #99 的修复。
+- 更新 SAGE 应用图标、单色标题栏标识及文档图片，修复 Normal、Auto、YOLO 启动配置的布局，并允许在 stdout/stderr 已关闭时正常退出。
 
 - 基础保护现在还会拒绝智能体的 shell 或文件工具使用 CanvasTTY 自己的私有数据：读取、复制或编码 agent-control 令牌与描述文件、各网关的连接记录、提供商与插件的密钥存储、账户主目录、GitHub 登录信息和已准备的启动运行（任何程序，包括解释器单行命令和 heredoc），以及连接 CanvasTTY 的控制或运行时套接字（`curl --unix-socket`、`nc -U`、`socat`、Python 套接字）。模型会平静地得知智能体不能以这种方式控制 CanvasTTY，并被建议请用户以 **Orchestrator** 角色启动它，从而获得 `canvastty_agents` 工具。路径来自应用自己的 userData 文件夹；项目、应用设置、其他套接字和内置控制 CLI 不受影响。控制端点现在对未认证或格式错误的请求，以及 HTTP 请求（最小的 403），都以相同的指引代替简单错误作答，并关闭连接。
 - 为 CLI 自带自动模式的智能体新增 **Auto** 启动配置档，与 Normal（仍为默认）和 YOLO 并列：Codex `--approve-for-me`（其自身审查，位于 `workspace-write` 沙箱），Claude Code `--permission-mode auto` 及其沙箱（`sandbox.enabled`、`autoAllowBashIfSandboxed: false`，合并进唯一的 `--settings`），Grok `--permission-mode auto`；控制 CLI 的 `create --profile auto` 和插件的 `sessions.create` 也支持。启动贡献者可回答 `thirdPartyModel: true`（API 或 Ollama 账户）：此时 Auto 以同一沙箱中 CLI 的“仅接受编辑”模式运行，卡片显示 **auto · edits**。Codex 不再因 CanvasTTY 自己添加的 hook 停在 “Hooks need review”（本次运行的 `-c hooks.state`，不写入 `~/.codex`；插件不能传递 `-c hooks…`），位于用户为其编排者所选文件夹（或其子目录）中的 Codex 子智能体不再被再次询问是否信任（本次运行的 `-c projects`）；插件以 `trustedFolder` 获得该文件夹。Claude Code 的 «✳» 标题现在表示空闲：带 hook 的 Claude 卡片仅通过 hook 离开 `needs_approval`，或在用户拒绝其提示后稍候离开。示例：`examples/plugins/launch-env`（Local model 配置档）。

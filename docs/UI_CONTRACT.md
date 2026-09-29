@@ -32,6 +32,7 @@ This contract preserves the approved MVP concept and prevents feature ownership 
 
 - Canvas image backgrounds and terminal borders are independent persisted choices. Appearance shows pixel backgrounds beside solid Canvas colors, and all pixel border variants remain in Terminal borders. Selecting a solid color clears the image; selecting a border never changes the background. Existing profiles retain their previously coupled background through a one-time migration.
 - Pixel theme creation explains the agent brief, ZIP/PNG upload, nine border slots and separate background in place, with a labeled example before upload. Border previews are explicitly marked as examples; their detail/state controls do not change live settings. Master is described as the artwork variant for an orchestrator.
+- Orchestrator terminals automatically use Master artwork for built-in and imported pixel skins. Pixel frames retain semantic summary below `0.5×` and resize from every edge and corner. `1200 × 800` is the initial pixel-card size, not a locked size; restored and manually resized bounds are preserved. Switching from non-pixel borders to pixel borders expands existing cards once.
 
 - Flat, large, pastel tiles; strong dark/light contrast; restrained shadows; no ornamental micro-controls or explanatory microcopy around self-evident controls.
 - Home renders at `1:1` whenever its current persisted boundary fits. Auto-fit uses discrete scale steps down to `0.2×` and integer camera coordinates so borders and dock spacing stay optically even across larger plugin layouts.

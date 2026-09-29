@@ -184,7 +184,7 @@ function TerminalCardView({
   const [position, setPosition] = useState(session.position);
   const [size, setSize] = useState(session.size);
   const pixelDetail = pixelSkinTheme
-    ? skinDetailLevel(skinDetail, forceMasterDetail)
+    ? skinDetailLevel(skinDetail, forceMasterDetail || session.role === "orchestrator")
     : "minimal";
   const pixelSurfaceBounds = pixelSkinTheme
     ? pixelSkinSurfaceBounds(pixelSkinTheme, pixelDetail, size.width, size.height, 26,
@@ -216,7 +216,7 @@ function TerminalCardView({
     return () => window.clearTimeout(timer);
   }, [actionToast]);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
-  const summaryMode = zoom < 0.5 && !pixelSkinTheme;
+  const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
   const terminalBackground = terminalTheme(palette, pixelSkinTheme).background;
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -849,7 +849,7 @@ function TerminalCardView({
         zIndex: stackIndex,
         transform: `translate(${position.x}px, ${position.y}px)`,
         "--summary-scale": summaryScale,
-        "--summary-content-width": `${Math.max(0, (size.width - 72) / summaryScale)}px`,
+        "--summary-content-width": `${Math.max(0, ((pixelSurfaceBounds ? pixelSurfaceBounds.right - pixelSurfaceBounds.left : size.width) - 72) / summaryScale)}px`,
         "--terminal-background": terminalBackground,
         "--pixel-skin-left-inset": `${pixelSurfaceBounds?.left ?? 28}px`,
         "--pixel-skin-right-inset": `${size.width - (pixelSurfaceBounds?.right ?? (size.width - 28))}px`,
@@ -1055,7 +1055,7 @@ function TerminalCardView({
           <div className="terminal-card__summary-copy"><strong>{visibleTitle}</strong><span>{sessionStatusLabel(locale, session.status, session.provider)}</span></div>
         </div>
       </button>
-      {!pixelSkinTheme && RESIZE_DIRECTIONS.map((direction) => (
+      {RESIZE_DIRECTIONS.map((direction) => (
         <div
           key={direction}
           className={`terminal-card__resize-handle terminal-card__resize-handle--${direction}`}
