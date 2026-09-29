@@ -1,6 +1,7 @@
 import { ORCHESTRATION_MCP_SERVER_NAME } from "../../agent-browser/orchestration-catalog.mjs";
 import { MCP_SERVER_NAME } from "../../agent-browser/tool-catalog.mjs";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
+import { otherSpellings } from "./onDiskPath.ts";
 
 const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
 
@@ -66,6 +67,35 @@ export function openCodeYoloEnvironment(
   const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
   return {
     [OPENCODE_CONFIG_CONTENT]: JSON.stringify({ ...config, permission: "allow" })
+  };
+}
+
+/**
+ * OpenCode asks before a tool touches a path outside its project folder (external_directory), comparing strings.
+ * Its project folder is the one it reads back from the system, spelled as on disk (NFD for Finder-made names on
+ * macOS), while the prompt it got usually spells the same folder in NFC. This run allows exactly that folder in its
+ * other spellings; nothing else is widened, and a folder whose name has one spelling (ASCII) changes nothing.
+ */
+export function openCodeProjectFolderEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  folder: string
+): Record<string, string> {
+  const spellings = otherSpellings(folder);
+  if (spellings.length === 0) return {};
+  const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
+  const permission = config.permission;
+  // Everything is allowed already (YOLO), or the person's own inline config decides with a single word.
+  if (permission === "allow" || typeof permission === "string") return {};
+  const current = objectField(permission, "permission");
+  const external = current.external_directory;
+  if (external === "allow") return {};
+  const patterns = typeof external === "string" ? { "*": external } : objectField(external, "permission.external_directory");
+  const allowed = Object.fromEntries(spellings.flatMap((spelling) => [[spelling, "allow"], [`${spelling}/**`, "allow"]]));
+  return {
+    [OPENCODE_CONFIG_CONTENT]: JSON.stringify({
+      ...config,
+      permission: { ...current, external_directory: { ...patterns, ...allowed } }
+    })
   };
 }
 

@@ -52,6 +52,8 @@ import {
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
+import { onDiskPath } from "./onDiskPath.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
@@ -487,6 +489,9 @@ export class TerminalManager {
     control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number } = {}
   ): SessionSnapshot {
     assertCreateRequest(request);
+    // A typed path (an orchestrator's spawn_agent, the control CLI) may spell the folder in another Unicode form
+    // than the disk does; the CLI would then see its own project as a foreign folder.
+    request = { ...request, cwd: onDiskPath(request.cwd) };
     const threadId = request.resumeThreadId === undefined ? undefined : normalizeThreadId(request.provider, request.resumeThreadId);
     if (request.resumeThreadId !== undefined && (!threadId || !canResumeThreadById(request.provider) || request.environment)) {
       throw new Error("Invalid local conversation resume request.");
@@ -1326,7 +1331,7 @@ export class TerminalManager {
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
-      const providerEnvironment = {
+      const providerEnvironment: Record<string, string> = {
         ...(provider === "opencode"
           ? mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment)
           : { ...browserEnvironment, ...runtimeEnvironment }),
@@ -1334,6 +1339,8 @@ export class TerminalManager {
         // Orchestrators alone learn where the control descriptor and CLI are.
         ...controlEnvironment(role, this.controlConnection)
       };
+      // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
+      if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
@@ -1363,7 +1370,8 @@ export class TerminalManager {
         command: launch.command,
         args: launch.args,
         cwd,
-        env: { ...baseEnvironment, ...launchEnvironment },
+        // The app's own PWD names another folder; a CLI that reads PWD must see where it runs.
+        env: { ...baseEnvironment, ...launchEnvironment, PWD: cwd },
         launchEnvironment,
         agentBrowser,
         agentRuntime,
@@ -1586,7 +1594,8 @@ export class TerminalManager {
         return refuse(wrapped.reason);
       }
       this.addLaunchSecrets(session, wrapped.secrets);
-      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd, env: { ...planned.env, ...wrapped.env } };
+      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
+        env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
     }
     let process: IPty;
     try {
