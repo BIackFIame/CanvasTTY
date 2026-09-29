@@ -109,8 +109,9 @@ test("pixel border skin preview is scoped, responsive, and bounds stage within m
 
   // Pixel thumbnail containment
   assert.match(pixelStyles, /\.border-skin-preview--pixel img \{[^}]*object-fit: contain;/);
-  assert.match(settings, /readAsset\(id, "master_idle"\)/);
-  assert.match(settings, /pixelSkinAssetFilename\(theme, "master", "idle"\)/);
+  assert.match(settings, /slot = "detailed_idle"/);
+  assert.match(settings, /readAsset\(id, slot\)/);
+  assert.match(settings, /pixelSkinAssetFilename\(theme, "detailed", "idle"\)/);
   assert.doesNotMatch(pixelStyles, /sakura-frame\.png/);
 });
 
