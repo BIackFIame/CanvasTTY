@@ -555,6 +555,8 @@ async function initializeServices(): Promise<void> {
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureRedaction(redaction);
   terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
+  // OpenCode's auto profile runs shell commands without asking only while base protection guards them.
+  terminalManager.configureBaseProtection(() => settings.get().baseProtectionEnabled);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
   agentChatHistory = new AgentChatHistoryService(settings, providerClis, terminalManager, hermesHomeDirectory);

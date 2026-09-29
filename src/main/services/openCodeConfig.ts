@@ -71,6 +71,57 @@ export function openCodeYoloEnvironment(
 }
 
 /**
+ * OpenCode's "auto" profile for this run (OpenCode 1.18 has no auto flag). Its permission rules are a list where the
+ * last matching rule wins (Permission.evaluate: findLast), and an agent's own `permission` is appended after the
+ * top-level one (agent config: merge(agent, fromConfig(agent.permission))). So the rules go under `agent.build`,
+ * OpenCode's default agent: they come after the person's own top-level rules without replacing them, and every tool
+ * not named here keeps whatever the person's configuration says.
+ *
+ * - read, glob, grep, list: allowed, except `.env` files (OpenCode's own default asks for those).
+ * - edit (OpenCode's edit, write and apply_patch): allowed.
+ * - bash: allowed only when `shellGuarded` (CanvasTTY's base protection is on and its guard runs in this OpenCode:
+ *   hard denies still deny before OpenCode's own check); otherwise it asks, as without auto.
+ * - external_directory is not touched: a path outside the project still asks (each tool checks it first).
+ * `thirdPartyModel` (a launch contributor put OpenCode on another model) keeps bash asking, like accept-edits.
+ */
+export function openCodeAutoEnvironment(
+  environment: Readonly<Record<string, string | undefined>>,
+  options: { shellGuarded: boolean; thirdPartyModel?: boolean }
+): Record<string, string> {
+  const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
+  const agents = objectField(config.agent, "agent");
+  const build = objectField(agents.build, "agent.build");
+  const permission = build.permission === undefined ? {} : objectField(build.permission, "agent.build.permission");
+  return {
+    [OPENCODE_CONFIG_CONTENT]: JSON.stringify({
+      ...config,
+      agent: {
+        ...agents,
+        build: {
+          ...build,
+          permission: {
+            ...permission,
+            ...openCodeAutoPermission(options.shellGuarded && options.thirdPartyModel !== true)
+          }
+        }
+      }
+    })
+  };
+}
+
+/** The auto rules (see openCodeAutoEnvironment); insertion order matters, the last matching rule wins. */
+export function openCodeAutoPermission(allowShell: boolean): OpenCodeConfig {
+  return {
+    read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" },
+    glob: "allow",
+    grep: "allow",
+    list: "allow",
+    edit: "allow",
+    bash: allowShell ? "allow" : "ask"
+  };
+}
+
+/**
  * OpenCode asks before a tool touches a path outside its project folder (external_directory), comparing strings.
  * Its project folder is the one it reads back from the system, spelled as on disk (NFD for Finder-made names on
  * macOS), while the prompt it got usually spells the same folder in NFC. This run allows exactly that folder in its

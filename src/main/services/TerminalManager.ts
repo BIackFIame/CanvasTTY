@@ -219,6 +219,9 @@ export class TerminalManager {
   // Where each running card was actually started (an environment may move it) and its agent config folder.
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
   private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
+  // Whether base protection is on (Settings → Agents); OpenCode's auto profile lets shell commands run without asking
+  // only then. Unknown counts as off.
+  private baseProtectionOn: () => boolean = () => false;
   // The model and effort of a card whose first launch runs before the card is registered (create, restore).
   private readonly startingModels = new Map<string, LaunchModelChoice>();
   private quitting = false;
@@ -330,6 +333,10 @@ export class TerminalManager {
   /** Refuses a model its CLI does not list (the cached listing only; none cached allows it). */
   configureModelCheck(check: (provider: ProviderId, model: string) => string | null): void {
     this.modelCheck = check;
+  }
+
+  configureBaseProtection(enabled: () => boolean): void {
+    this.baseProtectionOn = () => { try { return enabled() === true; } catch { return false; } };
   }
 
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
@@ -1386,6 +1393,7 @@ export class TerminalManager {
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
         ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...(agentRuntime?.decisions === true && this.baseProtectionOn() ? { shellGuarded: true } : {}),
         ...this.launchModelOf(id)
       });
       const session = this.sessions.get(id);

@@ -14,6 +14,17 @@ A session launched from the desktop with the **Orchestrator** role gets the `can
 | `get_agent_result`, `observe_agent` | The exit state and masked tail, or the current status and tail. |
 | `send_to_agent`, `cancel_agent`, `list_agents` | Follow-up prompts, disposing a subagent, listing this session's subagents. |
 
+### OpenCode auto
+
+OpenCode has no auto flag, so its auto profile is a per-run `OPENCODE_CONFIG_CONTENT` (nothing is written to `~/.config/opencode`). The rules go under `agent.build`, OpenCode's default agent, which OpenCode appends after the top-level rules (the last matching rule wins), so the person's own rules for every other tool stay as they are:
+
+- `read`, `glob`, `grep`, `list`: allowed, except `.env` files, which still ask (OpenCode's own default).
+- `edit` (OpenCode's edit, write and patch tools): allowed.
+- `bash`: allowed only while CanvasTTY's base protection is on and its guard runs in that OpenCode, so hard denies still deny before OpenCode's own check. With base protection off (or no guard), auto still asks before every shell command: it never grants more than the person chose. This is decided at launch; restart the card after changing base protection.
+- `external_directory` is untouched: anything outside the project folder asks as before (each tool checks it first).
+
+A launch contributor that puts OpenCode on another model keeps `bash` asking, like accept-edits for the other CLIs.
+
 The workflow is `list_providers` → `spawn_agent` (one per part) → `wait_for_agent` → `get_agent_result`. Agents should not explore the filesystem for agent CLIs or their configuration; the MCP server's instructions, the tool descriptions and the refusal messages say so.
 
 The control CLI below is a separate surface for automation; `providers` is its equivalent of `list_providers`.
