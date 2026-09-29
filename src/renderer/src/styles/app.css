@@ -25,8 +25,7 @@ button { border: 0; }
 .titlebar__build--dev { border-color: rgba(239,208,132,.34); color: var(--yellow); background: rgba(239,208,132,.09); }
 .titlebar__build--release { border-color: rgba(184,207,153,.34); color: var(--primary); background: rgba(184,207,153,.09); }
 .titlebar__subtitle { color: rgba(255,255,255,.43); font-size: 11px; }
-.titlebar__logo { width: 25px; height: 25px; display: grid; place-items: center; border-radius: 7px; color: #373842; background: var(--primary); }
-.titlebar__logo .provider-icon { width: 20px; height: 20px; }
+.titlebar__logo { width: 25px; height: 25px; display: block; flex: 0 0 auto; object-fit: contain; }
 .titlebar__drag { flex: 1; height: 100%; -webkit-app-region: drag; }
 .titlebar__controls { height: 100%; display: flex; -webkit-app-region: no-drag; }
 .titlebar__controls button { width: 46px; display: grid; place-items: center; color: rgba(255,255,255,.76); background: transparent; cursor: pointer; transition: background .15s ease, color .15s ease; }
@@ -36,8 +35,7 @@ button { border: 0; }
 .titlebar__macos-controls-space { flex: 0 0 78px; height: 100%; -webkit-app-region: no-drag; }
 .titlebar--macos .titlebar__brand { padding-left: 0; gap: 7px; }
 .titlebar--macos .titlebar__brand strong { font-size: 12px; }
-.titlebar--macos .titlebar__logo { width: 21px; height: 21px; border-radius: 6px; }
-.titlebar--macos .titlebar__logo .provider-icon { width: 17px; height: 17px; }
+.titlebar--macos .titlebar__logo { width: 21px; height: 21px; }
 
 .workspace {
   position: absolute;
@@ -619,7 +617,10 @@ button { border: 0; }
 .role-note { margin-top: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; border-radius: 12px; color: var(--text-dark); background: rgba(255,255,255,.34); font-size: 12px; line-height: 1.35; }
 .role-note--off { box-shadow: inset 0 0 0 2px rgba(227,97,94,.35); }
 .role-note__enable { align-self: flex-start; padding: 8px 14px; border-radius: 10px; color: white; background: var(--surface); font-weight: 800; cursor: pointer; }
-.profile-row { margin-top: 13px; display: grid; grid-template-columns: 1fr 1fr 96px; gap: 9px; }
+.profile-row { margin-top: 13px; display: flex; gap: 9px; }
+.profile-row > .profile-button { min-width: 0; flex: 1; }
+.profile-row > .launch-submit { flex: 0 0 96px; }
+.profile-row > .launch-submit:only-child { flex: 1; }
 .profile-button, .launch-submit { min-height: 70px; border-radius: 16px; cursor: pointer; font-weight: 900; transition: transform .15s ease, background .15s ease; }
 .profile-button { color: var(--text-dark); background: rgba(255,255,255,.38); }
 .profile-button:hover, .launch-submit:hover { transform: translateY(-2px); }
@@ -728,7 +729,7 @@ button { border: 0; }
 .provider-secret-row .provider-secret__controls { flex-wrap: wrap; justify-content: flex-end; }
 .provider-secret-row .provider-secret__input { flex: 1 1 18em; }
 .settings-error { margin: 8px 2px 0; color: #8a3d33; font-size: 11px; font-weight: 700; }
-.agent-hooks__core { min-height: 62px; padding: 9px 10px 9px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; border-radius: 12px; background: rgba(255,255,255,.43); }
+.agent-hooks__core { margin-top: 14px; min-height: 62px; padding: 9px 10px 9px 12px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; border-radius: 12px; background: rgba(255,255,255,.43); }
 .agent-hooks__core > span, .agent-hooks__copy { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 .agent-hooks__core strong, .agent-hooks__copy strong { font-size: 12px; }
 .agent-hooks__core small, .agent-hooks__copy small, .agent-hooks__copy > span { color: var(--text-muted); font-size: 10px; font-weight: 720; line-height: 1.4; }
@@ -1188,3 +1189,7 @@ button { border: 0; }
 .terminal-card__confirm span { font-weight: 500; line-height: 1.35; }
 .terminal-card__confirm-actions { display: flex; gap: 6px; }
 .terminal-card__confirm-actions button { padding: 4px 10px; border-radius: 7px; color: white; background: rgba(255,255,255,.12); font: inherit; cursor: pointer; }
+.renderer-recovery { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: #353442; color: #f8f7f1; text-align: center; }
+.renderer-recovery strong { font-size: 16px; }
+.renderer-recovery p { margin: 0; max-width: 420px; color: rgba(255, 255, 255, 0.7); font-size: 13px; line-height: 1.5; }
+.renderer-recovery button { padding: 8px 16px; border: 0; border-radius: 10px; background: #b8cf99; color: #30313d; font: inherit; font-weight: 700; cursor: pointer; }

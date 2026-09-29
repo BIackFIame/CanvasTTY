@@ -10,7 +10,7 @@
     "allowSyntheticDefaultImports": true,
     "esModuleInterop": true,
     "noEmit": true,
-    "types": ["node"]
+    "types": ["node", "electron-vite/node"]
   },
   "include": [
     "electron.vite.config.ts",

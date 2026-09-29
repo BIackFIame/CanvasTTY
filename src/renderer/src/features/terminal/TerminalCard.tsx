@@ -16,12 +16,15 @@ import type {
   Point,
   FocusActivation,
   SessionBounds,
-  SessionSnapshot
+  SessionSnapshot,
+  PixelSkinPreferredDetail,
+  TerminalBorderSkinId
 } from "../../../../shared/contracts";
 import { usePluginCardDecorations } from "../plugins/cardDecorations";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
+import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
 import {
@@ -46,11 +49,17 @@ import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
 import { renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
 import { webglContextPool } from "./webglContextPool";
+import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
+import { isPixelSkinThemeId, pixelSkinStateForSession } from "../skins/skinCatalog";
+import { isPixelSkinPackId, usePixelSkinPackSummary } from "../skins/SkinAssets";
+import { pixelSkinControlLayout, pixelSkinSurfaceBounds, skinDetailLevel } from "../skins/SkinLayout";
 
 interface TerminalCardProps {
   session: SessionSnapshot;
   locale: LocaleId;
   palette: PaletteId;
+  borderSkin: TerminalBorderSkinId;
+  skinDetail: PixelSkinPreferredDetail;
   zoom: number;
   stackIndex: number;
   snapEnabled: boolean;
@@ -60,7 +69,8 @@ interface TerminalCardProps {
   focused: boolean;
   focusChangeSource: "explicit" | "hover";
   selected: boolean;
-  /** Multi-select group member: gets the selected outline without focus side effects. */
+  forceMasterDetail: boolean;
+  /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
   groupSelected?: boolean;
   renaming: boolean;
   fullscreen: boolean;
@@ -117,6 +127,8 @@ function TerminalCardView({
   session,
   locale,
   palette,
+  borderSkin: selectedBorderSkin,
+  skinDetail,
   zoom,
   stackIndex,
   snapEnabled,
@@ -126,6 +138,7 @@ function TerminalCardView({
   focused,
   focusChangeSource,
   selected,
+  forceMasterDetail,
   groupSelected,
   renaming,
   fullscreen,
@@ -141,6 +154,11 @@ function TerminalCardView({
   onOpenUrl,
   restoreEnabled = false
 }: TerminalCardProps): React.JSX.Element {
+  const borderSkin = terminalBorderSkinFallback(selectedBorderSkin);
+  const customBorderSkin = isCustomTerminalBorderSkinId(selectedBorderSkin) ? selectedBorderSkin : undefined;
+  const pixelSkinTheme = isPixelSkinThemeId(borderSkin) || isPixelSkinPackId(borderSkin) ? borderSkin : null;
+  const pixelPack = usePixelSkinPackSummary(isPixelSkinPackId(borderSkin) ? borderSkin : null);
+  const pixelArtState = pixelSkinStateForSession(session.status, session.turnCompleted);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const onOpenUrlRef = useRef(onOpenUrl);
@@ -165,6 +183,16 @@ function TerminalCardView({
   const resizeState = useRef<ResizeState | null>(null);
   const [position, setPosition] = useState(session.position);
   const [size, setSize] = useState(session.size);
+  const pixelDetail = pixelSkinTheme
+    ? skinDetailLevel(skinDetail, forceMasterDetail || session.role === "orchestrator")
+    : "minimal";
+  const pixelSurfaceBounds = pixelSkinTheme
+    ? pixelSkinSurfaceBounds(pixelSkinTheme, pixelDetail, size.width, size.height, 26,
+      pixelPack?.apertures[pixelDetail] ?? pixelPack?.aperture)
+    : null;
+  const pixelControls = pixelSkinTheme
+    ? pixelSkinControlLayout(pixelSkinTheme, pixelDetail, size.width, size.height)
+    : null;
   const [restarting, setRestarting] = useState(false);
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [noteDismissed, setNoteDismissed] = useState<string | null>(null);
@@ -190,7 +218,7 @@ function TerminalCardView({
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
   const summaryMode = zoom < 0.5;
   const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
-  const terminalBackground = terminalTheme(palette).background;
+  const terminalBackground = terminalTheme(palette, pixelSkinTheme).background;
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -245,7 +273,7 @@ function TerminalCardView({
       // count) are proposed API in xterm; without this flag findNext throws and
       // the counter never leaves 0/0. The flag only unlocks that surface.
       allowProposedApi: true,
-      theme: terminalTheme(palette),
+      theme: terminalTheme(palette, pixelSkinTheme),
       // OSC 8 hyperlinks are handled by xterm itself rather than WebLinksAddon.
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
@@ -304,6 +332,11 @@ function TerminalCardView({
     };
     fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
+      if ((event.key === "F4" || event.code === "F4")
+        && !event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey
+        && terminalHost.current?.closest(".terminal-card")?.getAttribute("data-pixel-skin") === "true") {
+        return false;
+      }
       if (shouldSearchTerminalOutput(event)) {
         // Ctrl+Shift+F belongs to the card's scrollback search, never the shell.
         event.preventDefault();
@@ -413,8 +446,8 @@ function TerminalCardView({
 
   useEffect(() => {
     const terminal = terminalRef.current;
-    if (terminal) terminal.options.theme = terminalTheme(palette);
-  }, [palette]);
+    if (terminal) terminal.options.theme = terminalTheme(palette, pixelSkinTheme);
+  }, [palette, pixelSkinTheme]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
     if (webglAddonRef.current) return true;
@@ -699,6 +732,66 @@ function TerminalCardView({
   };
 
   const searchCount = `${searchMatches.current}/${searchMatches.total}`;
+  const terminalActions = (
+    <div
+      className={`terminal-card__actions${pixelControls ? " terminal-card__actions--pixel" : ""}`}
+      style={pixelControls ? {
+        left: pixelControls.left,
+        top: pixelControls.top,
+        width: pixelControls.width,
+        height: pixelControls.height,
+        "--pixel-control-size": `${pixelControls.buttonSize}px`,
+        "--pixel-control-font-size": `${pixelControls.fontSize}px`
+      } as React.CSSProperties : undefined}
+    >
+      {!summaryMode && (
+        <button
+          className="terminal-card__action terminal-card__action--search"
+          type="button"
+          onClick={toggleSearch}
+          title={t(locale, "terminalSearch")}
+          aria-label={t(locale, "terminalSearch")}
+        >
+          <UiIcon name="search" size="1.23em" />
+        </button>
+      )}
+      {session.exitCode !== null && (
+        <button
+          className="terminal-card__action terminal-card__action--restart"
+          type="button"
+          disabled={restarting}
+          onClick={() => void restartAction.current()}
+          title={`${t(locale, "restartSession")} · Ctrl+D`}
+          aria-label={t(locale, "restartSession")}
+        >
+          <UiIcon name={restarting ? "working" : "reload"} size="1.23em" />
+        </button>
+      )}
+      {session.exitCode !== null && session.provider !== "terminal" && (
+        <button className="terminal-card__action terminal-card__action--continue" type="button" disabled={restarting}
+          onClick={() => void restartAction.current(true)} title={t(locale, "continueSession")} aria-label={t(locale, "continueSession")}>
+          <UiIcon name="arrow" size="1.23em" />
+        </button>
+      )}
+      {hasOptions && (
+        <button className="terminal-card__action terminal-card__action--options" type="button" aria-haspopup="menu"
+          aria-expanded={optionsOpen} disabled={actionRunning} onClick={() => setOptionsOpen((open) => !open)}
+          title={t(locale, "cardOptions")} aria-label={t(locale, "cardOptions")}>
+          <UiIcon name="sliders-horizontal" size="1.23em" />
+        </button>
+      )}
+      <button className="terminal-card__action terminal-card__action--fullscreen" type="button"
+        onClick={(event) => { event.stopPropagation(); onToggleFullscreen(); }}
+        title={fullscreen ? t(locale, "exitFullscreen") : t(locale, "enterFullscreen")}
+        aria-label={fullscreen ? t(locale, "exitFullscreen") : t(locale, "enterFullscreen")}>
+        <UiIcon name={fullscreen ? "restore" : "maximize"} size="1.23em" />
+      </button>
+      <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => {
+        if (session.environment) setConfirmClose(true);
+        else onDispose(session.id);
+      }} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
+    </div>
+  );
   return (
     <article
       className={`terminal-card terminal-card--${session.provider} ${summaryMode ? "terminal-card--summary" : ""} ${selected || groupSelected ? "terminal-card--selected" : ""} ${session.status === "needs_approval" || session.status === "failed" ? "terminal-card--attention" : ""} ${fullscreen ? "terminal-card--fullscreen" : ""}`}
@@ -709,10 +802,13 @@ function TerminalCardView({
       data-canvas-zoom-surface="application"
       data-wheel-owner={summaryMode ? undefined : "local"}
       data-session-id={session.id}
+      data-border-skin={borderSkin}
+      data-pixel-skin={pixelSkinTheme ? "true" : undefined}
+      data-custom-border-skin={customBorderSkin}
       tabIndex={-1}
       onPointerDownCapture={(event) => {
         onSelect(session.id);
-        if (!renaming && !summaryMode && !(event.target as HTMLElement).closest("button, input")) {
+        if (!renaming && !summaryMode && !(event.target as HTMLElement).closest("button, input, .terminal-card__skin-drag")) {
           terminalRef.current?.focus();
         }
       }}
@@ -753,8 +849,12 @@ function TerminalCardView({
         zIndex: stackIndex,
         transform: `translate(${position.x}px, ${position.y}px)`,
         "--summary-scale": summaryScale,
-        "--summary-content-width": `${Math.max(0, (size.width - 72) / summaryScale)}px`,
-        "--terminal-background": terminalBackground
+        "--summary-content-width": `${Math.max(0, ((pixelSurfaceBounds ? pixelSurfaceBounds.right - pixelSurfaceBounds.left : size.width) - 72) / summaryScale)}px`,
+        "--terminal-background": terminalBackground,
+        "--pixel-skin-left-inset": `${pixelSurfaceBounds?.left ?? 28}px`,
+        "--pixel-skin-right-inset": `${size.width - (pixelSurfaceBounds?.right ?? (size.width - 28))}px`,
+        "--pixel-skin-top-inset": `${pixelSurfaceBounds?.top ?? 70}px`,
+        "--pixel-skin-bottom-inset": `${size.height - (pixelSurfaceBounds?.bottom ?? (size.height - 58))}px`
       } as React.CSSProperties}
     >
       {fullscreen && (
@@ -824,73 +924,19 @@ function TerminalCardView({
             </span>
           ))}
         </div>
-        <div className="terminal-card__actions">
-          {!summaryMode && (
-            <button
-              className="terminal-card__action terminal-card__action--search"
-              type="button"
-              onClick={toggleSearch}
-              title={t(locale, "terminalSearch")}
-              aria-label={t(locale, "terminalSearch")}
-            >
-              <UiIcon name="search" size="1.23em" />
-            </button>
-          )}
-          {session.exitCode !== null && (
-            <button
-              className="terminal-card__action terminal-card__action--restart"
-              type="button"
-              disabled={restarting}
-              onClick={() => void restartAction.current()}
-              title={`${t(locale, "restartSession")} · Ctrl+D`}
-              aria-label={t(locale, "restartSession")}
-            >
-              <UiIcon name={restarting ? "working" : "reload"} size="1.23em" />
-            </button>
-          )}
-          {session.exitCode !== null && session.provider !== "terminal" && (
-            <button
-              className="terminal-card__action terminal-card__action--continue"
-              type="button"
-              disabled={restarting}
-              onClick={() => void restartAction.current(true)}
-              title={t(locale, "continueSession")}
-              aria-label={t(locale, "continueSession")}
-            >
-              <UiIcon name="arrow" size="1.23em" />
-            </button>
-          )}
-          {hasOptions && (
-            <button
-              className="terminal-card__action terminal-card__action--options"
-              type="button"
-              aria-haspopup="menu"
-              aria-expanded={optionsOpen}
-              disabled={actionRunning}
-              onClick={() => setOptionsOpen((open) => !open)}
-              title={t(locale, "cardOptions")}
-              aria-label={t(locale, "cardOptions")}
-            >
-              <UiIcon name="sliders-horizontal" size="1.23em" />
-            </button>
-          )}
-          <button
-            className="terminal-card__action terminal-card__action--fullscreen"
-            type="button"
-            onClick={(event) => { event.stopPropagation(); onToggleFullscreen(); }}
-            title={fullscreen ? t(locale, "exitFullscreen") : t(locale, "enterFullscreen")}
-            aria-label={fullscreen ? t(locale, "exitFullscreen") : t(locale, "enterFullscreen")}
-          >
-            <UiIcon name={fullscreen ? "restore" : "maximize"} size="1.23em" />
-          </button>
-          <button className="terminal-card__action terminal-card__action--close" type="button" onClick={() => {
-            // A card in a plugin environment asks once whether its data stays.
-            if (session.environment) setConfirmClose(true);
-            else onDispose(session.id);
-          }} title={t(locale, "close")} aria-label={t(locale, "close")}><UiIcon name="close" size="1.23em" /></button>
-        </div>
+        {!pixelControls && terminalActions}
       </header>
       <div className="terminal-card__surface" ref={terminalHost} />
+      {pixelSkinTheme && (
+        <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}
+          width={size.width} height={size.height} detail={pixelDetail} surfaceBounds={pixelSurfaceBounds ?? undefined} />
+      )}
+      {pixelSkinTheme && (["top", "right", "bottom", "left"] as const).map((edge) => (
+        <div key={edge} className={`terminal-card__skin-drag terminal-card__skin-drag--${edge}`}
+          aria-hidden="true" onPointerDown={startDrag} onPointerMove={drag} onPointerUp={endDrag}
+          onPointerCancel={endDrag} onLostPointerCapture={cancelDrag} />
+      ))}
+      {pixelControls && terminalActions}
       {optionsOpen && hasOptions && (
         <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
           {restoreEnabled && (
@@ -1025,8 +1071,8 @@ function TerminalCardView({
   );
 }
 
-function terminalTheme(palette: PaletteId): { background: string; foreground: string; cursor: string; selectionBackground: string } {
-  const background = palette === "night" ? "#171a24" : "#202430";
+function terminalTheme(palette: PaletteId, pixelSkin: string | null = null): { background: string; foreground: string; cursor: string; selectionBackground: string } {
+  const background = pixelSkin ? "#00000000" : palette === "night" ? "#171a24" : "#202430";
   return {
     background,
     foreground: "#f7f4ec",

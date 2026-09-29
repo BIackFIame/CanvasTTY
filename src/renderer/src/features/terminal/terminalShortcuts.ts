@@ -1,9 +1,10 @@
-import { matchesPhysicalOrLayoutKey } from "../../lib/shortcuts.ts";
+import { matchesPhysicalOrLayoutKey, matchesShortcut } from "../../lib/shortcuts.ts";
 
 interface TerminalKeyEvent {
   type: string;
   key: string;
   code: string;
+  repeat?: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
   metaKey: boolean;
@@ -11,6 +12,22 @@ interface TerminalKeyEvent {
 }
 
 export const SHIFT_ENTER_SEQUENCE = "\u001b[13;2u";
+
+export function shouldTogglePixelSkinMasterView(
+  event: TerminalKeyEvent,
+  selectedTerminalExists: boolean,
+  reservedShortcuts: readonly string[]
+): boolean {
+  return selectedTerminalExists
+    && event.type === "keydown"
+    && !event.repeat
+    && (event.key === "F4" || event.code === "F4")
+    && !event.ctrlKey
+    && !event.shiftKey
+    && !event.metaKey
+    && !event.altKey
+    && !reservedShortcuts.some((shortcut) => matchesShortcut(event, shortcut));
+}
 
 export function shouldSendTerminalLineBreak(event: TerminalKeyEvent): boolean {
   return event.type === "keydown"

@@ -8,10 +8,12 @@ import type {
   ApiProfile,
   ApiProfileProtocol,
   AppSettings,
+  AppSkinId,
   BrowserCanvasState,
   CanvasLauncherItemId,
   CanvasRegion,
   CanvasColorId,
+  CanvasBackgroundId,
   CanvasOverlayPlacement,
   CanvasWheelCaptureMode,
   CanvasPatternId,
@@ -27,16 +29,19 @@ import type {
   MinimapInteractionMode,
   PaletteId,
   PluginCanvasInstance,
+  PixelSkinPreferredDetail,
   ProviderSecretId,
   RadialLauncherItemId,
   SessionRestoreMode,
   SessionRowColorMode,
   ShortcutBindings,
   StickyNote,
+  TerminalBorderSkinId,
   ZoomSensitivity
 } from "../../shared/contracts";
 import {
   API_PROFILE_PROTOCOLS,
+  BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_HOME_ACCENT_COLORS,
@@ -57,6 +62,7 @@ import {
   UI_SCALE_MIN,
   UI_SCALE_STEP
 } from "../../shared/contracts.ts";
+import { isTerminalBorderSkinId } from "./SkinRegistry.ts";
 import {
   canvasNavigationPlatform,
   defaultCanvasWheelBinding,
@@ -72,6 +78,7 @@ const HOME_ACCENT_PRESETS = new Set<HomeAccentPresetId>(["classic", "warm", "coo
 const SESSION_ROW_COLOR_MODES = new Set<SessionRowColorMode>(["monochrome", "status"]);
 const CANVAS_COLORS = new Set<CanvasColorId>(["sage", "lilac", "night", "sand", "mist", "rose", "slate"]);
 const PATTERNS = new Set<CanvasPatternId>(["dots", "grid", "waves", "diagonal", "rings", "none"]);
+const APP_SKINS = new Set<AppSkinId>(["classic", "atelier", "signal", "greenhouse", "midnight"]);
 const MEDIA_FITS = new Set<MediaFit>(["cover", "contain"]);
 // 21: the on/off "restoreTerminalSessions" became sessionRestoreMode (off / reopen / continue).
 const SETTINGS_VERSION = 21;
@@ -163,6 +170,7 @@ export class SettingsStore {
         || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
         || !("canvasColor" in source)
+        || !("canvasBackground" in source)
         || !("minimapPlacement" in source)
         || !("minimapInteractionMode" in source)
         || !("shortcutHintsPlacement" in source)
@@ -350,7 +358,12 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
+    canvasBackground: "none",
     pattern: "dots",
+    terminalBorderSkin: "classic",
+    terminalSkinDetail: "detailed",
+    terminalSkinAnimationEnabled: true,
+    appSkin: "classic",
     snapToGrid: true,
     invertTerminalWheel: true,
     invertCanvasWheel: false,
@@ -504,6 +517,16 @@ export function normalizeSettings(
     : CANVAS_COLORS.has(canvasColorCandidate as CanvasColorId)
       ? canvasColorCandidate as CanvasColorId
       : fallback.canvasColor;
+  // Preserve the visible background once when loading a profile from before independent backgrounds.
+  const canvasBackgroundCandidate = source.canvasBackground === undefined
+    ? source.terminalBorderSkin
+    : source.canvasBackground;
+  const canvasBackground: CanvasBackgroundId = canvasBackgroundCandidate === "none"
+    || (BUNDLED_CANVAS_BACKGROUND_IDS as readonly unknown[]).includes(canvasBackgroundCandidate)
+    || (typeof canvasBackgroundCandidate === "string" && canvasBackgroundCandidate.startsWith("pixel:")
+      && isTerminalBorderSkinId(canvasBackgroundCandidate))
+    ? canvasBackgroundCandidate as CanvasBackgroundId
+    : fallback.canvasBackground ?? "none";
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
@@ -538,9 +561,22 @@ export function normalizeSettings(
       : fallback.baseProtectionEnabled ?? true,
     uiScale: normalizeUiScale(source.uiScale, fallback.uiScale ?? DEFAULT_UI_SCALE),
     canvasColor,
+    canvasBackground,
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)
       ? source.pattern as CanvasPatternId
       : fallback.pattern,
+    terminalBorderSkin: isTerminalBorderSkinId(source.terminalBorderSkin)
+      ? source.terminalBorderSkin as TerminalBorderSkinId
+      : fallback.terminalBorderSkin,
+    terminalSkinDetail: source.terminalSkinDetail === "minimal" || source.terminalSkinDetail === "detailed"
+      ? source.terminalSkinDetail as PixelSkinPreferredDetail
+      : fallback.terminalSkinDetail,
+    terminalSkinAnimationEnabled: typeof source.terminalSkinAnimationEnabled === "boolean"
+      ? source.terminalSkinAnimationEnabled
+      : fallback.terminalSkinAnimationEnabled,
+    appSkin: APP_SKINS.has(source.appSkin as AppSkinId)
+      ? source.appSkin as AppSkinId
+      : fallback.appSkin,
     snapToGrid: typeof source.snapToGrid === "boolean" ? source.snapToGrid : fallback.snapToGrid,
     invertTerminalWheel: typeof source.invertTerminalWheel === "boolean"
       ? source.invertTerminalWheel

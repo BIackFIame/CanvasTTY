@@ -1,3 +1,5 @@
+import "./stdio";
+import appIcon from "../../build/icon.png?asset";
 import { ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -15,6 +17,8 @@ import {
 } from "../shared/contracts";
 import { registerIpc } from "./ipc/registerIpc";
 import { SettingsStore } from "./services/SettingsStore";
+import { SkinRegistry } from "./services/SkinRegistry";
+import { PixelSkinPackRegistry } from "./services/PixelSkinPackRegistry";
 import { TerminalManager, reachesObservers, reachesRenderer } from "./services/TerminalManager";
 import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
@@ -31,6 +35,7 @@ import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
 import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
+import { canvasTtyPrivateData } from "./services/safety/baseProtection";
 import { PluginAgentTools } from "./services/PluginAgentTools";
 import { PluginSessions } from "./services/PluginSessions";
 import { PluginCards } from "./services/PluginCards";
@@ -173,11 +178,13 @@ if (!hasSingleInstanceLock) app.quit();
 
 /**
  * Creates the shell window and starts loading the startup page into it. The
- * page load is not awaited: services start next to it, and the application
- * surface may replace the page before it finished (see startApplication).
+ * page load is not awaited here: services start next to it, and startApplication
+ * waits for it to settle before it loads the application surface.
  */
 function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
+  if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(appIcon);
   const window = new BrowserWindow({
+    icon: appIcon,
     width: 1440,
     height: 900,
     minWidth: 920,
@@ -241,28 +248,30 @@ function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad }
     }
   });
 
-  const startupPage: StartupPageLoad = { failure: null, superseded: false };
-  window.loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" })).catch((error) => {
-    // A close during this load aborts the navigation (ERR_ABORTED / ERR_FAILED).
-    // That is a quit, not a failed startup; the application surface replacing a
-    // page that was still loading aborts it the same way. Neither is a failure;
-    // a real error on a live window is kept for startApplication to report.
-    if (shellWindowGone(window)) {
-      console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
-      return;
-    }
-    if (!startupPage.superseded) startupPage.failure = error;
-  });
+  const startupPage: StartupPageLoad = window
+    .loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" }))
+    .then(
+      () => null,
+      (error: unknown) => {
+        // A close during this load aborts the navigation (ERR_ABORTED / ERR_FAILED).
+        // That is a quit, not a failed startup; a real error on a live window is
+        // handed to startApplication to report.
+        if (shellWindowGone(window)) {
+          console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
+          return null;
+        }
+        return error ?? new Error("The startup page did not load.");
+      }
+    );
   return { window, startupPage };
 }
 
-/** The startup page load of a fresh shell window, as startApplication sees it. */
-interface StartupPageLoad {
-  /** A real load error of the page, reported as a failed startup. */
-  failure: unknown;
-  /** Set once the application surface starts loading: aborting the page is expected then. */
-  superseded: boolean;
-}
+/**
+ * The startup page load of a fresh shell window: it settles with the load error
+ * to report as a failed startup, or null once the page loaded (or its window is
+ * gone). It never rejects.
+ */
+type StartupPageLoad = Promise<unknown>;
 
 /**
  * True when the shell window is on its way out: its close was requested (the
@@ -292,6 +301,10 @@ async function initializeServices(): Promise<void> {
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
   await settings.load();
+  const terminalBorderSkins = new SkinRegistry(userDataPath);
+  await terminalBorderSkins.initialize();
+  const pixelSkinPacks = new PixelSkinPackRegistry(userDataPath);
+  await pixelSkinPacks.initialize();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
@@ -328,7 +341,8 @@ async function initializeServices(): Promise<void> {
     baseProtection: () => settings.get().baseProtectionEnabled,
     services: () => pluginManager!.decisionServices(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
-    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null
+    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null,
+    privateData: canvasTtyPrivateData(userDataPath)
   });
   pluginManager.setServiceObserver(async (specs) => {
     await pluginServices!.sync(specs);
@@ -424,6 +438,7 @@ async function initializeServices(): Promise<void> {
         terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
+          event: signal.event,
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
@@ -606,8 +621,11 @@ async function initializeServices(): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined;
-    const gateway = new AgentControlGateway({ userDataPath, terminals: terminalManager,
+    const gateway = new AgentControlGateway({ userDataPath, terminals: terminalManager, pixelSkinPacks, settings,
       lifecycleEnabled: () => Boolean(runtimeGateway) && settings.get().agentLifecycleHooksEnabled,
+      onSettingsChanged: (updated) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.settingsChanged, updated);
+      },
       windowsHostPath });
     agentControl = gateway;
     try {
@@ -671,6 +689,8 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   observeMainWindowState = registerIpc({
     settings,
+    terminalBorderSkins,
+    pixelSkinPacks,
     providerClis,
     recheckProviderClis: async () => {
       providerClis!.refresh();
@@ -827,8 +847,14 @@ async function startApplication(): Promise<void> {
     if (!servicesReady) await initializeServices();
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
     if (startupPage) {
-      if (startupPage.failure) throw startupPage.failure;
-      startupPage.superseded = true;
+      // The application surface must not replace a page that is still loading:
+      // Chromium can report that page's ERR_ABORTED after the next navigation has
+      // started, and Electron's loadFile/loadURL promise takes the first main-frame
+      // load failure it sees as its own, so startup would fail with the startup
+      // page's abort. The page usually settles before services are up.
+      const failure = await startupPage;
+      if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
+      if (failure !== null) throw failure;
     }
     initializeUpdater();
     await loadApplication(window);
@@ -1092,6 +1118,7 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
 
   const window = new BrowserWindow({
     width: contribution.defaultSize.width,
+    icon: appIcon,
     height: contribution.defaultSize.height,
     minWidth: contribution.minSize?.width ?? 320,
     minHeight: contribution.minSize?.height ?? 220,

@@ -60,6 +60,9 @@ export class ProviderSecretsService {
 
   private async mutate(mutation: (values: Record<string, string>) => void): Promise<void> {
     const operation = async (): Promise<void> => {
+      if (!this.encryption.isAvailable()) {
+        throw new Error("Secure provider storage is unavailable on this system.");
+      }
       const values = await this.read();
       mutation(values);
       const keys = Object.keys(values);
@@ -83,15 +86,15 @@ export class ProviderSecretsService {
   }
 
   private async read(): Promise<Record<string, string>> {
-    if (!this.encryption.isAvailable()) {
-      throw new Error("Secure provider storage is unavailable on this system.");
-    }
     let encrypted: Buffer;
     try {
       encrypted = await readFile(this.root);
     } catch (error) {
       if (isMissingFile(error)) return {};
       throw error;
+    }
+    if (!this.encryption.isAvailable()) {
+      throw new Error("Secure provider storage is unavailable on this system.");
     }
     try {
       const plaintext = this.encryption.decrypt(encrypted);

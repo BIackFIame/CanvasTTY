@@ -1,23 +1,26 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmod, mkdir, mkdtemp, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { lazyRequire } from "../../lazyRequire.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
-import type { CreateSessionRequest, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
+import type { AppSettings, CreateSessionRequest, PixelSkinApertures, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
 import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
+import { MAX_PIXEL_SKIN_ARCHIVE_BYTES, type PixelSkinPackRegistry } from "../PixelSkinPackRegistry.ts";
+import type { SettingsStore } from "../SettingsStore.ts";
 
 // Headless terminals are created on demand; the module loads with the first one.
 const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
 
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 256 * 1024;
+const BUILT_IN_PIXEL_SKINS = ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"];
 const MAX_RECEIPTS = 4096;
 // Refusals that happen before anything is written: a retry with the same
 // request id must be performed again instead of replaying the refusal.
@@ -27,6 +30,13 @@ const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+/**
+ * What a caller that is not CanvasTTY's control CLI reads (an unauthenticated, malformed or HTTP request): why it
+ * was refused and what to do instead. Stable, and free of protocol details, file names and paths.
+ */
+export const CONTROL_REFUSAL_MESSAGE = "CanvasTTY refused this request: this endpoint only accepts requests from sessions CanvasTTY itself launched as orchestrators, and guessing its protocol will not work. If you are an agent and need other agents, ask the person to start you from CanvasTTY's launcher with the Orchestrator role: you will then get the canvastty_agents tools (spawn_agent, list_routes, wait_for_agent and the rest).";
+/** An HTTP request line (curl, a browser, an HTTP/2 preface): answered with a minimal 403 instead of NDJSON. */
+const HTTP_REQUEST_LINE = /^[A-Z]{3,10} \S{1,4096} HTTP\/\d(?:\.\d)?\r?$/;
 const SECRET = /^[a-f0-9]{64}$/;
 
 interface TerminalPort {
@@ -47,7 +57,8 @@ interface ControlRequest {
   instanceId: string;
   token: string;
   controller: string;
-  method: "create" | "list" | "status" | "screen" | "send" | "result" | "interrupt" | "choose" | "dismiss";
+  method: "create" | "list" | "status" | "screen" | "send" | "result" | "interrupt" | "choose" | "dismiss"
+    | "skin-list" | "skin-install" | "skin-select";
   params: Record<string, unknown>;
 }
 
@@ -74,6 +85,9 @@ interface OwnedSession {
 export interface AgentControlGatewayOptions {
   userDataPath: string;
   terminals: TerminalPort;
+  pixelSkinPacks?: PixelSkinPackRegistry;
+  settings?: SettingsStore;
+  onSettingsChanged?(settings: AppSettings): void;
   lifecycleEnabled(): boolean;
   platform?: NodeJS.Platform;
   windowsHostPath?: string;
@@ -270,7 +284,7 @@ export class AgentControlGateway {
     this.sockets.add(socket);
     const lines = new NdjsonLineReader({ maxLineBytes: MAX_REQUEST_BYTES });
     let handled = false;
-    const timer = setTimeout(() => socket.destroy(), 10_000);
+    let timer = setTimeout(() => socket.destroy(), 10_000);
     timer.unref();
     socket.setNoDelay(true);
     socket.on("error", () => socket.destroy());
@@ -283,6 +297,24 @@ export class AgentControlGateway {
         socket.write(data);
       } catch { socket.destroy(); }
     };
+    // A refusal is answered once and the connection closed, so a caller is not left waiting for the timeout.
+    const close = (): void => {
+      // A Unix socket half-closes after the reply is flushed; the Windows relay has no end(), so it is dropped shortly.
+      const end = (socket as { end?: () => void }).end;
+      if (typeof end === "function") end.call(socket);
+      else setTimeout(() => socket.destroy(), 250).unref();
+    };
+    const refuse = (line: Buffer): void => {
+      if (socket.destroyed) return;
+      if (HTTP_REQUEST_LINE.test(line.subarray(0, 4200).toString("latin1"))) {
+        const body = Buffer.from(`${CONTROL_REFUSAL_MESSAGE}\n`);
+        socket.write(Buffer.concat([Buffer.from("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\n"
+          + `Content-Length: ${body.length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n`), body]));
+      } else {
+        reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: CONTROL_REFUSAL_MESSAGE } });
+      }
+      close();
+    };
     socket.on("data", (chunk) => {
       if (handled) return;
       let line: Buffer | undefined;
@@ -291,7 +323,12 @@ export class AgentControlGateway {
       handled = true;
       let request: ControlRequest;
       try { request = this.parse(JSON.parse(line.toString("utf8"))); }
-      catch { reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: "Invalid or unauthenticated control request." } }); return; }
+      catch { refuse(line); return; }
+      if (request.method === "skin-install") {
+        clearTimeout(timer);
+        timer = setTimeout(() => socket.destroy(), 120_000);
+        timer.unref();
+      }
       void this.dispatch(request).then(
         (result) => reply({ v: 1, id: request.id, ok: true, result }),
         (error: unknown) => reply({ v: 1, id: request.id, ok: false, error: {
@@ -307,7 +344,8 @@ export class AgentControlGateway {
       || value.v !== 1 || typeof value.id !== "string" || !ID.test(value.id)
       || value.instanceId !== this.instanceId || typeof value.token !== "string" || !SECRET.test(value.token)
       || typeof value.controller !== "string" || !SECRET.test(value.controller)
-      || !["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss"].includes(String(value.method))
+      || !["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss",
+        "skin-list", "skin-install", "skin-select"].includes(String(value.method))
       || !record(value.params)) throw new Error("Invalid envelope");
     if (!tokenMatches(value.token, this.tokenHash)) throw new Error("Invalid credential");
     return value as unknown as ControlRequest;
@@ -315,7 +353,7 @@ export class AgentControlGateway {
 
   private async dispatch(request: ControlRequest): Promise<unknown> {
     const owner = hash(request.controller);
-    const mutating = ["create", "send", "interrupt", "choose", "dismiss"].includes(request.method);
+    const mutating = ["create", "send", "interrupt", "choose", "dismiss", "skin-install", "skin-select"].includes(request.method);
     if (!mutating) return this.perform(owner, request);
     const key = `${owner}:${request.id}`;
     const digest = hash(JSON.stringify([request.method, Object.entries(request.params).sort(([a], [b]) => a.localeCompare(b))]));
@@ -352,6 +390,9 @@ export class AgentControlGateway {
   private async perform(owner: string, request: ControlRequest): Promise<unknown> {
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
     const params = request.params;
+    if (request.method === "skin-list" || request.method === "skin-install" || request.method === "skin-select") {
+      return this.performSkinOperation(request.method, params);
+    }
     if (request.method === "create") {
       fields(params, ["provider", "cwd", "title", "profile"]);
       if (!isControlProvider(params.provider) || !isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal, yolo or auto launch profile.");
@@ -481,6 +522,57 @@ export class AgentControlGateway {
 
   private redactTurn(turn: Turn): Turn {
     return turn.result ? { ...turn, result: { ...turn.result, text: this.redact(turn.result.text) } } : turn;
+  }
+
+  private async performSkinOperation(method: "skin-list" | "skin-install" | "skin-select", params: Record<string, unknown>): Promise<unknown> {
+    const packs = this.options.pixelSkinPacks;
+    const settings = this.options.settings;
+    if (!packs || !settings) throw new ControlError("NOT_SUPPORTED", "Pixel theme control is unavailable.");
+    if (method === "skin-list") {
+      fields(params, []);
+      const current = settings.get();
+      return { builtIn: BUILT_IN_PIXEL_SKINS,
+        installed: packs.list(), activeId: current.terminalBorderSkin, detail: current.terminalSkinDetail };
+    }
+    if (method === "skin-install") {
+      fields(params, ["archivePath", "name", "activate", "detail", "apertures"]);
+      const archivePath = string(params.archivePath, 4096, "archivePath");
+      if (!isAbsolute(archivePath)) throw new ControlError("INVALID_PARAMS", "archivePath must be absolute.");
+      const stat = await lstat(archivePath).catch(() => { throw new ControlError("INVALID_PARAMS", "Theme ZIP does not exist."); });
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_PIXEL_SKIN_ARCHIVE_BYTES) {
+        throw new ControlError("INVALID_PARAMS", "Theme ZIP must be a regular file smaller than 150 MB.");
+      }
+      if (params.activate !== undefined && typeof params.activate !== "boolean") throw new ControlError("INVALID_PARAMS", "activate must be boolean.");
+      const detail = this.skinDetail(params.detail);
+      if (params.detail !== undefined && !params.activate) throw new ControlError("INVALID_PARAMS", "detail requires activate: true.");
+      const name = params.name === undefined ? basename(archivePath).replace(/\.zip$/i, "") : string(params.name, 64, "name");
+      let pack;
+      try { pack = await packs.installZip(await readFile(archivePath), name,
+        params.apertures as PixelSkinApertures | undefined); }
+      catch (error) { throw new ControlError("INVALID_PACK", error instanceof Error ? error.message : "Invalid theme ZIP."); }
+      if (params.activate) {
+        const updated = await settings.update({ terminalBorderSkin: pack.id, ...(detail ? { terminalSkinDetail: detail } : {}) });
+        this.options.onSettingsChanged?.(updated);
+      }
+      return { pack, active: Boolean(params.activate) };
+    }
+    fields(params, ["skinId", "detail"]);
+    const skinId = string(params.skinId, 128, "skinId");
+    if (!BUILT_IN_PIXEL_SKINS.includes(skinId)
+      && !packs.list().some((pack) => pack.id === skinId)) {
+      throw new ControlError("INVALID_PARAMS", "Unknown pixel theme ID.");
+    }
+    const detail = this.skinDetail(params.detail);
+    const updated = await settings.update({ terminalBorderSkin: skinId as AppSettings["terminalBorderSkin"],
+      ...(detail ? { terminalSkinDetail: detail } : {}) });
+    this.options.onSettingsChanged?.(updated);
+    return { activeId: updated.terminalBorderSkin, detail: updated.terminalSkinDetail };
+  }
+
+  private skinDetail(value: unknown): "minimal" | "detailed" | undefined {
+    if (value === undefined) return undefined;
+    if (value !== "minimal" && value !== "detailed") throw new ControlError("INVALID_PARAMS", "detail must be minimal or detailed.");
+    return value;
   }
 }
 

@@ -31,10 +31,24 @@ import {
   BridgeClientError,
   GatewayClient,
   createMcpDispatcher,
+  errorResponse,
   formatToolResult,
   isLocalEndpoint,
   readIdentity
 } from "../src/agent-browser/mcp-helper.mjs";
+
+test("MCP initialization preserves gateway failure reasons without exposing unexpected errors", async () => {
+  const dispatch = createMcpDispatcher({
+    async connect() {
+      throw new BridgeClientError({ code: "AUTH_REPLAYED", message: "Agent browser capability was already used.", retryable: false });
+    }
+  });
+  const reply = await dispatch({ jsonrpc: "2.0", id: 1, method: "initialize" })
+    .catch((error) => errorResponse(1, error));
+  assert.equal(reply.error.code, -32603);
+  assert.match(reply.error.message, /AUTH_REPLAYED: Agent browser capability was already used/);
+  assert.equal(errorResponse(2, new Error("private details")).error.message, "Internal error");
+});
 import {
   AGENT_BROWSER_ENV,
   AgentBrowserBridge

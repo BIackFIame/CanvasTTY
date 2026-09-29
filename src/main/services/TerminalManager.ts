@@ -161,6 +161,7 @@ type LaunchContribution = Extract<PreparedLaunch, { ok: true }>;
 export interface ProviderLifecycleSignal {
   kind: "lifecycle";
   state: "idle" | "working" | "needs_approval";
+  event?: string;
   requestId?: string;
   threadId?: string;
 }
@@ -593,6 +594,7 @@ export class TerminalManager {
       session.resumeOnLaunch = resume;
       session.metadata.startedAt = Date.now();
       session.metadata.status = initialSessionStatus(session.metadata.provider);
+      session.metadata.turnCompleted = false;
       session.metadata.exitCode = null;
       session.metadata.failureDetails = null;
       this.emitSession(session.metadata);
@@ -649,6 +651,7 @@ export class TerminalManager {
       failureOrigin = "user";
     } else {
       session.metadata.status = initialSessionStatus(session.metadata.provider);
+      session.metadata.turnCompleted = false;
       session.metadata.exitCode = null;
       session.metadata.failureDetails = null;
       if (launched.process) this.bindProcess(id, session, launched.process);
@@ -805,8 +808,11 @@ export class TerminalManager {
     }
 
     const nextStatus = signal.state;
-    if (session.metadata.status === nextStatus) return;
+    const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
+    const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
+    if (session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
     session.metadata.status = nextStatus;
+    session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
   }
 

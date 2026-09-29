@@ -6,10 +6,15 @@ import type {
   AgentCliAvailability,
   BrowserCommand,
   CanvasNavigationPointerBindingInput,
+  CustomTerminalBorderSkinId,
   CreateSessionRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
   PluginLaunchFieldOptions,
+  PixelSkinPackInstallRequest,
+  PixelSkinZipInstallRequest,
+  PixelSkinSlot,
+  PixelTerminalBorderSkinId,
   ProviderId,
   ProviderSecretId,
   SessionBounds
@@ -18,6 +23,8 @@ import { IPC, PROVIDER_SECRET_IDS, isProviderId } from "../../shared/contracts";
 import { isCanvasNavigationMouseButton } from "../../shared/canvasNavigation";
 import { createWindowStateObserver, readWindowState } from "../windowState";
 import type { SettingsStore } from "../services/SettingsStore";
+import { isCustomTerminalBorderSkinId, type SkinRegistry } from "../services/SkinRegistry";
+import { isPixelSkinSlot, isPixelTerminalBorderSkinId, type PixelSkinPackRegistry } from "../services/PixelSkinPackRegistry";
 import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
 import type { LimitsService } from "../services/LimitsService";
@@ -37,6 +44,8 @@ import { readHomeMedia } from "../services/homeMedia";
 
 interface Dependencies {
   settings: SettingsStore;
+  terminalBorderSkins: SkinRegistry;
+  pixelSkinPacks: PixelSkinPackRegistry;
   providerClis: ProviderCliRegistry;
   recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
@@ -72,6 +81,8 @@ interface Dependencies {
 
 export function registerIpc({
   settings,
+  terminalBorderSkins,
+  pixelSkinPacks,
   providerClis,
   recheckProviderClis,
   terminals,
@@ -124,6 +135,40 @@ export function registerIpc({
     return app.getVersion();
   });
   ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.terminalBorderSkinsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminalBorderSkins.list();
+  });
+  ipcMain.handle(IPC.terminalBorderSkinsGet, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!isCustomTerminalBorderSkinId(id)) throw new Error("Custom terminal skin ID is invalid.");
+    return terminalBorderSkins.get(id as CustomTerminalBorderSkinId);
+  });
+  terminalBorderSkins.onChanged(() => {
+    const window = getMainWindow();
+    if (window && !window.isDestroyed()) window.webContents.send(IPC.terminalBorderSkinsChanged);
+  });
+  ipcMain.handle(IPC.pixelSkinsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.list();
+  });
+  ipcMain.handle(IPC.pixelSkinsInstall, (event, request: PixelSkinPackInstallRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.install(request);
+  });
+  ipcMain.handle(IPC.pixelSkinsInstallZip, (event, request: PixelSkinZipInstallRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.installZip(request.archive, request.name, request.apertures);
+  });
+  ipcMain.handle(IPC.pixelSkinsReadAsset, (event, id: unknown, slot: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!isPixelTerminalBorderSkinId(id) || !isPixelSkinSlot(slot)) return null;
+    return pixelSkinPacks.readAsset(id as PixelTerminalBorderSkinId, slot as PixelSkinSlot);
+  });
+  pixelSkinPacks.onChanged(() => {
+    const window = getMainWindow();
+    if (window && !window.isDestroyed()) window.webContents.send(IPC.pixelSkinsChanged);
+  });
   ipcMain.handle(IPC.agentsAvailability, (event) => {
     assertMainRenderer(event, getMainWindow);
     return providerCliAvailability(providerClis);

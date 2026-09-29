@@ -33,7 +33,12 @@ const fallback = {
   agentLifecycleHooksEnabled: true,
   uiScale: 1,
   canvasColor: "sage",
+  canvasBackground: "none",
   pattern: "dots",
+  terminalBorderSkin: "classic",
+  terminalSkinDetail: "detailed",
+  terminalSkinAnimationEnabled: true,
+  appSkin: "classic",
   snapToGrid: true,
   invertTerminalWheel: true,
   invertCanvasWheel: false,
@@ -130,6 +135,8 @@ test("older settings files without the new keys inherit defaults", () => {
   assert.deepEqual(normalized.homeLauncherProviders, fallback.homeLauncherProviders);
   assert.deepEqual(normalized.homeLimitProviders, fallback.homeLimitProviders);
   assert.equal(normalized.canvasColor, fallback.canvasColor);
+  assert.equal(normalized.terminalBorderSkin, "classic");
+  assert.equal(normalized.appSkin, "classic");
   assert.equal(normalized.edgePan, fallback.edgePan);
   assert.equal(normalized.edgePanSpeed, fallback.edgePanSpeed);
   assert.equal(normalized.zoomSensitivity, fallback.zoomSensitivity);
@@ -141,6 +148,84 @@ test("older settings files without the new keys inherit defaults", () => {
   assert.equal(normalized.agentLifecycleHooksEnabled, true);
   assert.equal(normalized.persistCanvasRegions, true);
   assert.equal(normalized.persistStickyNotes, true);
+});
+
+test("terminal border skin accepts supported choices and rejects unknown values", () => {
+  for (const skin of ["classic", "minimal", "glass", "cyber", "nord", "gradient", "cybercore", "titanium", "retro", "sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).terminalBorderSkin, skin);
+  }
+  assert.equal(normalizeSettings({ terminalBorderSkin: "custom:aurora" }, fallback).terminalBorderSkin, "custom:aurora");
+  for (const skin of ["custom:", "custom:Bad", "custom:two words", "custom:../escape", "custom:a/b", `custom:${"a".repeat(49)}`]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).terminalBorderSkin, "classic");
+  }
+  assert.equal(normalizeSettings({ terminalBorderSkin: "unknown" }, fallback).terminalBorderSkin, "classic");
+  assert.equal(normalizeSettings({ terminalBorderSkin: "botanical" }, fallback).terminalBorderSkin, "classic");
+});
+
+test("terminal skin animation setting is boolean and persists independently of the selected skin", async () => {
+  assert.equal(normalizeSettings({ terminalSkinDetail: "minimal" }, fallback).terminalSkinDetail, "minimal");
+  assert.equal(normalizeSettings({ terminalSkinDetail: "master" }, fallback).terminalSkinDetail, "detailed");
+  assert.equal(normalizeSettings({ terminalSkinAnimationEnabled: false }, fallback).terminalSkinAnimationEnabled, false);
+  assert.equal(normalizeSettings({ terminalSkinAnimationEnabled: "false" }, fallback).terminalSkinAnimationEnabled, true);
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-skin-motion-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBorderSkin: "sakura", terminalSkinDetail: "minimal", terminalSkinAnimationEnabled: false });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.terminalBorderSkin, "sakura");
+    assert.equal(restored.terminalSkinDetail, "minimal");
+    assert.equal(restored.terminalSkinAnimationEnabled, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("canvas backgrounds migrate once and persist independently of terminal borders", async () => {
+  const pixel = "pixel:12345678-1234-1234-1234-123456789abc";
+  for (const skin of ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse", pixel]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).canvasBackground, skin);
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin, canvasBackground: "none" }, fallback).canvasBackground, "none");
+    assert.equal(normalizeSettings({ terminalBorderSkin: "classic", canvasBackground: skin }, fallback).canvasBackground, skin);
+  }
+  for (const invalid of ["glass", "custom:aurora", "pixel:bad", "../background.png", null, 1]) {
+    assert.equal(normalizeSettings({ canvasBackground: invalid }, fallback).canvasBackground, "none");
+  }
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ terminalBorderSkin: "sakura" }));
+    const store = new SettingsStore(dir, "en");
+    assert.equal((await store.load()).canvasBackground, "sakura");
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).canvasBackground, "sakura");
+    await store.update({ terminalBorderSkin: "cat" });
+    assert.equal((await new SettingsStore(dir, "en").load()).canvasBackground, "sakura");
+    await store.update({ canvasBackground: pixel });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBorderSkin, "cat");
+    await store.update({ canvasBackground: "none" });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.canvasBackground, "none");
+    assert.equal(restored.terminalBorderSkin, "cat");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("application skin accepts supported choices and rejects unknown values", () => {
+  for (const skin of ["classic", "atelier", "signal", "greenhouse", "midnight"]) {
+    assert.equal(normalizeSettings({ appSkin: skin }, fallback).appSkin, skin);
+  }
+  assert.equal(normalizeSettings({ appSkin: "unknown" }, fallback).appSkin, "classic");
+});
+
+test("terminal border skin persists across settings reload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-terminal-border-skin-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBorderSkin: "cyber" });
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).terminalBorderSkin, "cyber");
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBorderSkin, "cyber");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("preserves an explicit lifecycle hook revocation", () => {

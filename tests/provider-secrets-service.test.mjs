@@ -81,9 +81,17 @@ test("unknown secret ids and invalid values are rejected", async (t) => {
 });
 
 test("storage fails closed when OS encryption is unavailable", async (t) => {
-  const { service } = await fixture(t, { available: false });
+  const { root, service } = await fixture(t, { available: false });
+  assert.equal(Object.values(await service.status()).every((value) => value === false), true);
+  assert.equal(await service.get("OPENAI_API_KEY"), null);
   await assert.rejects(() => service.set("OPENAI_API_KEY", "value"), /unavailable/u);
+  await assert.rejects(() => service.delete("OPENAI_API_KEY"), /unavailable/u);
+  await assert.rejects(() => readFile(join(root, "provider-secrets.bin")), /ENOENT/u);
+
+  const encrypted = new ProviderSecretsService(root, fakeEncryption());
+  await encrypted.set("OPENAI_API_KEY", "value");
   await assert.rejects(() => service.status(), /unavailable/u);
+  await assert.rejects(() => service.get("OPENAI_API_KEY"), /unavailable/u);
 });
 
 test("corrupted encrypted payloads fail closed instead of leaking partial data", async (t) => {

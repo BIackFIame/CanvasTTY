@@ -40,6 +40,10 @@ import {
   DEFAULT_SHORTCUTS
 } from "../../shared/contracts";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
+import {
+  createTerminalBorderSkinStyleController,
+  type TerminalBorderSkinStyleController
+} from "./lib/skinStyles";
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 import { AgentLaunchDialog } from "./features/launcher/AgentLaunchDialog";
@@ -50,6 +54,9 @@ import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
 import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
+import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
+import { isPixelSkinPackId } from "./features/skins/SkinAssets";
+import { expandedPixelSkinCardBounds, PIXEL_SKIN_CARD_SIZE } from "./features/skins/pixelSkinCardGeometry";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { t } from "./lib/i18n";
 import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
@@ -92,7 +99,12 @@ const FALLBACK_SETTINGS: AppSettings = {
   baseProtectionEnabled: true,
   uiScale: DEFAULT_UI_SCALE,
   canvasColor: "sage",
+  canvasBackground: "none",
   pattern: "dots",
+  terminalBorderSkin: "classic",
+  terminalSkinDetail: "detailed",
+  terminalSkinAnimationEnabled: true,
+  appSkin: "classic",
   snapToGrid: true,
   invertTerminalWheel: true,
   invertCanvasWheel: false,
@@ -142,6 +154,28 @@ const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {
 
 const DEFAULT_FOCUS_ZOOM = 0.92;
 const PLUGIN_CANVAS_FOCUS_ZOOM = 1;
+
+function TerminalBorderSkinStyleHost({ skinId }: { skinId: AppSettings["terminalBorderSkin"] }): null {
+  const controllerRef = useRef<TerminalBorderSkinStyleController | null>(null);
+  const activeSkinIdRef = useRef(skinId);
+  activeSkinIdRef.current = skinId;
+
+  useEffect(() => {
+    const controller = createTerminalBorderSkinStyleController(window.canvasTTY.skins, document);
+    controllerRef.current = controller;
+    controller.setActive(activeSkinIdRef.current);
+    return () => {
+      controller.dispose();
+      if (controllerRef.current === controller) controllerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    controllerRef.current?.setActive(skinId);
+  }, [skinId]);
+
+  return null;
+}
 
 function customHomeAccentStyle(colors: HomeAccentColors): React.CSSProperties {
   const launcherTile = mixHexWithWhite(colors.launcher, 0.62);
@@ -261,6 +295,9 @@ export function App(): React.JSX.Element {
     });
 
     const settingsRequest = window.canvasTTY.settings.get();
+    const unsubscribeSettings = window.canvasTTY.settings.onChanged((next) => {
+      if (active) setSettings(next);
+    });
     const availabilityRequest = window.canvasTTY.agents.availability();
     const sessionsRequest = window.canvasTTY.terminal.list().then((loadedSessions) => {
       if (active) setSessions((current) => mergeSessionSnapshots(current, loadedSessions));
@@ -291,6 +328,7 @@ export function App(): React.JSX.Element {
       active = false;
       unsubscribeSession();
       unsubscribeRemoved();
+      unsubscribeSettings();
     };
   }, [showToast]);
 
@@ -391,8 +429,11 @@ export function App(): React.JSX.Element {
     environment?: SessionEnvironmentChoice
   ): Promise<SessionSnapshot> => {
     const currentSettings = settingsRef.current;
+    const pixelSkin = isPixelSkinThemeId(currentSettings.terminalBorderSkin)
+      || isPixelSkinPackId(currentSettings.terminalBorderSkin);
+    const cardSize = pixelSkin ? PIXEL_SKIN_CARD_SIZE : DEFAULT_SESSION_SIZE;
     const position = requestedCenter
-      ? centeredWindowPosition(requestedCenter, DEFAULT_SESSION_SIZE)
+      ? centeredWindowPosition(requestedCenter, cardSize)
       : findNearHomeSessionPosition(
           { position: { x: 0, y: 0 }, size: homeGridPixelSize(currentSettings.homeGridSize) },
           [
@@ -402,26 +443,28 @@ export function App(): React.JSX.Element {
             ...(currentSettings.browserCanvas ? [currentSettings.browserCanvas] : []),
             ...pendingSessionPlacements.current
           ],
-          DEFAULT_SESSION_SIZE
+          cardSize
         );
     // Reserve the slot until the async create finishes, so fast parallel launches
     // cannot both choose the same free position before React renders either card.
     const reservation: SessionBounds | null = requestedCenter
       ? null
-      : { position, size: DEFAULT_SESSION_SIZE };
+      : { position, size: cardSize };
     if (reservation) pendingSessionPlacements.current.push(reservation);
     try {
       const session = await window.canvasTTY.terminal.create({
         provider, profile, cwd, position, role, ...(launchOptions ? { launchOptions } : {}),
         ...(environment ? { environment } : {})
       });
-      sessionsRef.current = upsertSnapshot(sessionsRef.current, session);
-      setSessions((current) => upsertSnapshot(current, session));
+      const sizedSession = pixelSkin ? { ...session, size: { ...cardSize } } : session;
+      if (pixelSkin) window.canvasTTY.terminal.setBounds(session.id, { position, size: sizedSession.size });
+      sessionsRef.current = upsertSnapshot(sessionsRef.current, sizedSession);
+      setSessions((current) => upsertSnapshot(current, sizedSession));
       setActiveSessionId(session.id);
       await saveSettings({ lastDirectory: cwd });
       isHomeCamera.current = false;
-      setCamera(focusCamera(position, session.size));
-      return session;
+      setCamera(focusCamera(position, sizedSession.size));
+      return sizedSession;
     } finally {
       if (reservation) {
         pendingSessionPlacements.current = pendingSessionPlacements.current.filter((item) => item !== reservation);
@@ -533,6 +576,22 @@ export function App(): React.JSX.Element {
       setFullscreenSessionId(id);
     }
   }, [fullscreenSessionId]);
+
+  const previousBorderSkin = useRef<AppSettings["terminalBorderSkin"] | null>(null);
+  useEffect(() => {
+    if (!ready) return;
+    const previous = previousBorderSkin.current;
+    previousBorderSkin.current = settings.terminalBorderSkin;
+    // Expand only when entering pixel styling; preserve restored and manually resized bounds.
+    if (previous === null || previous === settings.terminalBorderSkin
+      || isPixelSkinThemeId(previous) || isPixelSkinPackId(previous)
+      || !(isPixelSkinThemeId(settings.terminalBorderSkin)
+      || isPixelSkinPackId(settings.terminalBorderSkin))) return;
+    const expanded = expandedPixelSkinCardBounds(sessions);
+    for (const { id, bounds } of expanded) changeSessionBounds(id, bounds);
+    const active = expanded.find(({ id }) => id === activeSessionId);
+    if (active && !isHomeCamera.current) setCamera(focusCamera(active.bounds.position, active.bounds.size));
+  }, [activeSessionId, changeSessionBounds, ready, sessions, settings.terminalBorderSkin]);
 
   const changePluginCanvasBounds = useCallback((id: string, bounds: SessionBounds): void => {
     const pluginCanvas = settingsRef.current.pluginCanvas.map((instance) => instance.id === id
@@ -1143,7 +1202,8 @@ export function App(): React.JSX.Element {
   }, [agentAvailability, homeEditDraft, settings]);
 
   return (
-    <div className={rootClasses} style={rootStyle}>
+    <div className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
+      <TerminalBorderSkinStyleHost skinId={settings.terminalBorderSkin} />
       <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
       <main className="app__content">
         {!ready && <div className="loading-screen">{t(settings.locale, "loading")}</div>}
