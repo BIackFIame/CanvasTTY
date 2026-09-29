@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
 import xterm from "@xterm/headless";
-import { AgentControlGateway, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { AgentControlGateway, CONTROL_REFUSAL_MESSAGE, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
@@ -284,7 +284,61 @@ test("invalid socket credentials cannot launch a native session", localSocket, a
   });
   assert.equal(reply.ok, false);
   assert.equal(reply.error.code, "INVALID_REQUEST");
+  assert.equal(reply.error.message, CONTROL_REFUSAL_MESSAGE);
   assert.equal(f.calls.length, 0);
+});
+
+/** Sends raw bytes to the control socket and collects everything until the gateway closes the connection. */
+function rawExchange(endpoint, bytes) {
+  return new Promise((resolveReply, reject) => {
+    const socket = createConnection(endpoint);
+    const chunks = [];
+    socket.on("error", reject);
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("the gateway did not close the refused connection")); });
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => { socket.destroy(); resolveReply(Buffer.concat(chunks).toString("utf8")); });
+    socket.on("connect", () => socket.write(bytes));
+  });
+}
+
+test("unauthenticated, garbage and HTTP requests get the same guidance and a closed connection", localSocket, async (t) => {
+  const f = await fixture(t);
+  const descriptor = JSON.parse(await readFile(f.connectionPath, "utf8"));
+  const guessed = await rawExchange(descriptor.endpoint, JSON.stringify({ method: "list", params: {} }) + "\n");
+  const garbage = await rawExchange(descriptor.endpoint, "hello?\n");
+  for (const text of [guessed, garbage]) {
+    const reply = JSON.parse(text.trim());
+    assert.deepEqual(reply, { v: 1, ok: false, error: { code: "INVALID_REQUEST", message: CONTROL_REFUSAL_MESSAGE } });
+  }
+  const http = await rawExchange(descriptor.endpoint, "GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: curl/8\r\nAccept: */*\r\n\r\n");
+  const [head, body] = http.split("\r\n\r\n");
+  assert.match(head, /^HTTP\/1\.1 403 Forbidden\r\n/u);
+  assert.match(head, /\r\nConnection: close/u);
+  assert.equal(Number(/Content-Length: (\d+)/u.exec(head)[1]), Buffer.byteLength(body));
+  assert.equal(body, `${CONTROL_REFUSAL_MESSAGE}\n`);
+  // The guidance names the way in and nothing about the protocol, the token or where anything lives.
+  assert.match(CONTROL_REFUSAL_MESSAGE, /Orchestrator role/u);
+  assert.match(CONTROL_REFUSAL_MESSAGE, /canvastty_agents tools/u);
+  assert.doesNotMatch(CONTROL_REFUSAL_MESSAGE, /token|instanceId|controller|\.sock|connection\.json|agent-control|ndjson|json/iu);
+  assert.equal(f.calls.length, 0);
+});
+
+test("the token file is private (0600) in a private folder (0700), even under a loose umask or a loose folder", localSocket, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-control-hygiene-")));
+  await mkdir(join(root, "agent-control"), { mode: 0o777 });
+  await chmod(join(root, "agent-control"), 0o777);
+  const previous = process.umask(0);
+  const terminals = { create() { throw new Error("unused"); }, listMetadata: () => [], readBuffer() { throw new Error("unused"); },
+    inputChecked: () => false, geometry: () => ({ cols: 80, rows: 24 }) };
+  const gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => false });
+  t.after(async () => { process.umask(previous); await gateway.close(); await rm(root, { recursive: true, force: true }); });
+  let connectionPath;
+  try { connectionPath = await gateway.start(); } finally { process.umask(previous); }
+  const descriptor = JSON.parse(await readFile(connectionPath, "utf8"));
+  assert.equal((await stat(join(root, "agent-control"))).mode & 0o777, 0o700);
+  assert.equal((await stat(descriptor.tokenFile)).mode & 0o777, 0o600);
+  assert.equal((await stat(connectionPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(join(descriptor.endpoint, ".."))).mode & 0o777, 0o700);
 });
 
 test("a control write waiting on terminal replay cannot reach a restarted session", localSocket, async (t) => {
