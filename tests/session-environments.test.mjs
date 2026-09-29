@@ -6,7 +6,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
-import test, { after } from "node:test";
+import test from "node:test";
 import { EnvironmentRegistry, resolveCommand } from "../src/main/services/EnvironmentRegistry.ts";
 import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import { PluginServiceSupervisor } from "../src/main/services/PluginServiceSupervisor.ts";
@@ -20,15 +20,6 @@ const SECRET = "environment-secret-4d9e1b77";
 const cwd = process.cwd();
 const at = { x: 0, y: 0 };
 const choice = { pluginId: PLUGIN, kind: "box" };
-
-after(() => {
-  setTimeout(() => {
-    console.error("Environment test resources still open:", process.getActiveResourcesInfo());
-    console.error("Environment test handles:", process._getActiveHandles().map((handle) => ({
-      type: handle.constructor.name, pid: handle.pid, spawnargs: handle.spawnargs
-    })));
-  }, 10_000).unref();
-});
 
 const waitFor = async (predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;

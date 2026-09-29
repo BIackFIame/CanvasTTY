@@ -35,7 +35,7 @@ async function prepare({ sessionId, cwd, options }) {
     return { refuse: { reason: `git worktree add failed: ${String(error.stderr || error.message).trim().slice(0, 200)}` } };
   }
   // The card's folder inside the repository (git reports real paths, so compare real paths).
-  const inside = relative(realpathSync(repo), realpathSync(cwd));
+  const inside = relative(realpathSync.native(repo), realpathSync.native(cwd));
   const sub = inside.startsWith("..") ? "" : inside;
   return { ref: { repo, dir, branch, createdBranch: !exists, sub }, label: `worktree ${branch}`, cwd: join(dir, sub) };
 }
