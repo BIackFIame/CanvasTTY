@@ -57,6 +57,11 @@ type KnownForms = {
 };
 const NO_FORMS: KnownForms = { bare: [], exact: [], armour: false };
 
+/** An owner's kind for a log line (`plugin`, `session`, `vault`), without its id. */
+function ownerKind(owner: string): string {
+  return owner.split(':')[0] || 'an owner';
+}
+
 export class SecretRedactionRegistry {
   private readonly owners = new Map<string, Set<string>>();
   private forms: KnownForms = NO_FORMS;
@@ -64,19 +69,33 @@ export class SecretRedactionRegistry {
   private knownSpan = 0;
   private dirty = false;
 
-  /** Adds values under an owner (`vault`, `session:<id>`, `plugin:<id>`); short or oversized values are ignored. */
+  /**
+   * Adds values under an owner (`vault`, `session:<id>`, `plugin:<id>`); short or oversized values are ignored.
+   * An owner holds its 64 most recently added values: adding a held value again makes it the newest, so a key that
+   * is still read (the vault adds each key it reads) is never the one dropped for a new value. A drop or a refused
+   * owner is logged (never the value), not silent.
+   */
   add(owner: string, values: Iterable<string>): void {
     let set = this.owners.get(owner);
     for (const value of values) {
       const trimmed = typeof value === 'string' ? value.trim() : '';
       if (trimmed.length < MIN_SECRET_CHARS || trimmed.length > MAX_SECRET_CHARS) continue;
       if (!set) {
-        if (this.owners.size >= MAX_OWNERS) return;
+        if (this.owners.size >= MAX_OWNERS) {
+          console.warn(`CanvasTTY secret masking holds ${MAX_OWNERS} owners; values of ${ownerKind(owner)} are not masked.`);
+          return;
+        }
         set = new Set();
         this.owners.set(owner, set);
       }
-      if (set.has(trimmed)) continue;
-      if (set.size >= MAX_VALUES_PER_OWNER) set.delete(set.values().next().value!);
+      if (set.delete(trimmed)) {
+        set.add(trimmed);
+        continue;
+      }
+      if (set.size >= MAX_VALUES_PER_OWNER) {
+        set.delete(set.values().next().value!);
+        console.warn(`CanvasTTY secret masking holds ${MAX_VALUES_PER_OWNER} values per owner; the least recently added value of ${ownerKind(owner)} is no longer masked.`);
+      }
       set.add(trimmed);
       this.dirty = true;
     }
