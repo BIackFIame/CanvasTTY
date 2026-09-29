@@ -54,6 +54,7 @@ import {
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
 import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
 import { onDiskPath } from "./onDiskPath.ts";
+import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
 import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
@@ -106,6 +107,8 @@ interface ManagedSession {
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
   promptTurnMark?: number;
+  /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
+  answer?: { text: string; truncated: boolean; at: number };
   /**
    * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
    * and owning plugin carried into the saved record.
@@ -519,8 +522,8 @@ export class TerminalManager {
       try { unknown = this.modelCheck(request.provider, modelChoice.model); } catch { unknown = null; }
       if (unknown) throw new Error(unknown);
     }
-    if (control.captureResult && request.provider !== "codex") {
-      throw new Error("Result capture requires a Codex session.");
+    if (control.captureResult && !RESULT_CAPTURE_PROVIDERS.has(request.provider)) {
+      throw new Error("Result capture requires a Codex or OpenCode session.");
     }
     assertDirectory(request.cwd);
 
@@ -888,12 +891,31 @@ export class TerminalManager {
     const nextStatus = signal.state;
     // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
     if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
+    // A new turn: the previous answer is no longer this turn's.
+    if (nextStatus === "working") session.answer = undefined;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
     if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
+  }
+
+  /**
+   * Keeps the final answer a result-capturing session reported with its turn's end (the Codex Stop hook, the OpenCode
+   * plugin's session.idle); read back masked by answer(). In memory only, never saved.
+   */
+  recordAnswer(id: string, result: { text: string; truncated: boolean }): void {
+    const session = this.sessions.get(id);
+    if (!session?.captureResult || typeof result?.text !== "string") return;
+    session.answer = { text: result.text, truncated: result.truncated === true, at: Date.now() };
+  }
+
+  /** The last final answer (masked), or null when none was reported since the current turn started. */
+  answer(id: string): { text: string; truncated: boolean; at: number } | null {
+    const answer = this.sessions.get(id)?.answer;
+    if (!answer) return null;
+    return { ...answer, text: this.redactSecretsTail(answer.text, answer.text.length + 1) };
   }
 
   setLifecycleHooksEnabled(enabled: boolean): void {

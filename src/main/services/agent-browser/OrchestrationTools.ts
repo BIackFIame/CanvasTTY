@@ -206,9 +206,11 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     return {
       sessionId: result.sessionId,
       state: result.state,
+      status: result.status,
       exitCode: result.exitCode,
       output: result.output,
-      ...(result.exitLines ? { exitLines: result.exitLines } : {})
+      ...(result.exitLines ? { exitLines: result.exitLines } : {}),
+      ...(result.answer ? { answer: result.answer } : {})
     };
   }
 

@@ -9,6 +9,7 @@ import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
 import { hasAutoMode } from "../../shared/autoMode.ts";
 import type { TerminalManager } from "./TerminalManager.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
+import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
 
 // Roadmap F1 preview: a programmatic parent must not be able to fan out
 // without bound. The real budgets setting arrives with resource management;
@@ -60,6 +61,8 @@ export interface AgentWaitResult {
   output: string;
   /** Once the process exited: the last lines of its screen as plain text, masked (why it stopped, e.g. a bad model). */
   exitLines?: string;
+  /** The final answer of the turn that ended (Codex, OpenCode subagents), masked. */
+  answer?: AgentAnswer;
 }
 
 export interface AgentWaitTiming {
@@ -83,10 +86,20 @@ const AGENT_WAIT_TIMING: AgentWaitTiming = { checkMs: 500, settleMs: 1_000, quie
 export interface AgentResult {
   sessionId: string;
   state: "running" | "done" | "failed";
+  /** The session's status (idle once its turn ended; state stays "running" while the CLI is open). */
+  status: SessionSnapshot["status"];
   exitCode: number | null;
   output: string;
   /** Once the process exited: the last lines of its screen as plain text, masked. */
   exitLines?: string;
+  /** The last turn's final answer as the agent reported it (Codex, OpenCode subagents), masked; absent otherwise. */
+  answer?: AgentAnswer;
+}
+
+export interface AgentAnswer {
+  text: string;
+  /** Only the end of a longer answer was kept. */
+  truncated: boolean;
 }
 
 /** The agent's launch did not start, so text meant for it was dropped (never queued for a later launch). */
@@ -145,7 +158,7 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    });
+    }, RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {});
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
       .then(() => this.terminals.getMetadata(created.id) ?? created);
@@ -211,8 +224,9 @@ export class AgentControlService {
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (capabilities.result === "none") {
-      return { sessionId: session.id, state: "running", exitCode: session.exitCode, output: "" };
+      return { sessionId: session.id, state: "running", status: session.status, exitCode: session.exitCode, output: "" };
     }
+    const answer = this.answer(sessionId);
     const buffer = capabilities.result === "terminal"
       ? this.terminals.readBuffer(sessionId).buffer
       : "";
@@ -221,9 +235,11 @@ export class AgentControlService {
       state: session.exitCode === null
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
+      status: session.status,
       exitCode: session.exitCode,
       output: this.redactTail(buffer, MAX_OBSERVE_CHARS),
-      ...(session.exitCode !== null && this.exitLines(buffer) ? { exitLines: this.exitLines(buffer)! } : {})
+      ...(session.exitCode !== null && this.exitLines(buffer) ? { exitLines: this.exitLines(buffer)! } : {}),
+      ...(answer ? { answer } : {})
     };
   }
 
@@ -246,8 +262,9 @@ export class AgentControlService {
       if (!session) return { sessionId, reason, exitCode: null, waitedMs, output: "" };
       let observation: AgentObservation | null = null;
       try { observation = this.observe(sessionId); } catch { observation = null; }
+      const answer = reason === "timeout" || reason === "needs_approval" ? null : this.answer(sessionId);
       return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
-        ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}) };
+        ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(answer ? { answer } : {}) };
     };
     let offset = this.outputOffset(sessionId);
     let changedAt = started;
@@ -303,6 +320,13 @@ export class AgentControlService {
 
   private turnProgress(sessionId: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
     try { return typeof this.terminals.turnProgress === "function" ? this.terminals.turnProgress(sessionId) : null; } catch { return null; }
+  }
+
+  private answer(sessionId: string): AgentAnswer | null {
+    try {
+      const answer = typeof this.terminals.answer === "function" ? this.terminals.answer(sessionId) : null;
+      return answer ? { text: answer.text, truncated: answer.truncated } : null;
+    } catch { return null; }
   }
 
   /** How much output the session produced so far; changes whenever its screen does. */
