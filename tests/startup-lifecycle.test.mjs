@@ -36,11 +36,15 @@ test("closing during service startup stops renderer loading without a failure di
   assert.equal(failures, 1, "a real error on a live window still reaches the failure page");
 });
 
-test("services start while the startup page is still loading, and only a real page error fails startup", async () => {
+test("services start while the startup page loads, and the application surface waits until the page settled", async () => {
   const source = await readFile(mainPath, "utf8");
   const start = source.slice(source.indexOf("async function startApplication"), source.indexOf("function buildProviderCliRegistry"));
   const events = [];
-  let page;
+  const turn = () => new Promise((resolve) => setImmediate(resolve));
+  let settlePage;
+  // The startup page load as createWindow hands it over: it settles with the error to report, or null.
+  const pendingPage = () => new Promise((resolve) => { settlePage = resolve; });
+  let gone = false;
   const context = {
     startupRunning: false,
     shutdownRunning: false,
@@ -48,22 +52,41 @@ test("services start while the startup page is still loading, and only a real pa
     servicesReady: false,
     mainWindow: null,
     process: { env: {} },
-    shellWindowGone: () => false,
-    // The page load never settles here: startup must not wait for it.
-    createWindow: () => { page = { failure: null, superseded: false }; events.push("window"); return { window: {}, startupPage: page }; },
-    initializeServices: async () => { events.push(`services superseded=${page.superseded}`); },
+    shellWindowGone: () => gone,
+    createWindow: () => { events.push("window"); return { window: {}, startupPage: pendingPage() }; },
+    initializeServices: async () => { events.push("services"); },
     initializeUpdater: () => events.push("updater"),
-    loadApplication: async () => { events.push(`app superseded=${page.superseded}`); },
+    loadApplication: async () => { events.push("app"); },
     showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); }
   };
   const startApplication = runInNewContext(`${stripTypeScriptTypes(start)}; startApplication`, context);
-  await startApplication();
-  assert.deepEqual(events, ["window", "services superseded=false", "updater", "app superseded=true"]);
 
+  // Services do not wait for the page. The application surface does: a page replaced while it is still loading
+  // reports its ERR_ABORTED late, and Electron's loadFile promise takes that failure as its own.
+  let startup = startApplication();
+  await turn();
+  assert.deepEqual(events, ["window", "services"]);
+  events.push("page settled");
+  settlePage(null);
+  await startup;
+  assert.deepEqual(events, ["window", "services", "page settled", "updater", "app"]);
+
+  // A real page error on a live window fails startup.
   events.length = 0;
-  context.initializeServices = async () => { page.failure = new Error("startup page failed"); };
+  context.createWindow = () => { events.push("window"); return { window: {}, startupPage: Promise.resolve(new Error("startup page failed")) }; };
   await startApplication();
-  assert.deepEqual(events, ["window", "failure startup page failed"]);
+  assert.deepEqual(events, ["window", "services", "failure startup page failed"]);
+
+  // A close while the page is still loading ends startup quietly once the page settles.
+  events.length = 0;
+  context.createWindow = () => { events.push("window"); return { window: {}, startupPage: pendingPage() }; };
+  startup = startApplication();
+  await turn();
+  gone = true;
+  settlePage(null);
+  await startup;
+  assert.deepEqual(events, ["window", "services"]);
+  assert.equal(context.startupRunning, false);
 });
 
 test("dependencies only some paths need are not imported when the main process starts", async () => {
