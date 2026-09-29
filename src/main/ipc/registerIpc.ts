@@ -126,9 +126,16 @@ export function registerIpc({
     await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
   };
 
-  ipcMain.handle(IPC.clipboardRead, () => clipboard.readText());
-  ipcMain.handle(IPC.clipboardHasImage, () => !clipboard.readImage().isEmpty());
-  ipcMain.on(IPC.clipboardWrite, (_event, text: string) => {
+  ipcMain.handle(IPC.clipboardRead, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return clipboard.readText();
+  });
+  ipcMain.handle(IPC.clipboardHasImage, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return !clipboard.readImage().isEmpty();
+  });
+  ipcMain.on(IPC.clipboardWrite, (event, text: string) => {
+    if (!isMainRenderer(event, getMainWindow)) return;
     if (typeof text === "string" && text.length > 0) clipboard.writeText(text);
   });
   ipcMain.handle(IPC.externalOpenUrl, (event, value: unknown) => {
@@ -140,7 +147,10 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return app.getVersion();
   });
-  ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.settingsGet, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return settings.get();
+  });
   ipcMain.handle(IPC.terminalBorderSkinsList, (event) => {
     assertMainRenderer(event, getMainWindow);
     return terminalBorderSkins.list();
@@ -226,6 +236,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickDirectory, async (event, defaultPath?: string) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose a project folder",
@@ -239,6 +250,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickMedia, async (event) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose Home media",
@@ -267,7 +279,10 @@ export function registerIpc({
     }
   });
 
-  ipcMain.handle(IPC.limitsGet, () => limits.get());
+  ipcMain.handle(IPC.limitsGet, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return limits.get();
+  });
 
   ipcMain.handle(IPC.pluginsList, (event) => {
     assertMainRenderer(event, getMainWindow);
@@ -405,11 +420,12 @@ export function registerIpc({
     pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (
-    _event,
+    event,
     pluginId: string,
     contributionId: string,
     sourceCanvasInstanceId?: string
   ) => {
+    assertMainRenderer(event, getMainWindow);
     const target = plugins.contribution(pluginId, contributionId);
     if (target.kind !== "canvas-app") throw new Error("Plugin contribution is not a canvas app.");
     requestPluginCanvas({
@@ -420,9 +436,10 @@ export function registerIpc({
         : {})
     });
   });
-  ipcMain.handle(IPC.pluginsOpenWindow, (_event, pluginId: string, contributionId: string) => (
-    openPluginWindow(pluginId, contributionId)
-  ));
+  ipcMain.handle(IPC.pluginsOpenWindow, (event, pluginId: string, contributionId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return openPluginWindow(pluginId, contributionId);
+  });
   ipcMain.handle(IPC.pluginsOpenExternal, async (event, pluginId: string, value: string) => {
     assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "external:open");
@@ -433,10 +450,12 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     await requestPluginBrowserOpen(pluginId, value);
   });
-  ipcMain.handle(IPC.pluginsStorageGet, (_event, pluginId: string, key: string) => (
-    plugins.storageGet(pluginId, key)
-  ));
-  ipcMain.handle(IPC.pluginsStorageSet, async (_event, pluginId: string, key: string, value: unknown) => {
+  ipcMain.handle(IPC.pluginsStorageGet, (event, pluginId: string, key: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return plugins.storageGet(pluginId, key);
+  });
+  ipcMain.handle(IPC.pluginsStorageSet, async (event, pluginId: string, key: string, value: unknown) => {
+    assertMainRenderer(event, getMainWindow);
     await plugins.storageSet(pluginId, key, value);
     broadcastPluginStorageChange(pluginId, key, value);
   });
@@ -464,45 +483,57 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return providerSecrets.delete(providerSecretValue(secretId));
   });
-  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => (
-    pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia)
-  ));
-  ipcMain.handle(IPC.pluginsMediaListLibraries, (_event, pluginId: string) => (
-    pluginMedia.listLibraries(pluginId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaScanLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.scanLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.revokeLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsList, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.listPlaylists(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsRead, (_event, pluginId: string, libraryId: string, playlistId: string) => (
-    pluginMedia.readPlaylist(pluginId, libraryId, playlistId)
-  ));
+  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia);
+  });
+  ipcMain.handle(IPC.pluginsMediaListLibraries, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listLibraries(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsMediaScanLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.scanLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.revokeLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsList, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listPlaylists(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsRead, (event, pluginId: string, libraryId: string, playlistId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.readPlaylist(pluginId, libraryId, playlistId);
+  });
   ipcMain.handle(IPC.pluginsPlaylistsWrite, (
-    _event,
+    event,
     pluginId: string,
     libraryId: string,
     name: string,
     content: string
-  ) => pluginMedia.writePlaylist(
-    pluginId,
-    stringValue(libraryId, "libraryId"),
-    stringValue(name, "name"),
-    playlistContent(content)
-  ));
-  ipcMain.handle(IPC.pluginsHermesHudStatus, (_event, pluginId: string) => {
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.writePlaylist(
+      pluginId,
+      stringValue(libraryId, "libraryId"),
+      stringValue(name, "name"),
+      playlistContent(content)
+    );
+  });
+  ipcMain.handle(IPC.pluginsHermesHudStatus, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.status();
   });
-  ipcMain.handle(IPC.pluginsHermesHudOpen, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudOpen, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.open();
   });
-  ipcMain.handle(IPC.pluginsHermesHudClose, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudClose, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.close();
   });
@@ -750,7 +781,10 @@ export function registerIpc({
     return shell.openExternal(safeGithubUrl(value));
   });
 
-  ipcMain.handle(IPC.terminalList, () => terminals.list());
+  ipcMain.handle(IPC.terminalList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.list();
+  });
   ipcMain.handle(IPC.terminalReadBuffer, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof id !== "string") throw new Error("Terminal session ID is required.");
@@ -769,12 +803,24 @@ export function registerIpc({
     if (!isMainRenderer(event, getMainWindow)) return;
     terminals.input(id, data);
   });
-  ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
+  ipcMain.on(IPC.terminalResize, (event, id: string, cols: number, rows: number) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
     terminals.resize(id, cols, rows);
   });
-  ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
-  ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
-  ipcMain.handle(IPC.terminalSetRestore, (_event, id: string, restore: boolean) => terminals.setRestore(id, restore));
+  ipcMain.on(IPC.terminalBounds, (event, id: string, bounds: SessionBounds) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
+    terminals.setBounds(id, bounds);
+  });
+  ipcMain.handle(IPC.terminalRename, (event, id: string, title: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.rename(id, title);
+  });
+  ipcMain.handle(IPC.terminalSetRestore, (event, id: string, restore: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.setRestore(id, restore);
+  });
   ipcMain.handle(IPC.terminalDispose, (event, id: string, options?: { keepEnvironmentData?: unknown }) => {
     assertMainRenderer(event, getMainWindow);
     // Environment data is kept unless the person explicitly chose Remove.
@@ -782,8 +828,8 @@ export function registerIpc({
   });
   // Fire-and-forget, like the other stream-reporting channels: a malformed
   // report is ignored rather than rejecting into the renderer.
-  ipcMain.on(IPC.terminalSetVisible, (_event, id: unknown, visible: unknown) => {
-    if (typeof id !== "string" || typeof visible !== "boolean") return;
+  ipcMain.on(IPC.terminalSetVisible, (event, id: unknown, visible: unknown) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string" || typeof visible !== "boolean") return;
     terminals.setVisible(id, visible);
   });
 

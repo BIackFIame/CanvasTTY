@@ -62,7 +62,7 @@ import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
-import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
+import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
@@ -1440,8 +1440,8 @@ export class TerminalManager {
       if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
       // A plugin may add to the person's environment, never replace what the core sets for this launch.
       const contributedEnvironment = contribution?.env ?? {};
-      const collision = Object.keys(contributedEnvironment)
-        .find((key) => key in providerEnvironment || key in (launch.environment ?? {}));
+      const coreNames = new Set([...Object.keys(providerEnvironment), ...Object.keys(launch.environment ?? {})].map((key) => envKey(key)));
+      const collision = Object.keys(contributedEnvironment).find((key) => coreNames.has(envKey(key)));
       if (collision) {
         throw new Error(`Launch refused: ${contribution!.envSources[collision]} sets ${collision}, which CanvasTTY sets for this launch.`);
       }

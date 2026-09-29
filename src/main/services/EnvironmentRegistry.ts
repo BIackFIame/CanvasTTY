@@ -6,7 +6,7 @@ import type {
   ProviderId,
   SessionEnvironmentChoice
 } from "../../shared/contracts.ts";
-import { errorText, isRecord, MAX_ENV, MAX_ENV_VALUE_BYTES, MAX_SECRET_ENV, stringMap } from "./LaunchPipeline.ts";
+import { envKey, errorText, isRecord, MAX_ENV, MAX_ENV_VALUE_BYTES, MAX_SECRET_ENV, stringMap } from "./LaunchPipeline.ts";
 import { MAX_PLUGIN_SLOT_BYTES, type PersistedEnvironmentRef } from "./TerminalSessionStore.ts";
 
 /** A trusted plugin service that provides session environments (PluginManager.environmentProviders). */
@@ -237,9 +237,13 @@ export class EnvironmentRegistry {
     if (typeof secretEnv === "string") return invalid(secretEnv);
     const merged: Record<string, string> = {};
     const secrets: string[] = [];
+    const platform = this.dependencies.platform ?? process.platform;
+    const taken = new Set([...request.takenEnv].map((key) => envKey(key, platform)));
+    const seen = new Set<string>();
     for (const key of [...Object.keys(env), ...Object.keys(secretEnv)]) {
-      if (request.takenEnv.has(key)) return { ok: false, reason: `${name} sets ${key}, which CanvasTTY or a launch option already sets for this launch.` };
-      if (key in merged) return { ok: false, reason: `${name} sets ${key} twice.` };
+      if (taken.has(envKey(key, platform))) return { ok: false, reason: `${name} sets ${key}, which CanvasTTY or a launch option already sets for this launch.` };
+      if (seen.has(envKey(key, platform))) return { ok: false, reason: `${name} sets ${key} twice.` };
+      seen.add(envKey(key, platform));
       merged[key] = env[key] ?? "";
     }
     for (const [key, secretKey] of Object.entries(secretEnv)) {

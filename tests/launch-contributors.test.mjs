@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
-import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
+import { LaunchPipeline, envKey } from "../src/main/services/LaunchPipeline.ts";
 import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import { PluginServiceSupervisor } from "../src/main/services/PluginServiceSupervisor.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
@@ -194,6 +194,21 @@ test("refusals, timeouts, errors, bad answers, conflicts and core-owned values r
   assert.match(await refusal({ "p.one": { secretEnv: { TOKEN: "token" } } }, { "p.one": {} },
     [contributor("p.one", { secrets: true })]), /secret token is not set/u);
   assert.match(await refusal({}, { "gone.plugin": {} }, []), /Needs plugin gone\.plugin/u);
+  assert.match(await refusal({ "p.one": { env: JSON.parse("{\"__proto__\":\"x\"}") } }, { "p.one": {} }), /env name __proto__ is invalid/u);
+});
+
+test("env names: an inherited-looking name is an ordinary one, and Windows compares names without case", async (t) => {
+  const { pipeline } = await pipelineFixture(t, {
+    contributors: [contributor("p.one"), contributor("p.two")],
+    answers: { "p.one": { env: { constructor: "a" } }, "p.two": { env: { toString: "b" } } }
+  });
+  const prepared = await pipeline.prepare({ sessionId: "s", provider: "claude", profile: "normal", role: "agent", cwd,
+    restoring: false, resume: false, options: { "p.one": {}, "p.two": {} } });
+  assert.equal(prepared.ok, true, prepared.reason);
+  assert.equal(prepared.env.constructor, "a");
+  assert.equal(prepared.env.toString, "b");
+  assert.equal(envKey("Path", "win32"), envKey("PATH", "win32"));
+  assert.notEqual(envKey("Path", "linux"), envKey("PATH", "linux"));
 });
 
 test("a card with options waits for its plugins; a refusal is shown on the card and nothing runs", async (t) => {
