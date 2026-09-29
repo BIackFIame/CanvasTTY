@@ -4,6 +4,8 @@
 
 ## 1.7.0
 
+- Fixed Windows orchestration startup by using the existing current-user-only pipe host, and recognized expanded Windows paths in private-data protection. The full Windows test suite now runs before PR merge as well as before release packaging.
+
 - Added pixel terminal skins and agent-generated theme packs from PR #98, with independent Canvas backgrounds and terminal borders. Theme creation now includes inline instructions, labeled upload slots, an example, and explicit preview guidance. Canvas patterns appear before background selection and explain when an image overrides them.
 - Restored readable terminal summary tiles when zoomed out, enabled Master artwork automatically for orchestrators, and restored edge/corner resizing for pixel skins without resetting manually chosen or restored sizes.
 - Integrated PR #100: startup navigation race fixes, safe provider API-key pasting, recovery from uncaught renderer errors, and protection for CanvasTTY's private control data. PR #100 consolidates the earlier fixes from #96, #97, and #99.

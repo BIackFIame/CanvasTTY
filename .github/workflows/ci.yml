@@ -53,6 +53,8 @@ jobs:
         run: npm ci
       - name: Build and self-test current-user-only named-pipe host
         run: npm run test:windows-pipe-host
+      - name: Run tests on Windows
+        run: npm test
       - name: Type-check Windows gateway integration
         run: npm run typecheck
       - name: Verify the packaged host resource

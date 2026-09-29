@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -110,7 +111,7 @@ test("a service select saves any short text; the service checks it when it prepa
 });
 
 test("the example service offers its profiles and refuses one that is gone", async (t) => {
-  const root = example.pathname;
+  const root = fileURLToPath(example);
   const entryPath = join(root, "services", "launcher.mjs");
   const dataDir = await mkdtemp(join(tmpdir(), "canvastty-choices-data-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

@@ -558,7 +558,7 @@ function codePath(text: string, ctx: PathContext): string | null {
   let value = text.trim().replace(/^file:\/\//iu, '/');
   value = value.replace(/^(?:\$HOME|\$\{HOME\})(?=[\\/]|$)/u, ctx.home).replace(/^(?:\$TMPDIR|\$\{TMPDIR\})(?=[\\/]|$)/u, ctx.temp);
   if (value === '~' || value.startsWith('~/')) value = ctx.home + value.slice(1);
-  return value.startsWith('/') && value.length > 1 ? value : null;
+  return isAbsolute(value) && value.length > 1 ? value : null;
 }
 
 /** Paths inside a word or a program text: after `=` or `:` (`--unix-socket=P`, `UNIX-CONNECT:P`), quoted strings, bare tokens. */
@@ -566,9 +566,9 @@ function privateCandidates(text: string, ctx: PathContext): string[] {
   if (text.length > MAX_SCANNED_TEXT) text = text.slice(0, MAX_SCANNED_TEXT);
   const found = new Set<string>();
   const add = (value: string | undefined): void => { const path = value ? codePath(value, ctx) : null; if (path && found.size < 64) found.add(path); };
-  for (const match of text.matchAll(/[=:]((?:~|\$\{?(?:HOME|TMPDIR)\}?|\/)[^\s,;'"`()<>|&]*)/gu)) add(match[1]);
+  for (const match of text.matchAll(/[=:]((?:~|\$\{?(?:HOME|TMPDIR)\}?|[A-Za-z]:[\\/]|\\\\|\/)[^\s,;'"`()<>|&]*)/gu)) add(match[1]);
   for (const match of text.matchAll(/(['"`])([^'"`\n]{1,4096}?)\1/gu)) add(match[2]);
-  for (const token of text.split(/[\s,;()[\]{}<>|&'"`=]+/u)) if (/^(?:~|\$\{?(?:HOME|TMPDIR)\}?|\/)/u.test(token)) add(token);
+  for (const token of text.split(/[\s,;()[\]{}<>|&'"`=]+/u)) if (/^(?:~|\$\{?(?:HOME|TMPDIR)\}?|[A-Za-z]:[\\/]|\\\\|\/)/u.test(token)) add(token);
   return [...found];
 }
 

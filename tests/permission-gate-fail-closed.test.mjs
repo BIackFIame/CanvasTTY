@@ -238,7 +238,7 @@ test("launch: the decision hook carries the fail-closed flag; a launch without i
   t.after(() => rm(runtimeDirectory, { recursive: true, force: true }));
   const helper = { command: "/opt/CanvasTTY", args: ["/opt/CanvasTTY/hook-helper.mjs"], env: { ELECTRON_RUN_AS_NODE: "1" } };
   const permissionGate = { command: "/opt/CanvasTTY", args: ["/opt/CanvasTTY/permission-gate.mjs"], env: { ELECTRON_RUN_AS_NODE: "1" } };
-  const options = { helper, runtimeDirectory, openCodePluginPath: "/opt/CanvasTTY/opencode-plugin.mjs", permissionGate,
+  const options = { platform: "darwin", helper, runtimeDirectory, openCodePluginPath: "/opt/CanvasTTY/opencode-plugin.mjs", permissionGate,
     kimiHomeDirectory: join(runtimeDirectory, "kimi"), hermesHomeDirectory: join(runtimeDirectory, "hermes"), grokHomeDirectory: join(runtimeDirectory, "grok") };
   const adapters = new ProviderRuntimeLaunchAdapters(options);
   const flag = new RegExp(`${DECISION_FAIL_CLOSED_ENV}='1' .*permission-gate\\.mjs' 'pretool'$`, "u");

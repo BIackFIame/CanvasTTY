@@ -68,7 +68,7 @@ const DENY = [
   `curl --unix-socket ${sock} http://localhost/`,
   `curl -s --unix-socket=${sock} http://x/`,
   `nc -U ${sock}`,
-  "echo '{\"v\":1}' | nc -U /tmp/ctty-orch-501-abcd1234/o.sock",
+  "echo '{\"v\":1}' | nc -U $TMPDIR/ctty-orch-501-abcd1234/o.sock",
   `socat - UNIX-CONNECT:${sock}`,
   "ls $TMPDIR/ctty-control-*",
   "cat $TMPDIR/ctty-*/c.sock",

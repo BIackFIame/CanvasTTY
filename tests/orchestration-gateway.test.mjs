@@ -69,7 +69,8 @@ async function fixture(t) {
   const control = new AgentControlService(terminals);
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
-    handler: new ScopedOrchestrationHandler(control)
+    handler: new ScopedOrchestrationHandler(control),
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe")
   });
   await gateway.start();
   t.after(() => gateway.stop());
@@ -340,7 +341,8 @@ test("cancel reaches the running command and the answer is CANCELED, not the lat
         signal = abortSignal ?? null;
         return new Promise((resolve) => { finish = resolve; });
       }
-    }
+    },
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe")
   });
   await gateway.start();
   t.after(() => gateway.stop());
