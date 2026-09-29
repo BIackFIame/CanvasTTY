@@ -46,6 +46,19 @@ Provider credentials are read only in the trusted main process when a source-bac
 
 Sanitized percentages, window metadata, timestamps, and explicit unavailable reasons may cross IPC. Raw provider responses, bearer headers, cookies, and credential files may not. Runtime-plugin secrets are a separate opt-in boundary: they cross only the owning sandbox's request path when its manifest declares `secrets` and are encrypted at rest through Electron `safeStorage`.
 
+## Agent protection layers
+
+Agents work in their own mode; CanvasTTY's layers sit outside it as a quiet safety net that adds no prompts for ordinary work in the project and stops what is dangerous, with a short reason the agent can act on.
+
+**Launch modes.** Auto (the default), Manual, Accept edits, Plan and Bypass, offered only where the CLI supports them. Auto is the CLI's own auto mode where it has one (Claude Code's classifier, Codex's reviewer, Grok's classifier), CanvasTTY's per-run rules for OpenCode (your own deny and ask rules still win), and for a CLI without one its approval bypass, only inside agent isolation. Bypass is the person's choice per CLI, acknowledged once, checked in the main process, never given to a subagent, and still inside the layers below. In Manual the CLI follows its own configuration; when that configuration skips approvals, the card says so.
+
+| Layer | Guarantees | Does not guarantee |
+| --- | --- | --- |
+| The agent's own permission system | What its CLI promises in the chosen mode (Claude Code, Codex, OpenCode, Grok…). | Anything the CLI's own classifier or reviewer lets through. |
+| Base protection (hooks) | Denies elevation, pipes into a shell, disk commands, fork bombs, writes and deletes outside the project and access to CanvasTTY's private data, before the tool call runs, for agents whose CLI has hooks (Claude Code, Codex, Qwen Code, OpenCode). A decision plugin's "ask" is shown by Claude Code; for a CLI that cannot ask it is a deny with the reason. | It reads commands; code that hides what it does, or a CLI without hooks, is not covered. It is a guard, not a sandbox. |
+| Delegation rules | A subagent never gets more than its orchestrator (never YOLO), works only in its orchestrator's project folder, within the depth and count limits the person set; orchestrators get a control connection of their own; no agent-facing tool changes settings, protection, profiles, trust or isolation; plugin launch options from an agent only where the plugin declared them delegable. | What a plugin the person trusted does with its own permissions. |
+| Agent isolation (OS layer) | On macOS (sandbox-exec) and Linux (bubblewrap), for subagents, plugin-started agents and every agent not in Manual: the whole process tree writes only in the project, its own temporary folder and its CLI's own folders; keys, other CLIs' credentials and CanvasTTY's tokens are unreadable; no other process, app, Apple event, preference write, launchd job or foreign Unix socket (Docker, tmux, SSH agent) is reachable. Fails closed. | Network is not restricted. Linux cannot filter Unix sockets, only hide the user runtime folder. The CLI's own sandbox cannot run inside the layer on macOS, so commands that would have run there are re-requested through the CLI's reviewer or the person. A CLI refreshing a sign-in stored in the macOS login keychain file cannot save it from inside the layer. Windows has no layer yet: subagents run in Manual there unless the person turns isolation off. |
+
 ## Repository guards
 
 ```bash
