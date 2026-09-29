@@ -558,7 +558,7 @@ function codePath(text: string, ctx: PathContext): string | null {
   let value = text.trim().replace(/^file:\/\//iu, '/');
   value = value.replace(/^(?:\$HOME|\$\{HOME\})(?=[\\/]|$)/u, ctx.home).replace(/^(?:\$TMPDIR|\$\{TMPDIR\})(?=[\\/]|$)/u, ctx.temp);
   if (value === '~' || value.startsWith('~/')) value = ctx.home + value.slice(1);
-  return value.startsWith('/') && value.length > 1 ? value : null;
+  return isAbsolute(value) && value.length > 1 ? value : null;
 }
 
 /** Paths inside a word or a program text: after `=` or `:` (`--unix-socket=P`, `UNIX-CONNECT:P`), quoted strings, bare tokens. */

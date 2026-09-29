@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import test from "node:test";
 import { EnvironmentRegistry, resolveCommand } from "../src/main/services/EnvironmentRegistry.ts";
 import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
@@ -33,7 +34,7 @@ function clis() {
   return {
     get(provider) {
       return { state: "available", provider, executable: `/resolved/${provider}`, launcher: "native",
-        environment: { PATH: "/usr/bin" }, checked: [] };
+        environment: { PATH: process.env.PATH ?? "" }, checked: [] };
     },
     snapshot() { return {}; }
   };
@@ -84,7 +85,7 @@ function registryFixture({ providers = () => [provider()], answers = {}, secrets
 
 const defaultAnswers = (extra = {}) => ({
   prepare: { ref: { box: "b-1" }, label: "box b-1" },
-  wrap: (params) => ({ command: "/bin/sh", args: ["-c", "exit 0", "wrapped", params.command, ...params.args], cwd: params.cwd }),
+  wrap: (params) => ({ command: process.execPath, args: ["-c", "exit 0", "wrapped", params.command, ...params.args], cwd: params.cwd }),
   resume: { ok: true },
   release: {},
   describe: { label: "box b-1 (running)", detail: "demo box" },
@@ -172,31 +173,31 @@ test("prepare answers are validated and a timeout refuses", async () => {
 test("wrap output is validated: program, no shell string, env rules, secrets, cwd", async () => {
   const environment = { pluginId: PLUGIN, kind: "box", ref: {}, label: "box" };
   const request = { sessionId: "s1", provider: "terminal", secretEnvNames: [], takenEnv: new Set(["CTTY_CONTRIBUTED"]),
-    path: "/usr/bin:/bin", launch: { command: "/bin/sh", args: ["-l"], env: {}, cwd } };
+    path: dirname(process.execPath), launch: { command: process.execPath, args: ["-l"], env: {}, cwd } };
   const wrap = (answer, extra = {}) => registryFixture({
     answers: { wrap: answer }, secrets: { [`${PLUGIN}/token`]: SECRET }, ...extra
   }).registry.wrap(environment, request);
 
-  const bare = await wrap({ command: "sh", args: ["-c", "true"] });
+  const bare = await wrap({ command: basename(process.execPath), args: ["-e", "true"] });
   assert.equal(bare.ok, true);
-  assert.equal(bare.command, resolveCommand("sh", "/usr/bin:/bin"));
-  assert.ok(bare.command.startsWith("/"));
+  assert.equal(bare.command, resolveCommand(basename(process.execPath), dirname(process.execPath)));
+  assert.ok(isAbsolute(bare.command));
   assert.equal(bare.cwd, cwd);
   for (const command of ["sh -c 'rm -rf ~'", "bin/sh", "./sh", "/definitely/missing/program", "no-such-program-canvastty"]) {
     assert.match((await wrap({ command, args: [] })).reason, /absolute path to a program or a bare program name on PATH; CanvasTTY runs no shell string/u, command);
   }
-  assert.match((await wrap({ command: "/bin/sh", args: ["a\u0000b"] })).reason, /without NUL/u);
-  assert.match((await wrap({ command: "/bin/sh", args: "-c true" })).reason, /args must be an array/u);
-  assert.match((await wrap({ command: "/bin/sh", cwd: "/definitely/missing" })).reason, /cwd must be an existing absolute folder/u);
-  assert.match((await wrap({ command: "/bin/sh", env: { PATH: "/tmp" } })).reason, /env PATH is reserved/u);
-  assert.match((await wrap({ command: "/bin/sh", env: { CANVASTTY_AGENT_TOKEN: "x" } })).reason, /reserved/u);
-  assert.match((await wrap({ command: "/bin/sh", env: { CTTY_CONTRIBUTED: "x" } })).reason, /already sets for this launch/u);
-  assert.match((await wrap({ command: "/bin/sh", shell: true })).reason, /unknown key shell/u);
-  assert.match((await wrap({ command: "/bin/sh", secretEnv: { BOX_TOKEN: "token" } })).reason, /without the secrets permission/u);
-  const secret = await wrap({ command: "/bin/sh", env: { BOX_NAME: "b" }, secretEnv: { BOX_TOKEN: "token" } },
+  assert.match((await wrap({ command: process.execPath, args: ["a\u0000b"] })).reason, /without NUL/u);
+  assert.match((await wrap({ command: process.execPath, args: "-c true" })).reason, /args must be an array/u);
+  assert.match((await wrap({ command: process.execPath, cwd: "/definitely/missing" })).reason, /cwd must be an existing absolute folder/u);
+  assert.match((await wrap({ command: process.execPath, env: { PATH: "/tmp" } })).reason, /env PATH is reserved/u);
+  assert.match((await wrap({ command: process.execPath, env: { CANVASTTY_AGENT_TOKEN: "x" } })).reason, /reserved/u);
+  assert.match((await wrap({ command: process.execPath, env: { CTTY_CONTRIBUTED: "x" } })).reason, /already sets for this launch/u);
+  assert.match((await wrap({ command: process.execPath, shell: true })).reason, /unknown key shell/u);
+  assert.match((await wrap({ command: process.execPath, secretEnv: { BOX_TOKEN: "token" } })).reason, /without the secrets permission/u);
+  const secret = await wrap({ command: process.execPath, env: { BOX_NAME: "b" }, secretEnv: { BOX_TOKEN: "token" } },
     { providers: () => [provider({ secrets: true })] });
   assert.deepEqual(secret.ok && [secret.env, secret.secrets], [{ BOX_NAME: "b", BOX_TOKEN: SECRET }, [SECRET]]);
-  const missing = await wrap({ command: "/bin/sh", secretEnv: { BOX_TOKEN: "unset" } }, { providers: () => [provider({ secrets: true })] });
+  const missing = await wrap({ command: process.execPath, secretEnv: { BOX_TOKEN: "unset" } }, { providers: () => [provider({ secrets: true })] });
   assert.match(missing.reason, /secret unset is not set/u);
   assert.match((await wrap({ refuse: { reason: "box is paused" } })).reason, /Env: box is paused/u);
 });
@@ -213,7 +214,7 @@ test("lifecycle: prepare, wrap, describe, saved ref; the environment never sees 
   const wrapParams = requests[1].params;
   assert.deepEqual(wrapParams.ref, { box: "b-1" });
   assert.equal(Object.keys(wrapParams.env).some((key) => /^(CANVASTTY_|PATH$|TERM$)/u.test(key)), false);
-  assert.equal(calls[0].command, "/bin/sh");
+  assert.equal(calls[0].command, process.execPath);
   assert.deepEqual(calls[0].args.slice(0, 3), ["-c", "exit 0", "wrapped"]);
   assert.equal(calls[0].options.cwd, cwd);
   await waitFor(() => card(manager, created.id).environment?.label === "box b-1 (running)");
@@ -271,17 +272,17 @@ test("restore resumes environments first, then parents before children; stopped 
     },
     wrap: (params) => {
       order.push(`wrap:${params.sessionId}`);
-      return { command: "/bin/sh", args: [params.sessionId], cwd: params.cwd };
+      return { command: process.execPath, args: [params.sessionId], cwd: params.cwd };
     }
   }) });
   const { manager, calls } = await managerFixture(t, registry, { directory });
-  await waitFor(() => calls.filter((call) => call.command === "/bin/sh").length === 2);
+  await waitFor(() => calls.filter((call) => call.command === process.execPath).length === 2);
   // Every resume is answered before any wrapped launch starts, and the parent launches before its child.
   const firstWrap = order.findIndex((entry) => entry.startsWith("wrap:"));
   assert.deepEqual(order.slice(0, firstWrap).sort(), ["resume:child", "resume:parent", "resume:stopped"]);
   assert.deepEqual(order.slice(firstWrap), ["wrap:parent", "wrap:child"]);
   assert.equal(requests.some((request) => request.params.sessionId === "missing"), false);
-  assert.equal(calls.filter((call) => call.command !== "/bin/sh").length, 1, "only the local card runs locally");
+  assert.equal(calls.filter((call) => call.command !== process.execPath).length, 1, "only the local card runs locally");
 
   const stopped = card(manager, "stopped");
   assert.equal(stopped.status, "failed");
@@ -298,7 +299,7 @@ test("restore resumes environments first, then parents before children; stopped 
 
   // Restarting a stopped card asks the plugin to resume again, never runs it locally.
   const again = await managerFixture(t, registryFixture({ answers: defaultAnswers({ resume: { stopped: { reason: "still gone" } } }) }).registry, { directory });
-  assert.equal(again.calls.filter((call) => call.command !== "/bin/sh").length, 1);
+  assert.equal(again.calls.filter((call) => call.command !== process.execPath).length, 1);
 });
 
 test("an exited card resumes its environment only when restarted", async (t) => {
@@ -365,7 +366,7 @@ test("wrap secrets are masked in agent-readable text", async (t) => {
   const { registry } = registryFixture({
     providers: () => [provider({ secrets: true })],
     secrets: { [`${PLUGIN}/token`]: SECRET },
-    answers: defaultAnswers({ wrap: (params) => ({ command: "/bin/sh", args: params.args, cwd: params.cwd, secretEnv: { BOX_TOKEN: "token" } }) })
+    answers: defaultAnswers({ wrap: (params) => ({ command: process.execPath, args: params.args, cwd: params.cwd, secretEnv: { BOX_TOKEN: "token" } }) })
   });
   const { manager, calls } = await managerFixture(t, registry);
   const created = manager.create({ provider: "terminal", profile: "normal", cwd, position: at, environment: choice });
@@ -390,7 +391,7 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
   git("add", ".");
   git("commit", "-q", "-m", "init");
 
-  const pluginRoot = new URL(".", example).pathname;
+  const pluginRoot = fileURLToPath(new URL(".", example));
   const entryPath = join(pluginRoot, "services", "worktree.mjs");
   const dataDir = join(root, "plugin-data");
   const supervisor = new PluginServiceSupervisor({
@@ -482,7 +483,7 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
   third.manager.restart(pending.id);
   await waitFor(() => third.calls.length === 1);
   assert.deepEqual(second.requests.filter((request) => request.step === "prepare").map((request) => request.params.options), [{ name: "two" }]);
-  assert.equal(third.calls[0].command, "/bin/sh", "wrapped by the environment, not the local shell");
+  assert.equal(third.calls[0].command, process.execPath, "wrapped by the environment, not the local shell");
   await waitFor(async () => (await saved(directory).catch(() => []))[0]?.environment?.ref?.box === "b-1");
   assert.equal((await saved(directory))[0].environmentChoice, undefined, "a prepared environment replaces the choice");
 
@@ -522,7 +523,7 @@ test("a failed prepare keeps its choice across an app restart; manual Restart pr
   answer = { ref: { box: "b-2" }, label: "box b-2" };
   second.manager.restart(created.id);
   await waitFor(() => second.calls.length === 1);
-  assert.equal(second.calls[0].command, "/bin/sh");
+  assert.equal(second.calls[0].command, process.execPath);
   assert.deepEqual(requests.filter((request) => request.step === "prepare").map((request) => request.params.options),
     [{ name: "two" }, { name: "two" }, { name: "two" }]);
   assert.equal(first.calls.length, 0);

@@ -106,7 +106,7 @@ test("each deny tells the model what to do instead; a write only to the temporar
   const outsideWrite = check("Write", { file_path: join(home, "Downloads", "hello.txt"), content: "hi" });
   assert.match(outsideWrite.message, /outside the project folder/u);
   assert.match(outsideWrite.message, /ask the person/u);
-  for (const command of ["echo x > /tmp/scratch.txt", "mkdir -p /tmp/work", "cp src/a.ts $TMPDIR/a.ts"]) {
+  for (const command of ["echo x > \"$TMPDIR/scratch.txt\"", "mkdir -p \"$TMPDIR/work\"", "cp src/a.ts \"$TMPDIR/a.ts\""]) {
     const result = check("Bash", { command });
     assert.equal(result.rule, "write-outside", command);
     assert.match(result.message, /temporary folder/u, command);
@@ -133,7 +133,7 @@ test("cut hook input: a file tool's path at the start of the preview can still a
 });
 
 test("the agent's own plan and memory folders are not outside; the rest of its config folder and escapes stay denied", () => {
-  symlinkSync("/etc", join(home, ".claude", "plans", "link"));
+  symlinkSync(outside, join(home, ".claude", "plans", "link"), "junction");
   for (const action of [edit(join(home, ".claude/plans/plan-1.md")), edit(join(home, ".claude/projects/p1/memory/MEMORY.md")), shell("echo x > ~/.claude/plans/a.md")]) {
     assert.equal(rule(action), null, JSON.stringify(action));
   }

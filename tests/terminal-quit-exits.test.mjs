@@ -51,7 +51,11 @@ test("quitting waits for every hung-up PTY to exit before it resolves", async ()
 });
 
 test("a PTY that ignores the hang-up is killed after the wait, and quitting waits for that exit too", async () => {
-  const stubborn = fakePty((signal, exit) => { if (signal === "SIGKILL") setTimeout(() => exit(137), 10); });
+  let signals = 0;
+  const stubborn = fakePty((signal, exit) => {
+    signals += 1;
+    if (signal === "SIGKILL" || (process.platform === "win32" && signals === 2)) setTimeout(() => exit(137), 10);
+  });
   const polite = fakePty((_signal, exit) => exit(0));
   const manager = managerWith([stubborn, polite]);
   await manager.shutdown();
@@ -103,7 +107,7 @@ test("an exit handler that throws never escapes into node-pty's native exit call
 });
 
 test("the quit path awaits the PTY exits before the app may finish quitting", () => {
-  const main = readFileSync(new URL("../src/main/index.ts", import.meta.url), "utf8");
+  const main = readFileSync(new URL("../src/main/index.ts", import.meta.url), "utf8").replaceAll("\r\n", "\n");
   const shutdown = main.slice(main.indexOf("async function shutdownServices"));
   const body = shutdown.slice(0, shutdown.indexOf("\n}\n"));
   assert.match(body, /terminalManager\.shutdown\(\)[\s\S]*waitForProcessExits\(\)[\s\S]*await ptyExits;\s*$/u);

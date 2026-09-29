@@ -266,7 +266,7 @@ test("launch: the decision hook is added only when wanted, per provider, with or
   const claude = JSON.parse(adapters.prepare("claude", "t1", false, true).args[1]);
   assert.deepEqual(Object.keys(claude.hooks), ["PreToolUse"]);
   assert.equal(claude.hooks.PreToolUse[0].matcher, "Bash|Write|Edit|MultiEdit|NotebookEdit");
-  assert.match(claude.hooks.PreToolUse[0].hooks[0].command, /permission-gate\.mjs' 'pretool'$/u);
+  assert.match(claude.hooks.PreToolUse[0].hooks[0].command, /permission-gate\.mjs['"] ['"]pretool['"]$/u);
   assert.ok(JSON.parse(adapters.prepare("claude", "t1", true, true).args[1]).hooks.Stop, "status hooks stay alongside");
   const codex = adapters.prepare("codex", "t2", false, true).args.join(" ");
   assert.match(codex, /hooks\.PreToolUse=\[\{matcher="Bash\|apply_patch\|Edit\|Write"/u);

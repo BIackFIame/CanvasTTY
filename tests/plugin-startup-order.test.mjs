@@ -5,6 +5,7 @@
  * restored/new card events without a disable/enable cycle. No real CLI runs; HOME is the runner's fake one.
  */
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -16,7 +17,7 @@ import { PluginSessions } from "../src/main/services/PluginSessions.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
 
-const entryPath = new URL("./fixtures/startup-subscriber-service.mjs", import.meta.url).pathname;
+const entryPath = fileURLToPath(new URL("./fixtures/startup-subscriber-service.mjs", import.meta.url));
 const cwd = process.cwd();
 const at = { x: 0, y: 0 };
 const waitFor = async (predicate, timeoutMs = 8_000) => {

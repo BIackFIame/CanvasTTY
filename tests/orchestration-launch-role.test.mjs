@@ -24,6 +24,7 @@ async function fixture(t) {
   const terminals = new TerminalManager(() => undefined, availableRegistry(), agentBrowser, undefined, true, fakeSpawner(calls));
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe"),
     handler: new ScopedOrchestrationHandler(new AgentControlService(terminals))
   });
   await gateway.start();

@@ -580,6 +580,11 @@ async function initializeServices(): Promise<void> {
   // other sessions never receive capabilities.
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
+    windowsHostPath: process.platform === "win32"
+      ? app.isPackaged
+        ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
+        : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
+      : undefined,
     handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools)
   });
   await orchestrationGateway.start();

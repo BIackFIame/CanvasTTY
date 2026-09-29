@@ -115,7 +115,7 @@ test("launch: the hook, the helper's environment and the gateway follow the sess
   assert.doesNotMatch(plain.command, new RegExp(DECISION_BUDGET_ENV, "u"), "the default budget changes nothing");
   const long = JSON.parse(adapters.prepare("claude", "t1", false, true, 45_000).args[1]).hooks.PreToolUse[0].hooks[0];
   assert.equal(long.timeout, 52);
-  assert.match(long.command, new RegExp(`${DECISION_BUDGET_ENV}='45000'`, "u"));
+  assert.match(long.command, new RegExp(process.platform === "win32" ? `set "${DECISION_BUDGET_ENV}=45000"` : `${DECISION_BUDGET_ENV}='45000'`, "u"));
   const qwen = adapters.prepare("qwen", "t2", false, true, 45_000);
   assert.equal(JSON.parse(await readFile(qwen.environment.QWEN_CODE_SYSTEM_SETTINGS_PATH, "utf8")).hooks.PreToolUse[0].hooks[0].timeout, 52_000);
   qwen.releaseConfiguration();
@@ -319,7 +319,7 @@ test("a decide budget above the supervisor's 15 s request default is honored thr
   const { PluginServiceSupervisor, MAX_HOST_CALL_TIMEOUT_MS } = await import("../src/main/services/PluginServiceSupervisor.ts");
   const { DecisionHooks } = await import("../src/main/services/DecisionHooks.ts");
   const { MAX_DECIDE_TIMEOUT_MS, permissionGateTimings } = await import("../src/agent-runtime/runtime-protocol.mjs");
-  const entryPath = new URL("./fixtures/slow-decide-service.mjs", import.meta.url).pathname;
+  const entryPath = fileURLToPath(new URL("./fixtures/slow-decide-service.mjs", import.meta.url));
   const dataDir = await mkdtemp(join(tmpdir(), "canvastty-slow-decide-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));
   // Production construction: no requestTimeoutMs, so surface requests keep the 15 s default.

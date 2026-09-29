@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import type { Server, Socket } from "node:net";
+import type { Server } from "node:net";
 import { join } from "node:path";
 import type {
   OrchestrationBridgeErrorPayload,
@@ -32,6 +32,8 @@ import {
   tokenMatches
 } from "../gatewaySocket.ts";
 
+import { WindowsPipeHostTransport, type AgentGatewaySocket } from "./WindowsPipeHostTransport.ts";
+
 const CAPABILITY_TTL_MS = 60_000;
 
 interface CapabilityLease {
@@ -47,7 +49,7 @@ interface CapabilityLease {
 }
 
 interface Connection {
-  socket: Socket;
+  socket: AgentGatewaySocket;
   decoder: OrchestrationNdjsonDecoder;
   lease: CapabilityLease | null;
   authenticated: boolean;
@@ -59,6 +61,7 @@ interface Connection {
 
 export interface OrchestrationGatewayOptions {
   runtimeDirectory: string;
+  windowsHostPath?: string;
   handler: OrchestrationCommandHandler;
   capabilityTtlMs?: number;
   heartbeatIntervalMs?: number;
@@ -72,6 +75,8 @@ export class OrchestrationGateway {
   private readonly connections = new Set<Connection>();
   private readonly handler: OrchestrationCommandHandler;
   private readonly runtimeDirectory: string;
+  private readonly windowsHostPath: string | undefined;
+  private windowsTransport: WindowsPipeHostTransport | null = null;
   private readonly capabilityTtlMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly heartbeatExpiryMs: number;
@@ -85,6 +90,7 @@ export class OrchestrationGateway {
   constructor(options: OrchestrationGatewayOptions) {
     this.handler = options.handler;
     this.runtimeDirectory = options.runtimeDirectory;
+    this.windowsHostPath = options.windowsHostPath;
     this.capabilityTtlMs = options.capabilityTtlMs ?? CAPABILITY_TTL_MS;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? ORCHESTRATION_HEARTBEAT_INTERVAL_MS;
     this.heartbeatExpiryMs = options.heartbeatExpiryMs ?? ORCHESTRATION_HEARTBEAT_EXPIRY_MS;
@@ -109,19 +115,38 @@ export class OrchestrationGateway {
 
   async start(): Promise<void> {
     if (this.running) return;
-    // Unix domain sockets cap at ~104 path bytes (macOS); fall back to a short
-    // current-user directory exactly like the browser gateway does.
-    let runtimeDirectory = this.runtimeDirectory;
-    this.ownedRuntimeDirectory = null;
-    let endpoint = join(runtimeDirectory, `orchestration-${randomUUID()}.sock`);
-    if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
-      runtimeDirectory = join("/tmp", `ctty-orch-${process.getuid?.() ?? "user"}-${randomUUID().slice(0, 8)}`);
-      this.ownedRuntimeDirectory = runtimeDirectory;
-      endpoint = join(runtimeDirectory, "orchestration.sock");
+    if (process.platform === "win32") {
+      if (!this.windowsHostPath) throw new Error("Orchestration requires the current-user Windows pipe host.");
+      const transport = new WindowsPipeHostTransport({ hostPath: this.windowsHostPath });
+      this.windowsTransport = transport;
+      transport.on("fatal", () => {
+        void this.stop().catch((error) => console.warn("Orchestration pipe host shutdown failed.", error));
+      });
+      try {
+        const endpoint = await transport.start((socket) => this.accept(socket));
+        if (this.windowsTransport !== transport) throw new Error("Orchestration is shutting down.");
+        this.socketEndpoint = endpoint;
+      } catch (error) {
+        await transport.close();
+        this.windowsTransport = null;
+        this.socketEndpoint = null;
+        throw error;
+      }
+    } else {
+      // Unix domain sockets cap at ~104 path bytes (macOS); fall back to a short
+      // current-user directory exactly like the browser gateway does.
+      let runtimeDirectory = this.runtimeDirectory;
+      this.ownedRuntimeDirectory = null;
+      let endpoint = join(runtimeDirectory, `orchestration-${randomUUID()}.sock`);
+      if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
+        runtimeDirectory = join("/tmp", `ctty-orch-${process.getuid?.() ?? "user"}-${randomUUID().slice(0, 8)}`);
+        this.ownedRuntimeDirectory = runtimeDirectory;
+        endpoint = join(runtimeDirectory, "orchestration.sock");
+      }
+      await makePrivateDirectory(runtimeDirectory, { recursive: true });
+      this.socketEndpoint = endpoint;
+      await listenOnEndpoint(this.server, endpoint);
     }
-    await makePrivateDirectory(runtimeDirectory, { recursive: true });
-    this.socketEndpoint = endpoint;
-    await listenOnEndpoint(this.server, endpoint);
     this.running = true;
     this.heartbeatTimer = setInterval(() => this.sweepConnections(), this.heartbeatIntervalMs);
     this.heartbeatTimer.unref?.();
@@ -134,8 +159,11 @@ export class OrchestrationGateway {
     }
     for (const connection of [...this.connections]) this.closeConnection(connection, "closed");
     for (const lease of [...this.leases.values()]) this.expireLease(lease);
+    const transport = this.windowsTransport;
+    this.windowsTransport = null;
+    if (transport) await transport.close();
     await closeServer(this.server);
-    if (this.socketEndpoint !== null) {
+    if (this.socketEndpoint !== null && process.platform !== "win32") {
       await removeEndpoint(this.socketEndpoint, this.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
     }
     this.socketEndpoint = null;
@@ -190,7 +218,7 @@ export class OrchestrationGateway {
     }
   }
 
-  private accept(socket: Socket): void {
+  private accept(socket: AgentGatewaySocket): void {
     if (this.connections.size >= MAX_CONNECTED_ORCHESTRATORS) {
       socket.destroy();
       return;

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -243,6 +244,7 @@ test("the bridge lists per-session tools over the socket and the MCP helper retu
   });
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "rt"),
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe"),
     handler: new ScopedOrchestrationHandler(new AgentControlService(terminals), plugin)
   });
   await gateway.start();
@@ -468,7 +470,7 @@ test("collect-demo through the real supervisor: the action and the tool return g
   const { terminals, sessions } = world();
   const badges = [];
   let cards = null;
-  const pluginRoot = new URL(".", example).pathname;
+  const pluginRoot = fileURLToPath(new URL(".", example));
   const entryPath = join(pluginRoot, "services", "collect.mjs");
   const permissions = validatePluginManifest(exampleManifest).permissions;
   const supervisor = new PluginServiceSupervisor({

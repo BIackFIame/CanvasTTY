@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -368,7 +369,7 @@ test("restore without the plugin holds the card stopped with its reason and keep
 });
 
 test("end to end: the example service prepares a launch over JSON-RPC", async (t) => {
-  const root = new URL(".", example).pathname;
+  const root = fileURLToPath(new URL(".", example));
   const entryPath = join(root, "services", "launcher.mjs");
   const dataDir = await mkdtemp(join(tmpdir(), "canvastty-launch-e2e-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

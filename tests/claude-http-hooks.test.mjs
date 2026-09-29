@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import { AGENT_RUNTIME_ENV, CAPTURE_RESULT_ENV, CLAUDE_HTTP_HOOK } from "../src/agent-runtime/runtime-protocol.mjs";
@@ -300,7 +300,7 @@ test("the policy keeps the helper wherever an HTTP hook could not reach the gate
   const files = new Map();
   const policy = (options = {}) => new ClaudeHttpHookPolicy({
     platform: "darwin", home: "/profile", managedSettingsPaths: ["/managed/managed-settings.json"],
-    readText: (path) => files.get(path) ?? null, version: () => "2.1.281", ...options
+    readText: (path) => files.get(resolve(path)) ?? null, version: () => "2.1.281", ...options
   });
   const facts = { executable: "/bin/claude", profile: "default", environmentWrapped: false, env: { PATH: "/bin" }, args: [], cwd: "/work/repo/sub" };
   assert.deepEqual(policy().verdict(facts), { ok: true });
@@ -322,7 +322,7 @@ test("the policy keeps the helper wherever an HTTP hook could not reach the gate
 
   const withFile = (path, value) => {
     files.clear();
-    files.set(path, JSON.stringify(value));
+    files.set(resolve(path), JSON.stringify(value));
   };
   withFile("/managed/managed-settings.json", { httpHookAllowedEnvVars: ["X"] });
   assert.match(refused({}), /headers/u);
@@ -333,7 +333,7 @@ test("the policy keeps the helper wherever an HTTP hook could not reach the gate
   withFile("/work/repo/.claude/settings.local.json", { allowedHttpHookUrls: ["https://x/*"] });
   assert.match(refused({}), /URLs/u);
   // The project walk stops at the repository root.
-  files.set("/work/repo/sub/.git", "gitdir: /elsewhere");
+  files.set(resolve("/work/repo/sub/.git"), "gitdir: /elsewhere");
   assert.equal(policy().verdict(facts).ok, true);
   files.clear();
   withFile("/work/repo/.claude/settings.json", { sandbox: { enabled: false }, env: { FOO: "1" } });
