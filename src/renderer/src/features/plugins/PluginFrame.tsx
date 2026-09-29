@@ -67,6 +67,11 @@ export function PluginFrame({
     () => `canvastty-plugin://${plugin.manifest.id}/${encodeAssetPath(contribution.entry)}`,
     [contribution.entry, plugin.manifest.id]
   );
+  // The plugin the frame serves right now, read when a reply is ready; and a new document the moment the
+  // host points the frame elsewhere (during render, before the frame can load or ask anything).
+  const servedPlugin = useRef(plugin.manifest.id);
+  servedPlugin.current = plugin.manifest.id;
+  replies.showing(plugin.manifest.id, entryUrl);
 
   const context = useMemo(() => ({
     apiVersion: 1,
@@ -129,7 +134,7 @@ export function PluginFrame({
       if (message.type !== "request" || typeof message.requestId !== "string" || message.requestId.length > 80) return;
       if (typeof message.method !== "string" || message.method.length > 80) return;
 
-      const mayReply = replies.received(message.requestId, event.source);
+      const mayReply = replies.received(message.requestId, event.source, plugin.manifest.id);
       void handleRequest({
         plugin,
         method: message.method,
@@ -140,7 +145,7 @@ export function PluginFrame({
         canvasInstanceId,
         onOpenLauncher
       }).then((value) => {
-        if (!mayReply(frame.current?.contentWindow)) return;
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",
@@ -151,7 +156,7 @@ export function PluginFrame({
       }).catch((error: unknown) => {
         const description = safeError(error);
         onError(description);
-        if (!mayReply(frame.current?.contentWindow)) return;
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",

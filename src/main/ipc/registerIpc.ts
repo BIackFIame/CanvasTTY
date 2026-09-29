@@ -414,9 +414,15 @@ export function registerIpc({
     // Uninstall first: it stops the plugin's services before removing its files, and afterwards
     // no surface or service of the plugin passes authorization, so nothing can write a secret or
     // media grant after they are revoked. A failed uninstall keeps the plugin's secrets.
-    await plugins.uninstall(pluginId);
-    await pluginSecrets.revokeAll(pluginId);
-    await pluginMedia.revokeAll(pluginId);
+    // A media folder pick still open refuses to store its grant while this runs (and after, the plugin is gone).
+    pluginMedia.beginRemoval(pluginId);
+    try {
+      await plugins.uninstall(pluginId);
+      await pluginSecrets.revokeAll(pluginId);
+      await pluginMedia.revokeAll(pluginId);
+    } finally {
+      pluginMedia.endRemoval(pluginId);
+    }
     pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (

@@ -46,6 +46,11 @@ export interface HardFacts {
   outsideWrites: string[];
   /** Names, reads or connects to CanvasTTY's own private data: tokens, secret stores, control/runtime sockets. */
   appPrivate: boolean;
+  /**
+   * Deletes or moves a path held in a variable or command output that cannot be resolved here, so where it points
+   * (inside the project or not) is unknown.
+   */
+  unknownTarget: boolean;
 }
 
 /**
@@ -223,7 +228,7 @@ interface Acc {
   ctx: PathContext;
   writes: Target[];
   deletes: Target[];
-  flags: { elevation: boolean; pipeToShell: boolean; downloadExec: boolean; disk: boolean; forkBomb: boolean; appPrivate: boolean };
+  flags: { elevation: boolean; pipeToShell: boolean; downloadExec: boolean; disk: boolean; forkBomb: boolean; appPrivate: boolean; unknownTarget: boolean };
   depth: number;
   budget: number;
   /** Paths still to be checked against CanvasTTY's private data (each costs a realpath). */
@@ -264,6 +269,18 @@ function analyzeSegment(segment: Segment, cwd: string | null, acc: Acc, download
   // Assignments alone set the shell's variables for the rest of the command; before a command they only set its
   // environment (`OUT=/x rm "$OUT"` expands the old OUT).
   if (!words.length) for (const word of assignments) assignVariable(word, cwd, acc.ctx);
+  // `for NAME in WORDS`: the loop body sees each word in turn. The variable takes a word that points outside the
+  // project when there is one (the body is judged by its worst case), else the first; unknown when any is.
+  if (words[0]?.text === 'for' && !words[0].quoted && words[1] && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(words[1].text) && words[2]?.text === 'in') {
+    const values = words.slice(3).map(word => ({ word, value: word.substitution ? null : expand(word, cwd, acc.ctx) }));
+    let chosen: string | null = values.length && values.every(entry => entry.value !== null) ? values[0]!.value : null;
+    if (chosen !== null) {
+      const outside = values.find(entry => resolveTarget({ ...entry.word, text: entry.value!, vars: [] }, cwd, acc.ctx).where === 'outside');
+      if (outside) chosen = outside.value;
+    }
+    acc.ctx.shellVars.set(words[1].text, chosen);
+    return cwd;
+  }
   checkPrivate(segment, words, cwd, acc);
   for (const word of segment.words) inspectWord(word, acc);
   for (const redirect of segment.redirects) {
@@ -290,6 +307,11 @@ function assignVariable(word: Word, cwd: string | null, ctx: PathContext): void 
   const value = word.text.slice(at + 1);
   const valueWord: Word = { ...word, text: value, vars: word.vars.filter(variable => value.includes(variable)), tilde: value.startsWith('~') };
   ctx.shellVars.set(name, word.glob ? null : expand(valueWord, cwd, ctx));
+}
+
+/** A target named only through a variable or a substitution that could not be resolved. */
+function heldElsewhere(word: Word, target: Target): boolean {
+  return target.where === 'unresolved' && (word.substitution || word.vars.length > 0);
 }
 
 function inspectWord(word: Word, acc: Acc): void {
@@ -690,6 +712,7 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
   if (DELETERS.has(program)) {
     for (const word of positional.filter(word => !/^-/u.test(word.text))) {
       const t = target(word, true);
+      if (heldElsewhere(word, t)) acc.flags.unknownTarget = true;
       if (program === 'shred' && t.device) acc.flags.disk = true;
       acc.deletes.push(t);
     }
@@ -712,7 +735,14 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
     const printTo = args.findIndex(arg => /^-f(?:print0?|printf|ls)$/u.test(arg));
     if (printTo >= 0 && args[printTo + 1]) acc.writes.push(target(args[printTo + 1]!));
     // The start folders are the scope of the deletion, not deleted themselves.
-    if (args.includes('-delete')) { for (const start of starts) acc.deletes.push({ ...target(start), root: false }); return; }
+    if (args.includes('-delete')) {
+      for (const start of starts) {
+        const t = target(start);
+        if (heldElsewhere(start, t)) acc.flags.unknownTarget = true;
+        acc.deletes.push({ ...t, root: false });
+      }
+      return;
+    }
     if (exec >= 0) {
       const end = args.findIndex((arg, index) => index > exec && (arg === ';' || arg === '+' || arg === '\\;'));
       const inner = argWords.slice(exec + 1, end < 0 ? undefined : end).map(word => word.text === '{}' ? starts[0]! : word);
@@ -733,8 +763,16 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
   if (MOVERS.has(program)) {
     // A move changes both ends (a moved symlink is the link itself; the destination may be a folder it enters).
     const files = positional.filter(word => !/^-/u.test(word.text) && word !== targetDir);
-    files.forEach((word, index) => acc.writes.push(target(word, targetDir !== undefined || index < files.length - 1)));
-    if (targetDir) acc.writes.push(target(targetDir));
+    files.forEach((word, index) => {
+      const t = target(word, targetDir !== undefined || index < files.length - 1);
+      if (heldElsewhere(word, t)) acc.flags.unknownTarget = true;
+      acc.writes.push(t);
+    });
+    if (targetDir) {
+      const t = target(targetDir);
+      if (heldElsewhere(targetDir, t)) acc.flags.unknownTarget = true;
+      acc.writes.push(t);
+    }
     return;
   }
   if (CREATORS.has(program)) {
@@ -1062,7 +1100,7 @@ export function commandFromArgv(argv: readonly string[]): string { return argv.m
 export function analyzeAction(action: ToolAction, root: string, options: { home?: string; agentRoots?: readonly string[]; privateData?: PrivateData } = {}): HardFacts {
   const ctx = pathContext(root, options.home, options.agentRoots, options.privateData);
   const acc: Acc = { ctx, writes: [], deletes: [], depth: 0, budget: 64, privateBudget: MAX_PRIVATE_CHECKS,
-    flags: { elevation: false, pipeToShell: false, downloadExec: false, disk: false, forkBomb: false, appPrivate: false } };
+    flags: { elevation: false, pipeToShell: false, downloadExec: false, disk: false, forkBomb: false, appPrivate: false, unknownTarget: false } };
   const commandCwd = action.commandCwd ? resolveTarget(action.commandCwd, ctx.rootReal, ctx) : null;
   const cwd = commandCwd ? commandCwd.abs : ctx.rootReal;
   if (action.kind === 'shell' && action.command) analyzeText(action.command, cwd, acc);

@@ -259,6 +259,22 @@ test("wrapped and less common forms: the same deny as the plain command outside,
   ]) assert.equal(rule(shell(command)), null, command);
 });
 
+test("a delete or move whose path comes from a variable or output CanvasTTY cannot resolve is denied as an unknown target", () => {
+  for (const command of [
+    "rm -rf \"$OUT\"", "rm -rf $BUILD_DIR/cache", "rm -r \"$(cat target.txt)\"", "rm \"$FILE\"", "rmdir \"$DIR\"",
+    "OUT=$(mktemp -d -p .); rm -rf \"$OUT\"", "mv \"$SRC\" build/", "mv build/a \"$DEST\"", "find \"$ROOT\" -delete",
+    "for f in $(ls); do rm -rf \"$f\"; done"
+  ]) assert.equal(rule(shell(command)), "unknown-target", command);
+  // Resolved variables, loop words and plain paths keep their ordinary reading.
+  for (const command of [
+    "OUT=build; rm -rf \"$OUT\"", "rm -rf build/cache", "for f in build dist; do rm -rf \"$f\"; done",
+    "for f in src/*.tmp; do rm \"$f\"; done", "rm -rf build", "mv src/a.ts src/b.ts", "echo \"$OUT\"", "cat \"$(ls)\""
+  ]) assert.equal(rule(shell(command)), null, command);
+  // A loop over a folder outside is the delete outside it.
+  assert.equal(rule(shell(`for f in build ${outside}; do rm -rf "$f"; done`)), "delete-outside");
+  assert.match(check("Bash", { command: "rm -rf \"$OUT\"" }).message, /cannot resolve/u);
+});
+
 test("curl and wget: every spelling of an output or side file, and --output-dir in either order, is judged where it lands", () => {
   // `@` is where the target goes: outside the working folder the command is denied like `cp a OUT`, inside it runs.
   const URL = "https://example.com/x";
