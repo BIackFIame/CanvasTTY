@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentProviderId, SessionRole } from "../../shared/contracts.ts";
+import type { AgentProviderId, LaunchProfileId, SessionRole } from "../../shared/contracts.ts";
 import type { RuntimePermissionDecision, RuntimePermissionRequest } from "./agent-runtime/RuntimeGateway.ts";
 import { actionFromHook, checkBaseProtection } from "./safety/baseProtection.ts";
 import type { PrivateData } from "./safety/commandFacts.ts";
@@ -27,6 +27,16 @@ export interface DecisionSession {
   cwd: string;
   /** The agent's own config folders (CLAUDE_CONFIG_DIR of this run), whose plans and memory are not "outside". */
   configDirs: string[];
+  /** The profile the card runs in. */
+  profile?: LaunchProfileId;
+}
+
+/**
+ * Whether the agent's hook can hand a question to the person. Only Claude Code takes "ask" from a hook; for every
+ * other CLI an ask would silently become "go on", so it is a deny with the reason instead.
+ */
+export function hookCanAsk(provider: AgentProviderId): boolean {
+  return provider === "claude";
 }
 
 export interface DecisionHooksDependencies {
@@ -55,6 +65,10 @@ export interface DecisionRequest {
   truncated: boolean;
   /** How long CanvasTTY waits for this answer (the service's `decide.timeoutMs`, capped by the session's gate). */
   budgetMs: number;
+  /** The card's launch profile (auto, normal, acceptEdits, plan, yolo). */
+  profile: LaunchProfileId | null;
+  /** The agent can put an "ask" in front of the person; false: an ask is turned into a deny with its reason. */
+  canAsk: boolean;
 }
 
 type Verdict = "deny" | "ask" | "allow";
@@ -133,14 +147,21 @@ export class DecisionHooks {
       agentCwd: request.cwd,
       tool: { name: request.toolName, kind: action.kind ?? "other", command: action.command, paths: action.paths },
       input: request.toolInput,
-      truncated: request.truncated
+      truncated: request.truncated,
+      profile: session.profile ?? null,
+      canAsk: hookCanAsk(session.provider)
     };
     // A service trusted after this card started gets no more time than the card's gate allows; the signal ends it.
     const answers = await Promise.all(services.map((service) => {
       const timeoutMs = this.timeoutFor(service);
       return this.ask(service, { ...params, budgetMs: timeoutMs }, timeoutMs, signal);
     }));
-    return mergeDecisions(answers, request.truncated);
+    const merged = mergeDecisions(answers, request.truncated);
+    // An agent that cannot ask would go on as if nobody objected: the person has to approve, so it is stopped.
+    if (merged.behavior === "ask" && !hookCanAsk(session.provider)) {
+      return { behavior: "deny", message: `${merged.message ?? "CanvasTTY asks the person about this tool call."} ${session.provider} cannot ask the person from here, so it was not run: tell the person what you want to do and why, and let them decide.` };
+    }
+    return merged;
   }
 
   private protects(): boolean {

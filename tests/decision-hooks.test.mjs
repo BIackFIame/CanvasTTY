@@ -51,7 +51,8 @@ function hooks({ protect = true, services = [], answers = {}, calls = [], timeou
       const reply = answers[pluginId];
       return typeof reply === "function" ? reply(params) : reply;
     },
-    session: (id) => id === "s1" ? { provider: "claude", role: "agent", cwd: project, configDirs: [] } : null,
+    session: (id) => id === "s1" ? { provider: "claude", role: "agent", cwd: project, configDirs: [], profile: "auto" }
+      : id === "codex" ? { provider: "codex", role: "subagent", cwd: project, configDirs: [], profile: "auto" } : null,
     home,
     timeoutMs
   });
@@ -162,9 +163,12 @@ test("the gate prints only what each CLI takes: deny for all; ask and allow for 
   }
   assert.equal(hookOutput("claude", { behavior: "ask", message: "" }).hookSpecificOutput.permissionDecision, "ask");
   assert.equal(hookOutput("claude", { behavior: "allow", message: "" }).hookSpecificOutput.permissionDecision, "allow");
-  for (const behavior of ["ask", "allow"]) {
-    assert.equal(hookOutput("codex", { behavior, message: "" }), null);
-    assert.equal(hookOutput("qwen", { behavior, message: "" }), null);
+  // Allow is Claude's alone; an ask that reached a CLI which cannot ask (the gateway ran out of time) is a deny.
+  for (const provider of ["codex", "qwen"]) {
+    assert.equal(hookOutput(provider, { behavior: "allow", message: "" }), null);
+    const asked = hookOutput(provider, { behavior: "ask", message: "" }).hookSpecificOutput;
+    assert.equal(asked.permissionDecision, "deny");
+    assert.match(asked.permissionDecisionReason, /cannot ask the person from here, so it was not run/u);
   }
   // "none" is a real answer (no verdict), told apart from an unreadable one (null), and prints nothing.
   const none = parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "none" }, "x");
@@ -366,4 +370,19 @@ test("manifest: decide needs decision:provide, lists pre-tool, and at most one s
   assert.throws(() => validatePluginManifest(manifest([{ ...guard, decide: { events: ["pre-tool"], appliesTo: ["terminal"] } }])), /appliesTo/u);
   assert.throws(() => validatePluginManifest(manifest([{ ...guard, decide: { events: ["pre-tool"], allow: true } }])), /unsupported|unknown|not allowed|invalid/iu);
   assert.throws(() => validatePluginManifest(manifest([guard, { ...guard, id: "second" }])), /At most one plugin service may decide/u);
+});
+
+test("an ask for an agent that cannot ask is a deny with the reason; the service learns the profile and whether it can ask", async () => {
+  const calls = [];
+  const decisions = hooks({ protect: false, services: [service("p.guard")], answers: { "p.guard": { verdict: "ask", reason: "Force push" } }, calls });
+  const codex = await decisions.decide("codex", request("Bash", { command: "git push --force" }), live());
+  assert.equal(codex.behavior, "deny");
+  assert.match(codex.message, /asks the person about this tool call \(Force push\)\. codex cannot ask the person from here, so it was not run/u);
+  assert.deepEqual([calls[0].params.profile, calls[0].params.canAsk], ["auto", false]);
+  const claude = await decisions.decide("s1", request("Bash", { command: "git push --force" }), live());
+  assert.equal(claude.behavior, "ask", "Claude Code puts it in front of the person");
+  assert.equal(calls[1].params.canAsk, true);
+  // A service that runs out of time is an ask too: for Codex that is a deny, never a run.
+  const slow = hooks({ protect: false, services: [service("p.slow")], answers: { "p.slow": () => new Promise(() => {}) }, timeoutMs: 20 });
+  assert.equal((await slow.decide("codex", request("Bash", { command: "ls" }), live())).behavior, "deny");
 });
