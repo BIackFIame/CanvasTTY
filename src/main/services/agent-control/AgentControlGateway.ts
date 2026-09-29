@@ -30,6 +30,13 @@ const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+/**
+ * What a caller that is not CanvasTTY's control CLI reads (an unauthenticated, malformed or HTTP request): why it
+ * was refused and what to do instead. Stable, and free of protocol details, file names and paths.
+ */
+export const CONTROL_REFUSAL_MESSAGE = "CanvasTTY refused this request: this endpoint only accepts requests from sessions CanvasTTY itself launched as orchestrators, and guessing its protocol will not work. If you are an agent and need other agents, ask the person to start you from CanvasTTY's launcher with the Orchestrator role: you will then get the canvastty_agents tools (spawn_agent, list_routes, wait_for_agent and the rest).";
+/** An HTTP request line (curl, a browser, an HTTP/2 preface): answered with a minimal 403 instead of NDJSON. */
+const HTTP_REQUEST_LINE = /^[A-Z]{3,10} \S{1,4096} HTTP\/\d(?:\.\d)?\r?$/;
 const SECRET = /^[a-f0-9]{64}$/;
 
 interface TerminalPort {
@@ -290,6 +297,24 @@ export class AgentControlGateway {
         socket.write(data);
       } catch { socket.destroy(); }
     };
+    // A refusal is answered once and the connection closed, so a caller is not left waiting for the timeout.
+    const close = (): void => {
+      // A Unix socket half-closes after the reply is flushed; the Windows relay has no end(), so it is dropped shortly.
+      const end = (socket as { end?: () => void }).end;
+      if (typeof end === "function") end.call(socket);
+      else setTimeout(() => socket.destroy(), 250).unref();
+    };
+    const refuse = (line: Buffer): void => {
+      if (socket.destroyed) return;
+      if (HTTP_REQUEST_LINE.test(line.subarray(0, 4200).toString("latin1"))) {
+        const body = Buffer.from(`${CONTROL_REFUSAL_MESSAGE}\n`);
+        socket.write(Buffer.concat([Buffer.from("HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\n"
+          + `Content-Length: ${body.length}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n`), body]));
+      } else {
+        reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: CONTROL_REFUSAL_MESSAGE } });
+      }
+      close();
+    };
     socket.on("data", (chunk) => {
       if (handled) return;
       let line: Buffer | undefined;
@@ -298,7 +323,7 @@ export class AgentControlGateway {
       handled = true;
       let request: ControlRequest;
       try { request = this.parse(JSON.parse(line.toString("utf8"))); }
-      catch { reply({ v: 1, ok: false, error: { code: "INVALID_REQUEST", message: "Invalid or unauthenticated control request." } }); return; }
+      catch { refuse(line); return; }
       if (request.method === "skin-install") {
         clearTimeout(timer);
         timer = setTimeout(() => socket.destroy(), 120_000);

@@ -1,6 +1,7 @@
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { isPathInside } from '../../../agent-runtime/path-inside.mjs';
-import { analyzeAction, commandFromArgv, realish, type HardFacts, type ToolAction } from './commandFacts.ts';
+import { analyzeAction, commandFromArgv, realish, type HardFacts, type PrivateData, type ToolAction } from './commandFacts.ts';
 
 /**
  * Base protection: a small set of deny-only rules the core applies to every local agent tool call it sees through
@@ -9,11 +10,12 @@ import { analyzeAction, commandFromArgv, realish, type HardFacts, type ToolActio
  * model: local rules only, no git, no network.
  */
 
-const BASE_DENY_RULES = ['elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
+const BASE_DENY_RULES = ['app-private', 'elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
 export type BaseDenyRule = typeof BASE_DENY_RULES[number];
 
 /** What the model reads: why the call was refused and what to do instead. */
 const DENY_MESSAGES: Readonly<Record<BaseDenyRule, string>> = {
+  'app-private': 'CanvasTTY blocked this: it reads CanvasTTY\'s own access tokens or secret stores, or talks to its control socket. Agents can\'t control CanvasTTY this way, and guessing its protocol will not work. If you need other agents, ask the person to start you from CanvasTTY\'s launcher with the Orchestrator role: you will then get the canvastty_agents tools (spawn_agent, list_routes, wait_for_agent and the rest). Otherwise continue your task without controlling CanvasTTY.',
   elevation: 'CanvasTTY blocked this command: it asks for administrator rights (sudo, doas, runas). Do the work without elevation; if the task truly needs it, stop and ask the person to run that step.',
   'pipe-to-shell': 'CanvasTTY blocked this command: it pipes downloaded or generated text straight into a shell or interpreter. Download the file first, show what it contains, and ask the person before running it.',
   'download-exec': 'CanvasTTY blocked this command: it downloads code and runs it in one step. Download the file first, show what it contains, and ask the person before running it.',
@@ -77,8 +79,24 @@ export function actionFromHook(toolName: string, toolInput: unknown, preview: st
   return { kind: 'edit', command: null, commandCwd: null, paths: path ? [path] : [] };
 }
 
+/**
+ * CanvasTTY's own private data under its userData folder (the app passes `app.getPath('userData')`; tests pass a
+ * temporary folder): the control token and descriptor, the gateways' connection records and sockets, the secret
+ * stores, the per-account homes and the prepared launch runs. Its settings and layouts are not listed.
+ */
+export function canvasTtyPrivateData(userDataPath: string): PrivateData {
+  const names = ['agent-control', join('browser', 'runtime'), join('lifecycle', 'runtime'), join('orchestration', 'runtime'),
+    'provider-secrets.bin', 'plugin-secrets', 'account-homes', 'github-oauth.json', 'launch-runs'];
+  return {
+    appRoots: [userDataPath],
+    paths: names.map(name => join(userDataPath, name)),
+    markers: ['agent-control', 'provider-secrets', 'plugin-secrets', 'account-homes', 'github-oauth']
+  };
+}
+
 /** The first deny rule a set of facts breaks, in a fixed order. */
 export function denyRule(facts: HardFacts): BaseDenyRule | null {
+  if (facts.appPrivate) return 'app-private';
   if (facts.elevation) return 'elevation';
   if (facts.pipeToShell) return 'pipe-to-shell';
   if (facts.downloadExec) return 'download-exec';
@@ -97,6 +115,8 @@ export function denyRule(facts: HardFacts): BaseDenyRule | null {
 export function checkBaseProtection(input: {
   toolName: string; toolInput: unknown; preview?: string | null; root: string; commandCwd?: string | null;
   home?: string; agentRoots?: readonly string[];
+  /** CanvasTTY's own private data (canvasTtyPrivateData); its socket folders are known without it. */
+  privateData?: PrivateData;
 }): BaseVerdict | null {
   try {
     const action = actionFromHook(input.toolName, input.toolInput, input.preview ?? null);
@@ -105,7 +125,8 @@ export function checkBaseProtection(input: {
     if (!action.commandCwd && input.commandCwd) action.commandCwd = input.commandCwd;
     const facts = analyzeAction(action, input.root, {
       ...(input.home ? { home: input.home } : {}),
-      ...(input.agentRoots ? { agentRoots: input.agentRoots } : {})
+      ...(input.agentRoots ? { agentRoots: input.agentRoots } : {}),
+      ...(input.privateData ? { privateData: input.privateData } : {})
     });
     const rule = denyRule(facts);
     if (!rule) return null;
