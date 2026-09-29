@@ -96,9 +96,15 @@ export function LaunchOptionsSection({ provider, locale, onChange, onEnvironment
   onChange(options: Record<string, PluginLaunchValues>): void;
   onEnvironmentChange(environment: SessionEnvironmentChoice | null): void;
 }): React.JSX.Element | null {
-  const [plugins, setPlugins] = useState<LaunchOptionPlugin[]>([]);
+  // Lists are tagged with the agent they were loaded for. After the agent changes, the previous lists
+  // stay in state until the new answer arrives, and offering them would let the person tick a plugin
+  // for an agent it does not apply to; so a list is shown only while its agent is still chosen.
+  const [loaded, setLoaded] = useState<{
+    provider: ProviderId;
+    plugins: LaunchOptionPlugin[];
+    environments: EnvironmentOption[];
+  } | null>(null);
   const [offered, setOffered] = useState<Record<string, PluginLaunchFieldOptions>>({});
-  const [environments, setEnvironments] = useState<EnvironmentOption[]>([]);
   const [chosen, setChosen] = useState<Record<string, PluginLaunchValues>>({});
   const [where, setWhere] = useState<SessionEnvironmentChoice | null>(null);
 
@@ -110,8 +116,7 @@ export function LaunchOptionsSection({ provider, locale, onChange, onEnvironment
     void window.canvasTTY.plugins.list().then((installed) => {
       if (!active) return;
       const available = launchOptionPlugins(installed, provider);
-      setPlugins(available);
-      setEnvironments(environmentOptions(installed, provider));
+      setLoaded({ provider, plugins: available, environments: environmentOptions(installed, provider) });
       // Selects filled by the plugin's service (its accounts, say): asked once per launcher, never blocking it.
       for (const plugin of available.filter((entry) => entry.fields.some((field) => field.optionsFrom === "service"))) {
         void window.canvasTTY.plugins.launchFieldOptions(plugin.pluginId, provider).then((options) => {
@@ -125,6 +130,9 @@ export function LaunchOptionsSection({ provider, locale, onChange, onEnvironment
   useEffect(() => onChange(chosen), [chosen, onChange]);
   useEffect(() => onEnvironmentChange(where), [where, onEnvironmentChange]);
 
+  const current = loaded?.provider === provider ? loaded : null;
+  const plugins = current?.plugins ?? [];
+  const environments = current?.environments ?? [];
   if (plugins.length === 0 && environments.length === 0) return null;
   const update = (pluginId: string, values: PluginLaunchValues | null): void => {
     setChosen((current) => {

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type {
   ApiProfile,
   ApiProfileProtocol,
@@ -74,51 +74,52 @@ export function ApiProfilesSettings({ settings, onChange }: ApiProfilesSettingsP
   const profiles = settings.apiProfiles;
   const [drafts, setDrafts] = useState<Record<string, ProfileDraft>>({});
   const [busy, setBusy] = useState(false);
+  // Read synchronously: two clicks can arrive before React re-renders with the busy state, and every
+  // write replaces the whole catalog from this render's profiles, so only one may run at a time.
+  const writing = useRef(false);
 
   const draftFor = (profile: ApiProfile): ProfileDraft => drafts[profile.id] ?? draftFrom(profile);
 
-  const commitDraft = async (draft: ProfileDraft): Promise<void> => {
+  const write = async (apiProfiles: ApiProfile[], onSaved?: () => void): Promise<void> => {
+    if (writing.current) return;
+    writing.current = true;
     setBusy(true);
     try {
-      await onChange({
-        apiProfiles: profiles.map((profile) => (profile.id === draft.id ? toProfile(draft) : profile))
-      });
-      setDrafts((current) => {
-        const next = { ...current };
-        delete next[draft.id];
-        return next;
-      });
+      await onChange({ apiProfiles });
+      onSaved?.();
     } finally {
+      writing.current = false;
       setBusy(false);
     }
   };
 
-  const addPreset = async (preset: ApiProfile): Promise<void> => {
+  const commitDraft = (draft: ProfileDraft): Promise<void> => write(
+    profiles.map((profile) => (profile.id === draft.id ? toProfile(draft) : profile)),
+    () => setDrafts((current) => {
+      // An edit made while the save ran replaced the draft object; it is not saved yet, so keep it.
+      if (current[draft.id] !== draft) return current;
+      const next = { ...current };
+      delete next[draft.id];
+      return next;
+    })
+  );
+
+  const addPreset = (preset: ApiProfile): Promise<void> => {
     let id = preset.id;
     let suffix = 2;
     const taken = new Set(profiles.map((profile) => profile.id));
     while (taken.has(id)) id = `${preset.id}-${suffix++}`;
-    setBusy(true);
-    try {
-      await onChange({ apiProfiles: [...profiles, { ...preset, id }] });
-    } finally {
-      setBusy(false);
-    }
+    return write([...profiles, { ...preset, id }]);
   };
 
-  const removeProfile = async (id: string): Promise<void> => {
-    setBusy(true);
-    try {
-      await onChange({ apiProfiles: profiles.filter((profile) => profile.id !== id) });
-      setDrafts((current) => {
-        const next = { ...current };
-        delete next[id];
-        return next;
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
+  const removeProfile = (id: string): Promise<void> => write(
+    profiles.filter((profile) => profile.id !== id),
+    () => setDrafts((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    })
+  );
 
   return (
     <div className="agent-launcher-settings">
@@ -142,7 +143,8 @@ export function ApiProfilesSettings({ settings, onChange }: ApiProfilesSettingsP
         const valid = draftIsValid(draft);
         const dirty = JSON.stringify(toProfile(draft)) !== JSON.stringify(profile);
         const update = (patch: Partial<ProfileDraft>): void => {
-          setDrafts((current) => ({ ...current, [profile.id]: { ...draft, ...patch } }));
+          // Merge into the draft as it is when React applies the update, not as this render saw it.
+          setDrafts((current) => ({ ...current, [profile.id]: { ...(current[profile.id] ?? draftFrom(profile)), ...patch } }));
         };
         return (
           <div className="agent-launcher-settings__row api-profile-row" key={profile.id}>
