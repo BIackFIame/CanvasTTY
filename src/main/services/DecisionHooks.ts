@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import type { AgentProviderId, SessionRole } from "../../shared/contracts.ts";
 import type { RuntimePermissionDecision, RuntimePermissionRequest } from "./agent-runtime/RuntimeGateway.ts";
 import { actionFromHook, checkBaseProtection } from "./safety/baseProtection.ts";
+import type { PrivateData } from "./safety/commandFacts.ts";
 import { DEFAULT_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 
 /** A trusted plugin service that declared `decide` (PluginManager.decisionServices). */
@@ -34,6 +35,8 @@ export interface DecisionHooksDependencies {
   call(pluginId: string, serviceId: string, method: "canvastty.decide", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): DecisionSession | null;
   home?: string;
+  /** CanvasTTY's own tokens, secret stores and sockets (canvasTtyPrivateData of its userData folder). */
+  privateData?: PrivateData;
   timeoutMs?: number;
 }
 
@@ -101,7 +104,8 @@ export class DecisionHooks {
         root: session.cwd,
         commandCwd: request.cwd,
         home,
-        agentRoots: [join(home, ".claude"), ...session.configDirs]
+        agentRoots: [join(home, ".claude"), ...session.configDirs],
+        ...(this.deps.privateData ? { privateData: this.deps.privateData } : {})
       });
       if (base) return { behavior: "deny", message: base.message };
     }

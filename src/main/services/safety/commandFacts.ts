@@ -7,8 +7,9 @@ import { lexShell, shellQuote, type Segment, type Word } from './shellParse.ts';
 /**
  * The hard facts base protection decides on, computed by code from one tool call and the working folder.
  * Nothing is executed and nothing is read except `realpath` of the paths involved. Only the facts a deny rule
- * needs are computed: elevation, a pipe into a shell, download-and-run, disk commands, a fork bomb, and writes or
- * deletes outside the working folder (deleting the folder itself included).
+ * needs are computed: elevation, a pipe into a shell, download-and-run, disk commands, a fork bomb, writes or
+ * deletes outside the working folder (deleting the folder itself included), and any use of CanvasTTY's own private
+ * data (its access tokens, secret stores and control sockets).
  */
 
 /** One tool call, source-neutral: a shell command or the files a file tool writes. */
@@ -43,7 +44,17 @@ export interface HardFacts {
   deletesOutside: boolean;
   /** Absolute targets written outside the working folder (for the temporary-folder advice). */
   outsideWrites: string[];
+  /** Names, reads or connects to CanvasTTY's own private data: tokens, secret stores, control/runtime sockets. */
+  appPrivate: boolean;
 }
+
+/**
+ * CanvasTTY's own private data, as the running app knows it (its userData folder differs per platform and per
+ * profile, so it is passed in, never guessed). `appRoots`: the app's data folders; `paths`: the private files and
+ * folders in them (tokens, connection records, secret stores, account homes); `markers`: names that, together with
+ * an app root's own name, identify those paths inside interpreter code that builds a path piece by piece.
+ */
+export interface PrivateData { appRoots: readonly string[]; paths: readonly string[]; markers: readonly string[] }
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -70,14 +81,26 @@ const DEVICE = /^(?:\/dev\/(?:r?disk\d|sd[a-z]|hd[a-z]|nvme\d|mmcblk\d|xvd[a-z]|
 const HARMLESS_DEVICE = /^\/dev\/(?:null|zero|u?random|stdin|stdout|stderr|tty|fd\/\d+)$|^(?:nul|con)$/iu;
 const WINDOWS_ABSOLUTE = /^(?:[A-Za-z]:[\\/]|[A-Za-z]:$|\\\\)/u;
 
-export interface PathContext { root: string; rootReal: string; home: string; temp: string; agentRoots: string[] }
+export interface PathContext {
+  root: string; rootReal: string; home: string; temp: string; agentRoots: string[];
+  /** CanvasTTY's private paths and data folders (as given and resolved), and the temporary folders its sockets live in. */
+  privatePaths: string[]; appRoots: string[]; appNames: string[]; markers: string[]; tempRoots: string[];
+}
 
 /**
  * `agentRoots`: the agent's own config folders (Claude's ~/.claude or the run's CLAUDE_CONFIG_DIR). Their plan and
  * memory folders belong to the agent, so writing there is not a write outside the project.
  */
-function pathContext(root: string, home = homedir(), agentRoots?: readonly string[]): PathContext {
-  return { root, rootReal: realish(resolve(root)), home, temp: tmpdir(), agentRoots: (agentRoots ?? [join(home, '.claude')]).map(dir => realish(resolve(dir))) };
+function pathContext(root: string, home = homedir(), agentRoots?: readonly string[], privateData?: PrivateData): PathContext {
+  const both = (paths: readonly string[]): string[] => [...new Set(paths.filter(path => path && isAbsolute(path)).flatMap(path => [resolve(path), realish(resolve(path))]))];
+  const temp = tmpdir();
+  return {
+    root, rootReal: realish(resolve(root)), home, temp, agentRoots: (agentRoots ?? [join(home, '.claude')]).map(dir => realish(resolve(dir))),
+    privatePaths: both(privateData?.paths ?? []), appRoots: both(privateData?.appRoots ?? []),
+    appNames: [...new Set((privateData?.appRoots ?? []).map(path => basename(path).toLowerCase()).filter(name => name.length >= 4))],
+    markers: (privateData?.markers ?? []).map(marker => marker.toLowerCase()).filter(marker => marker.length >= 6),
+    tempRoots: both([temp, '/tmp', '/private/tmp', '/var/tmp'])
+  };
 }
 
 const AGENT_SERVICE_DIR = /^(?:plans|projects[\\/][^\\/]+[\\/]memory)(?:[\\/]|$)/u;
@@ -193,9 +216,11 @@ interface Acc {
   ctx: PathContext;
   writes: Target[];
   deletes: Target[];
-  flags: { elevation: boolean; pipeToShell: boolean; downloadExec: boolean; disk: boolean; forkBomb: boolean };
+  flags: { elevation: boolean; pipeToShell: boolean; downloadExec: boolean; disk: boolean; forkBomb: boolean; appPrivate: boolean };
   depth: number;
   budget: number;
+  /** Paths still to be checked against CanvasTTY's private data (each costs a realpath). */
+  privateBudget: number;
 }
 
 interface Stdin { pipeIn: boolean; heredoc: string | null }
@@ -227,6 +252,7 @@ function analyzeSegment(segment: Segment, cwd: string | null, acc: Acc, download
     if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(first.text) || LEADING_RESERVED.has(first.text)) words.shift();
     else break;
   }
+  checkPrivate(segment, words, cwd, acc);
   for (const word of segment.words) inspectWord(word, acc);
   for (const redirect of segment.redirects) {
     if (redirect.fdDup || !redirect.target) continue;
@@ -437,6 +463,7 @@ function runInterpreter(program: string, argWords: Word[], cwd: string | null, a
     if (python && text === '-m') return cwd;
     if (/^(?:-c|-e|--eval|-p|--print|-r|-E)$/u.test(text) || program === 'deno' && text === 'eval' || program === 'osascript' && text === '-e') {
       if (innerFetch) acc.flags.downloadExec = true;
+      if (args[i + 1] !== undefined && codeNamesPrivate(args[i + 1]!, acc.ctx)) acc.flags.appPrivate = true;
       if (argWords[i + 1] && fetchesIn(args[i + 1]!) && /\b(?:exec|eval|system|spawn|child_process|subprocess|os\.system)\b/u.test(args[i + 1]!)) acc.flags.downloadExec = true;
       return cwd;
     }
@@ -449,7 +476,146 @@ function runInterpreter(program: string, argWords: Word[], cwd: string | null, a
     return cwd;
   }
   if (stdin.pipeIn) acc.flags.pipeToShell = true;
+  // A program read from a heredoc (`python3 - <<EOF`): its paths and names count like inline code.
+  if (stdin.heredoc !== null && (privateCandidates(stdin.heredoc, acc.ctx).some(text => privateHit(text, cwd, acc, false)) || codeNamesPrivate(stdin.heredoc, acc.ctx))) acc.flags.appPrivate = true;
   return cwd;
+}
+
+// ---------------------------------------------------------------------------
+// CanvasTTY's own private data
+// ---------------------------------------------------------------------------
+
+/** The folders CanvasTTY's gateways put their sockets in, under a temporary folder (`ctty-control-XXXX`, …). */
+const SOCKET_DIR = /^ctty-(?:control|runtime|orch|user|\d+)-/u;
+/** Variables that carry a control descriptor, a gateway address or a capability. */
+const PRIVATE_ENV = /^(?:ENV:)?CANVASTTY_(?:CONTROL_CONNECTION|[A-Z_]*_(?:CAPABILITY|ADDRESS))$/u;
+/** CanvasTTY's own control CLI reads its descriptor itself: an orchestrator may name it. */
+const CONTROL_CLI = /^canvastty-control(?:\.mjs)?$/u;
+/** Programs that walk folders by themselves: naming a folder that holds private data reads it. */
+const RECURSIVE = new Set(['rg', 'ag', 'ack', 'find', 'fd', 'tar', 'bsdtar', 'zip', '7z', 'rsync', 'ditto', 'scp', 'rclone']);
+const GLOB_CHAR = /[*?[]/u;
+const MAX_PRIVATE_CHECKS = 256;
+const MAX_SCANNED_TEXT = 64 * 1024;
+
+const parts = (path: string): string[] => path.split(/[\\/]+/u).filter(Boolean);
+
+/** A glob component (`token-*`, `ctty-control-????`) against one real name. */
+function componentMatches(pattern: string, name: string): boolean {
+  if (!GLOB_CHAR.test(pattern)) return pattern === name;
+  let source = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const char = pattern[i]!;
+    if (char === '*') source += '.*';
+    else if (char === '?') source += '.';
+    else if (char === '[') {
+      const close = pattern.indexOf(']', i + 2);
+      if (close < 0) { source += '\\['; continue; }
+      source += `[${pattern.slice(i + 1, close).replace(/^!/u, '^').replace(/[\\\]]/gu, '\\$&')}]`;
+      i = close;
+    } else source += char.replace(/[.+^${}()|\\\]]/gu, '\\$&');
+  }
+  try { return new RegExp(`^${source}$`, 'u').test(name); } catch { return true; }
+}
+
+/**
+ * Whether one path (absolute, maybe a glob) is CanvasTTY's private data: inside a private path, a folder of the app
+ * that holds one when the command walks folders, or a gateway's socket folder under a temporary folder.
+ */
+function privatePath(abs: string, glob: boolean, recursive: boolean, ctx: PathContext): boolean {
+  if (!glob) {
+    // The project, and the agent's own config folder (an account home it was launched with), are its own.
+    if (isPathInside(ctx.rootReal, abs) || ctx.agentRoots.some(dir => isPathInside(dir, abs))) return false;
+    if (ctx.privatePaths.some(path => isPathInside(path, abs))) return true;
+    if (recursive && ctx.privatePaths.some(path => isPathInside(abs, path)) && ctx.appRoots.some(root => isPathInside(root, abs))) return true;
+    return ctx.tempRoots.some(temp => isPathInside(temp, abs, { allowRoot: false }) && SOCKET_DIR.test(parts(relative(temp, abs))[0] ?? ''));
+  }
+  // A glob: the folders before its first wildcard resolved, the rest matched name by name.
+  const all = parts(abs);
+  const first = all.findIndex(part => GLOB_CHAR.test(part));
+  const prefix = realish((abs.startsWith('/') ? '/' : '') + all.slice(0, first).join('/'));
+  const pattern = [...parts(prefix), ...all.slice(first)];
+  const matchesFrom = (target: string[]): number => {
+    let i = 0;
+    while (i < pattern.length && i < target.length && componentMatches(pattern[i]!, target[i]!)) i++;
+    return i;
+  };
+  for (const path of ctx.privatePaths) {
+    const target = parts(path);
+    const matched = matchesFrom(target);
+    if (matched >= target.length) return true;
+    if (matched === pattern.length && recursive && ctx.appRoots.some(root => parts(root).length <= pattern.length)) return true;
+  }
+  return ctx.tempRoots.some(temp => {
+    const target = parts(temp);
+    if (matchesFrom(target) < target.length || pattern.length <= target.length) return false;
+    const next = pattern[target.length]!;
+    return SOCKET_DIR.test(next) || next.startsWith('ctty') && GLOB_CHAR.test(next);
+  });
+}
+
+/** Expands `~`, $HOME and $TMPDIR in a path found inside a word or in code; null when it is not a path. */
+function codePath(text: string, ctx: PathContext): string | null {
+  let value = text.trim().replace(/^file:\/\//iu, '/');
+  value = value.replace(/^(?:\$HOME|\$\{HOME\})(?=[\\/]|$)/u, ctx.home).replace(/^(?:\$TMPDIR|\$\{TMPDIR\})(?=[\\/]|$)/u, ctx.temp);
+  if (value === '~' || value.startsWith('~/')) value = ctx.home + value.slice(1);
+  return value.startsWith('/') && value.length > 1 ? value : null;
+}
+
+/** Paths inside a word or a program text: after `=` or `:` (`--unix-socket=P`, `UNIX-CONNECT:P`), quoted strings, bare tokens. */
+function privateCandidates(text: string, ctx: PathContext): string[] {
+  if (text.length > MAX_SCANNED_TEXT) text = text.slice(0, MAX_SCANNED_TEXT);
+  const found = new Set<string>();
+  const add = (value: string | undefined): void => { const path = value ? codePath(value, ctx) : null; if (path && found.size < 64) found.add(path); };
+  for (const match of text.matchAll(/[=:]((?:~|\$\{?(?:HOME|TMPDIR)\}?|\/)[^\s,;'"`()<>|&]*)/gu)) add(match[1]);
+  for (const match of text.matchAll(/(['"`])([^'"`\n]{1,4096}?)\1/gu)) add(match[2]);
+  for (const token of text.split(/[\s,;()[\]{}<>|&'"`=]+/u)) if (/^(?:~|\$\{?(?:HOME|TMPDIR)\}?|\/)/u.test(token)) add(token);
+  return [...found];
+}
+
+/** Interpreter code that builds a private path from pieces: an app folder's name together with a private name. */
+function codeNamesPrivate(code: string, ctx: PathContext): boolean {
+  const lower = code.slice(0, MAX_SCANNED_TEXT).toLowerCase();
+  if (/ctty-(?:control|runtime|orch)-/u.test(lower)) return true;
+  return ctx.appNames.some(name => lower.includes(name)) && ctx.markers.some(marker => lower.includes(marker));
+}
+
+function privateHit(text: string, cwd: string | null, acc: Acc, recursive: boolean, glob = GLOB_CHAR.test(text)): boolean {
+  if (--acc.privateBudget < 0) return false;
+  if (!isAbsolute(text) && cwd === null) return false;
+  return privatePath(glob ? resolve(cwd ?? acc.ctx.rootReal, text) : realish(resolve(cwd ?? acc.ctx.rootReal, text)), glob, recursive, acc.ctx);
+}
+
+/** The command is CanvasTTY's control CLI (`canvastty-control.mjs …`, `node "$CANVASTTY_CONTROL_CLI" …`). */
+function runsControlCli(words: readonly Word[]): boolean {
+  const cli = (word: Word | undefined): boolean => Boolean(word && (word.vars.length === 1 && word.vars[0] === 'CANVASTTY_CONTROL_CLI' && /^\$\{?CANVASTTY_CONTROL_CLI\}?$/u.test(word.text) || !word.vars.length && !word.substitution && CONTROL_CLI.test(programName(word.text))));
+  if (cli(words[0])) return true;
+  if (!words[0] || !INTERPRETERS.has(programName(words[0].text))) return false;
+  return cli(words.slice(1).find(word => !word.text.startsWith('-')));
+}
+
+/**
+ * One segment against CanvasTTY's private data: every word (and each path inside it), every redirection, and the
+ * variables that carry a descriptor or a capability. Whatever program reads, copies, encodes or connects to them,
+ * the command uses them. CanvasTTY's own control CLI is the one program that may name its descriptor.
+ */
+function checkPrivate(segment: Segment, words: Word[], cwd: string | null, acc: Acc): void {
+  if (acc.flags.appPrivate || acc.privateBudget <= 0) return;
+  if (runsControlCli(words)) return;
+  const recursive = words.some(word => RECURSIVE.has(programName(word.text)) || /^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive|--archive)$/u.test(word.text))
+    || programName(words[0]?.text ?? '') === 'cp' && words.some(word => /^-[a-zA-Z]*a/u.test(word.text));
+  const targets = [...segment.words, ...segment.redirects.filter(redirect => !redirect.fdDup && redirect.target).map(redirect => redirect.target!)];
+  for (const word of targets) {
+    if (word.vars.some(name => PRIVATE_ENV.test(name))) { acc.flags.appPrivate = true; return; }
+    if (word.substitution) continue;
+    const text = expand(word, cwd, acc.ctx);
+    if (text === null || text === '') continue;
+    const candidates = new Set([text, ...(text.length > 1 && /[=:'"\s]/u.test(text) ? privateCandidates(text, acc.ctx) : [])]);
+    for (const candidate of candidates) {
+      if (!privateHit(candidate, cwd, acc, recursive, candidate === text ? word.glob : GLOB_CHAR.test(candidate))) continue;
+      acc.flags.appPrivate = true;
+      return;
+    }
+  }
 }
 
 function classifyProgram(program: string, argWords: Word[], cwd: string | null, acc: Acc, stdin: Stdin, downloadedHere: Target[]): void {
@@ -843,13 +1009,17 @@ function gitEffect(sub: string, rest: readonly string[]): 'read' | 'write' | 'de
 /** Converts an argv array (Codex style `["bash","-lc","…"]`) into one command string. */
 export function commandFromArgv(argv: readonly string[]): string { return argv.map(shellQuote).join(' '); }
 
-export function analyzeAction(action: ToolAction, root: string, options: { home?: string; agentRoots?: readonly string[] } = {}): HardFacts {
-  const ctx = pathContext(root, options.home, options.agentRoots);
-  const acc: Acc = { ctx, writes: [], deletes: [], depth: 0, budget: 64, flags: { elevation: false, pipeToShell: false, downloadExec: false, disk: false, forkBomb: false } };
+export function analyzeAction(action: ToolAction, root: string, options: { home?: string; agentRoots?: readonly string[]; privateData?: PrivateData } = {}): HardFacts {
+  const ctx = pathContext(root, options.home, options.agentRoots, options.privateData);
+  const acc: Acc = { ctx, writes: [], deletes: [], depth: 0, budget: 64, privateBudget: MAX_PRIVATE_CHECKS,
+    flags: { elevation: false, pipeToShell: false, downloadExec: false, disk: false, forkBomb: false, appPrivate: false } };
   const commandCwd = action.commandCwd ? resolveTarget(action.commandCwd, ctx.rootReal, ctx) : null;
   const cwd = commandCwd ? commandCwd.abs : ctx.rootReal;
   if (action.kind === 'shell' && action.command) analyzeText(action.command, cwd, acc);
-  else if (action.kind === 'edit') acc.writes.push(...action.paths.map(path => resolveTarget(path, cwd, ctx)));
+  else if (action.kind === 'edit') {
+    acc.writes.push(...action.paths.map(path => resolveTarget(path, cwd, ctx)));
+    if (action.paths.some(path => { const text = codePath(path, ctx) ?? path; return privateHit(text, cwd, acc, false, false); })) acc.flags.appPrivate = true;
+  }
   const outside = acc.writes.filter(t => t.where === 'outside' && !t.device && !(t.abs && isAgentServicePath(t.abs, ctx)));
   return {
     ...acc.flags,
