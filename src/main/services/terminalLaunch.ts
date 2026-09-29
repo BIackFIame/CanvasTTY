@@ -356,8 +356,15 @@ const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
   opencode: ["-c", "-s"],
   codex: ["-a", "-s"]
 };
-// `-c hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust); `approvals_reviewer` is auto's.
-const CORE_OWNED_WORDS = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|bypass|^hooks[.=]/i;
+// Config keys (`-c key=value`, `--config=key=value`, or a `key=value` argument that is a `-c` value) that decide
+// approvals or the sandbox. `hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust);
+// `approvals_reviewer` is auto's. Only the key is read: a value is the plugin's text (a rule that mentions
+// these words is not a setting).
+const CORE_OWNED_CONFIG_KEY = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|sandbox_workspace_write|bypass|^hooks(?:\.|$)/i;
+/** A flag whose own name asks to skip approvals, whatever the agent calls it. */
+const CORE_OWNED_FLAG_WORDS = /dangerously|bypass/i;
+/** `key=value` as a config override writes it: a dotted key of plain name characters, then `=`. */
+const CONFIG_PAIR = /^([A-Za-z0-9_][A-Za-z0-9_.-]*)=/;
 const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
   codex: ["resume", "fork", "exec"]
 };
@@ -385,8 +392,18 @@ export function coreOwnedLaunchArgument(provider: ProviderId, argument: string):
     if (equals && !inline) return true;
     if (inline && claudeCoreSettingsKey(inline)) return true;
   }
-  return CORE_OWNED_FLAGS.has(flag)
-    || Boolean(CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag))
-    || Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument))
-    || CORE_OWNED_WORDS.test(argument);
+  if (argument.startsWith("-")) {
+    if (CORE_OWNED_FLAGS.has(flag) || CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag) || CORE_OWNED_FLAG_WORDS.test(flag)) return true;
+    // A config override written into the flag itself: `--config=key=value`, `-ckey=value`.
+    const inlineConfig = argument.startsWith("--config=") ? argument.slice("--config=".length)
+      : /^-c[^=-]/u.test(argument) ? argument.slice(2) : null;
+    return inlineConfig !== null && coreOwnedConfigPair(inlineConfig);
+  }
+  return Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument)) || coreOwnedConfigPair(argument);
+}
+
+/** A `key=value` argument whose key is core-owned; any other text (a rule, a prompt) is the plugin's own. */
+function coreOwnedConfigPair(argument: string): boolean {
+  const key = CONFIG_PAIR.exec(argument)?.[1];
+  return key !== undefined && CORE_OWNED_CONFIG_KEY.test(key);
 }

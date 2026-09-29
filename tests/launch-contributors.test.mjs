@@ -197,6 +197,20 @@ test("refusals, timeouts, errors, bad answers, conflicts and core-owned values r
   assert.match(await refusal({ "p.one": { env: JSON.parse("{\"__proto__\":\"x\"}") } }, { "p.one": {} }), /env name __proto__ is invalid/u);
 });
 
+test("a plugin's instruction text that mentions permission words launches; the permission setting itself is refused", async (t) => {
+  const rule = "developer_instructions=\"Never use --dangerously-bypass-approvals-and-sandbox or change approval_policy.\"";
+  const prepare = async (args) => {
+    const { pipeline } = await pipelineFixture(t, { contributors: [contributor("p.one")], answers: { "p.one": { args } } });
+    return pipeline.prepare({ sessionId: "s", provider: "codex", profile: "normal", role: "agent", cwd, restoring: false, resume: false, options: { "p.one": {} } });
+  };
+  const allowed = await prepare(["-c", rule]);
+  assert.equal(allowed.ok, true, allowed.reason);
+  assert.deepEqual(allowed.args, ["-c", rule]);
+  const refused = await prepare(["-c", "approval_policy=\"never\""]);
+  assert.equal(refused.ok, false);
+  assert.match(refused.reason, /which only CanvasTTY may pass/u);
+});
+
 test("env names: an inherited-looking name is an ordinary one, and Windows compares names without case", async (t) => {
   const { pipeline } = await pipelineFixture(t, {
     contributors: [contributor("p.one"), contributor("p.two")],
