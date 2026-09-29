@@ -268,9 +268,9 @@ test("OMP and Pi use their documented dangerous flags instead of the legacy defa
   assert.deepEqual(pi.args, ["--approve"]);
 });
 
-test("Cursor YOLO uses its Claude-Code-style permission bypass", () => {
+test("Cursor YOLO uses cursor-agent's own bypass, -f/--force (it rejects Claude Code's flag)", () => {
   const cursor = resolveTerminalLaunch("cursor", "yolo", [], { providerCli: available("cursor", "/resolved/agent") });
-  assert.deepEqual(cursor.args, ["--dangerously-skip-permissions"]);
+  assert.deepEqual(cursor.args, ["--force"]);
 });
 
 test("MiniMax YOLO launches the stock CLI because mcode has no bypass flag", () => {

@@ -1,0 +1,216 @@
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import type { ProviderId } from "../../../shared/contracts.ts";
+import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
+import { otherSpellings } from "../onDiskPath.ts";
+
+/**
+ * The folders one isolated agent may write, the ones it may not read, and the sockets it may connect to. Pure: the
+ * caller passes the home folder, the launch environment and CanvasTTY's own data folder, so a test (and a fake HOME)
+ * decides every path.
+ */
+export interface IsolationPathInput {
+  provider: ProviderId;
+  /** The folder the agent works in (the project). */
+  cwd: string;
+  /** This launch's own temporary folder (TMPDIR inside the layer). */
+  sessionTemp: string;
+  /** The agent's launch environment (HOME, XDG_*, CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, CanvasTTY's socket addresses). */
+  env: Readonly<Record<string, string | undefined>>;
+  /** CanvasTTY's userData folder. */
+  userDataPath: string;
+  /** The session id, for its own plugin launch files and its own control grant. */
+  sessionId: string;
+  /** Folders under CanvasTTY's private data this launch was handed (its own control grant, its account home). */
+  grantedPrivate?: readonly string[];
+  /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
+  socketFolders?: readonly string[];
+}
+
+export interface IsolationPaths {
+  /** Writable folders (subpaths), every spelling. */
+  writable: string[];
+  /** Writable single files (with their `.lock` / `.tmp` / backup siblings). */
+  writableFiles: string[];
+  /** Folders that may be created (empty) on the way to a writable one: `~/.local/state` for `~/.local/state/opencode`. */
+  creatableFolders: string[];
+  /** Inside writable folders, still not writable: the repository's git config, the CLIs' own permission settings. */
+  protectedWrites: string[];
+  /** The project's git hook folders: only `*.sample` files may be written there (what `git init` creates). */
+  gitHooks: string[];
+  /** Not readable at all: other agents' credentials, SSH/cloud keys, CanvasTTY's tokens and secret stores. */
+  unreadable: string[];
+  /** Readable again inside an unreadable folder: what this launch was handed. */
+  readableAgain: string[];
+  /** Folders whose Unix sockets the agent may connect to. */
+  socketFolders: string[];
+  /** Folders whose name starts with this prefix hold CanvasTTY's gateway sockets (token-authenticated). */
+  socketPrefixes: string[];
+}
+
+/** Each provider's own state, configuration and cache folders, relative to HOME unless an env variable moves them. */
+function providerFolders(provider: ProviderId, env: IsolationPathInput["env"], home: string): { folders: string[]; files: string[] } {
+  const xdg = xdgFolders(env, home);
+  const named = (name: string): string[] => [
+    join(home, `.${name}`),
+    join(xdg.config, name), join(xdg.data, name), join(xdg.state, name), join(xdg.cache, name),
+    join(home, "Library", "Caches", name), join(home, "Library", "Application Support", name)
+  ];
+  switch (provider) {
+    case "codex":
+      return { folders: [env.CODEX_HOME && isAbsolute(env.CODEX_HOME) ? env.CODEX_HOME : join(home, ".codex"), ...named("codex")], files: [] };
+    case "claude": {
+      const config = env.CLAUDE_CONFIG_DIR && isAbsolute(env.CLAUDE_CONFIG_DIR) ? env.CLAUDE_CONFIG_DIR : join(home, ".claude");
+      return {
+        folders: [config, ...named("claude"), join(home, "Library", "Caches", "claude-cli-nodejs")],
+        // Claude Code keeps its state next to HOME (and next to its config folder when CLAUDE_CONFIG_DIR moves it).
+        files: [join(home, ".claude.json"), join(config, ".claude.json")]
+      };
+    }
+    case "grok":
+      return { folders: [env.GROK_HOME && isAbsolute(env.GROK_HOME) ? env.GROK_HOME : join(home, ".grok"), ...named("grok")], files: [] };
+    case "opencode":
+      return { folders: named("opencode"), files: [] };
+    case "hermes":
+      return { folders: [env.HERMES_HOME && isAbsolute(env.HERMES_HOME) ? env.HERMES_HOME : join(home, ".hermes"), ...named("hermes")], files: [] };
+    case "kimi":
+      return { folders: [env.KIMI_HOME && isAbsolute(env.KIMI_HOME) ? env.KIMI_HOME : join(home, ".kimi"), ...named("kimi")], files: [] };
+    case "cursor":
+      return { folders: [...named("cursor"), ...named("cursor-agent")], files: [] };
+    case "antigravity":
+      return { folders: [...named("antigravity"), join(home, ".gemini")], files: [] };
+    case "terminal":
+      return { folders: [], files: [] };
+    default:
+      return { folders: named(provider), files: [] };
+  }
+}
+
+function xdgFolders(env: IsolationPathInput["env"], home: string): { config: string; data: string; state: string; cache: string } {
+  const pick = (value: string | undefined, fallback: string): string => value && isAbsolute(value) ? value : fallback;
+  return {
+    config: pick(env.XDG_CONFIG_HOME, join(home, ".config")),
+    data: pick(env.XDG_DATA_HOME, join(home, ".local", "share")),
+    state: pick(env.XDG_STATE_HOME, join(home, ".local", "state")),
+    cache: pick(env.XDG_CACHE_HOME, join(home, ".cache"))
+  };
+}
+
+/** Credentials and keys no agent reads inside the layer (other than its own CLI's folders, handled separately). */
+function sensitiveHomeFolders(home: string, xdgConfig: string): string[] {
+  return [
+    ".ssh", ".aws", ".gnupg", ".azure", ".kube", ".docker", ".netrc", ".git-credentials", ".password-store",
+    ".config/gh", ".config/gcloud", ".config/op", ".npmrc", ".pypirc", ".gem/credentials", ".cargo/credentials",
+    ".cargo/credentials.toml", ".terraform.d/credentials.tfrc.json", ".vault-token"
+  ].map((name) => join(home, name)).concat([join(xdgConfig, "gh"), join(xdgConfig, "gcloud")]);
+}
+
+/**
+ * CanvasTTY's own private data under userData (the same list base protection refuses): tokens, connection records,
+ * secret stores, account homes and prepared launch files. Its gateways' runtime folders stay readable: they hold
+ * token-authenticated sockets and per-run hook settings the CLI must read.
+ */
+export function privateAppData(userDataPath: string): string[] {
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs"]
+    .map((name) => join(userDataPath, name));
+}
+
+/** Every spelling of a path an agent or the kernel may use: as given, resolved through links, NFC and NFD. */
+export function spellings(path: string): string[] {
+  const found = new Set<string>();
+  const add = (value: string): void => {
+    if (!value || !isAbsolute(value)) return;
+    found.add(value);
+    for (const other of otherSpellings(value)) found.add(other);
+  };
+  add(resolve(path));
+  add(realish(resolve(path)));
+  return [...found];
+}
+
+/** realpath of the longest existing ancestor plus the rest, so /tmp and /var resolve to /private on macOS. */
+function realish(path: string): string {
+  const rest: string[] = [];
+  let current = path;
+  for (let i = 0; i < 128; i++) {
+    try {
+      const real = realpathSync.native(current);
+      return rest.length > 0 ? join(real, ...rest.reverse()) : real;
+    } catch { /* go up */ }
+    const parent = dirname(current);
+    if (parent === current) return path;
+    rest.push(current.slice(parent.length).replace(/^[\\/]+/u, ""));
+    current = parent;
+  }
+  return path;
+}
+
+export function isolationPaths(input: IsolationPathInput): IsolationPaths {
+  const home = input.env.HOME && isAbsolute(input.env.HOME) ? input.env.HOME : "/nonexistent-home";
+  const xdg = xdgFolders(input.env, home);
+  const own = providerFolders(input.provider, input.env, home);
+  // A launch that moved its CLI home into CanvasTTY's account homes (an accounts plugin) or elsewhere: that folder is
+  // its own state too.
+  const movedHomes = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME", "HERMES_HOME", "KIMI_HOME", "OPENCODE_CONFIG_DIR", "QWEN_HOME"]
+    .map((name) => input.env[name])
+    .filter((value): value is string => typeof value === "string" && isAbsolute(value));
+  const ownFolders = [...own.folders, ...movedHomes];
+  const others = AGENT_PROVIDERS.filter((provider) => provider !== input.provider)
+    .flatMap((provider) => {
+      const folders = providerFolders(provider, {}, home);
+      return [...folders.folders, ...folders.files];
+    })
+    // A folder another CLI shares with this one (~/.cache/<name> never overlaps; .gemini could) stays this CLI's.
+    .filter((folder) => !ownFolders.includes(folder));
+  const privateData = privateAppData(input.userDataPath);
+  const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
+  const project = input.cwd;
+  const all = (paths: readonly string[]): string[] => [...new Set(paths.flatMap(spellings))];
+  const socketFolders = [
+    ...Object.entries(input.env)
+      .filter(([name, value]) => /^CANVASTTY_.*_ADDRESS$/u.test(name) && typeof value === "string" && isAbsolute(value))
+      .map(([, value]) => dirname(value!)),
+    ...(input.socketFolders ?? []),
+    input.sessionTemp,
+    join(input.userDataPath, "browser", "runtime"),
+    join(input.userDataPath, "lifecycle", "runtime"),
+    join(input.userDataPath, "orchestration", "runtime")
+  ];
+  return {
+    writable: all([
+      project,
+      input.sessionTemp,
+      ...ownFolders,
+      join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
+    ]),
+    writableFiles: all(own.files),
+    creatableFolders: all([...ownFolders, join(home, ".npm"), join(home, ".bun")].flatMap((folder) => ancestorsBelow(home, folder))),
+    protectedWrites: all([
+      // A repository that exists keeps its config (hooksPath, fsmonitor, filters run code when the person uses git
+      // later, outside the layer); a new one may be created, which writes its config.
+      ...(existsSync(join(project, ".git", "config")) ? [join(project, ".git", "config"), join(project, ".git", "config.lock")] : []),
+      ...(input.provider === "codex" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
+      ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
+      ...(input.provider === "opencode" ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(xdg.config, "opencode", name)) : [])
+    ]),
+    gitHooks: all([join(project, ".git", "hooks")]),
+    unreadable: all([...sensitiveHomeFolders(home, xdg.config), ...others, ...privateData]),
+    readableAgain: all([...grants, ...movedHomes]),
+    socketFolders: all(socketFolders),
+    // The temporary folder a launch's own folder lives in (sessionTemp is <temp root>/ctty-iso-…/tmp), and /tmp: where
+    // CanvasTTY's gateways put their sockets when the userData path is too long for one.
+    socketPrefixes: all([dirname(dirname(realish(input.sessionTemp))), "/private/tmp", "/tmp"].map((folder) => join(folder, "ctty-")))
+  };
+}
+
+/** The folders between `home` (exclusive) and `folder` (exclusive). */
+function ancestorsBelow(home: string, folder: string): string[] {
+  const found: string[] = [];
+  for (let current = dirname(folder); current !== home && current.startsWith(`${home}/`); current = dirname(current)) found.push(current);
+  return found;
+}
+
+/** The launch pipeline's folder name for a session (LaunchPipeline.safeSegment). */
+export function safeSegment(value: string): string {
+  return value.replace(/[^A-Za-z0-9._-]/g, "_").replace(/^\.+/, "_").slice(0, 128) || "_";
+}

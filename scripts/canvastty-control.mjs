@@ -31,6 +31,12 @@ async function privateFile(path, maximum = 16 * 1024) {
   } finally { await file.close(); }
 }
 
+/** "session" for an orchestrator session's own connection, "person" otherwise (or when it cannot be read). */
+async function connectionScope(connectionPath) {
+  try { return JSON.parse(await privateFile(connectionPath)).scope === "session" ? "session" : "person"; }
+  catch { return "person"; }
+}
+
 export async function controlRequest({ connectionPath, clientPath, method, params = {}, requestId = randomUUID(), timeoutMs = 8000 }) {
   let connection;
   try { connection = JSON.parse(await privateFile(connectionPath)); }
@@ -132,7 +138,7 @@ providers
   The agents CanvasTTY can create workers for: id (the --provider value), name,
   installed/available, signIn (ok, signed_out, expired or unknown). Run it first;
   do not search the filesystem for agent CLIs or their configuration.
-create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal|auto]
+create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile auto|normal|acceptEdits|plan]
        [--model <id>] [--effort <level>]
   provider: an id from providers; codex (default), claude, qwen, kimi, opencode,
   hermes, grok, omp, pi, cursor, minimax, devin, antigravity.
@@ -156,8 +162,13 @@ skin-select <skin-id> [--detail minimal|detailed]
 Global options: --connection <descriptor> --client-file <private-file>
                 --request-id <id> --json
 
-create defaults to the YOLO profile: full access, no sandbox approvals.
---profile auto (codex, claude, grok): the CLI's own auto mode in its sandbox.
+From the person's own terminal, create defaults to the YOLO profile (full access,
+no approvals), which CanvasTTY allows only for CLIs the person acknowledged YOLO
+for in its launcher. Inside an orchestrator session (its own connection), create
+makes a subagent of that session: without --profile it gets the session's
+profile, never more and never YOLO, in a folder inside the session's project, up
+to the limits the person set; such a connection cannot change settings or themes.
+--profile auto: the CLI's own auto mode inside CanvasTTY's outer layers.
 No global provider configuration is modified. Scope tasks before sending them.
 After a timeout, inspect status; retry identical input with the SAME request ID.
 `;
@@ -179,7 +190,11 @@ export async function runCli(argv) {
   if (method === "create") {
     if (!options.cwd) throw new Error("create requires --cwd.");
     if (options.yolo && options.profile && options.profile !== "yolo") throw new Error("Conflicting launch profiles.");
-    params = { provider: options.provider || "codex", cwd: resolve(options.cwd), profile: options.profile || "yolo",
+    // An orchestrator's own connection makes subagents: no profile means the orchestrator's (never YOLO).
+    const agentScope = !options.yolo && !options.profile
+      && await connectionScope(resolve(options.connection || defaultConnectionPath())) === "session";
+    params = { provider: options.provider || "codex", cwd: resolve(options.cwd),
+      ...(agentScope ? {} : { profile: options.yolo ? "yolo" : options.profile || "yolo" }),
       ...(options.title === undefined ? {} : { title: options.title }),
       ...(options.model === undefined ? {} : { model: options.model }),
       ...(options.effort === undefined ? {} : { effort: options.effort }) };

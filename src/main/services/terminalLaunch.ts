@@ -3,7 +3,7 @@ import { posix, win32 } from "node:path";
 import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeAutoEnvironment, openCodeYoloEnvironment } from "./openCodeConfig.ts";
-import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
+import { autoKind, CLAUDE_SANDBOX_SETTINGS, profileArguments, type LaunchProfile } from "../../shared/autoMode.ts";
 import { providerEffortArguments, providerModelArguments, type ReasoningEffort } from "../../shared/launchModel.ts";
 import {
   providerTerminalBatchCommandLine,
@@ -34,6 +34,14 @@ interface LaunchResolutionOptions {
   /** The CLI's --model and reasoning effort for this run (launchModel.ts); checked again here. */
   model?: string;
   effort?: ReasoningEffort;
+  /**
+   * The launch runs inside CanvasTTY's isolation layer. macOS refuses a sandbox inside another one, so Claude Code's own
+   * sandbox block is left out there (its commands would all fail); the layer contains them instead. A CLI without an
+   * auto mode of its own gets its "auto" (its approval bypass) only here.
+   */
+  isolated?: boolean;
+  /** The folder the CLI runs in (OpenCode's project configuration is read from it). */
+  cwd?: string;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -62,22 +70,31 @@ export function resolveTerminalLaunch(
   }
   if (providerCli.state === "unavailable") throw new Error(providerCli.diagnostic);
 
+  const kind = autoKind(provider);
+  const containedAuto = profile === "auto" && kind === "contained";
+  if (containedAuto && options.isolated !== true) {
+    throw new Error(`${provider} has no auto mode of its own; its auto runs only inside CanvasTTY's agent isolation.`);
+  }
   const launchEnvironment = provider !== "opencode" ? undefined
     : profile === "yolo" ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
-      : profile === "auto" ? openCodeAutoEnvironment({ ...environment, ...providerCli.environment }, {
-        shellGuarded: options.shellGuarded === true,
-        ...(options.thirdPartyModel ? { thirdPartyModel: true } : {})
+      : profile === "auto" || profile === "acceptEdits" ? openCodeAutoEnvironment({ ...environment, ...providerCli.environment }, {
+        // Accept-edits: edits run, every shell command asks.
+        shellGuarded: profile === "auto" && options.shellGuarded === true,
+        ...(options.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...(options.cwd ? { cwd: options.cwd } : {})
       })
         : undefined;
-  const auto = profile === "auto";
+  // Claude Code's own sandbox where CanvasTTY's layer does not run (and the CLI has one on this platform).
+  const claudeSandbox = provider === "claude" && (profile === "auto" || profile === "acceptEdits") && options.isolated !== true
+    && (platform === "darwin" || platform === "linux");
   const providerArgs = [
     ...(provider === "codex" && agentBrowserArgs.includes("-c") ? ["--no-daemon"] : []),
-    ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
-    ...(auto ? autoModeArguments(provider, options.thirdPartyModel === true) : []),
+    ...((profile === "yolo" || containedAuto) && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
+    ...(profile !== "normal" && profile !== "yolo" && !containedAuto ? profileArguments(provider, profile, options.thirdPartyModel === true) : []),
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
-    // Its sandbox for "auto" joins the same one.
+    // Its sandbox joins the same one.
     ...(provider === "claude"
-      ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
+      ? mergeClaudeInlineSettings(claudeSandbox ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
       : agentBrowserArgs),
     ...providerModelArguments(provider, options.model),
     ...providerEffortArguments(provider, options.effort),
@@ -217,9 +234,9 @@ const DANGEROUS_ARGUMENTS: Record<Exclude<ProviderId, "terminal" | "opencode">, 
   // pi 0.85.1 has no permission system, so it has no auto-approve flag. `-a, --approve`
   // only skips its one prompt (trust project-local settings for this run).
   pi: ["--approve"],
-  // The Cursor CLI follows Claude Code conventions; its permission bypass is the
-  // same flag Claude Code documents.
-  cursor: ["--dangerously-skip-permissions"],
+  // cursor-agent rejects Claude Code's --dangerously-skip-permissions; its own
+  // bypass is `-f, --force` ("Force allow commands unless explicitly denied").
+  cursor: ["--force"],
   // Measured on @minimax-ai/code 0.5.1: the CLI has no permission bypass flag.
   // Permission modes (default/auto/bypassPermissions/off) are settings.json and
   // TUI state (/permission, Alt+M) only, so YOLO launches the stock CLI.
@@ -347,11 +364,13 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 const CORE_OWNED_FLAGS = new Set<string>([
   ...Object.values(DANGEROUS_ARGUMENTS).flat().filter((argument) => argument.startsWith("-")),
   "--full-auto", "--approve-for-me", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
+  // cursor-agent: --force/-f skip approvals, --approve-mcps approves every MCP server; Grok's --always-approve.
+  "--force", "--approve-mcps", "--always-approve", "--auto", "--agent", "--mode", "--plan", "--yolo",
   "--continue", "--resume", "--session", "--last", "--conversation", "--fork-session"
 ]);
 const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
   claude: ["-c", "-r"],
-  cursor: ["-c", "-r"],
+  cursor: ["-c", "-r", "-f"],
   qwen: ["-c", "-r", "-y"],
   opencode: ["-c", "-s"],
   codex: ["-a", "-s"]

@@ -1,6 +1,7 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
 import type {
+  PluginEnvironmentKeeps,
   PluginEnvironmentKind,
   PluginLaunchValues,
   ProviderId,
@@ -76,6 +77,11 @@ export class EnvironmentRegistry {
   constructor(dependencies: EnvironmentRegistryDependencies) {
     this.dependencies = dependencies;
     this.timeouts = { ...ENVIRONMENT_TIMEOUTS, ...dependencies.timeouts };
+  }
+
+  /** What the plugin declared its environment keeps of CanvasTTY's protection (nothing when it declared nothing). */
+  keeps(environment: Pick<PersistedEnvironmentRef, "pluginId" | "kind">): PluginEnvironmentKeeps {
+    return { ...(this.lookup(environment.pluginId, environment.kind)?.kind.keeps ?? {}) };
   }
 
   /** True when the plugin named by a saved ref can serve that kind now. */

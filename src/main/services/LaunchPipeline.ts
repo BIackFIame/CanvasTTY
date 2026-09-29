@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -11,6 +12,7 @@ import type {
 } from "../../shared/contracts.ts";
 import { claudeCoreSettingsKey, coreOwnedLaunchArgument, parseInlineSettings } from "./terminalLaunch.ts";
 import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
+import { LaunchRefusal } from "./launchRefusal.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
 export interface LaunchContributor {
@@ -143,7 +145,7 @@ export class LaunchPipeline {
    * Checks launcher values against each plugin's declared fields and fills defaults.
    * Throws with a person-readable reason; returns undefined when nothing was chosen.
    */
-  normalizeOptions(provider: ProviderId, candidate: unknown): Record<string, PluginLaunchValues> | undefined {
+  normalizeOptions(provider: ProviderId, candidate: unknown, context?: { delegated?: boolean }): Record<string, PluginLaunchValues> | undefined {
     if (candidate === undefined) return undefined;
     if (!isRecord(candidate) || Object.keys(candidate).length > MAX_OPTION_PLUGINS) throw new Error("Launch options are invalid.");
     if (Object.keys(candidate).length === 0) return undefined;
@@ -153,6 +155,10 @@ export class LaunchPipeline {
     for (const [pluginId, raw] of Object.entries(candidate)) {
       const contributor = contributors.get(pluginId);
       if (!contributor) throw new Error(unavailableReason(pluginId));
+      // An orchestrator picks options for its subagents only where the plugin said that is safe.
+      if (context?.delegated && contributor.launch.delegable !== true) {
+        throw new LaunchRefusal(`${contributor.pluginName} has not declared its launch options safe for an orchestrator to choose; only the person chooses them, in the launcher.`);
+      }
       const { appliesTo, fields } = contributor.launch;
       if (appliesTo && !appliesTo.includes(provider as never)) {
         throw new Error(`${contributor.pluginName} launch options do not apply to ${provider}.`);
@@ -279,6 +285,9 @@ export class LaunchPipeline {
       }
       const forbidden = contributedArgs.find((argument) => coreOwnedLaunchArgument(context.provider, argument));
       if (forbidden) return refuse(`${name} added ${forbidden.slice(0, 60)}, which only CanvasTTY may pass.`);
+      // A configuration a CLI reads from the environment or an argument may not decide its approvals either.
+      const widening = permissionConfigProblem(context.provider, contribution);
+      if (widening) return refuse(`${name} ${widening}`);
       let filesDirectory: string | null = null;
       if (contribution.files.length > 0) {
         filesDirectory = join(runDirectory, safeSegment(contributor.pluginId));
@@ -451,6 +460,87 @@ function claudeSettingsArguments(args: readonly string[], files: Contribution["f
     result.push("--settings", JSON.stringify(settings));
   }
   return result;
+}
+
+/** Keys of a CLI configuration that decide approvals, the sandbox or bypasses (anywhere in the object). */
+const PERMISSION_CONFIG_KEY = /permission|approv|yolo|sandbox|dangerous|bypass|auto_?accept|trust/i;
+
+function permissionKey(value: unknown, depth = 0): string | null {
+  if (depth > 8 || !value || typeof value !== "object") return null;
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (PERMISSION_CONFIG_KEY.test(key)) return key;
+    const nested = permissionKey(entry, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/** JSON with // and /* comments (JSONC), or null. */
+function parseConfigText(text: string): unknown {
+  try { return JSON.parse(text); } catch { /* maybe JSONC */ }
+  try { return JSON.parse(text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/(^|[^:"\\])\/\/.*$/gmu, "$1")); } catch { return null; }
+}
+
+/**
+ * The contribution hands the CLI a configuration (OpenCode's OPENCODE_CONFIG file, OPENCODE_CONFIG_DIR, Kimi's
+ * `--config` JSON or `--config-file`) that sets approval, permission or sandbox keys: those are CanvasTTY's (the
+ * person's profile). A file must be one of the contribution's own launch files or a readable file; one CanvasTTY
+ * cannot read and check is refused. Returns the problem as text.
+ */
+export function permissionConfigProblem(provider: ProviderId, contribution: Pick<Contribution, "env" | "args" | "files">): string | null {
+  const fromFile = (value: string): { text: string } | { problem: string } => {
+    if (value.startsWith(`${LAUNCH_FILES_TOKEN}/`)) {
+      const file = contribution.files.find((candidate) => candidate.relPath === value.slice(LAUNCH_FILES_TOKEN.length + 1));
+      return file ? { text: file.content } : { problem: `names a launch file it did not write (${value.slice(0, 80)}).` };
+    }
+    try { return { text: readFileSync(value, "utf8") }; } catch { return { problem: `hands the CLI a configuration file CanvasTTY cannot check (${value.slice(0, 80)}).` }; }
+  };
+  const check = (label: string, text: string): string | null => {
+    const parsed = parseConfigText(text);
+    if (parsed === null || typeof parsed !== "object") return `hands the CLI ${label} that is not a JSON object.`;
+    const key = permissionKey(parsed);
+    return key ? `sets ${key} in ${label}, which decides approvals; only the person's profile does.` : null;
+  };
+  if (provider === "opencode") {
+    for (const name of Object.keys(contribution.env)) {
+      if (/^OPENCODE_PERMISSION$/iu.test(name)) return `sets ${name}, which decides approvals; only the person's profile does.`;
+    }
+    const file = contribution.env.OPENCODE_CONFIG;
+    if (file !== undefined) {
+      const read = fromFile(file);
+      if ("problem" in read) return read.problem;
+      const problem = check("its OpenCode configuration (OPENCODE_CONFIG)", read.text);
+      if (problem) return problem;
+    }
+    const folder = contribution.env.OPENCODE_CONFIG_DIR;
+    if (folder !== undefined) {
+      for (const name of ["opencode.json", "opencode.jsonc", "config.json"]) {
+        const path = folder.startsWith(`${LAUNCH_FILES_TOKEN}/`) ? `${folder}/${name}` : join(folder, name);
+        const read = fromFile(path);
+        if ("problem" in read) continue;
+        const problem = check(`its OpenCode configuration (OPENCODE_CONFIG_DIR/${name})`, read.text);
+        if (problem) return problem;
+      }
+    }
+  }
+  if (provider === "kimi") {
+    for (let index = 0; index < contribution.args.length; index++) {
+      const argument = contribution.args[index]!;
+      const inline = argument === "--config" ? contribution.args[index + 1] : argument.startsWith("--config=") ? argument.slice("--config=".length) : undefined;
+      const file = argument === "--config-file" ? contribution.args[index + 1] : argument.startsWith("--config-file=") ? argument.slice("--config-file=".length) : undefined;
+      if (inline !== undefined) {
+        const problem = check("its Kimi --config", inline);
+        if (problem) return problem;
+      }
+      if (file !== undefined) {
+        const read = fromFile(file);
+        if ("problem" in read) return read.problem;
+        const problem = check("its Kimi --config-file", read.text);
+        if (problem) return problem;
+      }
+    }
+  }
+  return null;
 }
 
 /** Env names a plugin may set: valid, not reserved for CanvasTTY or the loader, text values. */

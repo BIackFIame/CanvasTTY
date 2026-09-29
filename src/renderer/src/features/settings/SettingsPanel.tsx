@@ -844,6 +844,34 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ baseProtectionEnabled: value === "on" })}
                 />
               </SettingGroup>
+              <SettingGroup label={t(locale, "agentIsolation")} description={t(locale, "agentIsolationDescription")}>
+                <Segmented
+                  value={settings.agentIsolation === "off" ? "off" : "on"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ agentIsolation: value === "off" ? "off" : "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "defaultLaunchProfile")} description={t(locale, "defaultLaunchProfileDescription")}>
+                <Segmented
+                  value={settings.defaultLaunchProfile ?? "auto"}
+                  options={[["auto", t(locale, "autoProfile")], ["acceptEdits", t(locale, "acceptEditsProfile")], ["normal", t(locale, "manualProfile")], ["plan", t(locale, "planProfile")]]}
+                  onChange={(value) => void onChange({ defaultLaunchProfile: value as AppSettings["defaultLaunchProfile"] })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "orchestrationMaxDepth")} description={t(locale, "orchestrationMaxDepthDescription")}>
+                <Segmented
+                  value={String(settings.orchestrationMaxDepth ?? 2)}
+                  options={[["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"]]}
+                  onChange={(value) => void onChange({ orchestrationMaxDepth: Number(value) })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "orchestrationMaxSubagents")} description={t(locale, "orchestrationMaxSubagentsDescription")}>
+                <Segmented
+                  value={String(settings.orchestrationMaxSubagents ?? 8)}
+                  options={[...new Set([2, 4, 8, 16, 32, settings.orchestrationMaxSubagents ?? 8])].sort((a, b) => a - b).map((count) => [String(count), String(count)] as [string, string])}
+                  onChange={(value) => void onChange({ orchestrationMaxSubagents: Number(value) })}
+                />
+              </SettingGroup>
               <AgentHooksSettings
                 settings={settings}
                 plugins={plugins}

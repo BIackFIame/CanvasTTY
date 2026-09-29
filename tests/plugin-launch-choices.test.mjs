@@ -153,7 +153,7 @@ test("spawn_agent takes plugin launch options and hands them to the launch", () 
     assert.equal(validateOrchestrationArguments("spawn_agent", { ...base, launchOptions }).ok, false, JSON.stringify(launchOptions).slice(0, 60));
   }
   const created = [];
-  const parent = { id: "orch", provider: "claude", role: "orchestrator", position: { x: 0, y: 0 }, exitCode: null };
+  const parent = { id: "orch", provider: "claude", role: "orchestrator", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 }, exitCode: null };
   const terminals = {
     get: (id) => (id === "orch" ? parent : undefined),
     getMetadata: (id) => (id === "orch" ? parent : null),
@@ -161,8 +161,8 @@ test("spawn_agent takes plugin launch options and hands them to the launch", () 
     create: (request) => { created.push(request); return { id: "child", ...request, status: "starting", title: "c" }; }
   };
   const control = new AgentControlService(terminals);
-  control.spawn({ parentSessionId: "orch", provider: "codex", cwd: "/work", launchOptions: { "canvastty-accounts": { account: "ollama" } } });
-  control.spawn({ parentSessionId: "orch", provider: "codex", cwd: "/work" });
+  control.spawn({ parentSessionId: "orch", provider: "codex", cwd: process.cwd(), launchOptions: { "canvastty-accounts": { account: "ollama" } } });
+  control.spawn({ parentSessionId: "orch", provider: "codex", cwd: process.cwd() });
   assert.deepEqual(created[0].launchOptions, { "canvastty-accounts": { account: "ollama" } });
   assert.equal("launchOptions" in created[1], false);
   assert.equal(created[0].role, "subagent");

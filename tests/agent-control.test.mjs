@@ -669,21 +669,18 @@ test("cancel disposes the subagent and plain terminals are not agents", async ()
   terminals.disposeAll();
 });
 
-test("a parent cannot exceed the subagent fan-out cap", () => {
+test("a parent cannot exceed the person's live-subagent limit, nor the card cap", () => {
   const { terminals, control } = serviceFixture();
-  const parent = terminals.create({
-    provider: "codex",
-    cwd: process.cwd(),
-    profile: "normal",
-    position: { x: 0, y: 0 }
-  });
-  for (let index = 0; index < 16; index += 1) {
-    control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
-  }
-  assert.throws(
-    () => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
-    /16 subagents/u
-  );
+  const parent = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 8; index += 1) control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
+    /already runs 8 live subagents, its limit \(Settings → Agents/u);
+  terminals.disposeAll();
+
+  const wide = new AgentControlService(terminals, { limits: () => ({ maxDepth: 2, maxSubagents: 32 }) });
+  const other = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 16; index += 1) wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() }), /16 subagent cards/u);
   terminals.disposeAll();
 });
 

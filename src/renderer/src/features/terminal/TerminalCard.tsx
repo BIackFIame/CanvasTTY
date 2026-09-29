@@ -974,6 +974,23 @@ function TerminalCardView({
               {t(locale, session.autoDowngraded ? "autoDowngraded" : "autoProfile")}
             </span>
           )}
+          {(session.profile === "acceptEdits" || session.profile === "plan" || session.profile === "yolo") && (
+            <span className="terminal-card__role" title={t(locale, session.profile === "acceptEdits" ? "acceptEditsNote" : session.profile === "plan" ? "planNote" : "bypassInsideIsolation")}>
+              {t(locale, session.profile === "acceptEdits" ? "acceptEditsProfile" : session.profile === "plan" ? "planProfile" : "bypassProfile")}
+            </span>
+          )}
+          {session.isolation && (
+            <span className={`terminal-card__role terminal-card__isolation terminal-card__isolation--${session.isolation.state}`} data-isolation={session.isolation.state}
+              title={session.isolation.state === "on" ? t(locale, "isolationOnNote") : session.isolation.reason ?? ""}>
+              {t(locale, session.isolation.state === "on" ? "isolationOn" : session.isolation.state === "off" ? "isolationOff"
+                : session.isolation.state === "environment" ? "isolationEnvironment" : "isolationUnavailable")}
+            </span>
+          )}
+          {session.configuredMode && (
+            <span className="terminal-card__role" title={`${session.configuredMode.mode} · ${session.configuredMode.source}`}>
+              {t(locale, "configuredModeBadge")}: {session.configuredMode.mode}
+            </span>
+          )}
           {session.environment && (
             <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
               {session.environment.label}

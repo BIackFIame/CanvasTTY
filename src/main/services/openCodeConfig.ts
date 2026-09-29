@@ -2,6 +2,8 @@ import { ORCHESTRATION_MCP_SERVER_NAME } from "../../agent-browser/orchestration
 import { MCP_SERVER_NAME } from "../../agent-browser/tool-catalog.mjs";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 import { otherSpellings } from "./onDiskPath.ts";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
 
@@ -86,12 +88,15 @@ export function openCodeYoloEnvironment(
  */
 export function openCodeAutoEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
-  options: { shellGuarded: boolean; thirdPartyModel?: boolean }
+  options: { shellGuarded: boolean; thirdPartyModel?: boolean; cwd?: string; readFile?: (path: string) => string | null }
 ): Record<string, string> {
   const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
   const agents = objectField(config.agent, "agent");
   const build = objectField(agents.build, "agent.build");
   const permission = build.permission === undefined ? {} : objectField(build.permission, "agent.build.permission");
+  // The person's own deny and ask rules (their config files and this run's inline config) come after the auto rules,
+  // so they still win: auto never allows what the person denied or wanted to be asked about.
+  const person = openCodePersonRules(environment, options.cwd, options.readFile);
   return {
     [OPENCODE_CONFIG_CONTENT]: JSON.stringify({
       ...config,
@@ -99,14 +104,94 @@ export function openCodeAutoEnvironment(
         ...agents,
         build: {
           ...build,
-          permission: {
+          permission: withPersonRules({
             ...permission,
             ...openCodeAutoPermission(options.shellGuarded && options.thirdPartyModel !== true)
-          }
+          }, person)
         }
       }
     })
   };
+}
+
+type Rule = string | Record<string, string>;
+
+/**
+ * The deny and ask rules the person's OpenCode configuration sets for the tools auto allows (read, glob, grep, list,
+ * edit, bash): the global and project config files, OPENCODE_CONFIG, and the inline config this run started with,
+ * top-level `permission` and `agent.build.permission` alike. Allow rules are left out (auto allows those already).
+ */
+export function openCodePersonRules(
+  environment: Readonly<Record<string, string | undefined>>,
+  cwd?: string,
+  readFile: (path: string) => string | null = readTextFile
+): Record<string, Rule> {
+  const home = environment.HOME ?? "";
+  const configHome = environment.XDG_CONFIG_HOME || (home ? join(home, ".config") : "");
+  const files = [
+    ...(configHome ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(configHome, "opencode", name)) : []),
+    ...(environment.OPENCODE_CONFIG ? [environment.OPENCODE_CONFIG] : []),
+    ...(cwd ? ["opencode.json", "opencode.jsonc", join(".opencode", "opencode.json"), join(".opencode", "opencode.jsonc")].map((name) => join(cwd, name)) : [])
+  ];
+  const configs: unknown[] = [];
+  for (const file of files) {
+    const text = readFile(file);
+    if (text !== null) configs.push(parseLoose(text));
+  }
+  configs.push(parseLoose(environment[OPENCODE_CONFIG_CONTENT] ?? ""));
+  const rules: Record<string, Rule> = {};
+  for (const config of configs) {
+    if (!isObject(config)) continue;
+    const agent = isObject(config.agent) && isObject(config.agent.build) ? config.agent.build.permission : undefined;
+    for (const permission of [config.permission, agent]) {
+      if (permission === "deny" || permission === "ask") {
+        for (const tool of AUTO_TOOLS) rules[tool] = permission;
+        continue;
+      }
+      if (!isObject(permission)) continue;
+      for (const tool of AUTO_TOOLS) {
+        const value = permission[tool];
+        if (value === "deny" || value === "ask") { rules[tool] = value; continue; }
+        if (!isObject(value)) continue;
+        const current = rules[tool];
+        if (typeof current === "string") continue;
+        const kept: Record<string, string> = { ...(current ?? {}) };
+        for (const [pattern, action] of Object.entries(value)) {
+          if (action === "deny" || action === "ask") { delete kept[pattern]; kept[pattern] = action; }
+        }
+        if (Object.keys(kept).length > 0) rules[tool] = kept;
+      }
+    }
+  }
+  return rules;
+}
+
+const AUTO_TOOLS = ["read", "glob", "grep", "list", "edit", "bash"] as const;
+
+/** Appends the person's rules after the auto rules: a whole-tool deny/ask replaces the tool, patterns go last. */
+function withPersonRules(permission: OpenCodeConfig, person: Record<string, Rule>): OpenCodeConfig {
+  const result: OpenCodeConfig = { ...permission };
+  for (const [tool, rule] of Object.entries(person)) {
+    if (typeof rule === "string") { result[tool] = rule; continue; }
+    const current = result[tool];
+    const merged: Record<string, string> = typeof current === "string" ? { "*": current } : isObject(current) ? { ...(current as Record<string, string>) } : {};
+    for (const [pattern, action] of Object.entries(rule)) {
+      delete merged[pattern];
+      merged[pattern] = action;
+    }
+    result[tool] = merged;
+  }
+  return result;
+}
+
+function parseLoose(text: string): unknown {
+  if (!text.trim()) return null;
+  try { return JSON.parse(text); } catch { /* JSONC */ }
+  try { return JSON.parse(text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/(^|[^:"\\])\/\/.*$/gmu, "$1").replace(/,\s*([}\]])/gu, "$1")); } catch { return null; }
+}
+
+function readTextFile(path: string): string | null {
+  try { return readFileSync(path, "utf8"); } catch { return null; }
 }
 
 /** The auto rules (see openCodeAutoEnvironment); insertion order matters, the last matching rule wins. */

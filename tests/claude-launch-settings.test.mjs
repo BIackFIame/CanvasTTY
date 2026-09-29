@@ -122,7 +122,7 @@ test("Normal and Auto: one effective --settings keeps CanvasTTY's hooks (and Aut
       const [settings] = settingsOf(args);
       assert.deepEqual(settings.hooks, HOOKS.hooks, `${profile}: CanvasTTY's hooks stay`);
       assert.deepEqual(settings.env, ROUTE.env);
-      if (profile === "auto") assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false });
+      if (profile === "auto") assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false });
       else assert.equal(settings.sandbox, undefined);
     }
     for (const answer of [

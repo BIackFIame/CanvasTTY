@@ -2,7 +2,8 @@ import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orches
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { AgentProviderId, ProviderId, SessionRole } from "../../../shared/contracts.ts";
 import { launchEffortProblem, launchModelProblem } from "../../../shared/launchModel.ts";
-import { PromptNotDeliveredError, subagentProfile, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
+import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
+import { LaunchRefusal } from "../launchRefusal.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
 import {
   DEFAULT_AGENT_WAIT_SECONDS,
@@ -78,6 +79,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (error && typeof error === "object" && "bridgeError" in error) throw error;
       // The launch was refused, cancelled or superseded: retrying the same call would not deliver it either.
       if (error instanceof PromptNotDeliveredError) throw orchestrationBridgeError("INVALID_REQUEST", error.message, false);
+      // A delegation or launch rule said no: the same call would be refused again.
+      if (error instanceof LaunchRefusal) throw orchestrationBridgeError("INVALID_REQUEST", error.message, false);
       throw orchestrationBridgeError(
         "INTERNAL_ERROR",
         error instanceof Error ? error.message : "Orchestration command failed.",
@@ -135,8 +138,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     const problem = (args.model !== undefined ? launchModelProblem(provider, args.model) : null)
       ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
     if (problem) throw orchestrationBridgeError("INVALID_REQUEST", `${problem} Call list_providers for what ${provider} takes.`, false);
-    const parent = this.control.status(orchestratorId);
-    const profile = subagentProfile(parent.profile, provider, args.profile);
+    const profile = this.control.profileFor(orchestratorId, provider, args.profile);
     if ("error" in profile) throw orchestrationBridgeError("INVALID_REQUEST", profile.error, false);
     if (args.model !== undefined) {
       let unknown: string | null = null;

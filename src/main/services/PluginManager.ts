@@ -1644,8 +1644,9 @@ const MAX_LAUNCH_TEXT = 200;
 
 function validateServiceLaunch(value: unknown): PluginServiceLaunch {
   if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
-  assertOnlyKeys(value, ["appliesTo", "fields", "policy"], "Plugin service launch");
+  assertOnlyKeys(value, ["appliesTo", "fields", "policy", "delegable"], "Plugin service launch");
   if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  if (value.delegable !== undefined && typeof value.delegable !== "boolean") throw new Error("Plugin launch delegable must be true or false.");
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
@@ -1654,7 +1655,8 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
-  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}) };
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}),
+    ...(value.delegable === true ? { delegable: true } : {}) };
 }
 
 function validateServiceDecide(value: unknown): PluginServiceDecide {
@@ -1753,7 +1755,7 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   const kinds = new Set<string>();
   return value.map((candidate): PluginEnvironmentKind => {
     if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
-    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields"], "Plugin environment");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps"], "Plugin environment");
     const kind = requiredString(candidate.kind, "environment kind", 32);
     // Same shape the session store accepts for a saved environment's kind.
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
@@ -1771,9 +1773,21 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
       appliesTo = [...new Set(candidate.appliesTo as NonNullable<PluginEnvironmentKind["appliesTo"]>)];
     }
     const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields);
+    let keeps: PluginEnvironmentKind["keeps"];
+    if (candidate.keeps !== undefined) {
+      if (!isRecord(candidate.keeps)) throw new Error(`Plugin environment ${kind} keeps must be an object.`);
+      assertOnlyKeys(candidate.keeps, ["launch", "isolated", "confines"], `Plugin environment ${kind} keeps`);
+      keeps = {};
+      for (const key of ["launch", "isolated", "confines"] as const) {
+        const value = candidate.keeps[key];
+        if (value === undefined) continue;
+        if (typeof value !== "boolean") throw new Error(`Plugin environment ${kind} keeps.${key} must be true or false.`);
+        keeps[key] = value;
+      }
+    }
     return {
       kind, label, ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
-      ...(fields?.length ? { fields } : {})
+      ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {})
     };
   });
 }

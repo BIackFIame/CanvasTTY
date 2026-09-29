@@ -368,6 +368,7 @@ test("a spawn_agent canceled while it was starting closes the agent it created",
   const canceled = [];
   const control = {
     status: () => ({ role: "orchestrator", provider: "codex" }),
+    profileFor: () => ({ profile: "normal", inherited: true }),
     spawn: async () => {
       controller.abort();
       return { id: "child-1", provider: "codex", status: "running", title: "worker" };

@@ -14,7 +14,38 @@ import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
 import { LaunchOptionsSection } from "./LaunchOptionsSection";
-import { hasAutoMode } from "../../../../shared/autoMode";
+import { autoKind, availableProfiles, BYPASS_CHANGES_NOTHING } from "../../../../shared/autoMode";
+import type { TranslationKey } from "../../lib/i18n";
+
+/** Agent isolation can contain an agent here: the person has it on and this system has a layer (macOS, Linux). */
+export function isolationAvailable(settings: AppSettings, platform: string): boolean {
+  return settings.agentIsolation !== "off" && (platform === "darwin" || platform === "linux");
+}
+
+/** The mode the launcher starts in for this CLI: the person's default, else the next one the CLI has. */
+export function initialProfile(provider: ProviderId, settings: AppSettings, platform: string): LaunchProfileId {
+  const offered = availableProfiles(provider, isolationAvailable(settings, platform));
+  const order: LaunchProfileId[] = ["auto", "acceptEdits", "normal", "plan"];
+  const wanted = settings.defaultLaunchProfile ?? "auto";
+  return order.slice(Math.max(0, order.indexOf(wanted))).find((profile) => offered.includes(profile)) ?? "normal";
+}
+
+const PROFILE_LABEL: Record<LaunchProfileId, TranslationKey> = {
+  auto: "autoProfile", normal: "manualProfile", acceptEdits: "acceptEditsProfile", plan: "planProfile", yolo: "bypassProfile"
+};
+
+/** What the chosen mode does for this CLI, honestly per CLI. */
+export function profileNoteKey(provider: ProviderId, profile: LaunchProfileId): TranslationKey | null {
+  if (profile === "auto") {
+    const kind = autoKind(provider);
+    if (provider === "grok") return "autoNoteGrok";
+    return kind === "native" ? "autoNoteNative" : kind === "config" ? "autoNoteOpenCode" : kind === "contained" ? "autoNoteContained" : null;
+  }
+  if (profile === "acceptEdits") return "acceptEditsNote";
+  if (profile === "plan") return provider === "codex" ? "planNoteCodex" : "planNote";
+  if (profile === "normal") return "manualNote";
+  return null;
+}
 
 interface AgentLaunchDialogProps {
   /** "terminal" opens it only while a plugin environment applies to terminals (folder and Where). */
@@ -42,7 +73,8 @@ export function AgentLaunchDialog({
   onEnableAgentControl,
   onLaunch
 }: AgentLaunchDialogProps): React.JSX.Element | null {
-  const [profile, setProfile] = useState<LaunchProfileId>("normal");
+  const platform = window.canvasTTY?.window?.platform ?? "";
+  const [profile, setProfile] = useState<LaunchProfileId>(provider ? initialProfile(provider, settings, platform) : "normal");
   const [role, setRole] = useState<LaunchRole>("agent");
   const [cwd, setCwd] = useState(settings.lastDirectory);
   const [confirmDanger, setConfirmDanger] = useState(false);
@@ -56,7 +88,7 @@ export function AgentLaunchDialog({
 
   useEffect(() => {
     if (!provider) return;
-    setProfile("normal");
+    setProfile(initialProfile(provider, settings, platform));
     setRole("agent");
     setCwd(settings.lastDirectory);
     setConfirmDanger(false);
@@ -169,20 +201,13 @@ export function AgentLaunchDialog({
         </div>}
 
         <div className="profile-row">
-          {!isTerminal && <>
-          <button className={profile === "normal" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
-            setProfile("normal");
-            setConfirmDanger(false);
-          }}>{t(locale, "normal")}</button>
-          {hasAutoMode(provider) && <button className={profile === "auto" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
-            setProfile("auto");
-            setConfirmDanger(false);
-          }}>{t(locale, "autoProfile")}</button>}
-          <button className={profile === "yolo" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
-            setProfile("yolo");
-            setConfirmDanger(false);
-          }}>{t(locale, "yolo")}</button>
-          </>}
+          {!isTerminal && availableProfiles(provider, isolationAvailable(settings, platform)).map((mode) => (
+            <button key={mode} className={profile === mode ? "profile-button profile-button--active" : "profile-button"} type="button"
+              aria-pressed={profile === mode} onClick={() => {
+                setProfile(mode);
+                setConfirmDanger(false);
+              }}>{t(locale, PROFILE_LABEL[mode])}</button>
+          ))}
           <button className="launch-submit" type="button" disabled={busy || endpointMissing} onClick={() => void submit()}>
             {busy ? <span className="launch-submit__busy" /> : <UiIcon name="arrow" size={38} />}
           </button>
@@ -204,10 +229,16 @@ export function AgentLaunchDialog({
 
         <LaunchOptionsSection provider={provider} locale={locale} onChange={changeLaunchOptions} onEnvironmentChange={changeEnvironment} />
 
-        {profile === "auto" && <div className="role-note"><span>{t(locale, "autoProfileNote")}</span></div>}
+        {!isTerminal && profileNoteKey(provider, profile) && (
+          <div className="role-note">
+            <span>{t(locale, profileNoteKey(provider, profile)!)}</span>
+            {profile !== "normal" && <span>{t(locale, isolationAvailable(settings, platform) ? "isolationNoteOn" : "isolationNoteOff")}</span>}
+          </div>
+        )}
         {profile === "yolo" && (
           <div className={`danger-note ${confirmDanger ? "danger-note--confirm" : ""}`}>
-            <strong>{t(locale, dangerKey)}</strong>
+            <strong>{t(locale, BYPASS_CHANGES_NOTHING.has(provider) ? "bypassChangesNothing" : dangerKey)}</strong>
+            {!BYPASS_CHANGES_NOTHING.has(provider) && <span>{t(locale, isolationAvailable(settings, platform) ? "bypassInsideIsolation" : "bypassWithoutIsolation")}</span>}
             {!acknowledged && <span>{confirmDanger ? t(locale, "dangerousFirstUse") : t(locale, "confirmLaunch")}</span>}
           </div>
         )}

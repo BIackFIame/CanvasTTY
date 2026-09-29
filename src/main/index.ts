@@ -47,6 +47,8 @@ import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
+import { AgentIsolation } from "./services/isolation/AgentIsolation";
+import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
@@ -557,6 +559,10 @@ async function initializeServices(): Promise<void> {
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureRedaction(redaction);
   terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
+  // The operating-system isolation layer (Settings → Agents → Agent isolation) and YOLO only where the person
+  // acknowledged it: both decided here, in the main process, for every launch whoever asks for it.
+  terminalManager.configureIsolation(new AgentIsolation({ userDataPath, enabled: () => settings.get().agentIsolation !== "off" }));
+  terminalManager.configureYoloAcknowledgement((provider) => settings.get().acknowledgedDangerousProfiles.includes(provider as AgentProviderId));
   // OpenCode's auto profile runs shell commands without asking only while base protection guards them.
   terminalManager.configureBaseProtection(() => settings.get().baseProtectionEnabled);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
@@ -601,11 +607,19 @@ async function initializeServices(): Promise<void> {
     models: (provider) => providerModels.peek(provider),
     checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
     limits: () => limitsService?.peek() ?? null,
-    launchContributors: () => pluginManager?.launchContributors() ?? []
+    launchContributors: () => pluginManager?.launchContributors() ?? [],
+    containment: () => terminalManager?.containment() === true
   };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.
+  // Every delegation (spawn_agent, an orchestrator's own control connection) goes through this one service: the
+  // person's limits, profile ceilings, project folder and isolation rules apply the same way to each.
+  const managedTerminals = terminalManager;
+  const agentControlService = new AgentControlService(managedTerminals, {
+    limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
+    containment: () => managedTerminals.containment()
+  });
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
     windowsHostPath: process.platform === "win32"
@@ -613,7 +627,7 @@ async function initializeServices(): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined,
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools, providerDirectorySources)
+    handler: new ScopedOrchestrationHandler(agentControlService, pluginTools, providerDirectorySources)
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
@@ -663,11 +677,17 @@ async function initializeServices(): Promise<void> {
       providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits,
         models: providerDirectorySources.models }),
       checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
+      spawnSubagent: (request) => agentControlService.spawn({ parentSessionId: request.parentSessionId, provider: request.provider,
+        cwd: request.cwd, ...(request.title !== undefined ? { title: request.title } : {}),
+        ...(request.profile !== undefined ? { profile: request.profile as LaunchProfileId } : {}),
+        ...(request.model !== undefined ? { model: request.model } : {}), ...(request.effort !== undefined ? { effort: request.effort } : {}) }),
       windowsHostPath });
     agentControl = gateway;
     try {
       const connection = await gateway.start();
-      terminalManager.setControlConnection({ connectionPath: connection, cliPath: agentControlCliPath });
+      // Orchestrator sessions get a connection of their own (grantSession), never the app-wide descriptor.
+      terminalManager.setControlConnection({ connectionPath: connection, cliPath: agentControlCliPath,
+        grant: (sessionId) => gateway.grantSession(sessionId) });
       console.log(`CANVASTTY_AGENT_CONTROL_READY ${connection}`);
     } catch {
       if (agentControl === gateway) agentControl = null;
