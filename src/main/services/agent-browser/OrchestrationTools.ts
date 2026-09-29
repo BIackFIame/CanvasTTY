@@ -2,7 +2,7 @@ import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orches
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { AgentProviderId, ProviderId, SessionRole } from "../../../shared/contracts.ts";
 import { launchEffortProblem, launchModelProblem } from "../../../shared/launchModel.ts";
-import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
+import { PromptNotDeliveredError, subagentProfile, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
 import {
   DEFAULT_AGENT_WAIT_SECONDS,
@@ -135,6 +135,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     const problem = (args.model !== undefined ? launchModelProblem(provider, args.model) : null)
       ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
     if (problem) throw orchestrationBridgeError("INVALID_REQUEST", `${problem} Call list_providers for what ${provider} takes.`, false);
+    const parent = this.control.status(orchestratorId);
+    const profile = subagentProfile(parent.profile, provider, args.profile);
+    if ("error" in profile) throw orchestrationBridgeError("INVALID_REQUEST", profile.error, false);
     if (args.model !== undefined) {
       let unknown: string | null = null;
       try { unknown = await this.providers.checkModel?.(provider, args.model as string) ?? null; } catch { unknown = null; }
@@ -148,7 +151,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
       ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {}),
       ...(args.model !== undefined ? { model: args.model as string } : {}),
-      ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {})
+      ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
+      profile: profile.profile
     });
     if (signal?.aborted) {
       // Canceled while the agent was starting: nobody will receive its id, so close it.
@@ -164,6 +168,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       provider: created.provider,
       status: created.status,
       title: created.title,
+      profile: created.profile,
+      ...(profile.inherited ? { profileInherited: true } : {}),
       ...(created.model !== undefined ? { model: created.model } : {}),
       ...(created.effort !== undefined ? { effort: created.effort } : {})
     };
@@ -218,7 +224,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         sessionId: session.id,
         provider: session.provider,
         status: session.status,
-        title: session.title
+        title: session.title,
+        profile: session.profile,
+        ...(session.model !== undefined ? { model: session.model } : {})
       }))
     };
   }

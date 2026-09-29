@@ -6,6 +6,7 @@ import type {
   SessionSnapshot
 } from "../../shared/contracts.ts";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
+import { hasAutoMode } from "../../shared/autoMode.ts";
 import type { TerminalManager } from "./TerminalManager.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 
@@ -127,11 +128,13 @@ export class AgentControlService {
       throw new Error(`Session ${parent.id} already has ${MAX_CHILDREN_PER_PARENT} subagents.`);
     }
 
+    const profile = subagentProfile(parent.profile, request.provider, request.profile);
+    if ("error" in profile) throw new Error(profile.error);
     const cascade = children.length;
     const created = this.terminals.create({
       provider: request.provider,
       cwd: request.cwd,
-      profile: request.profile ?? "normal",
+      profile: profile.profile,
       position: {
         x: parent.position.x + CHILD_POSITION_STEP.x * (cascade + 1),
         y: parent.position.y + CHILD_POSITION_STEP.y * (cascade + 1)
@@ -319,6 +322,34 @@ export class AgentControlService {
     if (!session) throw new Error("Terminal session does not exist.");
     return session;
   }
+}
+
+/**
+ * The launch profile of a subagent. Asked for: "normal", or "auto" where its CLI has an auto mode. Not asked for: its
+ * orchestrator's, so a person who runs the orchestrator in auto is not asked about every step of its subagents; an
+ * auto the subagent's CLI lacks becomes normal. YOLO is never given to a subagent here: core allows it only for an
+ * isolated environment (a worktree or container the person chose), which spawn_agent cannot pick, so a YOLO
+ * orchestrator's subagents run in auto where their CLI has it, otherwise normal.
+ */
+export function subagentProfile(
+  parent: LaunchProfileId,
+  provider: AgentProviderId,
+  requested?: unknown
+): { profile: LaunchProfileId; inherited: boolean } | { error: string } {
+  if (requested !== undefined) {
+    if (requested === "normal") return { profile: "normal", inherited: false };
+    if (requested === "auto") {
+      return hasAutoMode(provider)
+        ? { profile: "auto", inherited: false }
+        : { error: `${provider} has no auto mode; use profile normal.` };
+    }
+    if (requested === "yolo") {
+      return { error: "YOLO is not available for subagents: it needs an isolated environment the person chose. Use profile auto (where the provider has it) or normal." };
+    }
+    return { error: "profile must be normal or auto." };
+  }
+  const wanted = parent === "yolo" ? "auto" : parent;
+  return { profile: wanted === "auto" && !hasAutoMode(provider) ? "normal" : wanted, inherited: true };
 }
 
 /** Sleeps, or rejects with an AbortError as soon as `signal` aborts. */

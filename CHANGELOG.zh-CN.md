@@ -11,6 +11,7 @@
 - 集成 PR #100，修复启动导航竞态、API 密钥粘贴及未捕获界面错误后的恢复，并保护 CanvasTTY 的私有控制数据。该 PR 汇总了 #96、#97 和 #99 的修复。
 - 更新 SAGE 应用图标、单色标题栏标识及文档图片，修复 Normal、Auto、YOLO 启动配置的布局，并允许在 stdout/stderr 已关闭时正常退出。
 
+- 当编排者以「自动」运行时，子 agent 不再每一步都询问人。`spawn_agent` 支持可选的 `profile`（`normal` 或 `auto`）；不传时子 agent 继承编排者的配置（其 CLI 没有自动模式时为「普通」，YOLO 编排者的子 agent 以「自动」或「普通」运行：YOLO 需要 `spawn_agent` 无法选择的隔离环境）。回答（`profile`、`profileInherited`）、`list_agents` 和卡片会显示实际得到的配置。control CLI 的 `create --profile` 仍是其 worker 的对应方式。
 - OpenCode 新增 **自动** 启动配置。OpenCode 没有自动模式参数，因此它是本次运行在 OpenCode 默认 agent `agent.build` 下的 `OPENCODE_CONFIG_CONTENT`（追加在人自己的规则之后，不写入 `~/.config/opencode`）：项目内的读取、搜索和编辑无需询问（`.env` 文件仍会询问），shell 命令也一样，但仅在基础保护开启且其守卫在该 OpenCode 中运行时（否则照旧询问），项目外的路径照旧询问。卡片像其他 agent 一样显示 **自动**。
 - `spawn_agent` 和 control CLI 的 `create` 支持可选的 `model`（本次运行 CLI 自己的 `--model`：OpenCode 为 `provider/model`，以及 Codex、Claude、Qwen、Kimi 别名、Grok、OMP、Pi、Cursor）和 `effort`（Codex、Claude、Grok）。两者按 provider 校验并在拒绝时说明原因，重启和恢复时保留，且从不写入 CLI 的配置；被指定模型的编排者现在会用该模型运行子 agent，而不是 CLI 的默认模型。`list_providers` 显示每个 provider 的模型格式和 effort 级别，OpenCode 还会显示 `opencode models` 列出的模型（后台读取，超时 5 秒并缓存；工具不会等待它）。不在该列表中的 OpenCode 模型会在启动前被拒绝，并给出最多五个最接近的 id，否则 OpenCode 只会报「Unexpected server error」后停止；若子 agent 仍然退出，其屏幕最后几行会以 `exitLines` 出现在 `wait_for_agent`、`observe_agent` 和 `get_agent_result` 中。
 - 名称含有两种 Unicode 写法字符（西里尔字母「й」、带重音的字母；Finder 保存分解形式）的项目文件夹，现在无论 `spawn_agent`、control CLI 或插件传入哪种写法，都会以磁盘上的写法启动，CLI 不再把自己的项目当作外部文件夹（OpenCode 曾对每个文件询问「Access external directory …」）。agent 的 `PWD` 也设为其文件夹而不是应用的，OpenCode 在本次运行中被允许访问该文件夹的另一种写法；其他权限不变，ASCII 路径照旧启动。

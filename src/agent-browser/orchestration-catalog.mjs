@@ -58,12 +58,13 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "spawn_agent",
-    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked). Then call wait_for_agent and get_agent_result.`,
+    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. profile: without it the subagent gets this session's launch profile (auto stays auto where its CLI has one, otherwise normal; a YOLO orchestrator's subagents run in auto or normal, never YOLO); "auto" lets it work without asking the person for each edit or command inside the project (CanvasTTY's base protection still applies), "normal" asks as usual. The answer says the profile it got. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked). Then call wait_for_agent and get_agent_result.`,
     {
       provider,
       cwd: string({ minLength: 1, maxLength: 4_096 }),
       prompt,
       title,
+      profile: string({ enum: ["normal", "auto"] }),
       model: string({ minLength: 1, maxLength: 200 }),
       effort: string({ enum: [...REASONING_EFFORT_IDS] }),
       launchOptions
