@@ -74,25 +74,65 @@ const EMPTY_STATE: PersistedTerminalSessionState = {
   sessions: []
 };
 
+/**
+ * Why the saved cards could not be read. `newer`: a later CanvasTTY wrote the file; `unreadable`: it could not be
+ * read at all (permissions, I/O). Both leave the file as it is: nothing is written over it for the rest of this
+ * run. `corrupt`: it is not a card list; it was kept beside the file (`backupPath`) and a fresh file is used.
+ */
+export type SessionStoreProblem =
+  | { kind: "newer" | "unreadable"; backupPath: null }
+  | { kind: "corrupt"; backupPath: string | null };
+
 export class TerminalSessionStore {
   readonly filePath: string;
   private value: PersistedTerminalSessionState = structuredClone(EMPTY_STATE);
   private writeQueue = Promise.resolve();
+  private problem: SessionStoreProblem | null = null;
 
   constructor(userDataPath: string, fileName = "terminal-sessions.json") {
     this.filePath = join(userDataPath, fileName);
   }
 
+  /** What went wrong reading the saved cards at load(), or null. */
+  get loadProblem(): SessionStoreProblem | null {
+    return this.problem ? { ...this.problem } : null;
+  }
+
   async load(): Promise<PersistedTerminalSession[]> {
+    let text: string;
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as unknown;
-      this.value = normalizePersistedTerminalSessions(parsed);
-      if (JSON.stringify(parsed) !== JSON.stringify(this.value)) await this.persist();
+      text = await readFile(this.filePath, "utf8");
     } catch (error) {
       if (!isMissingFile(error)) {
-        console.warn("CanvasTTY terminal window state could not be loaded; an empty state is used.", error);
+        this.problem = { kind: "unreadable", backupPath: null };
+        console.warn("CanvasTTY terminal window state could not be read; it is left as it is and not saved over this run.", error);
       }
+      return this.get();
     }
+    let parsed: unknown;
+    try { parsed = JSON.parse(text) as unknown; } catch { parsed = undefined; }
+    const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
+    if (typeof version === "number" && Number.isInteger(version) && version > TERMINAL_SESSION_STORE_VERSION) {
+      // A later CanvasTTY's cards: this build cannot read them and must not replace them with its own.
+      this.problem = { kind: "newer", backupPath: null };
+      console.warn(`CanvasTTY terminal window state was written by a newer version (${version}); it is left as it is and not saved over this run.`);
+      return this.get();
+    }
+    if (!isReadableState(parsed)) {
+      const backupPath = `${this.filePath}.corrupt-${Date.now()}`;
+      try {
+        await rename(this.filePath, backupPath);
+        this.problem = { kind: "corrupt", backupPath };
+        console.warn(`CanvasTTY terminal window state could not be parsed; it was kept as ${backupPath} and an empty state is used.`);
+      } catch (error) {
+        // Not even set aside: leave it alone instead of writing over it.
+        this.problem = { kind: "unreadable", backupPath: null };
+        console.warn("CanvasTTY terminal window state could not be parsed or set aside; it is left as it is.", error);
+      }
+      return this.get();
+    }
+    this.value = normalizePersistedTerminalSessions(parsed);
+    if (JSON.stringify(parsed) !== JSON.stringify(this.value)) await this.persist();
     return this.get();
   }
 
@@ -117,6 +157,8 @@ export class TerminalSessionStore {
   }
 
   private persist(): Promise<void> {
+    // The file on disk is one this build could not read: keep it (the cards of this run live in memory only).
+    if (this.problem && this.problem.kind !== "corrupt") return this.writeQueue;
     const snapshot = `${JSON.stringify(this.value, null, 2)}\n`;
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
@@ -329,6 +371,13 @@ function isFiniteSize(value: unknown): value is Size {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/** A v1 or v2 card list (its records are checked one by one when normalized). */
+function isReadableState(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as { version?: unknown; sessions?: unknown };
+  return (state.version === 1 || state.version === TERMINAL_SESSION_STORE_VERSION) && Array.isArray(state.sessions);
 }
 
 function isMissingFile(error: unknown): boolean {

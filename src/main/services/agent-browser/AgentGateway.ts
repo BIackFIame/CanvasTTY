@@ -109,6 +109,8 @@ export class AgentGateway {
   private ownedRuntimeDirectory: string | null = null;
   private expiryTimer: NodeJS.Timeout | undefined;
   private startPromise: Promise<string> | null = null;
+  /** Bumped by close(): a Unix bring-up still creating or opening its socket then knows it was closed. */
+  private closeGeneration = 0;
   private restartTimer: NodeJS.Timeout | undefined;
   private restartAttempts = 0;
   private restartToken = 0;
@@ -204,9 +206,14 @@ export class AgentGateway {
   private async startOnce(): Promise<string> {
     if (this.platform === "win32") return await this.startWindowsTransport();
 
+    const generation = this.closeGeneration;
     const { endpoint, ownedRuntimeDirectory } = await createEndpoint(
       this.requestedRuntimeDirectory
     );
+    if (generation !== this.closeGeneration) {
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+      throw new Error("Agent gateway was closed during startup.");
+    }
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
     this.endpoint = endpoint;
@@ -222,6 +229,12 @@ export class AgentGateway {
       this.ownedRuntimeDirectory = null;
       await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true });
       throw error;
+    }
+    if (this.server !== server) {
+      // close() ran while the socket opened: it found nothing listening yet, so this is the only place to close it.
+      await closeServer(server);
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+      throw new Error("Agent gateway was closed during startup.");
     }
 
     this.expiryTimer = setInterval(() => this.expireConnections(), 1_000);
@@ -304,6 +317,7 @@ export class AgentGateway {
   }
 
   async close(): Promise<void> {
+    this.closeGeneration += 1;
     this.cancelTransportRestart();
     clearInterval(this.expiryTimer);
     this.expiryTimer = undefined;

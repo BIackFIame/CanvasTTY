@@ -165,14 +165,14 @@ export class AgentControlService {
   }
 
   /** Validates at once (throws); resolves once the text reached the agent, and rejects when it did not. */
-  send(sessionId: string, text: string, submit = true): Promise<void> {
+  send(sessionId: string, text: string, submit = true, signal?: AbortSignal): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (!capabilities.send) throw new Error(`${session.provider} cannot receive prompts.`);
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
-    return this.deliver(sessionId, submit ? `${text}\r` : text, "text");
+    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal);
   }
 
   status(sessionId: string): SessionMetadata {
@@ -298,8 +298,8 @@ export class AgentControlService {
   }
 
   /** Through the terminal manager's one delivery rule: exactly once, into the launch that is starting now. */
-  private async deliver(sessionId: string, data: string, what: "prompt" | "text"): Promise<void> {
-    const delivery = await this.terminals.deliverInput(sessionId, data);
+  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal): Promise<void> {
+    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal);
     if (!delivery.delivered) {
       throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
     }

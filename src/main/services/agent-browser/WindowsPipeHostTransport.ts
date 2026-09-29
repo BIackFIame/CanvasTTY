@@ -171,9 +171,14 @@ export class WindowsPipeHostTransport extends EventEmitter {
       });
       child.once("error", (error) => {
         settleError(new Error(`Windows agent pipe host could not start: ${error.message}`));
-        this.fail(error);
+        if (this.child === child) this.fail(error);
       });
       child.once("exit", (code, signal) => {
+        // A host this transport already gave up on (fail() kills without waiting) must not end its successor.
+        if (this.child !== child) {
+          settleError(new Error("Windows agent pipe host exited."));
+          return;
+        }
         const details = this.stderr.trim();
         const suffix = details ? ` ${details}` : "";
         const failure = new Error(

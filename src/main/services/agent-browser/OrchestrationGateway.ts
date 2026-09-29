@@ -85,6 +85,9 @@ export class OrchestrationGateway {
   private ownedRuntimeDirectory: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private starting: Promise<void> | null = null;
+  /** Bumped by stop(): a start() still opening the socket then knows it was stopped. */
+  private generation = 0;
   private enabled = true;
 
   constructor(options: OrchestrationGatewayOptions) {
@@ -113,8 +116,17 @@ export class OrchestrationGateway {
     for (const lease of [...this.leases.values()]) this.expireLease(lease);
   }
 
-  async start(): Promise<void> {
-    if (this.running) return;
+  /**
+   * Starts listening once: a second start() while the first is still opening the socket waits for it, and a stop()
+   * meanwhile wins (the opened socket is closed again and start() leaves the gateway stopped).
+   */
+  start(): Promise<void> {
+    if (this.running) return Promise.resolve();
+    this.starting ??= this.open(this.generation).finally(() => { this.starting = null; });
+    return this.starting;
+  }
+
+  private async open(generation: number): Promise<void> {
     if (process.platform === "win32") {
       if (!this.windowsHostPath) throw new Error("Orchestration requires the current-user Windows pipe host.");
       const transport = new WindowsPipeHostTransport({ hostPath: this.windowsHostPath });
@@ -124,11 +136,11 @@ export class OrchestrationGateway {
       });
       try {
         const endpoint = await transport.start((socket) => this.accept(socket));
-        if (this.windowsTransport !== transport) throw new Error("Orchestration is shutting down.");
+        if (this.windowsTransport !== transport || generation !== this.generation) throw new Error("Orchestration is shutting down.");
         this.socketEndpoint = endpoint;
       } catch (error) {
         await transport.close();
-        this.windowsTransport = null;
+        if (this.windowsTransport === transport) this.windowsTransport = null;
         this.socketEndpoint = null;
         throw error;
       }
@@ -144,8 +156,16 @@ export class OrchestrationGateway {
         endpoint = join(runtimeDirectory, "orchestration.sock");
       }
       await makePrivateDirectory(runtimeDirectory, { recursive: true });
+      if (generation !== this.generation) return;
       this.socketEndpoint = endpoint;
       await listenOnEndpoint(this.server, endpoint);
+      if (generation !== this.generation) {
+        // stop() ran while the socket opened: it closed nothing that was listening yet, so close it here.
+        await closeServer(this.server);
+        await removeEndpoint(endpoint, this.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+        if (this.socketEndpoint === endpoint) this.socketEndpoint = null;
+        return;
+      }
     }
     this.running = true;
     this.heartbeatTimer = setInterval(() => this.sweepConnections(), this.heartbeatIntervalMs);
@@ -153,6 +173,8 @@ export class OrchestrationGateway {
   }
 
   async stop(): Promise<void> {
+    this.generation += 1;
+    if (this.starting) await this.starting.catch(() => undefined);
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;

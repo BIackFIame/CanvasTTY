@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -293,6 +293,20 @@ test("AgentGateway uses a mode-0600 local socket instead of a TCP listener", POS
   assert.equal(gateway.address.includes("://"), false);
   assert.equal((await stat(gateway.address)).mode & 0o777, 0o600);
   assert.equal((await stat(runtimeDirectory)).mode & 0o777, 0o700);
+});
+
+test("AgentGateway closed while it starts leaves nothing listening and can start again", POSIX_GATEWAY_TEST, async (t) => {
+  const runtimeDirectory = await fixture(t, "canvastty-gateway-close-start-");
+  const gateway = new AgentGateway(core(), { runtimeDirectory });
+  t.after(() => gateway.close());
+  const starting = gateway.start();
+  await gateway.close();
+  await assert.rejects(starting, /closed during startup/u);
+  assert.throws(() => gateway.address, /has not started/u);
+  assert.throws(() => gateway.registerAgent({ terminalSessionId: "t", provider: "codex", cwd: "/x" }), /must be started/u);
+  assert.deepEqual((await readdir(runtimeDirectory)).filter((name) => name.endsWith(".sock")), []);
+  const address = await gateway.start();
+  assert.equal((await stat(address)).isSocket(), true);
 });
 
 test("AgentGateway supports Windows only when the secure native pipe host is supplied", async () => {

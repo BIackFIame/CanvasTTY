@@ -382,3 +382,59 @@ test("a spawn_agent canceled while it was starting closes the agent it created",
   await assert.rejects(handler.execute("orchestrator-1", { id: "spawn-2", tool: "spawn_agent", arguments: {} }, late.signal));
   assert.deepEqual(canceled, ["child-1"], "nothing is spawned after cancel");
 });
+
+test("start and stop in flight: a second start waits for the first, and a stop during start leaves nothing listening", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-lifecycle-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const gateway = new OrchestrationGateway({ runtimeDirectory: join(directory, "runtime"), handler: { execute: async () => ({}) } });
+  await Promise.all([gateway.start(), gateway.start()]);
+  const first = gateway.address;
+  assert.ok(first);
+  await gateway.stop();
+
+  const starting = gateway.start();
+  const stopping = gateway.stop();
+  await Promise.all([starting, stopping]);
+  assert.equal(gateway.address, null);
+  assert.throws(() => gateway.registerOrchestrator({ terminalSessionId: "late" }), /not running/u);
+  // It starts again normally afterwards.
+  await gateway.start();
+  const client = await TestClient.connectTo(gateway.address);
+  client.socket.destroy();
+  await gateway.stop();
+});
+
+test("a send_to_agent canceled while its text waited delivers nothing and answers CANCELED", async () => {
+  const controller = new AbortController();
+  let received = null;
+  const control = {
+    status: (id) => id === "orchestrator-1" ? { role: "orchestrator", provider: "codex" } : { id, parentSessionId: "orchestrator-1", provider: "codex" },
+    send: async (_id, _text, _submit, signal) => {
+      received = signal;
+      controller.abort();
+      throw new Error("The text for agent child-1 was not delivered: The delivery was cancelled.");
+    }
+  };
+  const handler = new ScopedOrchestrationHandler(control);
+  handler.requireOwned = () => undefined;
+  await assert.rejects(
+    handler.execute("orchestrator-1", { id: "send-1", tool: "send_to_agent", arguments: { sessionId: "child-1", prompt: "hi" } }, controller.signal),
+    (error) => error.bridgeError?.code === "CANCELED" || error.code === "CANCELED"
+  );
+  assert.equal(received, controller.signal, "the signal reaches the delivery");
+});
+
+test("deliverInput with a cancelled signal writes nothing to the card", async () => {
+  const written = [];
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner([], { onWrite: (data) => written.push(data) }));
+  const card = terminals.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
+  const before = written.length;
+  const controller = new AbortController();
+  controller.abort();
+  const delivery = await terminals.deliverInput(card.id, "hello\r", undefined, controller.signal);
+  assert.equal(delivery.delivered, false);
+  assert.match(delivery.reason, /cancelled/u);
+  assert.equal(written.length, before);
+  assert.equal((await terminals.deliverInput(card.id, "hello\r")).delivered, true);
+  terminals.disposeAll();
+});

@@ -40,6 +40,34 @@ export function chooseResume(
   return { resume: null, note: "fresh-shared-folder" };
 }
 
+/**
+ * The records that come back at all: the ones marked to restore, minus subagents whose parent does not come back
+ * (a dropped parent drops its subtree). Their environments are the only ones resumed.
+ */
+export function restorableRecords(
+  records: readonly PersistedTerminalSession[],
+  mode: SessionRestoreMode,
+  isLiveSession: (id: string) => boolean
+): PersistedTerminalSession[] {
+  if (mode === "off") return [];
+  const candidates = records.filter((record) => record.restore);
+  const byId = new Map(candidates.map((record) => [record.id, record]));
+  // Walk each subagent's parents: it comes back only when the chain reaches a card that is not a subagent (or a
+  // live card). A chain that loops back on itself has no owner and comes back as nothing.
+  const owned = (record: PersistedTerminalSession): boolean => {
+    const seen = new Set<string>();
+    for (let current: PersistedTerminalSession | undefined = record; current?.role === "subagent";) {
+      if (seen.has(current.id)) return false;
+      seen.add(current.id);
+      const parentId = current.parentSessionId ?? "";
+      if (!byId.has(parentId)) return isLiveSession(parentId);
+      current = byId.get(parentId);
+    }
+    return true;
+  };
+  return candidates.filter(owned);
+}
+
 /** The core's one restore order and rule set, the same for every environment. */
 export function planSessionRestore(
   records: readonly PersistedTerminalSession[],
@@ -53,15 +81,8 @@ export function planSessionRestore(
   }
 ): RestoreStep[] {
   if (mode === "off") return [];
-  let kept = records.filter((record) => record.restore);
   // A subagent comes back only with its parent; a dropped parent drops its subtree.
-  for (let changed = true; changed;) {
-    const ids = new Set(kept.map((record) => record.id));
-    const next = kept.filter((record) => record.role !== "subagent"
-      || ids.has(record.parentSessionId ?? "") || context.isLiveSession(record.parentSessionId ?? ""));
-    changed = next.length !== kept.length;
-    kept = next;
-  }
+  const kept = restorableRecords(records, mode, (id) => context.isLiveSession(id));
   const byId = new Map(kept.map((record) => [record.id, record]));
   const depth = (record: PersistedTerminalSession, seen = new Set<string>()): number => {
     const parent = record.parentSessionId ? byId.get(record.parentSessionId) : undefined;
