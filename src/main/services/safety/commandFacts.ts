@@ -85,6 +85,11 @@ export interface PathContext {
   root: string; rootReal: string; home: string; temp: string; agentRoots: string[];
   /** CanvasTTY's private paths and data folders (as given and resolved), and the temporary folders its sockets live in. */
   privatePaths: string[]; appRoots: string[]; appNames: string[]; markers: string[]; tempRoots: string[];
+  /**
+   * Shell variables this command set before using them (`OUT=/x; rm -rf "$OUT"`, `export OUT=/x`): the value, or
+   * null when it cannot be known (a substitution, an unknown variable). Filled in order while the command is read.
+   */
+  shellVars: Map<string, string | null>;
 }
 
 /**
@@ -99,7 +104,8 @@ function pathContext(root: string, home = homedir(), agentRoots?: readonly strin
     privatePaths: both(privateData?.paths ?? []), appRoots: both(privateData?.appRoots ?? []),
     appNames: [...new Set((privateData?.appRoots ?? []).map(path => basename(path).toLowerCase()).filter(name => name.length >= 4))],
     markers: (privateData?.markers ?? []).map(marker => marker.toLowerCase()).filter(marker => marker.length >= 6),
-    tempRoots: both([temp, '/tmp', '/private/tmp', '/var/tmp'])
+    tempRoots: both([temp, '/tmp', '/private/tmp', '/var/tmp']),
+    shellVars: new Map()
   };
 }
 
@@ -115,14 +121,15 @@ function isAgentServicePath(abs: string, ctx: PathContext): boolean {
 const HOME_VARS = new Set(['HOME', 'USERPROFILE', 'ENV:USERPROFILE', 'ENV:HOME']);
 const TEMP_VARS = new Set(['TMPDIR', 'TEMP', 'TMP', 'ENV:TEMP', 'ENV:TMP']);
 
-/** Expands only what is certain (~, HOME, PWD, TMPDIR); anything else is unresolved. */
+/** Expands only what is certain (~, HOME, PWD, TMPDIR, variables this command set); anything else is unresolved. */
 function expand(word: Word | string, cwd: string | null, ctx: PathContext): string | null {
   if (typeof word !== 'string' && word.substitution) return null;
   let text = typeof word === 'string' ? word : word.text;
   const vars = typeof word === 'string' ? [] : word.vars;
   for (const name of vars) {
     let value: string | null = null;
-    if (HOME_VARS.has(name)) value = ctx.home;
+    if (ctx.shellVars.has(name)) value = ctx.shellVars.get(name) ?? null;
+    else if (HOME_VARS.has(name)) value = ctx.home;
     else if (name === 'PWD' || name === 'ENV:PWD') value = cwd;
     else if (TEMP_VARS.has(name)) value = ctx.temp;
     if (value === null) return null;
@@ -245,13 +252,18 @@ function analyzeText(command: string, cwd: string | null, acc: Acc): string | nu
 
 function analyzeSegment(segment: Segment, cwd: string | null, acc: Acc, downloadedHere: Target[]): string | null {
   const words = [...segment.words];
+  const assignments: Word[] = [];
   // Leading NAME=value assignments and the shell's own words before a command (`do rm …`, `then rm …`, `! rm …`).
   for (;;) {
     const first = words[0];
-    if (!first || first.quoted) break;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(first.text) || LEADING_RESERVED.has(first.text)) words.shift();
-    else break;
+    if (!first || first.quoted && !ASSIGNMENT.test(first.text)) break;
+    if (ASSIGNMENT.test(first.text)) assignments.push(first);
+    else if (!LEADING_RESERVED.has(first.text)) break;
+    words.shift();
   }
+  // Assignments alone set the shell's variables for the rest of the command; before a command they only set its
+  // environment (`OUT=/x rm "$OUT"` expands the old OUT).
+  if (!words.length) for (const word of assignments) assignVariable(word, cwd, acc.ctx);
   checkPrivate(segment, words, cwd, acc);
   for (const word of segment.words) inspectWord(word, acc);
   for (const redirect of segment.redirects) {
@@ -265,6 +277,19 @@ function analyzeSegment(segment: Segment, cwd: string | null, acc: Acc, download
   }
   if (!words.length) return cwd;
   return analyzeArgv(words, cwd, acc, { pipeIn: segment.pipeIn, heredoc: segment.heredoc }, downloadedHere);
+}
+
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+/** Shell builtins whose NAME=value operands set variables for the rest of the command. */
+const DECLARERS = new Set(['export', 'declare', 'typeset', 'local', 'readonly']);
+
+/** Records `NAME=value`: its value when it is certain, else null (the variable is then unknown, never left stale). */
+function assignVariable(word: Word, cwd: string | null, ctx: PathContext): void {
+  const at = word.text.indexOf('=');
+  const name = word.text.slice(0, at);
+  const value = word.text.slice(at + 1);
+  const valueWord: Word = { ...word, text: value, vars: word.vars.filter(variable => value.includes(variable)), tilde: value.startsWith('~') };
+  ctx.shellVars.set(name, word.glob ? null : expand(valueWord, cwd, ctx));
 }
 
 function inspectWord(word: Word, acc: Acc): void {
@@ -343,6 +368,10 @@ function analyzeArgv(argvWords: Word[], cwd: string | null, acc: Acc, stdin: Std
     return resolveTarget(dest, cwd, acc.ctx).abs;
   }
   if (program === 'popd') return null;
+  if (DECLARERS.has(program)) {
+    for (const word of argWords) if (ASSIGNMENT.test(word.text)) assignVariable(word, cwd, acc.ctx);
+    return cwd;
+  }
 
   if (EVAL_WORDS.has(program)) {
     const generated = program !== 'eval' || argWords.some(word => word.substitution || word.vars.length) || stdin.pipeIn;
@@ -736,6 +765,7 @@ function classifyProgram(program: string, argWords: Word[], cwd: string | null, 
       const arg = args[i]!;
       if (tar && (arg === '-C' || arg === '--directory') || program === 'unzip' && arg === '-d') dest = args[i + 1];
       else if (tar && arg.startsWith('--directory=')) dest = arg.slice('--directory='.length);
+      else if (tar && /^-C./u.test(arg)) dest = arg.slice(2);
       else if (program === '7z' && arg.startsWith('-o') && arg.length > 2) dest = arg.slice(2);
       else continue;
       break;
@@ -911,7 +941,8 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
     // The repository another --work-tree or --git-dir names is changed exactly like one -C names.
     if (arg === '--work-tree' || arg === '--git-dir') { dir = args[i + 1] ? resolveTarget(argWords[i + 1]!, cwd, acc.ctx).abs : null; i++; continue; }
     if (arg.startsWith('--work-tree=') || arg.startsWith('--git-dir=')) { dir = resolveTarget(arg.slice(arg.indexOf('=') + 1), cwd, acc.ctx).abs; continue; }
-    if (arg === '-c' || arg === '--namespace' || arg === '--exec-path') { i++; continue; }
+    if (arg === '-c') { gitConfigCommand(args[i + 1] ?? '', dir, acc); i++; continue; }
+    if (arg === '--namespace' || arg === '--exec-path') { i++; continue; }
     if (arg.startsWith('-')) continue;
     break;
   }
@@ -945,6 +976,21 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
     return;
   }
   if (elsewhere) acc.writes.push(elsewhere);
+}
+
+/**
+ * Config keys whose value git runs as a shell command: a `!` alias, and the hooks, pagers, editors, filters and
+ * helpers a `git -c key=value` can set for this one run. Such a value is read like any other command.
+ */
+const GIT_COMMAND_KEYS = /^(?:core\.(?:fsmonitor|sshcommand|pager|editor|askpass)|sequence\.editor|pager\..+|diff\..+\.(?:textconv|command)|diff\.external|filter\..+\.(?:clean|smudge|process)|merge\..+\.driver|(?:diff|merge)tool\..+\.cmd|credential\.helper|credential\..+\.helper|gpg\.program|gpg\..+\.program|uploadpack\.packobjectshook)$/u;
+
+function gitConfigCommand(setting: string, cwd: string | null, acc: Acc): void {
+  const at = setting.indexOf('=');
+  if (at <= 0) return;
+  const key = setting.slice(0, at).toLowerCase();
+  const value = setting.slice(at + 1);
+  if (key.startsWith('alias.')) { if (value.startsWith('!')) analyzeText(value.slice(1), cwd, acc); return; }
+  if (GIT_COMMAND_KEYS.test(key)) analyzeText(value.replace(/^!/u, ''), cwd, acc);
 }
 
 /** Flags whose next word is their value, per subcommand, so a value is never taken for a name. */

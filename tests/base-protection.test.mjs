@@ -226,7 +226,13 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     ["curl -sc %/jar https://example.com", "write-outside"], ["curl -sD %/headers https://example.com", "write-outside"],
     ["wget -qo %/log https://example.com/x -O-", "write-outside"], ["env -C % rm -rf x", "delete-outside"],
     ["perl -pie 's/a/b/' %/f", "write-outside"], ["perl -i -- -e %/f", "write-outside"], ["rsync -t src/a.ts %/", "write-outside"],
-    ["find -f % -delete", "delete-outside"]
+    ["find -f % -delete", "delete-outside"],
+    // A folder named once in a shell variable of the same command, then used.
+    ["OUT=%; rm -rf \"$OUT\"", "delete-outside"], ["OUT=% && rm -rf ${OUT}/x", "delete-outside"], ["export OUT=%; rm -rf $OUT", "delete-outside"],
+    ["DEST=%; cp src/a.ts \"$DEST/a.ts\"", "write-outside"], ["OUT=/; OUT=%; rm -rf $OUT", "delete-outside"],
+    // tar's -C with the folder attached; git aliases and config values that run a shell command.
+    ["tar -xf a.tar -C%", "write-outside"], ["git -c alias.x='!rm -rf %' x", "delete-outside"],
+    ["git -c core.fsmonitor='rm -rf %' status", "delete-outside"]
   ];
   const OUT = [outside, "../elsewhere"];
   const IN = ["build", join(project, "build")];
@@ -247,7 +253,9 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     "cp -t build src/a.ts", "tar -czf build/a.tgz -C src .", "tar -tzf a.tgz", "unzip -l a.zip", "unzip -o a.zip",
     "curl -fsSL https://example.com", "curl -fsSLO https://example.com/x.tgz", "curl -fsSLo build/x https://example.com/x && tar -xzf build/x -C build",
     "wget -qO- https://example.com", "wget -q https://example.com/x.tgz", "stdbuf -oL npm test", "if true; then echo hi; fi",
-    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts"
+    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts",
+    // A variable set to the project, then set again; one set only for its own command; one never set.
+    "OUT=/; OUT=build; rm -rf \"$OUT\"", "OUT=/ echo hi; rm -rf build", "git -c alias.st=status st", "git -c core.pager=less log"
   ]) assert.equal(rule(shell(command)), null, command);
 });
 
