@@ -45,6 +45,7 @@ import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
+import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
@@ -588,8 +589,13 @@ async function initializeServices(): Promise<void> {
 
   // list_providers: the CLI registry resolved at startup, the last usage read (never started from here) and the
   // launch options trusted plugins declared.
+  const providerModels = new ProviderModelCatalog(providerClis);
+  // OpenCode with a model it does not list fails with only "Unexpected server error": refuse it up front.
+  terminalManager.configureModelCheck((provider, model) => provider === "terminal" ? null : providerModels.unknownModelCached(provider, model));
   const providerDirectorySources: ProviderDirectorySources = {
     cli: (provider) => providerClis?.get(provider).state ?? null,
+    models: (provider) => providerModels.peek(provider),
+    checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
     limits: () => limitsService?.peek() ?? null,
     launchContributors: () => pluginManager?.launchContributors() ?? []
   };
@@ -650,7 +656,9 @@ async function initializeServices(): Promise<void> {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.settingsChanged, updated);
       },
       // The CLI's create takes no plugin launch options, so none are listed.
-      providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits }),
+      providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits,
+        models: providerDirectorySources.models }),
+      checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
       windowsHostPath });
     agentControl = gateway;
     try {

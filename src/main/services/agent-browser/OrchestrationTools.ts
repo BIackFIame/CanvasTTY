@@ -1,6 +1,7 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
-import type { ProviderId, SessionRole } from "../../../shared/contracts.ts";
+import type { AgentProviderId, ProviderId, SessionRole } from "../../../shared/contracts.ts";
+import { launchEffortProblem, launchModelProblem } from "../../../shared/launchModel.ts";
 import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
 import {
@@ -130,13 +131,24 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
+    const provider = args.provider as AgentProviderId;
+    const problem = (args.model !== undefined ? launchModelProblem(provider, args.model) : null)
+      ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
+    if (problem) throw orchestrationBridgeError("INVALID_REQUEST", `${problem} Call list_providers for what ${provider} takes.`, false);
+    if (args.model !== undefined) {
+      let unknown: string | null = null;
+      try { unknown = await this.providers.checkModel?.(provider, args.model as string) ?? null; } catch { unknown = null; }
+      if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
+    }
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
-      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {})
+      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {}),
+      ...(args.model !== undefined ? { model: args.model as string } : {}),
+      ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {})
     });
     if (signal?.aborted) {
       // Canceled while the agent was starting: nobody will receive its id, so close it.
@@ -151,7 +163,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       sessionId: created.id,
       provider: created.provider,
       status: created.status,
-      title: created.title
+      title: created.title,
+      ...(created.model !== undefined ? { model: created.model } : {}),
+      ...(created.effort !== undefined ? { effort: created.effort } : {})
     };
   }
 
@@ -171,7 +185,13 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       args.sessionId as string,
       args.maxChars as number | undefined
     );
-    return { sessionId: observation.sessionId, status: observation.status, output: observation.output };
+    return {
+      sessionId: observation.sessionId,
+      status: observation.status,
+      output: observation.output,
+      ...(observation.exitCode !== undefined ? { exitCode: observation.exitCode } : {}),
+      ...(observation.exitLines ? { exitLines: observation.exitLines } : {})
+    };
   }
 
   private result(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {
@@ -181,7 +201,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       sessionId: result.sessionId,
       state: result.state,
       exitCode: result.exitCode,
-      output: result.output
+      output: result.output,
+      ...(result.exitLines ? { exitLines: result.exitLines } : {})
     };
   }
 

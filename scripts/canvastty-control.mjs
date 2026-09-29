@@ -106,7 +106,7 @@ export async function controlRequest({ connectionPath, clientPath, method, param
 export function parseArguments(argv) {
   const options = {};
   const positional = [];
-  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--prompt-file", "--text", "--after", "--choice", "--revision", "--archive", "--name", "--apertures", "--detail"]);
+  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--model", "--effort", "--prompt-file", "--text", "--after", "--choice", "--revision", "--archive", "--name", "--apertures", "--detail"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--json") continue;
@@ -133,8 +133,12 @@ providers
   installed/available, signIn (ok, signed_out, expired or unknown). Run it first;
   do not search the filesystem for agent CLIs or their configuration.
 create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal|auto]
+       [--model <id>] [--effort <level>]
   provider: an id from providers; codex (default), claude, qwen, kimi, opencode,
   hermes, grok, omp, pi, cursor, minimax, devin, antigravity.
+  --model: the CLI's own --model for this worker (OpenCode: provider/model); if
+  the person names a model, pass it. --effort: codex, claude and grok only.
+  providers shows each provider's model format and effort levels.
   Only Codex workers report a captured result and expose startup/approval menus
   to choose/dismiss; the create response lists each worker's capabilities.
 list
@@ -165,7 +169,7 @@ export async function runCli(argv) {
   if (!["create", "list", "providers", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
   if (positional.length !== (["create", "list", "providers", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
   const allowed = new Set(["connection", "client-file", "request-id",
-    ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo"] : []),
+    ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo", "model", "effort"] : []),
     ...(method === "send" ? ["prompt-file", "text"] : []), ...(method === "result" ? ["after"] : []),
     ...(method === "choose" ? ["choice", "revision"] : []), ...(method === "dismiss" ? ["revision"] : [])]);
   if (method === "skin-install") ["archive", "name", "apertures", "activate", "detail"].forEach((key) => allowed.add(key));
@@ -176,7 +180,9 @@ export async function runCli(argv) {
     if (!options.cwd) throw new Error("create requires --cwd.");
     if (options.yolo && options.profile && options.profile !== "yolo") throw new Error("Conflicting launch profiles.");
     params = { provider: options.provider || "codex", cwd: resolve(options.cwd), profile: options.profile || "yolo",
-      ...(options.title === undefined ? {} : { title: options.title }) };
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }) };
   }
   if (method === "send") {
     if ((options["prompt-file"] === undefined) === (options.text === undefined)) throw new Error("send requires exactly one of --prompt-file or --text.");

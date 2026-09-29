@@ -292,3 +292,9 @@ test("after a prompt, an idle before the turn starts does not end wait_for_agent
   terminals.applyProviderSignal(child.sessionId, { kind: "lifecycle", state: "idle" });
   assert.equal((await wait(1)).reason, "idle");
 });
+
+test("the skill tells the orchestrator to pass a model the person names", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const skill = await readFile(new URL("../agent/orchestrator/SKILL.md", import.meta.url), "utf8");
+  assert.match(skill, /If the person names a model, pass it as `model`/u);
+});

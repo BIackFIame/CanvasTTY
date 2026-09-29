@@ -6,6 +6,7 @@ export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
 /** "auto" only for agents with a native auto mode (autoMode.ts); "normal" is the default. */
 export type LaunchProfileId = import("./autoMode.ts").LaunchProfile;
+export type ReasoningEffort = import("./launchModel.ts").ReasoningEffort;
 /**
  * What a session is for, independent of its normal/YOLO profile: an ordinary
  * agent, or an orchestrator that drives other sessions through the local
@@ -363,6 +364,10 @@ export interface CreateSessionRequest {
   environment?: SessionEnvironmentChoice;
   /** Exact provider conversation to resume when this card is created from history. */
   resumeThreadId?: string;
+  /** The CLI's --model for this launch (launchModel.ts); omitted keeps the CLI's own default. */
+  model?: string;
+  /** The CLI's reasoning effort for this launch; only the levels that CLI takes. */
+  effort?: ReasoningEffort;
 }
 
 /** Every non-terminal agent that CanvasTTY can install and resolve. */
@@ -417,6 +422,9 @@ export interface SessionMetadata {
   environment?: SessionEnvironmentBadge;
   /** Profile "auto" runs as accept-edits: a launch contributor put the agent on a third-party model. */
   autoDowngraded?: true;
+  /** The model and effort the launch asked the CLI for; restarts and restores keep them. */
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 export interface SessionSnapshot extends SessionMetadata {

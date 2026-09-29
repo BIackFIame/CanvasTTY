@@ -7,12 +7,16 @@ import type {
 } from "../../shared/contracts.ts";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
 import type { TerminalManager } from "./TerminalManager.ts";
+import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 
 // Roadmap F1 preview: a programmatic parent must not be able to fan out
 // without bound. The real budgets setting arrives with resource management;
 // until then this hard cap is the only backstop.
 const MAX_CHILDREN_PER_PARENT = 16;
 const MAX_OBSERVE_CHARS = 8_192;
+// An exited agent's reason is in its last screen lines (OpenCode: "Error: Unexpected server error" for an unknown model).
+const MAX_EXIT_WINDOW_CHARS = 16_384;
+const MAX_EXIT_LINES = 20;
 const CHILD_POSITION_STEP = { x: 60, y: 60 };
 
 export interface SpawnAgentRequest {
@@ -25,6 +29,9 @@ export interface SpawnAgentRequest {
   initialPrompt?: string;
   /** Plugin launch options, checked by the launch exactly like the launcher's. */
   launchOptions?: CreateSessionRequest["launchOptions"];
+  /** The CLI's --model and reasoning effort for this subagent (checked by the launch for its CLI). */
+  model?: string;
+  effort?: CreateSessionRequest["effort"];
 }
 
 export interface AgentObservation {
@@ -32,6 +39,9 @@ export interface AgentObservation {
   status: SessionSnapshot["status"];
   /** Raw terminal tail, capped; capabilities with result \"none\" see nothing. */
   output: string;
+  /** Once the process exited: its exit code and the last lines of its screen as plain text, masked. */
+  exitCode?: number | null;
+  exitLines?: string;
 }
 
 /** Why waitFor returned. "done"/"failed": the process exited (exit code 0 or not); "quiet": the provider reports no
@@ -47,6 +57,8 @@ export interface AgentWaitResult {
   waitedMs: number;
   /** Masked terminal tail (masked before the cut). */
   output: string;
+  /** Once the process exited: the last lines of its screen as plain text, masked (why it stopped, e.g. a bad model). */
+  exitLines?: string;
 }
 
 export interface AgentWaitTiming {
@@ -72,6 +84,8 @@ export interface AgentResult {
   state: "running" | "done" | "failed";
   exitCode: number | null;
   output: string;
+  /** Once the process exited: the last lines of its screen as plain text, masked. */
+  exitLines?: string;
 }
 
 /** The agent's launch did not start, so text meant for it was dropped (never queued for a later launch). */
@@ -125,7 +139,9 @@ export class AgentControlService {
       ...(request.title !== undefined ? { title: request.title } : {}),
       role: "subagent",
       parentSessionId: parent.id,
-      ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {})
+      ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
+      ...(request.model !== undefined ? { model: request.model } : {}),
+      ...(request.effort !== undefined ? { effort: request.effort } : {})
     });
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
@@ -174,12 +190,16 @@ export class AgentControlService {
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (!capabilities.observe) throw new Error(`${session.provider} cannot be observed.`);
+    const buffer = this.terminals.readBuffer(sessionId).buffer;
+    const exitLines = session.exitCode === null ? null : this.exitLines(buffer);
     return {
       sessionId: session.id,
       status: session.status,
       // Masked before the cut (a cut inside a secret would leave a tail no pattern recognizes), over a window
       // wider than any match rather than the whole scrollback.
-      output: this.redactTail(this.terminals.readBuffer(sessionId).buffer, maxChars)
+      output: this.redactTail(buffer, maxChars),
+      ...(session.exitCode === null ? {} : { exitCode: session.exitCode }),
+      ...(exitLines ? { exitLines } : {})
     };
   }
 
@@ -199,7 +219,8 @@ export class AgentControlService {
         ? "running"
         : session.exitCode === 0 ? "done" : "failed",
       exitCode: session.exitCode,
-      output: this.redactTail(buffer, MAX_OBSERVE_CHARS)
+      output: this.redactTail(buffer, MAX_OBSERVE_CHARS),
+      ...(session.exitCode !== null && this.exitLines(buffer) ? { exitLines: this.exitLines(buffer)! } : {})
     };
   }
 
@@ -220,9 +241,10 @@ export class AgentControlService {
     const answer = (session: SessionMetadata | null, reason: AgentWaitReason): AgentWaitResult => {
       const waitedMs = Date.now() - started;
       if (!session) return { sessionId, reason, exitCode: null, waitedMs, output: "" };
-      let output = "";
-      try { output = this.observe(sessionId).output; } catch { output = ""; }
-      return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output };
+      let observation: AgentObservation | null = null;
+      try { observation = this.observe(sessionId); } catch { observation = null; }
+      return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
+        ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}) };
     };
     let offset = this.outputOffset(sessionId);
     let changedAt = started;
@@ -261,6 +283,13 @@ export class AgentControlService {
     if (!delivery.delivered) {
       throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
     }
+  }
+
+  /** The last lines of an exited agent's screen as plain text: masked over the whole tail window before it is cut. */
+  private exitLines(buffer: string): string | null {
+    const text = terminalFailureDetails(this.redactTail(buffer, MAX_EXIT_WINDOW_CHARS));
+    if (!text) return null;
+    return text.split("\n").slice(-MAX_EXIT_LINES).join("\n");
   }
 
   /** Plugin launch secrets never reach another agent through observed output: the tail as masking the whole text leaves it. */

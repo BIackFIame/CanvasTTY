@@ -1,11 +1,13 @@
 import type { AgentProviderId, LimitsSnapshot, PluginLaunchField, ProviderLimitsSnapshot } from "../../shared/contracts.ts";
 import { AGENT_PROVIDERS, PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
 import { PROVIDER_LABELS } from "../../shared/providerCatalog.ts";
+import { launchModelHint, reasoningEffortsFor, supportsLaunchModel } from "../../shared/launchModel.ts";
 
 /**
  * What an orchestrator can launch as a subagent, from what CanvasTTY already knows: the provider CLI registry
- * (resolved at startup and on a recheck), the last usage-limits read (never started from here), and the launch
- * options trusted plugins declared. Nothing here starts a process, reads a credential or calls a network API.
+ * (resolved at startup and on a recheck), the last usage-limits read (never started from here), the models a CLI
+ * listed locally (ProviderModelCatalog, refreshed in the background, never awaited), and the launch options trusted
+ * plugins declared. Nothing here waits for a process, reads a credential or calls a paid API.
  */
 
 /** Sign-in as the last usage-limits read left it; "unknown" when it was never read for that provider. */
@@ -26,6 +28,10 @@ export interface ProviderDirectoryEntry {
   subagent: boolean;
   /** Started with the Orchestrator role, it gets the canvastty_agents tools itself. */
   orchestrator: boolean;
+  /** spawn_agent.model: whether this CLI takes one, its format, and the models its CLI listed when known. */
+  model: { supported: boolean; format: string; known?: string[]; knownAt?: number };
+  /** spawn_agent.effort levels this CLI takes; absent when it takes none. */
+  efforts?: string[];
   /** Plugin launch options it accepts (spawn_agent.launchOptions), by plugin. */
   launchOptions?: Array<{ pluginId: string; plugin: string; fields: Array<{ key: string; kind: PluginLaunchField["kind"]; choices?: string[] }> }>;
 }
@@ -42,12 +48,18 @@ export interface ProviderDirectorySources {
   cli(provider: AgentProviderId): "available" | "unavailable" | null;
   /** The cached usage-limits snapshot, or null; must not start a read. */
   limits(): LimitsSnapshot | null;
+  /** Why this model would not start (its CLI lists models and not this one), or null; may wait for a first listing. */
+  checkModel?(provider: AgentProviderId, model: string): Promise<string | null>;
+  /** The models this provider's CLI listed (cached; must not wait for the CLI). */
+  models?(provider: AgentProviderId): { models: string[]; checkedAt: number } | null;
   /** Launch options trusted plugins declared (PluginManager.launchContributors). */
   launchContributors?(): Array<{ pluginId: string; pluginName: string; launch: { appliesTo?: AgentProviderId[]; fields: PluginLaunchField[] } }>;
 }
 
 const NOTE = "Pass one of these ids as spawn_agent.provider. Prefer available providers whose signIn is \"ok\"; "
-  + "\"unknown\" only means CanvasTTY has not read it yet. Do not search the filesystem for agent CLIs or their configuration.";
+  + "\"unknown\" only means CanvasTTY has not read it yet. If the person names a model, pass it as spawn_agent.model "
+  + "in the provider's model.format (model.known lists what its CLI reported, when CanvasTTY has that list; otherwise pass the "
+  + "model id the CLI accepts). Do not search the filesystem for agent CLIs or their configuration.";
 
 /** A plugin tool whose name says it picks routes or accounts for a launch. */
 const LAUNCH_OPTION_TOOL = /__(?:list_routes|pick_route|list_accounts|pick_account)$/;
@@ -65,6 +77,12 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
     const installed = cli === null ? null : cli === "available";
     const subagent = capabilities.send && capabilities.observe;
     const signIn = signInState(byProvider.get(id));
+    const supported = supportsLaunchModel(id);
+    let known: { models: string[]; checkedAt: number } | null = null;
+    if (supported) {
+      try { known = sources.models?.(id) ?? null; } catch { known = null; }
+    }
+    const efforts = reasoningEffortsFor(id);
     const options = contributors
       .filter((contributor) => !contributor.launch.appliesTo || contributor.launch.appliesTo.includes(id))
       .map((contributor) => ({
@@ -88,6 +106,12 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
       ...(signIn.checkedAt !== undefined ? { signInCheckedAt: signIn.checkedAt } : {}),
       subagent,
       orchestrator: capabilities.browser === "mcp",
+      model: {
+        supported,
+        format: launchModelHint(id),
+        ...(known && known.models.length > 0 ? { known: known.models, knownAt: known.checkedAt } : {})
+      },
+      ...(efforts.length > 0 ? { efforts: [...efforts] } : {}),
       ...(options.length > 0 ? { launchOptions: options } : {})
     };
   });

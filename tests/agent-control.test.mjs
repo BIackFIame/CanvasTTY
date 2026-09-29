@@ -734,3 +734,27 @@ test("the providers command lists what CanvasTTY can create and an unknown provi
   assert.equal(cli.result.providers[0].id, "opencode");
   await assert.rejects(runCli(["providers", "extra"]), /Unexpected or missing positional/u);
 });
+
+test("create passes a model and effort to the worker's CLI and refuses ones it cannot take", localSocket, async (t) => {
+  const f = await fixture(t);
+  const cli = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath, "create", "--cwd", f.root,
+    "--model", "gpt-5.5", "--effort", "high"]);
+  assert.equal(cli.result.session.model, "gpt-5.5");
+  assert.equal(cli.result.session.effort, "high");
+  const args = f.calls.at(-1).args;
+  assert.ok(args.includes("--model") && args.includes("gpt-5.5"));
+  assert.ok(args.includes("model_reasoning_effort=\"high\""));
+  await assert.rejects(f.request("create", { provider: "codex", profile: "yolo", cwd: f.root, effort: "max" }),
+    (e) => e.code === "INVALID_PARAMS" && /codex takes effort/u.test(e.message) && /providers command/u.test(e.message));
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "glm" }),
+    (e) => e.code === "INVALID_PARAMS" && /provider\/model/u.test(e.message));
+});
+
+test("create refuses a model the worker's CLI does not list, naming the closest", localSocket, async (t) => {
+  const f = await fixture(t, { checkModel: async (provider, model) => provider === "opencode" && model !== "zai/glm-5.3-flash"
+    ? "opencode does not list the model \"nosuch/model\". Closest: zai/glm-5.3-flash. Call list_providers for the models it lists." : null });
+  const before = f.calls.length;
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "nosuch/model" }),
+    (e) => e.code === "INVALID_PARAMS" && /does not list the model/u.test(e.message) && /Run the providers command/u.test(e.message));
+  assert.equal(f.calls.length, before);
+});

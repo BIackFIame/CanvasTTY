@@ -12,6 +12,7 @@ import type {
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
 const TERMINAL_SESSION_STORE_VERSION = 2;
 const MAX_PERSISTED_SESSIONS = 64;
@@ -49,6 +50,9 @@ export interface PersistedTerminalSession {
   environmentChoice?: SessionEnvironmentChoice;
   /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
   ownerPluginId?: string;
+  /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
@@ -166,7 +170,9 @@ export function persistedTerminalSession(
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
-    ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {})
+    ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+    ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
   };
 }
 
@@ -239,7 +245,12 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(options ? { options } : {}),
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
-      ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {})
+      ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
+      ...(session.provider !== "terminal" && session.model !== undefined && launchModelProblem(session.provider as ProviderId, session.model) === null
+        ? { model: session.model } : {}),
+      ...(session.provider !== "terminal" && session.effort !== undefined && launchEffortProblem(session.provider as ProviderId, session.effort) === null
+        ? { effort: session.effort } : {})
     });
     ids.add(session.id);
   }

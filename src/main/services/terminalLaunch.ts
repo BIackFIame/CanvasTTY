@@ -4,6 +4,7 @@ import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
+import { providerEffortArguments, providerModelArguments, type ReasoningEffort } from "../../shared/launchModel.ts";
 import {
   providerTerminalBatchCommandLine,
   windowsCommandPromptPath,
@@ -27,6 +28,9 @@ interface LaunchResolutionOptions {
   resumeThreadId?: string;
   /** A launch contributor runs the CLI on another model: "auto" becomes accept-edits (autoModeArguments). */
   thirdPartyModel?: boolean;
+  /** The CLI's --model and reasoning effort for this run (launchModel.ts); checked again here. */
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -68,6 +72,8 @@ export function resolveTerminalLaunch(
     ...(provider === "claude"
       ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
       : agentBrowserArgs),
+    ...providerModelArguments(provider, options.model),
+    ...providerEffortArguments(provider, options.effort),
     ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {

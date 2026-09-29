@@ -54,6 +54,7 @@ import {
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
 import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
 import { onDiskPath } from "./onDiskPath.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
@@ -217,6 +218,9 @@ export class TerminalManager {
   private redaction = new SecretRedactionRegistry();
   // Where each running card was actually started (an environment may move it) and its agent config folder.
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
+  // The model and effort of a card whose first launch runs before the card is registered (create, restore).
+  private readonly startingModels = new Map<string, LaunchModelChoice>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
   // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
@@ -321,6 +325,11 @@ export class TerminalManager {
     if (!session || session.extras.ownerPluginId === pluginId) return;
     session.extras.ownerPluginId = pluginId;
     this.schedulePersistence();
+  }
+
+  /** Refuses a model its CLI does not list (the cached listing only; none cached allows it). */
+  configureModelCheck(check: (provider: ProviderId, model: string) => string | null): void {
+    this.modelCheck = check;
   }
 
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
@@ -497,6 +506,12 @@ export class TerminalManager {
       throw new Error("Invalid local conversation resume request.");
     }
     const resume: ResumeRequest = threadId ? { threadId } : null;
+    const modelChoice = launchModelChoice(request.provider, request.model, request.effort);
+    if (modelChoice.model !== undefined) {
+      let unknown: string | null = null;
+      try { unknown = this.modelCheck(request.provider, modelChoice.model); } catch { unknown = null; }
+      if (unknown) throw new Error(unknown);
+    }
     if (control.captureResult && request.provider !== "codex") {
       throw new Error("Result capture requires a Codex session.");
     }
@@ -530,17 +545,24 @@ export class TerminalManager {
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
-      failureDetails: null
+      failureDetails: null,
+      ...modelChoice
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
-    const launched = awaitMeasuredGrid || contributed
-      ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
-        control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    this.startingModels.set(id, modelChoice);
+    let launched: ReturnType<TerminalManager["spawnProcess"]> | { process: null; agentBrowser: null; agentRuntime: null; agentOrchestration: null; failure: null };
+    try {
+      launched = awaitMeasuredGrid || contributed
+        ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
+        : this.spawnProcess(id, request.provider, request.profile, request.cwd,
+          INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
+          control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    } finally {
+      this.startingModels.delete(id);
+    }
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -1005,7 +1027,9 @@ export class TerminalManager {
       exitCode: null,
       failureDetails: null,
       ...(step.note ? { restoreNote: step.note } : {}),
-      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {})
+      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
+      ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
+      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {})
     };
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
@@ -1072,7 +1096,11 @@ export class TerminalManager {
       && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
     if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
-        const launched = this.spawnProcess(
+        this.startingModels.set(descriptor.id, { ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+          ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}) });
+        let launched: ReturnType<TerminalManager["spawnProcess"]>;
+        try {
+          launched = this.spawnProcess(
           descriptor.id,
           descriptor.provider,
           descriptor.profile,
@@ -1085,7 +1113,10 @@ export class TerminalManager {
           undefined,
           null,
           descriptor.parentSessionId
-        );
+          );
+        } finally {
+          this.startingModels.delete(descriptor.id);
+        }
         process = launched.process;
         agentBrowser = launched.agentBrowser;
         agentRuntime = launched.agentRuntime;
@@ -1354,7 +1385,8 @@ export class TerminalManager {
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
-        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {})
+        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...this.launchModelOf(id)
       });
       const session = this.sessions.get(id);
       if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
@@ -1382,6 +1414,17 @@ export class TerminalManager {
       cleanup();
       throw error;
     }
+  }
+
+  /** The model and effort this card's launches ask the CLI for. */
+  private launchModelOf(id: string): LaunchModelChoice {
+    const starting = this.startingModels.get(id);
+    if (starting) return starting;
+    const metadata = this.sessions.get(id)?.metadata;
+    return {
+      ...(metadata?.model !== undefined ? { model: metadata.model } : {}),
+      ...(metadata?.effort !== undefined ? { effort: metadata.effort } : {})
+    };
   }
 
   /**
@@ -1841,6 +1884,26 @@ function assertDirectory(cwd: string): void {
 
 const SESSION_PROVIDERS = new Set<ProviderId>(CANVAS_LAUNCHER_ITEMS);
 const SESSION_ROLES = new Set<SessionRole>(["agent", "orchestrator", "subagent"]);
+
+type LaunchModelChoice = { model?: string; effort?: ReasoningEffort };
+
+/** The request's model and effort, checked for its CLI; a refusal names what that CLI takes. */
+function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown): LaunchModelChoice {
+  if (model === undefined && effort === undefined) return {};
+  if (provider === "terminal") throw new Error("A plain terminal has no model.");
+  if (model !== undefined) {
+    const problem = launchModelProblem(provider, model);
+    if (problem) throw new Error(problem);
+  }
+  if (effort !== undefined) {
+    const problem = launchEffortProblem(provider, effort);
+    if (problem) throw new Error(problem);
+  }
+  return {
+    ...(model !== undefined ? { model: model as string } : {}),
+    ...(effort !== undefined ? { effort: effort as ReasoningEffort } : {})
+  };
+}
 
 function assertCreateRequest(request: CreateSessionRequest): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
