@@ -27,6 +27,36 @@ export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom"
 export type SessionRowColorMode = "monochrome" | "status";
 export type CanvasColorId = "sage" | "lilac" | "night" | "sand" | "mist" | "rose" | "slate";
 export type CanvasPatternId = "dots" | "grid" | "waves" | "diagonal" | "rings" | "none";
+export type CustomTerminalBorderSkinId = `custom:${string}`;
+export type PixelTerminalBorderSkinId = `pixel:${string}`;
+export type PixelSkinPreferredDetail = "minimal" | "detailed";
+export type PixelSkinSlot = `${"minimal" | "detailed" | "master"}_${"idle" | "working" | "completed"}` | "background";
+export interface PixelSkinAperture { left: number; right: number; top: number; bottom: number }
+export type PixelSkinApertures = Record<PixelSkinPreferredDetail | "master", PixelSkinAperture>;
+export const DEFAULT_PIXEL_SKIN_APERTURES: PixelSkinApertures = {
+  minimal: { left: 10, right: 10, top: 16, bottom: 16 },
+  detailed: { left: 14, right: 14, top: 18, bottom: 19 },
+  master: { left: 15, right: 15, top: 21, bottom: 22 }
+};
+export interface PixelSkinPackSummary { id: PixelTerminalBorderSkinId; name: string; aperture: PixelSkinAperture; apertures: PixelSkinApertures }
+export interface PixelSkinPackInstallRequest { name: string; files: Record<PixelSkinSlot, Uint8Array>; aperture?: PixelSkinAperture; apertures?: PixelSkinApertures }
+export interface PixelSkinZipInstallRequest { name: string; archive: Uint8Array; apertures?: PixelSkinApertures }
+export type TerminalBorderSkinId = "classic" | "minimal" | "glass" | "cyber" | "nord" | "gradient" | "cybercore" | "titanium" | "retro" | "sakura" | "matrix" | "forest-cabin" | "gold-black" | "cat" | "gothic-eclipse" | CustomTerminalBorderSkinId | PixelTerminalBorderSkinId;
+/** v1 manifest uses an unprefixed plain slug; files live at the fixed skin.css path. */
+export interface TerminalBorderSkinManifest {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  kind: "terminal-border";
+}
+/** Metadata only; the CSS is returned by get(). */
+export type TerminalBorderSkinListItem =
+  | { id: CustomTerminalBorderSkinId; name: string; revision: string; status: "ready" }
+  | { id: CustomTerminalBorderSkinId; name?: string; revision?: string; status: "error"; error: string };
+export type TerminalBorderSkinReadResult =
+  | { id: CustomTerminalBorderSkinId; name: string; revision: string; status: "ready"; css: string }
+  | { id: CustomTerminalBorderSkinId; status: "error"; error: string };
+export type AppSkinId = "classic" | "atelier" | "signal" | "greenhouse" | "midnight";
 export type LocaleId = "ru" | "en";
 export type MediaFit = "cover" | "contain";
 export type EdgePanSpeed = "slow" | "normal" | "fast";
@@ -196,6 +226,10 @@ export interface AppSettings {
   uiScale: number;
   canvasColor: CanvasColorId;
   pattern: CanvasPatternId;
+  terminalBorderSkin: TerminalBorderSkinId;
+  terminalSkinDetail: PixelSkinPreferredDetail;
+  terminalSkinAnimationEnabled: boolean;
+  appSkin: AppSkinId;
   snapToGrid: boolean;
   invertTerminalWheel: boolean;
   invertCanvasWheel: boolean;
@@ -276,6 +310,8 @@ export interface SessionMetadata {
   role: SessionRole;
   parentSessionId?: string;
   status: SessionStatus;
+  /** True only after an explicit provider turn-stop signal; cleared by the next working turn. */
+  turnCompleted?: boolean;
   startedAt: number;
   exitCode: number | null;
   failureDetails: string | null;
@@ -1271,6 +1307,19 @@ export interface CanvasTTYApi {
   settings: {
     get(): Promise<AppSettings>;
     update(patch: Partial<AppSettings>): Promise<AppSettings>;
+    onChanged(listener: (settings: AppSettings) => void): () => void;
+  };
+  skins: {
+    list(): Promise<TerminalBorderSkinListItem[]>;
+    get(id: CustomTerminalBorderSkinId): Promise<TerminalBorderSkinReadResult>;
+    onChanged(listener: () => void): () => void;
+  };
+  pixelSkins: {
+    list(): Promise<PixelSkinPackSummary[]>;
+    install(request: PixelSkinPackInstallRequest): Promise<PixelSkinPackSummary>;
+    installZip(request: PixelSkinZipInstallRequest): Promise<PixelSkinPackSummary>;
+    readAsset(id: PixelTerminalBorderSkinId, slot: PixelSkinSlot): Promise<Uint8Array | null>;
+    onChanged(listener: () => void): () => void;
   };
   agents: {
     availability(): Promise<AgentCliAvailability>;
@@ -1426,6 +1475,15 @@ export const IPC = {
   updaterInstall: "updater:install",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
+  settingsChanged: "settings:changed",
+  terminalBorderSkinsList: "terminal-border-skins:list",
+  terminalBorderSkinsGet: "terminal-border-skins:get",
+  terminalBorderSkinsChanged: "terminal-border-skins:changed",
+  pixelSkinsList: "pixel-skins:list",
+  pixelSkinsInstall: "pixel-skins:install",
+  pixelSkinsInstallZip: "pixel-skins:install-zip",
+  pixelSkinsReadAsset: "pixel-skins:read-asset",
+  pixelSkinsChanged: "pixel-skins:changed",
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",

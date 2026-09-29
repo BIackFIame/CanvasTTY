@@ -11,6 +11,8 @@ import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
 import xterm from "@xterm/headless";
 import { AgentControlGateway, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { PixelSkinPackRegistry } from "../src/main/services/PixelSkinPackRegistry.ts";
+import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
@@ -49,7 +51,13 @@ async function fixture(t, gatewayOptions = {}) {
       return pty;
     });
   let lifecycleEnabled = true;
-  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled, ...gatewayOptions });
+  const pixelSkinPacks = new PixelSkinPackRegistry(root);
+  await pixelSkinPacks.initialize();
+  const settings = new SettingsStore(root, "en");
+  await settings.load();
+  let notifiedSettings = null;
+  gateway = new AgentControlGateway({ userDataPath: root, terminals, pixelSkinPacks, settings,
+    onSettingsChanged: (next) => { notifiedSettings = next; }, lifecycleEnabled: () => lifecycleEnabled, ...gatewayOptions });
   const connectionPath = await gateway.start();
   const clientPath = join(root, "client-a.json");
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
@@ -69,9 +77,49 @@ async function fixture(t, gatewayOptions = {}) {
     }
     assert.fail("fixture composer not ready");
   };
-  return { root, gateway, terminals, calls, connectionPath, clientPath, request, create, signal, ready,
+  return { root, gateway, terminals, calls, connectionPath, clientPath, pixelSkinPacks, settings,
+    get notifiedSettings() { return notifiedSettings; }, request, create, signal, ready,
     disableLifecycle() { lifecycleEnabled = false; } };
 }
+
+test("agent skin API lists and activates persistent themes", localSocket, async (t) => {
+  const f = await fixture(t);
+  assert.ok((await f.request("skin-list")).builtIn.includes("matrix"));
+  assert.ok((await f.request("skin-list")).builtIn.includes("gothic-eclipse"));
+  assert.equal((await f.request("skin-select", { skinId: "gothic-eclipse" })).activeId, "gothic-eclipse");
+  const selected = await f.request("skin-select", { skinId: "matrix", detail: "minimal" });
+  assert.equal(selected.activeId, "matrix");
+  assert.equal(selected.detail, "minimal");
+  assert.equal(f.notifiedSettings.terminalBorderSkin, "matrix");
+  assert.equal((await f.request("skin-list")).activeId, "matrix");
+  assert.equal((await new SettingsStore(f.root, "en").load()).terminalBorderSkin, "matrix");
+  await assert.rejects(f.request("skin-select", { skinId: "pixel:missing" }), (error) => error.code === "INVALID_PARAMS");
+});
+
+test("agent ZIP import accepts per-level terminal openings from a JSON file", localSocket, async (t) => {
+  const f = await fixture(t);
+  const archivePath = join(f.root, "theme.zip");
+  const aperturesPath = join(f.root, "apertures.json");
+  const apertures = {
+    minimal: { left: 10, right: 10, top: 16, bottom: 16 },
+    detailed: { left: 14, right: 14, top: 18, bottom: 19 },
+    master: { left: 15, right: 15, top: 21, bottom: 22 }
+  };
+  await writeFile(archivePath, "test ZIP placeholder");
+  await writeFile(aperturesPath, JSON.stringify(apertures));
+  let received;
+  f.pixelSkinPacks.installZip = async (archive, name, openings) => {
+    received = { archive: archive.toString(), name, apertures: openings };
+    return { id: `pixel:${randomUUID()}`, name, aperture: apertures.detailed, apertures: openings };
+  };
+  const response = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath,
+    "skin-install", "--archive", archivePath, "--name", "Agent theme", "--apertures", aperturesPath,
+    "--activate", "--detail", "detailed"]);
+  assert.deepEqual(received, { archive: "test ZIP placeholder", name: "Agent theme", apertures });
+  assert.equal(response.result.pack.name, "Agent theme");
+  assert.equal(f.notifiedSettings.terminalBorderSkin, response.result.pack.id);
+  assert.equal(f.notifiedSettings.terminalSkinDetail, "detailed");
+});
 
 test("CLI creates native YOLO with requested directory/title, including concurrent replay", localSocket, async (t) => {
   const f = await fixture(t);

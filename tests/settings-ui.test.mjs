@@ -13,6 +13,11 @@ const menuPrimitivesPath = new URL("../src/renderer/src/components/CanvasMenuPri
 const minimapPath = new URL("../src/renderer/src/features/workspace/CanvasMinimap.tsx", import.meta.url);
 const homeZonePath = new URL("../src/renderer/src/features/home/HomeZone.tsx", import.meta.url);
 const appStylesPath = new URL("../src/renderer/src/styles/app.css", import.meta.url);
+const terminalSkinsPath = new URL("../src/renderer/src/styles/terminalSkins.css", import.meta.url);
+const ornateTerminalSkinsPath = new URL("../src/renderer/src/styles/ornateTerminalSkins.css", import.meta.url);
+const appSkinsPath = new URL("../src/renderer/src/styles/appSkins.css", import.meta.url);
+const terminalCardPath = new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url);
+const pixelTerminalSkinsPath = new URL("../src/renderer/src/styles/pixelTerminalSkins.css", import.meta.url);
 
 test("About is the final Settings tab and owns the expandable hook FAQ", async () => {
   const [settings, about] = await Promise.all([
@@ -46,6 +51,83 @@ test("Settings uses the approved icon-sidebar modal instead of the legacy horizo
   assert.match(styles, /\.setting-group--stacked \{[^}]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.doesNotMatch(styles, /\.settings-tabs \{[^}]*grid-template-columns: repeat\(6/);
 });
+
+test("terminal border selection reaches cards with a preview for every choice", async () => {
+  const [settings, workspace, card, styles, ornateStyles] = await Promise.all([
+    readFile(settingsPanelPath, "utf8"),
+    readFile(workspacePath, "utf8"),
+    readFile(terminalCardPath, "utf8"),
+    readFile(terminalSkinsPath, "utf8"),
+    readFile(ornateTerminalSkinsPath, "utf8")
+  ]);
+  assert.match(settings, /onChange=\{\(terminalBorderSkin\) => void onChange\(\{ terminalBorderSkin \}\)\}/);
+  assert.match(workspace, /borderSkin=\{settings\.terminalBorderSkin\}/);
+  assert.match(card, /data-border-skin=\{borderSkin\}/);
+  for (const skin of ["classic", "minimal", "glass", "cyber", "nord", "gradient", "cybercore", "titanium", "retro", "sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"]) {
+    assert.match(settings, new RegExp(`\\["${skin}", "borderSkin`));
+  }
+  for (const skin of ["minimal", "glass", "cyber", "nord", "gradient"]) {
+    assert.ok(styles.includes(`.terminal-card[data-border-skin="${skin}"]`));
+    assert.ok(styles.includes(`.border-skin-preview[data-border-skin="${skin}"]`));
+  }
+  for (const skin of ["cybercore", "titanium", "retro"]) {
+    assert.ok(ornateStyles.includes(`.terminal-card[data-border-skin="${skin}"]`));
+    assert.ok(ornateStyles.includes(`.border-skin-preview[data-border-skin="${skin}"]`));
+  }
+  assert.doesNotMatch(settings, /\["botanical", "borderSkinBotanical"\]/);
+  assert.doesNotMatch(ornateStyles, /data-border-skin="botanical"/);
+});
+
+test("pixel border skin preview is scoped, responsive, and bounds stage within modal", async () => {
+  const [settings, pixelStyles] = await Promise.all([
+    readFile(settingsPanelPath, "utf8"),
+    readFile(pixelTerminalSkinsPath, "utf8")
+  ]);
+
+  // Check SettingsPanel contains the expected structure
+  assert.match(settings, /className="pixel-skin-preview-tools"/);
+  assert.match(settings, /className="pixel-skin-preview-tools__groups"/);
+  assert.match(settings, /className="pixel-skin-preview-tools__group"/);
+  assert.match(settings, /className="pixel-skin-preview-stage"/);
+  assert.match(settings, /className="pixel-skin-preview-stage__screen"/);
+  assert.match(settings, /className="pixel-skin-preview-stage__activity"/);
+
+  // Tools container spans choices grid
+  assert.match(pixelStyles, /\.pixel-skin-preview-tools \{[^}]*grid-column: 1 \/ -1;/);
+
+  // Grouped controls wrap and button states
+  assert.match(pixelStyles, /\.pixel-skin-preview-tools__groups \{[^}]*display: flex;[^}]*flex-wrap: wrap;/);
+  assert.match(pixelStyles, /\.pixel-skin-preview-tools__button:focus-visible \{/);
+  assert.match(pixelStyles, /\.pixel-skin-preview-tools__button--active/);
+
+  // Bounded 3:2 stage
+  assert.match(pixelStyles, /\.pixel-skin-preview-stage \{[^}]*position: relative;[^}]*width: 100%;[^}]*max-width: 520px;[^}]*aspect-ratio: 3 \/ 2;[^}]*overflow: hidden;/);
+
+  // Absolute inset stage canvas & aperture screen
+  assert.match(pixelStyles, /\.pixel-skin-preview-stage \.terminal-skin-canvas \{[^}]*position: absolute;[^}]*inset: 0;/);
+  assert.match(pixelStyles, /\.pixel-skin-preview-stage__screen \{[^}]*position: absolute;[^}]*z-index: 2;/);
+
+  // Pixel thumbnail containment
+  assert.match(pixelStyles, /\.border-skin-preview--pixel img \{[^}]*object-fit: contain;/);
+  assert.match(settings, /readAsset\(id, "master_idle"\)/);
+  assert.match(settings, /pixelSkinAssetFilename\(theme, "master", "idle"\)/);
+  assert.doesNotMatch(pixelStyles, /sakura-frame\.png/);
+});
+
+test("application skin selection reaches the app root with previews", async () => {
+  const [settings, app, styles] = await Promise.all([
+    readFile(settingsPanelPath, "utf8"),
+    readFile(new URL("../src/renderer/src/App.tsx", import.meta.url), "utf8"),
+    readFile(appSkinsPath, "utf8")
+  ]);
+  assert.match(settings, /onChange=\{\(appSkin\) => void onChange\(\{ appSkin \}\)\}/);
+  assert.match(app, /data-app-skin=\{settings\.appSkin\}/);
+  for (const skin of ["classic", "atelier", "signal", "greenhouse", "midnight"]) {
+    assert.match(settings, new RegExp(`\\["${skin}", "appSkin`));
+    assert.ok(styles.includes(`data-preview-skin="${skin}"`));
+  }
+});
+
 
 test("Hooks stays concise while detailed safety copy is available in About", async () => {
   const [hooks, styles] = await Promise.all([

@@ -15,7 +15,8 @@ test("palette changes retheme the live xterm without recreating it", async () =>
   const mountDependencies = effectDependenciesContaining(source, "new Terminal({");
 
   assert.equal(mountDependencies, "session.id");
-  assert.match(source, /terminal\.options\.theme = terminalTheme\(palette\)/);
+  assert.match(source, /terminal\.options\.theme = terminalTheme\(palette, pixelSkinTheme\)/);
+  assert.match(source, /\}, \[palette, pixelSkinTheme\]\);/);
 });
 
 test("terminal copy shortcuts write the xterm selection without reaching the PTY", async () => {
@@ -117,6 +118,19 @@ test("revoking lifecycle hooks makes live agent status unavailable until a resta
   assert.match(source, /session\.metadata\.status = "unavailable";\s*this\.emitSession\(session\.metadata\)/);
   assert.match(source, /if \(!this\.lifecycleHooksEnabled \|\| !session/);
   assert.match(source, /session\.lifecycle = this\.lifecycleHooksEnabled\s*\? createProviderLifecycleParser/);
+});
+
+test("only explicit turn-stop hooks set completed art and a new turn clears it", async () => {
+  const [card, manager, main] = await Promise.all([
+    readFile(terminalCardPath, "utf8"),
+    readFile(terminalManagerPath, "utf8"),
+    readFile(new URL("../src/main/index.ts", import.meta.url), "utf8")
+  ]);
+  assert.match(main, /state: signal\.state,\s*event: signal\.event/);
+  assert.match(manager, /\["Stop", "StopFailure", "StopCancelled"\]\.includes\(signal\.event \?\? ""\)/);
+  assert.match(manager, /nextStatus === "working" \? false : completed \|\| Boolean\(session\.metadata\.turnCompleted\)/);
+  assert.match(card, /pixelSkinStateForSession\(session\.status, session\.turnCompleted\)/);
+  assert.match(card, /artState=\{pixelArtState\}/);
 });
 
 test("terminal viewport keeps the palette background after row-sized fits", async () => {

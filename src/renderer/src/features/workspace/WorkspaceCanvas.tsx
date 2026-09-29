@@ -36,6 +36,9 @@ import { StickyNoteCard } from "../notes/StickyNoteCard";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
 import { TerminalCard } from "../terminal/TerminalCard";
+import { shouldTogglePixelSkinMasterView } from "../terminal/terminalShortcuts";
+import { isPixelSkinThemeId } from "../skins/skinCatalog";
+import { isPixelSkinPackId, usePixelSkinPackAssets } from "../skins/SkinAssets";
 import { CanvasCommandPalette } from "./CanvasCommandPalette";
 import { CanvasContextMenu } from "./CanvasContextMenu";
 import { CanvasMinimap } from "./CanvasMinimap";
@@ -86,12 +89,30 @@ import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
 import { webglContextPool } from "../terminal/webglContextPool";
 
-const CANVAS_OVERLAY_PLACEMENTS: CanvasOverlayPlacement[] = [
+const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
   "top-left",
   "top-right",
   "bottom-left",
   "bottom-right"
 ];
+
+const PIXEL_THEME_BACKGROUND_IDS = new Set<string>([
+  "sakura",
+  "matrix",
+  "forest-cabin",
+  "gold-black",
+  "cat",
+  "gothic-eclipse"
+]);
+
+function themeBackgroundForBorderSkin(skin: string | undefined): string | undefined {
+  if (!skin) return undefined;
+  if (PIXEL_THEME_BACKGROUND_IDS.has(skin)) {
+    return skin;
+  }
+  return undefined;
+}
+
 
 /** Alt+arrow moves canvas focus; never a canvas-navigation binding (those are modifier+mouse or wheel). */
 const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
@@ -239,8 +260,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const [noteEditRequest, setNoteEditRequest] = useState<{ id: string; version: number } | null>(null);
   const [regionMovePreview, setRegionMovePreview] = useState<RegionMovePreview | null>(null);
   const [marqueeSelection, setMarqueeSelection] = useState<ReadonlySet<string>>(EMPTY_MARQUEE_SELECTION);
+  const [masterPixelSkinSessionIds, setMasterPixelSkinSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const overlays = useRef<HTMLDivElement>(null);
   const [overlayRects, setOverlayRects] = useState<SessionBounds[]>([]);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
   const commitCamera = useCallback((next: CameraState): void => {
@@ -749,6 +773,25 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
+      if (activeSessionId !== null
+        && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
+        && shouldTogglePixelSkinMasterView(
+          event,
+          sessionsRef.current.some((session) => session.id === activeSessionId),
+          [settings.shortcuts.home, settings.shortcuts.renameWindow]
+        )
+        && !isShortcutCaptureTarget(event.target)
+        && !isRenameInputTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMasterPixelSkinSessionIds((current) => {
+          const next = new Set(current);
+          if (next.has(activeSessionId)) next.delete(activeSessionId);
+          else next.add(activeSessionId);
+          return next;
+        });
+        return;
+      }
       // Alt+arrow is a canvas gesture of its own; the Ctrl/Cmd chords below stay untouched.
       const direction = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
         ? CANVAS_FOCUS_ARROWS[event.key]
@@ -778,11 +821,19 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     };
     window.addEventListener("keydown", handleShortcut, true);
     return () => window.removeEventListener("keydown", handleShortcut, true);
-  }, [browserViewVisible, homeEditing, onOpenSettings]);
+  }, [activeSessionId, browserViewVisible, homeEditing, onOpenSettings,
+    settings.shortcuts.home, settings.shortcuts.renameWindow, settings.terminalBorderSkin]);
+
+  const themeBackground = themeBackgroundForBorderSkin(settings.terminalBorderSkin);
+  const packBackground = usePixelSkinPackAssets(
+    isPixelSkinPackId(settings.terminalBorderSkin) ? settings.terminalBorderSkin : null
+  )?.background;
 
   return (
     <div
       ref={viewport}
+      data-theme-background={themeBackground ?? (packBackground ? "custom" : undefined)}
+      style={packBackground ? { backgroundImage: `url("${packBackground}")` } : undefined}
       className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${wheelNavigation.wheelPanning ? "workspace--wheel-panning" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
       onPointerDownCapture={(event) => {
         if (openRadialLauncher(event)) return;
@@ -907,6 +958,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               session={withGroupNudge(terminalLayerId(session.id), session)}
               locale={settings.locale}
               palette={settings.palette}
+              borderSkin={settings.terminalBorderSkin}
+              skinDetail={settings.terminalSkinDetail}
               zoom={camera.zoom}
               stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
               snapEnabled={settings.snapToGrid}
@@ -916,6 +969,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
               selected={activeSessionId === session.id}
+              forceMasterDetail={masterPixelSkinSessionIds.has(session.id)}
               groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
               renaming={renamingSessionId === session.id}
               fullscreen={fullscreenSessionId === session.id}
@@ -1050,6 +1104,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               session={withGroupNudge(terminalLayerId(session.id), session)}
               locale={settings.locale}
               palette={settings.palette}
+              borderSkin={settings.terminalBorderSkin}
+              skinDetail={settings.terminalSkinDetail}
               zoom={1}
               stackIndex={9999}
               snapEnabled={false}
@@ -1059,6 +1115,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
               selected={activeSessionId === session.id}
+              forceMasterDetail={true}
               groupSelected={false}
               renaming={renamingSessionId === session.id}
               fullscreen={true}
