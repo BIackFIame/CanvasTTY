@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../src/shared/contracts.ts";
 
 const BUNDLED_THEMES = ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"];
 
@@ -77,31 +78,16 @@ test("verify WorkspaceCanvas.tsx source-level wiring and background theme scopin
     "WorkspaceCanvas.tsx should attach bundled or imported theme background"
   );
 
-  // Check themeBackground wiring to settings.terminalBorderSkin
+  // Background rendering must use its own persisted selection.
   assert.match(
     tsx,
-    /const\s+themeBackground\s*=\s*themeBackgroundForBorderSkin\(settings\.terminalBorderSkin\);/,
-    "WorkspaceCanvas.tsx should resolve themeBackground from settings.terminalBorderSkin"
+    /BUNDLED_CANVAS_BACKGROUND_IDS[^\n]*\.includes\(settings\.canvasBackground\)/,
+    "WorkspaceCanvas.tsx should resolve bundled backgrounds from settings.canvasBackground"
   );
-
-  // Verify themeBackgroundForBorderSkin restricts strictly to bundled themes
-  const functionMatch = tsx.match(/function\s+themeBackgroundForBorderSkin[\s\S]*?\n\}/);
-  assert.ok(functionMatch, "themeBackgroundForBorderSkin function definition should exist");
-  const functionBody = functionMatch[0];
-
-  assert.ok(
-    !functionBody.includes("isPixelSkinThemeId"),
-    "themeBackgroundForBorderSkin should not accept arbitrary isPixelSkinThemeId"
-  );
-
-  const bundledThemesSetMatch = tsx.match(
-    /const\s+PIXEL_THEME_BACKGROUND_IDS\s*=\s*new\s+Set<string>\(\[\s*([\s\S]*?)\]\);/
-  );
-  assert.ok(bundledThemesSetMatch, "PIXEL_THEME_BACKGROUND_IDS should be defined as a Set");
-  const extractedThemes = [...bundledThemesSetMatch[1].matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+  assert.match(tsx, /isPixelSkinPackId\(settings\.canvasBackground\) \? settings\.canvasBackground : null/);
   assert.deepEqual(
-    extractedThemes.sort(),
+    [...BUNDLED_CANVAS_BACKGROUND_IDS].sort(),
     BUNDLED_THEMES.slice().sort(),
-    "PIXEL_THEME_BACKGROUND_IDS must contain exactly the bundled themes"
+    "BUNDLED_CANVAS_BACKGROUND_IDS must contain exactly the bundled themes"
   );
 });

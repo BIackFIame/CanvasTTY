@@ -1,3 +1,5 @@
+import "./stdio";
+import appIcon from "../../build/icon.png?asset";
 import { ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
 import { isAbsolute } from "node:path";
@@ -179,7 +181,9 @@ if (!hasSingleInstanceLock) app.quit();
  * waits for it to settle before it loads the application surface.
  */
 function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
+  if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(appIcon);
   const window = new BrowserWindow({
+    icon: appIcon,
     width: 1440,
     height: 900,
     minWidth: 920,
@@ -1112,6 +1116,7 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
 
   const window = new BrowserWindow({
     width: contribution.defaultSize.width,
+    icon: appIcon,
     height: contribution.defaultSize.height,
     minWidth: contribution.minSize?.width ?? 320,
     minHeight: contribution.minSize?.height ?? 220,

@@ -57,6 +57,15 @@
 }
 .pixel-pack-dialog__close:hover { background: color-mix(in srgb, var(--text) 12%, transparent); }
 .pixel-pack-dialog__body { min-height: 0; overflow: auto; padding: 18px; }
+.pixel-pack-guide { display: grid; grid-template-columns: minmax(0, 1fr) 220px; gap: 18px; align-items: center; margin-bottom: 18px; padding: 14px; border: 1px solid color-mix(in srgb, var(--text) 20%, transparent); border-radius: 6px; background: var(--surface-soft); }
+.pixel-pack-guide h3 { margin: 0 0 8px; font-size: 14px; }
+.pixel-pack-guide ol { margin: 0; padding-left: 20px; font-size: 12px; line-height: 1.6; }
+.pixel-pack-guide li + li { margin-top: 5px; }
+.pixel-pack-guide figure { margin: 0; }
+.pixel-pack-guide img { display: block; width: 100%; aspect-ratio: 3 / 2; object-fit: contain; image-rendering: pixelated; background: #141419; border-radius: 4px; }
+.pixel-pack-guide figcaption { margin-top: 6px; font-size: 11px; line-height: 1.4; }
+.pixel-pack-help { margin: 0 0 12px; font-size: 12px; line-height: 1.5; }
+.pixel-pack-aperture > .pixel-pack-help { grid-column: 1 / -1; }
 .pixel-pack-dialog__topline { display: flex; align-items: end; gap: 12px; margin-bottom: 16px; }
 .pixel-pack-dialog__agent-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: -5px 0 16px; }
 .pixel-pack-dialog__agent-actions button {
@@ -128,8 +137,9 @@
   background: #0a0b0dd9;
   font: 11px/1.2 ui-monospace, Menlo, monospace;
 }
+.pixel-pack-slot__label small { display: block; margin-top: 4px; color: #b7c0ca; font-size: 10px; }
 .pixel-pack-slot img { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; }
-.pixel-pack-slot__empty { color: #8193a0; }
+.pixel-pack-slot__empty { display: grid; justify-items: center; gap: 8px; padding: 48px 10px 10px; color: #b7c0ca; font-size: 11px; text-align: center; }
 .pixel-pack-slot input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .pixel-pack-bottom { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; margin-top: 16px; }
 .pixel-pack-bottom--zip { grid-template-columns: 1fr; }
@@ -142,6 +152,8 @@
 .pixel-pack-aperture input { min-width: 0; accent-color: var(--primary); }
 .pixel-pack-aperture output { font-variant-numeric: tabular-nums; text-align: right; }
 @media (max-width: 650px) {
+  .pixel-pack-guide { grid-template-columns: 1fr; }
+  .pixel-pack-guide figure { max-width: 220px; }
   .pixel-pack-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .pixel-pack-bottom { grid-template-columns: 1fr; }
   .pixel-pack-aperture { grid-template-columns: 1fr; }

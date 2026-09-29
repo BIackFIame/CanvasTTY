@@ -99,6 +99,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   baseProtectionEnabled: true,
   uiScale: DEFAULT_UI_SCALE,
   canvasColor: "sage",
+  canvasBackground: "none",
   pattern: "dots",
   terminalBorderSkin: "classic",
   terminalSkinDetail: "detailed",

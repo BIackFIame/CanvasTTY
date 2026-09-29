@@ -568,13 +568,15 @@ function response(id, result) {
   return { jsonrpc: "2.0", id: id ?? null, result };
 }
 
-function errorResponse(id, error) {
+export function errorResponse(id, error) {
   return {
     jsonrpc: "2.0",
     id: id ?? null,
     error: {
       code: Number.isInteger(error?.code) ? error.code : -32603,
-      message: Number.isInteger(error?.code) ? error.message : "Internal error"
+      message: error instanceof BridgeClientError
+        ? `CanvasTTY browser: ${error.code}: ${error.message}`
+        : Number.isInteger(error?.code) ? error.message : "Internal error"
     }
   };
 }

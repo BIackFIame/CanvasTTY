@@ -11,6 +11,8 @@ import type {
 import { UiIcon } from "../../components/UiIcon";
 import { pixelPackSlotForFilename } from "./pixelPackFiles";
 import { PIXEL_THEME_AGENT_GUIDE_URL, pixelThemeAgentPrompt } from "./pixelThemeAgentPrompt";
+import { PILOT_SKIN_ASSETS } from "../skins/SkinAssets";
+import { pixelSkinAssetFilename } from "../skins/skinCatalog";
 
 const LEVELS = ["minimal", "detailed", "master"] as const;
 const STATES = ["idle", "working", "completed"] as const;
@@ -25,6 +27,12 @@ export function PixelSkinPackCreator({ locale, onCreated }: {
   onCreated(pack: PixelSkinPackSummary): void;
 }): React.JSX.Element {
   const ru = locale === "ru";
+  const levelLabels = ru
+    ? { minimal: "Простая рамка", detailed: "Детальная рамка", master: "Оркестратор" }
+    : { minimal: "Simple border", detailed: "Detailed border", master: "Orchestrator" };
+  const stateLabels = ru
+    ? { idle: "Ожидание", working: "Работа", completed: "Готово" }
+    : { idle: "Idle", working: "Working", completed: "Completed" };
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [zipFile, setZipFile] = useState<File | null>(null);
@@ -153,6 +161,20 @@ export function PixelSkinPackCreator({ locale, onCreated }: {
               </button>
             </div>
             <div className="pixel-pack-dialog__body">
+              <div className="pixel-pack-guide">
+                <div>
+                  <h3>{ru ? "Соберите тему с помощью агента" : "Build a theme with your agent"}</h3>
+                  <ol>
+                    <li>{ru ? "Скопируйте задание ниже, вставьте его в чат агента, опишите стиль и приложите референс." : "Copy the brief below, paste it into your agent chat, describe the style, and attach a reference."}</li>
+                    <li>{ru ? "Загрузите готовый ZIP от агента или 10 PNG: 9 рамок и 1 фон Canvas." : "Upload the agent’s ZIP or 10 PNGs: 9 borders and 1 Canvas background."}</li>
+                    <li>{ru ? "Назовите тему и нажмите «Создать тему». Её рамки и фон можно выбирать независимо в оформлении." : "Name the theme and select “Create theme”. Its borders and background can be selected independently in Appearance."}</li>
+                  </ol>
+                </div>
+                <figure>
+                  <img src={PILOT_SKIN_ASSETS[pixelSkinAssetFilename("sakura", "detailed", "idle")]} alt={ru ? "Пример пиксельной рамки Сакура" : "Example Sakura pixel border"} />
+                  <figcaption>{ru ? "Пример: детальная рамка «Сакура»" : "Example: detailed Sakura border"}</figcaption>
+                </figure>
+              </div>
               <div className="pixel-pack-dialog__topline">
                 <label>
                   <span>{ru ? "Название темы" : "Theme name"}</span>
@@ -182,9 +204,12 @@ export function PixelSkinPackCreator({ locale, onCreated }: {
                 </button>
                 <button type="button" onClick={openAgentGuide} title={ru ? "Открыть инструкцию на GitHub" : "Open the GitHub guide"}>
                   <UiIcon name="browser" size={16} />
-                  {ru ? "Инструкция" : "Guide"}
+                  {ru ? "Подробнее о формате" : "More about the format"}
                 </button>
               </div>
+              <p className="pixel-pack-help">{zipFile
+                ? (ru ? "ZIP будет проверен при создании темы. Предпросмотр рамок появится после установки." : "The ZIP will be validated when you create the theme. Border previews are available after installation.")
+                : (ru ? "Ниже — места для ваших PNG, а не готовые варианты. Нажмите на ячейку или перетащите PNG: в ней появится превью. Строки — простая рамка, детальная и Master для оркестратора; столбцы — ожидание, работа и готово." : "These are slots for your PNGs, not existing designs. Click a slot or drop a PNG to see its preview. Rows are simple, detailed, and Master for an orchestrator; columns are idle, working, and completed.")}</p>
               {zipFile ? <div className="pixel-pack-zip-selected">
                 <span>{zipFile.name}</span>
                 <button type="button" onClick={() => setZipFile(null)} title={ru ? "Убрать ZIP" : "Remove ZIP"} aria-label={ru ? "Убрать ZIP" : "Remove ZIP"}>
@@ -193,16 +218,16 @@ export function PixelSkinPackCreator({ locale, onCreated }: {
               </div> : <div className="pixel-pack-grid" role="group" aria-label={ru ? "Состояния терминала" : "Terminal states"}>
                 {LEVELS.map((level) => STATES.map((state) => {
                   const slot = `${level}_${state}` as PixelSkinSlot;
-                  const label = `${level} · ${state}`;
+                  const label = `${levelLabels[level]} · ${stateLabels[state]}`;
                   return (
                     <label key={slot} className="pixel-pack-slot" onDragOver={(event) => event.preventDefault()} onDrop={(event) => {
                       event.preventDefault();
                       assign(slot, event.dataTransfer.files[0]);
                     }}>
-                      <span className="pixel-pack-slot__label">{label}</span>
+                      <span className="pixel-pack-slot__label">{label}<small>{slot}.png</small></span>
                       {previews[slot]
                         ? <img src={previews[slot]} alt="" />
-                        : <span className="pixel-pack-slot__empty"><UiIcon name="image-plus" size={22} /></span>}
+                        : <span className="pixel-pack-slot__empty"><UiIcon name="image-plus" size={22} /><span>{ru ? "Нажмите или перетащите PNG" : "Click or drop a PNG"}</span></span>}
                       <input type="file" accept="image/png,.png" aria-label={label} onChange={(event) => {
                         assign(slot, event.target.files?.[0]);
                         event.target.value = "";
@@ -216,20 +241,21 @@ export function PixelSkinPackCreator({ locale, onCreated }: {
                   event.preventDefault();
                   assign("background", event.dataTransfer.files[0]);
                 }}>
-                  <span className="pixel-pack-slot__label">{ru ? "Фон" : "Background"}</span>
+                  <span className="pixel-pack-slot__label">{ru ? "Фон Canvas" : "Canvas background"}<small>background.png</small></span>
                   {previews.background
                     ? <img src={previews.background} alt="" />
-                    : <span className="pixel-pack-slot__empty"><UiIcon name="image-plus" size={22} /></span>}
+                    : <span className="pixel-pack-slot__empty"><UiIcon name="image-plus" size={22} /><span>{ru ? "Нажмите или перетащите PNG" : "Click or drop a PNG"}</span></span>}
                   <input type="file" accept="image/png,.png" aria-label={ru ? "Фон" : "Background"} onChange={(event) => {
                     assign("background", event.target.files?.[0]);
                     event.target.value = "";
                   }} />
                 </label>}
                 <div className="pixel-pack-aperture" role="group" aria-label={ru ? "Отступы терминала" : "Terminal insets"}>
+                  <p className="pixel-pack-help">{ru ? "Отступы оставляют место для рамки вокруг текста терминала. Меняйте их, если рисунок перекрывает текст." : "Insets reserve space for the border around terminal text. Adjust them if the artwork overlaps the text."}</p>
                   <div className="pixel-pack-aperture__levels" role="group" aria-label={ru ? "Размер терминала" : "Terminal size"}>
                     {LEVELS.map((level) => (
                       <button key={level} type="button" aria-pressed={apertureLevel === level} onClick={() => setApertureLevel(level)}>
-                        {ru ? ({ minimal: "Минимал", detailed: "Детальный", master: "Мастер" })[level] : level}
+                        {level === "master" ? (ru ? "Master · Оркестратор" : "Master · Orchestrator") : levelLabels[level]}
                       </button>
                     ))}
                   </div>

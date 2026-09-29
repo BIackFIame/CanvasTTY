@@ -33,6 +33,7 @@ const fallback = {
   agentLifecycleHooksEnabled: true,
   uiScale: 1,
   canvasColor: "sage",
+  canvasBackground: "none",
   pattern: "dots",
   terminalBorderSkin: "classic",
   terminalSkinDetail: "detailed",
@@ -174,6 +175,35 @@ test("terminal skin animation setting is boolean and persists independently of t
     assert.equal(restored.terminalBorderSkin, "sakura");
     assert.equal(restored.terminalSkinDetail, "minimal");
     assert.equal(restored.terminalSkinAnimationEnabled, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("canvas backgrounds migrate once and persist independently of terminal borders", async () => {
+  const pixel = "pixel:12345678-1234-1234-1234-123456789abc";
+  for (const skin of ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse", pixel]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).canvasBackground, skin);
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin, canvasBackground: "none" }, fallback).canvasBackground, "none");
+    assert.equal(normalizeSettings({ terminalBorderSkin: "classic", canvasBackground: skin }, fallback).canvasBackground, skin);
+  }
+  for (const invalid of ["glass", "custom:aurora", "pixel:bad", "../background.png", null, 1]) {
+    assert.equal(normalizeSettings({ canvasBackground: invalid }, fallback).canvasBackground, "none");
+  }
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ terminalBorderSkin: "sakura" }));
+    const store = new SettingsStore(dir, "en");
+    assert.equal((await store.load()).canvasBackground, "sakura");
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).canvasBackground, "sakura");
+    await store.update({ terminalBorderSkin: "cat" });
+    assert.equal((await new SettingsStore(dir, "en").load()).canvasBackground, "sakura");
+    await store.update({ canvasBackground: pixel });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBorderSkin, "cat");
+    await store.update({ canvasBackground: "none" });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.canvasBackground, "none");
+    assert.equal(restored.terminalBorderSkin, "cat");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 import type { LocaleId, WindowState } from "../../../shared/contracts";
 import appManifest from "../../../../package.json";
-import { ProviderIcon } from "./ProviderIcon";
+import appLogo from "../../../../docs/assets/canvastty-logo-dark.svg?url";
 import { UiIcon } from "./UiIcon";
 import { t } from "../lib/i18n";
 
@@ -36,7 +36,7 @@ export function TitleBar({ locale, windowState, onWindowStateChange }: TitleBarP
       <header className="titlebar titlebar--macos">
         <div className="titlebar__macos-controls-space" aria-hidden="true" />
         <div className="titlebar__brand">
-          <span className="titlebar__logo"><ProviderIcon provider="terminal" size="small" /></span>
+          <img className="titlebar__logo" src={appLogo} alt="" aria-hidden="true" />
           <strong>CanvasTTY</strong>
           <span className={`titlebar__build titlebar__build--${BUILD_CHANNEL.toLowerCase()}`}>{BUILD_LABEL}</span>
           <span className="titlebar__subtitle">{t(locale, "appSubtitle")}</span>
@@ -49,7 +49,7 @@ export function TitleBar({ locale, windowState, onWindowStateChange }: TitleBarP
   return (
     <header className="titlebar">
       <div className="titlebar__brand">
-        <span className="titlebar__logo"><ProviderIcon provider="terminal" size="small" /></span>
+        <img className="titlebar__logo" src={appLogo} alt="" aria-hidden="true" />
         <strong>CanvasTTY</strong>
         <span className={`titlebar__build titlebar__build--${BUILD_CHANNEL.toLowerCase()}`}>{BUILD_LABEL}</span>
         <span className="titlebar__subtitle">{t(locale, "appSubtitle")}</span>

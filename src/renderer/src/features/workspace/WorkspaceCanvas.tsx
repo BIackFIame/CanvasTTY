@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
   AgentProviderId,
   AppSettings,
@@ -95,24 +96,6 @@ const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
   "bottom-left",
   "bottom-right"
 ];
-
-const PIXEL_THEME_BACKGROUND_IDS = new Set<string>([
-  "sakura",
-  "matrix",
-  "forest-cabin",
-  "gold-black",
-  "cat",
-  "gothic-eclipse"
-]);
-
-function themeBackgroundForBorderSkin(skin: string | undefined): string | undefined {
-  if (!skin) return undefined;
-  if (PIXEL_THEME_BACKGROUND_IDS.has(skin)) {
-    return skin;
-  }
-  return undefined;
-}
-
 
 /** Alt+arrow moves canvas focus; never a canvas-navigation binding (those are modifier+mouse or wheel). */
 const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
@@ -824,9 +807,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   }, [activeSessionId, browserViewVisible, homeEditing, onOpenSettings,
     settings.shortcuts.home, settings.shortcuts.renameWindow, settings.terminalBorderSkin]);
 
-  const themeBackground = themeBackgroundForBorderSkin(settings.terminalBorderSkin);
+  const themeBackground = (BUNDLED_CANVAS_BACKGROUND_IDS as readonly string[]).includes(settings.canvasBackground)
+    ? settings.canvasBackground : undefined;
   const packBackground = usePixelSkinPackAssets(
-    isPixelSkinPackId(settings.terminalBorderSkin) ? settings.terminalBorderSkin : null
+    isPixelSkinPackId(settings.canvasBackground) ? settings.canvasBackground : null
   )?.background;
 
   return (

@@ -29,6 +29,8 @@ export type CanvasColorId = "sage" | "lilac" | "night" | "sand" | "mist" | "rose
 export type CanvasPatternId = "dots" | "grid" | "waves" | "diagonal" | "rings" | "none";
 export type CustomTerminalBorderSkinId = `custom:${string}`;
 export type PixelTerminalBorderSkinId = `pixel:${string}`;
+export const BUNDLED_CANVAS_BACKGROUND_IDS = ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"] as const;
+export type CanvasBackgroundId = "none" | typeof BUNDLED_CANVAS_BACKGROUND_IDS[number] | PixelTerminalBorderSkinId;
 export type PixelSkinPreferredDetail = "minimal" | "detailed";
 export type PixelSkinSlot = `${"minimal" | "detailed" | "master"}_${"idle" | "working" | "completed"}` | "background";
 export interface PixelSkinAperture { left: number; right: number; top: number; bottom: number }
@@ -225,6 +227,7 @@ export interface AppSettings {
   baseProtectionEnabled: boolean;
   uiScale: number;
   canvasColor: CanvasColorId;
+  canvasBackground: CanvasBackgroundId;
   pattern: CanvasPatternId;
   terminalBorderSkin: TerminalBorderSkinId;
   terminalSkinDetail: PixelSkinPreferredDetail;
