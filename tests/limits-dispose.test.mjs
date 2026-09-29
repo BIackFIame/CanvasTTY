@@ -64,3 +64,20 @@ require("node:readline").createInterface({ input: process.stdin }).on("line", (l
   while (alive() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 50));
   assert.equal(alive(), false, "the app-server is stopped once no read came for the idle time");
 });
+
+test("peek returns the last snapshot without starting a read", async () => {
+  const service = new LimitsService({
+    get: (provider) => ({ state: "unavailable", provider, reason: "cli-not-found", checked: [], diagnostic: "" })
+  }, "test");
+  try {
+    assert.equal(service.peek(), null);
+    assert.equal(service.peek(), null);
+    const snapshot = await service.get();
+    const peeked = service.peek();
+    assert.deepEqual(peeked, snapshot);
+    peeked.providers.length = 0;
+    assert.notEqual(service.peek().providers.length, 0);
+  } finally {
+    service.dispose();
+  }
+});

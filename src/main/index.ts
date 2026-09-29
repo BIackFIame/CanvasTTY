@@ -44,6 +44,7 @@ import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
+import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { AgentControlService } from "./services/AgentControlService";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
@@ -585,6 +586,13 @@ async function initializeServices(): Promise<void> {
     }
   });
 
+  // list_providers: the CLI registry resolved at startup, the last usage read (never started from here) and the
+  // launch options trusted plugins declared.
+  const providerDirectorySources: ProviderDirectorySources = {
+    cli: (provider) => providerClis?.get(provider).state ?? null,
+    limits: () => limitsService?.peek() ?? null,
+    launchContributors: () => pluginManager?.launchContributors() ?? []
+  };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.
@@ -595,7 +603,7 @@ async function initializeServices(): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined,
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools)
+    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools, providerDirectorySources)
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
@@ -641,6 +649,8 @@ async function initializeServices(): Promise<void> {
       onSettingsChanged: (updated) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.settingsChanged, updated);
       },
+      // The CLI's create takes no plugin launch options, so none are listed.
+      providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits }),
       windowsHostPath });
     agentControl = gateway;
     try {

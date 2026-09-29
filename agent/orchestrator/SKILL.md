@@ -5,6 +5,19 @@ description: Create and coordinate native agent sessions (Codex, Claude, Qwen, K
 
 # CanvasTTY Orchestrator
 
+## Inside an Orchestrator session: the canvastty_agents tools
+
+A session started from CanvasTTY's launcher with the **Orchestrator** role has the `canvastty_agents` MCP tools. Use them in this order:
+
+1. `list_providers`: which agents CanvasTTY can launch here. Each entry's `id` is the exact `spawn_agent.provider` value; prefer entries that are `available` with `signIn: "ok"` (`unknown` only means CanvasTTY has not checked yet). When plugins offer launch options (for example an accounts plugin's `list_routes` tool), the answer names that tool.
+2. `spawn_agent` once per part of the task: a known `provider` id, an absolute `cwd` and a self-contained prompt. An unknown provider is refused with a pointer back to `list_providers`.
+3. `wait_for_agent` for each subagent (`timeoutSeconds` up to 600; call it again after `timeout`) instead of polling. `needs_approval` means the person must answer a prompt in that card: never answer it yourself.
+4. `get_agent_result` to read what the subagent produced; check the actual files before reporting success.
+
+Do not explore the filesystem, `PATH` or config folders (for example `~/.local/bin` or `~/.config/<cli>`) looking for agents or their configuration: `list_providers` is what CanvasTTY can launch, and delegation goes through `spawn_agent`.
+
+The rest of this skill covers the local control CLI, for automation outside such a session.
+
 Use the bundled `canvastty-control.mjs` CLI with a running CanvasTTY instance whose agent orchestration endpoint is enabled (Settings → Agents → Agent orchestration, or the `--agent-control` start flag). A session launched from the desktop with the **Orchestrator** role already carries `CANVASTTY_CONTROL_CONNECTION` in its environment. A plain shell running a provider CLI is not a substitute for a native session created through this endpoint. Do not use mouse/keyboard automation, clipboard, window focus, CDP, or renderer injection.
 
 ## Create workers

@@ -286,7 +286,7 @@ test("a session a plugin tool applies to gets the bridge with exactly its tools 
   const helper = { command: "/node", args: ["/h.mjs"] };
   assert.match(codexMcpArgs(helper, helper, ["collect-demo__diffstat"]).join(" "), /enabled_tools=\["collect-demo__diffstat"\]/u);
   assert.match(qwenMcpArgs(helper, helper, ["collect-demo__diffstat"]).join(" "), /mcp__canvastty_agents__collect-demo__diffstat/u);
-  assert.match(codexMcpArgs(helper, helper).join(" "), /enabled_tools=\["spawn_agent"/u);
+  assert.match(codexMcpArgs(helper, helper).join(" "), /enabled_tools=\["list_providers","spawn_agent"/u);
 });
 
 test("session events carry card metadata, never screen text without sessions:read-screen", async () => {

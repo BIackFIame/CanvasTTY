@@ -3,7 +3,15 @@ import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { ProviderId, SessionRole } from "../../../shared/contracts.ts";
 import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
-import { ORCHESTRATION_TOOL_DEFINITIONS, isPluginOrchestrationTool } from "../../../agent-browser/orchestration-catalog.mjs";
+import {
+  DEFAULT_AGENT_WAIT_SECONDS,
+  MAX_AGENT_WAIT_SECONDS,
+  ORCHESTRATION_TOOL_DEFINITIONS,
+  isPluginOrchestrationTool,
+  unknownProviderMessage
+} from "../../../agent-browser/orchestration-catalog.mjs";
+import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
+import { listProviderDirectory, type ProviderDirectorySources } from "../providerDirectory.ts";
 import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
 
 /**
@@ -15,10 +23,16 @@ import type { McpToolDefinition } from "../../../agent-browser/orchestration-cat
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
   private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
+  private readonly providers: ProviderDirectorySources;
 
-  constructor(control: AgentControlService, plugins: Pick<PluginAgentTools, "list" | "call"> | null = null) {
+  constructor(
+    control: AgentControlService,
+    plugins: Pick<PluginAgentTools, "list" | "call"> | null = null,
+    providers: ProviderDirectorySources = { cli: () => null, limits: () => null }
+  ) {
     this.control = control;
     this.plugins = plugins;
+    this.providers = providers;
   }
 
   /** Orchestrators see the core tools; every role sees the plugin tools that list it (EP-6). */
@@ -40,6 +54,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", "Only orchestrator sessions can use CanvasTTY's agent tools.", false);
       }
       switch (request.tool) {
+        case "list_providers":
+          return this.listProviders(session);
+        case "wait_for_agent":
+          return await this.wait(sessionId, request.arguments, signal);
         case "spawn_agent":
           return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
@@ -83,7 +101,35 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
+  private listProviders(session: { role: SessionRole; provider: ProviderId }): Record<string, unknown> {
+    const pluginTools = this.plugins?.list(session.role, session.provider).map((tool) => tool.name) ?? [];
+    return listProviderDirectory(this.providers, pluginTools) as unknown as Record<string, unknown>;
+  }
+
+  private async wait(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const target = args.sessionId as string;
+    // Its own session is in its subtree, but waiting on itself would only ever time out.
+    if (target === orchestratorId) {
+      throw orchestrationBridgeError("INVALID_REQUEST", "wait_for_agent waits for a subagent, not for this session.", false);
+    }
+    this.requireOwned(orchestratorId, target);
+    const seconds = typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : DEFAULT_AGENT_WAIT_SECONDS;
+    try {
+      const result = await this.control.waitFor(target, {
+        timeoutMs: Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000,
+        ...(signal ? { signal } : {})
+      });
+      return { ...result };
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw canceledError();
+      throw error;
+    }
+  }
+
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
+      throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
+    }
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,

@@ -128,8 +128,13 @@ Enable agent orchestration in CanvasTTY Settings → Agents first (or start it
 with --agent-control). Each --client-file owns only the sessions it creates.
 Keep the same private client file across related commands.
 
+providers
+  The agents CanvasTTY can create workers for: id (the --provider value), name,
+  installed/available, signIn (ok, signed_out, expired or unknown). Run it first;
+  do not search the filesystem for agent CLIs or their configuration.
 create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal|auto]
-  provider: codex (default), claude, qwen, kimi, opencode, hermes, grok, omp, pi.
+  provider: an id from providers; codex (default), claude, qwen, kimi, opencode,
+  hermes, grok, omp, pi, cursor, minimax, devin, antigravity.
   Only Codex workers report a captured result and expose startup/approval menus
   to choose/dismiss; the create response lists each worker's capabilities.
 list
@@ -157,8 +162,8 @@ export async function runCli(argv) {
   const { options, positional } = parseArguments(argv);
   if (options.help) return { help: HELP };
   const [method, sessionId] = positional;
-  if (!["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
-  if (positional.length !== (["create", "list", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
+  if (!["create", "list", "providers", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
+  if (positional.length !== (["create", "list", "providers", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
   const allowed = new Set(["connection", "client-file", "request-id",
     ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo"] : []),
     ...(method === "send" ? ["prompt-file", "text"] : []), ...(method === "result" ? ["after"] : []),
@@ -166,7 +171,7 @@ export async function runCli(argv) {
   if (method === "skin-install") ["archive", "name", "apertures", "activate", "detail"].forEach((key) => allowed.add(key));
   if (method === "skin-select") allowed.add("detail");
   if (Object.keys(options).some((key) => !allowed.has(key))) throw new Error("Option does not apply to this command.");
-  let params = ["list", "skin-list", "skin-install"].includes(method) ? {} : { sessionId };
+  let params = ["list", "providers", "skin-list", "skin-install"].includes(method) ? {} : { sessionId };
   if (method === "create") {
     if (!options.cwd) throw new Error("create requires --cwd.");
     if (options.yolo && options.profile && options.profile !== "yolo") throw new Error("Conflicting launch profiles.");

@@ -34,6 +34,39 @@ export interface AgentObservation {
   output: string;
 }
 
+/** Why waitFor returned. "done"/"failed": the process exited (exit code 0 or not); "quiet": the provider reports no
+ *  status and its screen stopped changing; "closed": its card is gone. */
+export type AgentWaitReason = "idle" | "needs_approval" | "done" | "failed" | "quiet" | "closed" | "timeout";
+
+export interface AgentWaitResult {
+  sessionId: string;
+  reason: AgentWaitReason;
+  /** The session's status as the wait ended; absent once its card is gone. */
+  status?: SessionSnapshot["status"];
+  exitCode: number | null;
+  waitedMs: number;
+  /** Masked terminal tail (masked before the cut). */
+  output: string;
+}
+
+export interface AgentWaitTiming {
+  /** How often a waiting call reads the session again. */
+  checkMs: number;
+  /** How long the screen must stay the same before an idle status counts (a CLI may still be drawing its answer). */
+  settleMs: number;
+  /** How long a session without status must show the same screen before it counts as "quiet". */
+  quietMs: number;
+}
+
+export interface AgentControlOptions {
+  /** waitFor timing; tests shorten it. */
+  waitTiming?: AgentWaitTiming;
+}
+
+/** The longest wait one call may ask for (wait_for_agent's timeoutSeconds maximum). */
+export const MAX_AGENT_WAIT_MS = 600_000;
+const AGENT_WAIT_TIMING: AgentWaitTiming = { checkMs: 500, settleMs: 1_000, quietMs: 10_000 };
+
 export interface AgentResult {
   sessionId: string;
   state: "running" | "done" | "failed";
@@ -54,9 +87,11 @@ export class PromptNotDeliveredError extends Error {
 
 export class AgentControlService {
   private readonly terminals: TerminalManager;
+  private readonly options: AgentControlOptions;
 
-  constructor(terminals: TerminalManager) {
+  constructor(terminals: TerminalManager, options: AgentControlOptions = {}) {
     this.terminals = terminals;
+    this.options = options;
   }
 
   /**
@@ -168,6 +203,53 @@ export class AgentControlService {
     };
   }
 
+  /**
+   * Waits until the agent is at rest (idle, needs_approval, exited, or quiet when it reports no status), its card
+   * closed, or the timeout passed. Only reads metadata and the output offset while it waits; the tail is read and
+   * masked once, as it returns. Rejects with an AbortError once `signal` aborts.
+   */
+  async waitFor(sessionId: string, request: { timeoutMs: number; signal?: AbortSignal }): Promise<AgentWaitResult> {
+    const { signal } = request;
+    signal?.throwIfAborted();
+    const first = this.requireSession(sessionId);
+    if (first.provider === "terminal") throw new Error("Plain terminals are not agents.");
+    if (typeof request.timeoutMs !== "number" || !Number.isFinite(request.timeoutMs)) throw new Error("A wait timeout is required.");
+    const timing = this.options.waitTiming ?? AGENT_WAIT_TIMING;
+    const timeoutMs = Math.min(MAX_AGENT_WAIT_MS, Math.max(0, request.timeoutMs));
+    const started = Date.now();
+    const answer = (session: SessionMetadata | null, reason: AgentWaitReason): AgentWaitResult => {
+      const waitedMs = Date.now() - started;
+      if (!session) return { sessionId, reason, exitCode: null, waitedMs, output: "" };
+      let output = "";
+      try { output = this.observe(sessionId).output; } catch { output = ""; }
+      return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output };
+    };
+    let offset = this.outputOffset(sessionId);
+    let changedAt = started;
+    for (;;) {
+      const session = this.terminals.getMetadata(sessionId);
+      if (!session) return answer(null, "closed");
+      const now = Date.now();
+      const current = this.outputOffset(sessionId);
+      if (current !== offset) { offset = current; changedAt = now; }
+      const quietFor = now - changedAt;
+      if (session.exitCode !== null) return answer(session, session.exitCode === 0 ? "done" : "failed");
+      if (session.status === "needs_approval") return answer(session, "needs_approval");
+      // After a prompt, an idle that no turn followed (the CLI's startup idle, or one reported before the turn began)
+      // is not the answer: only an idle after a turn that started since that prompt is. A CLI that never reports its
+      // turns still ends as "quiet" once its screen stops changing.
+      const progress = this.turnProgress(sessionId);
+      const awaitingTurn = progress !== null && progress.promptSent && !progress.turnStartedSincePrompt;
+      if (!awaitingTurn && (session.status === "idle" || session.status === "done" || session.status === "failed") && quietFor >= timing.settleMs) {
+        return answer(session, session.status);
+      }
+      if ((session.status === "unavailable" || awaitingTurn) && quietFor >= timing.quietMs) return answer(session, "quiet");
+      const waited = now - started;
+      if (waited >= timeoutMs) return answer(session, "timeout");
+      await pause(Math.min(timing.checkMs, timeoutMs - waited), signal);
+    }
+  }
+
   cancel(sessionId: string): void {
     this.requireSession(sessionId);
     this.terminals.dispose(sessionId);
@@ -187,6 +269,18 @@ export class AgentControlService {
     return tail(typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text, maxChars);
   }
 
+  private turnProgress(sessionId: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
+    try { return typeof this.terminals.turnProgress === "function" ? this.terminals.turnProgress(sessionId) : null; } catch { return null; }
+  }
+
+  /** How much output the session produced so far; changes whenever its screen does. */
+  private outputOffset(sessionId: string): number {
+    try {
+      if (typeof this.terminals.outputOffset === "function") return this.terminals.outputOffset(sessionId) ?? -1;
+      return this.terminals.readBuffer(sessionId).outputOffset;
+    } catch { return -1; }
+  }
+
   /** A lookup by id: metadata only, so no other session's scrollback is copied. */
   private requireSession(sessionId: string): SessionMetadata {
     if (typeof sessionId !== "string" || sessionId.length === 0) {
@@ -196,6 +290,22 @@ export class AgentControlService {
     if (!session) throw new Error("Terminal session does not exist.");
     return session;
   }
+}
+
+/** Sleeps, or rejects with an AbortError as soon as `signal` aborts. */
+function pause(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(abortError()); return; }
+    const onAbort = (): void => { clearTimeout(timer); reject(abortError()); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", onAbort); resolve(); }, Math.max(0, ms));
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("The wait was canceled.");
+  error.name = "AbortError";
+  return error;
 }
 
 function tail(text: string, maxChars: number): string {

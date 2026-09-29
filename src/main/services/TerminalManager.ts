@@ -99,6 +99,10 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
+  /** Turns the agent started (its status became working) since launch. */
+  turnStarts?: number;
+  /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
+  promptTurnMark?: number;
   /**
    * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
    * and owning plugin carried into the saved record.
@@ -444,6 +448,22 @@ export class TerminalManager {
     return { cols: session.cols, rows: session.rows };
   }
 
+  /**
+   * Whether a submitted prompt was delivered to the session (through deliverInput) and whether a turn has started since
+   * then; null when the session does not exist.
+   */
+  turnProgress(id: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const mark = session.promptTurnMark;
+    return { promptSent: mark !== undefined, turnStartedSincePrompt: mark !== undefined && (session.turnStarts ?? 0) > mark };
+  }
+
+  /** The session's output offset without copying its scrollback; null when it does not exist. */
+  outputOffset(id: string): number | null {
+    return this.sessions.get(id)?.outputOffset ?? null;
+  }
+
   readBuffer(id: string): TerminalBufferSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
@@ -731,9 +751,11 @@ export class TerminalManager {
         ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
         : "The session has already exited." };
     }
-    return this.inputChecked(id, data)
-      ? { delivered: true }
-      : { delivered: false, reason: "The terminal no longer accepts input." };
+    // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
+    const mark = session.turnStarts ?? 0;
+    if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
+    if (data.endsWith("\r")) session.promptTurnMark = mark;
+    return { delivered: true };
   }
 
   private wakeLaunchWaiters(session: ManagedSession): void {
@@ -830,6 +852,8 @@ export class TerminalManager {
     }
 
     const nextStatus = signal.state;
+    // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
+    if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
     if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
