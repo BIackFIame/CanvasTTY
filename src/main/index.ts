@@ -31,6 +31,7 @@ import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
 import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
+import { canvasTtyPrivateData } from "./services/safety/baseProtection";
 import { PluginAgentTools } from "./services/PluginAgentTools";
 import { PluginSessions } from "./services/PluginSessions";
 import { PluginCards } from "./services/PluginCards";
@@ -330,7 +331,8 @@ async function initializeServices(): Promise<void> {
     baseProtection: () => settings.get().baseProtectionEnabled,
     services: () => pluginManager!.decisionServices(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
-    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null
+    session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null,
+    privateData: canvasTtyPrivateData(userDataPath)
   });
   pluginManager.setServiceObserver(async (specs) => {
     await pluginServices!.sync(specs);
