@@ -346,7 +346,7 @@ export function resolveCommand(command: string, path: string | undefined, platfo
   if (command.includes("\u0000")) return null;
   if (isAbsolute(command)) return isExecutable(command, platform) ? command : null;
   if (!BARE_COMMAND.test(command)) return null;
-  const extensions = platform === "win32" ? [".exe", ".com"] : [""];
+  const extensions = platform === "win32" && !/\.(?:exe|com)$/iu.test(command) ? [".exe", ".com"] : [""];
   for (const directory of (path ?? "").split(platform === "win32" ? ";" : delimiter)) {
     if (!directory || !isAbsolute(directory)) continue;
     for (const extension of extensions) {

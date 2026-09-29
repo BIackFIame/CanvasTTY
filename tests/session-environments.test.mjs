@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import test from "node:test";
 import { EnvironmentRegistry, resolveCommand } from "../src/main/services/EnvironmentRegistry.ts";
 import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
@@ -179,7 +179,7 @@ test("wrap output is validated: program, no shell string, env rules, secrets, cw
   }).registry.wrap(environment, request);
 
   const bare = await wrap({ command: basename(process.execPath), args: ["-e", "true"] });
-  assert.equal(bare.ok, true);
+  assert.equal(bare.ok, true, JSON.stringify(bare));
   assert.equal(bare.command, resolveCommand(basename(process.execPath), dirname(process.execPath)));
   assert.ok(isAbsolute(bare.command));
   assert.equal(bare.cwd, cwd);
@@ -416,11 +416,15 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
   const removed = first.manager.create({ provider: "terminal", profile: "normal", cwd: join(repo, "sub"), position: at, environment: worktree });
   const kept = first.manager.create({ provider: "terminal", profile: "normal", cwd: repo, position: at,
     environment: { ...worktree, options: { branch: "feature/kept" } } });
-  await waitFor(() => first.calls.length === 2, 15_000);
+  await waitFor(() => {
+    assert.equal(card(first.manager, removed.id).failureDetails, null);
+    assert.equal(card(first.manager, kept.id).failureDetails, null);
+    return first.calls.length === 2;
+  }, 15_000);
   const byCwd = (manager, id) => card(manager, id).cwd;
   const removedDir = byCwd(first.manager, removed.id);
   const keptDir = byCwd(first.manager, kept.id);
-  assert.ok(removedDir.startsWith(join(dataDir, "worktrees")) && removedDir.endsWith("/sub"));
+  assert.ok(removedDir.startsWith(join(dataDir, "worktrees")) && removedDir.endsWith(`${sep}sub`));
   assert.deepEqual(first.calls.map((call) => call.options.cwd).sort(), [keptDir, removedDir].sort());
   assert.equal(execFileSync("git", ["-C", keptDir, "rev-parse", "--abbrev-ref", "HEAD"]).toString().trim(), "feature/kept");
   await waitFor(() => card(first.manager, kept.id).environment?.label === "worktree feature/kept");
