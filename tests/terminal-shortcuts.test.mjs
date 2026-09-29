@@ -6,7 +6,8 @@ import {
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
   shouldScrollTerminalPage,
-  shouldSendTerminalLineBreak
+  shouldSendTerminalLineBreak,
+  shouldTogglePixelSkinMasterView
 } from "../src/renderer/src/features/terminal/terminalShortcuts.ts";
 
 const keydown = {
@@ -67,6 +68,28 @@ test("ctrl-d restarts only an exited terminal session", () => {
   assert.equal(shouldRestartExitedTerminal(restart, true), true);
   assert.equal(shouldRestartExitedTerminal(restart, false), false);
   assert.equal(shouldRestartExitedTerminal({ ...restart, shiftKey: true }, true), false);
+});
+
+test("plain F4 toggles master detail and modified or repeated F4 stays with the app", () => {
+  const f4 = { ...keydown, key: "F4", code: "F4" };
+
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, []), true);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, key: "Unidentified", code: "F4" }, true, []), true);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, false, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F4"]), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, type: "keyup" }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, repeat: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, ctrlKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, shiftKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, metaKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, altKey: true }, true, []), false);
+});
+
+test("configured Home or rename bindings take precedence over F4", () => {
+  const f4 = { ...keydown, key: "F4", code: "F4" };
+
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F4"]), false);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F2", "F4"]), false);
 });
 
 test("plain page-up and page-down page the scrollback viewport", () => {

@@ -62,6 +62,36 @@ test("other providers retain immediate startup and subsequent PTY resize", () =>
   manager.disposeAll();
 });
 
+test("only explicit stop signals mark a provider turn complete", () => {
+  const manager = new TerminalManager(
+    () => undefined,
+    availableRegistry(),
+    undefined,
+    undefined,
+    true,
+    fakeSpawner([])
+  );
+  const session = manager.create({
+    provider: "codex",
+    cwd: process.cwd(),
+    profile: "normal",
+    position: { x: 0, y: 0 }
+  });
+  const signal = (state, event) => manager.applyProviderSignal(session.id, { kind: "lifecycle", state, event });
+
+  signal("working", "UserPromptSubmit");
+  signal("idle", "Notification");
+  assert.equal(manager.list()[0].turnCompleted, false);
+  signal("working", "UserPromptSubmit");
+  signal("idle", "Stop");
+  assert.equal(manager.list()[0].turnCompleted, true);
+  signal("idle", "Notification");
+  assert.equal(manager.list()[0].turnCompleted, true);
+  signal("working", "UserPromptSubmit");
+  assert.equal(manager.list()[0].turnCompleted, false);
+  manager.disposeAll();
+});
+
 test("answer-capture grants are passed only to the explicitly granted session generation", () => {
   const calls = [];
   const grants = [];

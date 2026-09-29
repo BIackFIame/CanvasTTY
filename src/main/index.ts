@@ -15,6 +15,8 @@ import {
 } from "../shared/contracts";
 import { registerIpc } from "./ipc/registerIpc";
 import { SettingsStore } from "./services/SettingsStore";
+import { SkinRegistry } from "./services/SkinRegistry";
+import { PixelSkinPackRegistry } from "./services/PixelSkinPackRegistry";
 import { TerminalManager, reachesObservers, reachesRenderer } from "./services/TerminalManager";
 import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
@@ -294,6 +296,10 @@ async function initializeServices(): Promise<void> {
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
   await settings.load();
+  const terminalBorderSkins = new SkinRegistry(userDataPath);
+  await terminalBorderSkins.initialize();
+  const pixelSkinPacks = new PixelSkinPackRegistry(userDataPath);
+  await pixelSkinPacks.initialize();
   pluginManager = new PluginManager(userDataPath);
   await pluginManager.load();
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
@@ -426,6 +432,7 @@ async function initializeServices(): Promise<void> {
         terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
+          event: signal.event,
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
@@ -608,8 +615,11 @@ async function initializeServices(): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined;
-    const gateway = new AgentControlGateway({ userDataPath, terminals: terminalManager,
+    const gateway = new AgentControlGateway({ userDataPath, terminals: terminalManager, pixelSkinPacks, settings,
       lifecycleEnabled: () => Boolean(runtimeGateway) && settings.get().agentLifecycleHooksEnabled,
+      onSettingsChanged: (updated) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.settingsChanged, updated);
+      },
       windowsHostPath });
     agentControl = gateway;
     try {
@@ -673,6 +683,8 @@ async function initializeServices(): Promise<void> {
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   observeMainWindowState = registerIpc({
     settings,
+    terminalBorderSkins,
+    pixelSkinPacks,
     providerClis,
     recheckProviderClis: async () => {
       providerClis!.refresh();

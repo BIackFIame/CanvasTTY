@@ -1188,3 +1188,7 @@ button { border: 0; }
 .terminal-card__confirm span { font-weight: 500; line-height: 1.35; }
 .terminal-card__confirm-actions { display: flex; gap: 6px; }
 .terminal-card__confirm-actions button { padding: 4px 10px; border-radius: 7px; color: white; background: rgba(255,255,255,.12); font: inherit; cursor: pointer; }
+.renderer-recovery { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; background: #353442; color: #f8f7f1; text-align: center; }
+.renderer-recovery strong { font-size: 16px; }
+.renderer-recovery p { margin: 0; max-width: 420px; color: rgba(255, 255, 255, 0.7); font-size: 13px; line-height: 1.5; }
+.renderer-recovery button { padding: 8px 16px; border: 0; border-radius: 10px; background: #b8cf99; color: #30313d; font: inherit; font-weight: 700; cursor: pointer; }

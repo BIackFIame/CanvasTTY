@@ -106,11 +106,12 @@ export async function controlRequest({ connectionPath, clientPath, method, param
 export function parseArguments(argv) {
   const options = {};
   const positional = [];
-  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--prompt-file", "--text", "--after", "--choice", "--revision"]);
+  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--prompt-file", "--text", "--after", "--choice", "--revision", "--archive", "--name", "--apertures", "--detail"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--json") continue;
     if (arg === "--yolo") { options.yolo = true; continue; }
+    if (arg === "--activate") { options.activate = true; continue; }
     if (arg === "--help" || arg === "-h") { options.help = true; continue; }
     if (arg.startsWith("--")) {
       if (!flags.has(arg) || i + 1 === argv.length) throw new Error("Unknown option or missing option value.");
@@ -139,6 +140,9 @@ result <session-id> [--after <result-revision>]
 interrupt <session-id>
 choose <session-id> --choice <number> --revision <observed-menu-revision>
 dismiss <session-id> --revision <observed-screen-revision>
+skin-list
+skin-install --archive <theme.zip> [--name <name>] [--apertures <json-file>] [--activate] [--detail minimal|detailed]
+skin-select <skin-id> [--detail minimal|detailed]
 
 Global options: --connection <descriptor> --client-file <private-file>
                 --request-id <id> --json
@@ -153,14 +157,16 @@ export async function runCli(argv) {
   const { options, positional } = parseArguments(argv);
   if (options.help) return { help: HELP };
   const [method, sessionId] = positional;
-  if (!["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss"].includes(method)) throw new Error("Unknown command; see --help.");
-  if (positional.length !== (["create", "list"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
+  if (!["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
+  if (positional.length !== (["create", "list", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
   const allowed = new Set(["connection", "client-file", "request-id",
     ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo"] : []),
     ...(method === "send" ? ["prompt-file", "text"] : []), ...(method === "result" ? ["after"] : []),
     ...(method === "choose" ? ["choice", "revision"] : []), ...(method === "dismiss" ? ["revision"] : [])]);
+  if (method === "skin-install") ["archive", "name", "apertures", "activate", "detail"].forEach((key) => allowed.add(key));
+  if (method === "skin-select") allowed.add("detail");
   if (Object.keys(options).some((key) => !allowed.has(key))) throw new Error("Option does not apply to this command.");
-  let params = method === "list" ? {} : { sessionId };
+  let params = ["list", "skin-list", "skin-install"].includes(method) ? {} : { sessionId };
   if (method === "create") {
     if (!options.cwd) throw new Error("create requires --cwd.");
     if (options.yolo && options.profile && options.profile !== "yolo") throw new Error("Conflicting launch profiles.");
@@ -184,11 +190,23 @@ export async function runCli(argv) {
     if (!options.revision) throw new Error("dismiss requires the observed --revision.");
     params.revision = options.revision;
   }
+  if (method === "skin-install") {
+    if (!options.archive) throw new Error("skin-install requires --archive.");
+    if (options.detail && !options.activate) throw new Error("--detail requires --activate.");
+    const apertures = options.apertures ? JSON.parse(await readFile(resolve(options.apertures), "utf8")) : undefined;
+    params = { archivePath: resolve(options.archive), ...(options.name ? { name: options.name } : {}),
+      ...(apertures ? { apertures } : {}), ...(options.activate ? { activate: true } : {}),
+      ...(options.detail ? { detail: options.detail } : {}) };
+  }
+  if (method === "skin-select") {
+    params = { skinId: sessionId, ...(options.detail ? { detail: options.detail } : {}) };
+  }
   const connectionPath = resolve(options.connection || defaultConnectionPath());
   const clientPath = resolve(options["client-file"] || join(dirname(connectionPath), "controller.json"));
   const requestId = options["request-id"] || randomUUID();
   try {
-    const result = await controlRequest({ connectionPath, clientPath, method, params, requestId });
+    const result = await controlRequest({ connectionPath, clientPath, method, params, requestId,
+      timeoutMs: method === "skin-install" ? 120_000 : 8_000 });
     return { requestId, result };
   } catch (error) { error.requestId = requestId; throw error; }
 }
