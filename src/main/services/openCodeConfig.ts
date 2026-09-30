@@ -9,6 +9,7 @@ import { lazyRequire } from "../lazyRequire.ts";
 const lazyYaml = lazyRequire<typeof import("yaml")>("yaml");
 
 const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
+const OPENCODE_PERMISSION = "OPENCODE_PERMISSION";
 
 interface OpenCodeStdioHelper {
   command: string;
@@ -81,7 +82,7 @@ export function openCodeYoloEnvironment(
  * merged top-level `permission`, then the merged `agent.build.permission`; Permission.evaluate takes the LAST rule
  * whose permission key and pattern both match (`*` and `?` wildcards, the key included, so `"*": "deny"` covers
  * every tool). Config files and this run's inline config are merged with remeda's mergeDeep: a key keeps the place
- * where it first appeared.
+ * where it first appeared. OPENCODE_PERMISSION merges into the top-level rules after the inline config.
  *
  * Auto adds rules under `agent.build` for the tools it opens (read, glob, grep, list, edit, bash), and never grants
  * what the person's own configuration denies or asks about:
@@ -90,7 +91,8 @@ export function openCodeYoloEnvironment(
  *   rules after theirs). Such a tool behaves exactly as without auto;
  * - for any other tool, auto's rules come first and the person's own rules for that tool (top-level and this run's
  *   agent.build, in their order) after them, so the person's rules still win;
- * - a config file that exists but cannot be read or parsed leaves every tool alone.
+ * - a config file that exists but cannot be read or parsed, or a parsed environment permission block with an
+ *   unsupported shape, leaves every tool alone. Malformed OPENCODE_PERMISSION JSON is ignored, like OpenCode.
  * Auto's rules: read, glob, grep, list allowed, except `.env` files (they ask, like OpenCode's default); edit (edit,
  * write, apply_patch) allowed; bash allowed only when `shellGuarded` (CanvasTTY's base protection is on and its guard
  * runs in this OpenCode), otherwise it asks. external_directory is not touched: a path outside the project still asks.
@@ -126,20 +128,21 @@ type PermissionBlock = Record<string, Rule>;
 
 /** The person's OpenCode permission rules, merged the way OpenCode merges its configuration. */
 export interface OpenCodePersonRules {
-  /** The merged top-level `permission` of the config files and this run's inline config. */
+  /** The merged top-level `permission` of the config files, this run's inline config, and OPENCODE_PERMISSION. */
   top: PermissionBlock;
   /** The merged `agent.build.permission` of the config files and agent files (this run's inline one is not here). */
   fileAgent: PermissionBlock;
   /** This run's inline `agent.build.permission`. */
   inlineAgent: PermissionBlock;
-  /** A config file exists but could not be read or parsed: auto must not assume anything about it. */
+  /** A config source could not be understood: auto must not assume anything about its permissions. */
   unknown: boolean;
 }
 
 /**
  * The person's OpenCode configuration as OpenCode 1.18 loads it: the global config files, OPENCODE_CONFIG, the
  * project's opencode.json(c) from the file system root down to the working folder, `.opencode` folders and
- * OPENCODE_CONFIG_DIR (their opencode.json(c) and `agent/build.md`), and this run's inline config. Remote
+ * OPENCODE_CONFIG_DIR (their opencode.json(c) and `agent/build.md`), this run's inline config, then the top-level
+ * OPENCODE_PERMISSION environment rules. Remote
  * (well-known) configurations of a signed-in organization are not read.
  */
 export function openCodePersonRules(
@@ -199,6 +202,12 @@ export function openCodePersonRules(
       if (block === null) unknown = true;
       else inlineAgent = block;
     }
+  }
+  const environmentPermission = environment[OPENCODE_PERMISSION];
+  if (environmentPermission) {
+    try {
+      take(JSON.parse(environmentPermission), "top");
+    } catch { /* OpenCode ignores malformed OPENCODE_PERMISSION JSON. */ }
   }
   return { top, fileAgent, inlineAgent, unknown };
 }
