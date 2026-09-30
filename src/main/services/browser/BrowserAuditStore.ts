@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink, writeFile } from "node:fs/promises";
 import { canonicalStringify } from "../../../agent-browser/tool-catalog.mjs";
 import { hasSensitiveAssignment, isSensitiveName } from "../safety/sensitiveNames.ts";
 
 const AUDIT_VERSION = 1;
 const DEFAULT_MAX_BYTES = 100 * 1024 * 1024;
+// Aggregate cap across the active file plus every retained rotated segment, independent of the
+// per-file rotation size and the age-based retention window: a long automation run that rotates
+// often must not be allowed to keep unbounded disk regardless of how young the segments are.
+const DEFAULT_MAX_TOTAL_BYTES = 5 * DEFAULT_MAX_BYTES;
 const DEFAULT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const REDACTED = "[REDACTED]";
 // Page content an audit record must not carry, on top of the shared sensitive names.
@@ -58,6 +64,8 @@ export interface BrowserAuditRecord {
 
 export interface BrowserAuditStoreOptions {
   maxBytes?: number;
+  /** Aggregate cap across the active file and every retained rotated segment. */
+  maxTotalBytes?: number;
   retentionMs?: number;
   now?: () => number;
 }
@@ -75,6 +83,7 @@ export class BrowserAuditStore {
   readonly filePath: string;
   private readonly anchorPath: string;
   private readonly maxBytes: number;
+  private readonly maxTotalBytes: number;
   private readonly retentionMs: number;
   private readonly now: () => number;
   private writeQueue = Promise.resolve();
@@ -87,6 +96,7 @@ export class BrowserAuditStore {
     this.filePath = join(userDataPath, "browser", "audit", "browser-audit.jsonl");
     this.anchorPath = join(userDataPath, "browser", "audit", "browser-audit-anchor.json");
     this.maxBytes = Math.max(1_024, options.maxBytes ?? DEFAULT_MAX_BYTES);
+    this.maxTotalBytes = Math.max(this.maxBytes, options.maxTotalBytes ?? DEFAULT_MAX_TOTAL_BYTES);
     this.retentionMs = Math.max(1_000, options.retentionMs ?? DEFAULT_RETENTION_MS);
     this.now = options.now ?? Date.now;
   }
@@ -153,9 +163,7 @@ export class BrowserAuditStore {
     let previousHash: string | null = null;
     let records = 0;
     for (const path of files) {
-      const content = await readFile(path, "utf8").catch(() => "");
-      for (const line of content.split("\n")) {
-        if (!line) continue;
+      for await (const line of readLines(path)) {
         let record: BrowserAuditRecord;
         try {
           record = JSON.parse(line) as BrowserAuditRecord;
@@ -183,16 +191,15 @@ export class BrowserAuditStore {
     await mkdir(dirname(this.filePath), { recursive: true });
     await this.repairTornTail();
     await this.pruneExpired();
+    await this.pruneToAggregateQuota();
     const files = await this.auditFiles();
     const anchor = await this.loadAnchor();
     let previousHash: string | null = null;
     let sequence = 0;
     let records = 0;
     for (const path of files) {
-      const content = await readFile(path, "utf8").catch(() => "");
-      for (const line of content.split("\n")) {
-        if (!line) continue;
-        try {
+      try {
+        for await (const line of readLines(path)) {
           const record = JSON.parse(line) as BrowserAuditRecord;
           const { hash, ...base } = record;
           if ((records > 0 ? record.previousHash !== previousHash : !isTrustedChainStart(record, anchor))
@@ -202,10 +209,10 @@ export class BrowserAuditStore {
           previousHash = hash;
           sequence = Math.max(sequence, record.sequence);
           records += 1;
-        } catch (error) {
-          this.integrityError = error instanceof Error ? error : new Error("Browser audit log is invalid.");
-          return;
         }
+      } catch (error) {
+        this.integrityError = error instanceof Error ? error : new Error("Browser audit log is invalid.");
+        return;
       }
     }
     this.previousHash = previousHash;
@@ -255,6 +262,7 @@ export class BrowserAuditStore {
     const rotated = join(dirname(this.filePath), `browser-audit-${stamp}-${this.sequence}.jsonl`);
     await rename(this.filePath, rotated);
     await this.pruneExpired();
+    await this.pruneToAggregateQuota();
   }
 
   private async pruneExpired(): Promise<void> {
@@ -275,6 +283,31 @@ export class BrowserAuditStore {
   }
 
   /**
+   * Bounds total retained-audit disk independent of per-file rotation size and age: rotated
+   * segments are dropped oldest-first (by `auditFiles()` order) until the active file plus every
+   * surviving rotated segment fits `maxTotalBytes`. The active file is never removed here — it is
+   * still being appended to — so a single active file larger than the quota is left alone.
+   */
+  private async pruneToAggregateQuota(): Promise<void> {
+    const files = await this.auditFiles();
+    const sized = await Promise.all(files.map(async (path) => ({
+      path,
+      size: (await stat(path).catch(() => null))?.size ?? 0
+    })));
+    let total = sized.reduce((sum, file) => sum + file.size, 0);
+    if (total <= this.maxTotalBytes) return;
+    let removedAny = false;
+    for (const { path, size } of sized) {
+      if (total <= this.maxTotalBytes) break;
+      if (path === this.filePath) continue;
+      await unlink(path).catch(() => undefined);
+      total -= size;
+      removedAny = true;
+    }
+    if (removedAny) await this.recordAnchor();
+  }
+
+  /**
    * Records the trusted chain-start whenever retention pruning removes the earliest
    * segment(s), so verify()/initialize() can distinguish a sanctioned trim from a rotated
    * segment that disappeared some other way (see isTrustedChainStart).
@@ -282,8 +315,11 @@ export class BrowserAuditStore {
   private async recordAnchor(): Promise<void> {
     const files = await this.auditFiles();
     for (const path of files) {
-      const content = await readFile(path, "utf8").catch(() => "");
-      const firstLine = content.split("\n").find((line) => line.length > 0);
+      let firstLine: string | null = null;
+      for await (const line of readLines(path)) {
+        firstLine = line;
+        break;
+      }
       if (!firstLine) continue;
       try {
         const record = JSON.parse(firstLine) as BrowserAuditRecord;
@@ -398,6 +434,36 @@ function isTrustedChainStart(record: BrowserAuditRecord, anchor: AuditAnchor | n
     && anchor.hash === record.hash
     && anchor.previousHash === record.previousHash
   );
+}
+
+/**
+ * Yields an audit file's non-empty lines one at a time via a read stream, instead of loading the
+ * whole (potentially very large, long-lived) file into memory to split it. A missing file yields
+ * nothing, matching the previous `readFile(...).catch(() => "")` behavior.
+ */
+async function* readLines(path: string): AsyncGenerator<string, void, void> {
+  let stream: ReturnType<typeof createReadStream>;
+  try {
+    stream = createReadStream(path, { encoding: "utf8" });
+  } catch (error) {
+    if (isEnoent(error)) return;
+    throw error;
+  }
+  const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (line.length > 0) yield line;
+    }
+  } catch (error) {
+    if (!isEnoent(error)) throw error;
+  } finally {
+    rl.close();
+    stream.destroy();
+  }
+}
+
+function isEnoent(error: unknown): boolean {
+  return Boolean(error) && typeof error === "object" && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 const byCodeUnit = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
