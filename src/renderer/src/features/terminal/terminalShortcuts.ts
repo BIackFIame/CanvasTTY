@@ -5,6 +5,7 @@ interface TerminalKeyEvent {
   key: string;
   code: string;
   repeat?: boolean;
+  isComposing?: boolean;
   ctrlKey: boolean;
   shiftKey: boolean;
   metaKey: boolean;
@@ -14,12 +15,12 @@ interface TerminalKeyEvent {
 export const SHIFT_ENTER_SEQUENCE = "\u001b[13;2u";
 export const CODEX_SELECT_ALL_SEQUENCE = "\u001b[97;9u";
 
-export function macCodexEnterSequence(event: TerminalKeyEvent, isMacOS: boolean, provider: string): string | null {
-  if (!isMacOS || provider !== "codex" || event.type !== "keydown"
-    || !(event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")
-    || event.ctrlKey || event.altKey || (event.metaKey && event.shiftKey)) return null;
-  if (event.metaKey) return "\u001b[13;9u";
-  return event.shiftKey ? SHIFT_ENTER_SEQUENCE : "\r";
+export function codexEnterSequence(event: TerminalKeyEvent, provider: string): string | null {
+  if (provider !== "codex" || event.type !== "keydown" || event.isComposing
+    || !(event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")) return null;
+  const modifiers = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0)
+    + (event.ctrlKey ? 4 : 0) + (event.metaKey ? 8 : 0);
+  return modifiers === 1 ? "\r" : `\u001b[13;${modifiers}u`;
 }
 
 export function shouldSelectCodexDraft(event: TerminalKeyEvent, isMacOS: boolean, provider: string): boolean {

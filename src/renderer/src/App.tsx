@@ -1128,7 +1128,7 @@ export function App(): React.JSX.Element {
     };
     const handleShortcut = (event: KeyboardEvent): void => {
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
-      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS)) return;
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();

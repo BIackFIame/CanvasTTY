@@ -30,8 +30,7 @@ import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinate
 import {
   CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
-  isMacTerminalClipboardShortcut,
-  macCodexEnterSequence,
+  codexEnterSequence,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
@@ -338,7 +337,7 @@ function TerminalCardView({
     };
     fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
-      const codexEnter = macCodexEnterSequence(event, window.canvasTTY.window.isMacOS, session.provider);
+      const codexEnter = codexEnterSequence(event, session.provider);
       if (codexEnter !== null) {
         event.preventDefault();
         event.stopPropagation();
@@ -346,7 +345,6 @@ function TerminalCardView({
         return false;
       }
       const selectCodexDraft = shouldSelectCodexDraft(event, window.canvasTTY.window.isMacOS, session.provider);
-      if (window.canvasTTY.window.isMacOS && !isMacTerminalClipboardShortcut(event) && !selectCodexDraft) return true;
       if (selectCodexDraft) {
         event.preventDefault();
         event.stopPropagation();
@@ -848,7 +846,7 @@ function TerminalCardView({
       onKeyDown={(event) => {
         // Fallback for focus parked on the card itself; the terminal textarea is
         // handled by attachCustomKeyEventHandler, which stops propagation first.
-        if (window.canvasTTY.window.isMacOS || summaryMode || !shouldSearchTerminalOutput(event)) return;
+        if (summaryMode || !shouldSearchTerminalOutput(event)) return;
         event.preventDefault();
         event.stopPropagation();
         toggleSearch();

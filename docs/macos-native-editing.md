@@ -26,7 +26,15 @@ canvas has focus. This focus rule applies on macOS only.
   dialogs, and embedded question editors retain their existing keys.
 - Command+A in ordinary application inputs, textareas and contenteditable fields
   keeps native field selection. Physical key codes also support non-Latin
-  keyboard layouts. Additional modifier combinations keep their existing path.
+  keyboard layouts.
+- Alt+arrow reaches focused terminal surfaces and editable fields on every OS;
+  canvas focus navigation handles it only outside those input surfaces.
+- Codex Enter events preserve Shift, Alt, Ctrl, and Super combinations through
+  CSI-u on every OS. Plain Enter stays a carriage return. Submission and newline
+  behavior belong to the CLI and its keymap; this bridge does not require an
+  exact Codex version.
+- Control+Shift+F still searches terminal output on macOS, and Control+D still
+  restarts an exited terminal. Shift+Enter remains distinct for other CLIs.
 
 ## Optional Codex frontend
 
@@ -66,6 +74,44 @@ updating and testing the frontend and launcher together.
 The optional frontend's selection and launcher tests live in its linked
 repository. A maintainer decision on distribution and ongoing version support
 is needed before including that frontend in official CanvasTTY releases.
+
+## Process and input ownership
+
+CanvasTTY supplies Electron window chrome, xterm rendering and a PTY. The CLI
+owns the editable draft, completion state, selection and submission decisions.
+Sending Super+A cannot create a select-all action that is missing in the CLI.
+
+Ordinary launches run the resolved official `codex` executable, which manages
+its own TUI/backend connection. The optional macOS bundle instead starts a Node
+launcher inside the PTY. The launcher starts two child processes:
+
+```mermaid
+flowchart LR
+  Canvas[CanvasTTY and xterm] --> PTY
+  PTY --> Launcher[Node launcher]
+  Launcher --> Frontend[Patched Codex TUI inheriting the PTY]
+  Launcher --> Backend[Official codex app-server]
+  Frontend <-->|Private local Unix socket| Backend
+```
+
+The frontend is a fork of Codex's Rust TUI, not a CanvasTTY editor. Its changes
+add whole-draft selection, expansion of large pasted payloads when copying, and
+the main-draft Enter policy, including startup and completion handling. These
+changes do not modify the upstream keymap parser: the fork handles Super keys
+directly in the composer. The launcher also translates CLI/resume flags and
+owns backend cleanup, so this integration is more than a keyboard bridge.
+
+Its client uses the upstream app-server protocol with experimental API enabled.
+The exact `0.159.2` check is a restriction of this external launcher; it is not
+the minimum version needed to fix CanvasTTY's keyboard ownership. Upstream's
+remote TUI has a server-version notice path, rather than this launcher's exact
+version gate. That does not establish compatibility of this fork with a newer
+backend. The Alt+arrow and modified-Enter bridge changes work independently of
+this optional bundle.
+
+Source references: [frontend entry point](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/codex-rs/tui/src/canvastty_main.rs),
+[launcher and version check](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos/codex-tui-launch.mjs),
+and [upstream server-version notice](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/tui/src/app/startup.rs#L282).
 
 ## Launch-scoped browser configuration
 

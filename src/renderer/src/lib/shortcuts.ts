@@ -61,8 +61,14 @@ export function isRenameInputTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('[data-terminal-rename="true"]'));
 }
 
-export function shouldKeepNativeKeyboardInput(target: EventTarget | null, isMacOS: boolean): boolean {
-  return isMacOS && target instanceof Element
+export function shouldKeepNativeKeyboardInput(
+  target: EventTarget | null,
+  isMacOS: boolean,
+  event?: ShortcutEvent
+): boolean {
+  const altArrow = event?.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
+    && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key);
+  return (isMacOS || Boolean(altArrow)) && target instanceof Element
     && Boolean(target.closest('.terminal-card__surface, input, textarea, select, [contenteditable="true"]'));
 }
 

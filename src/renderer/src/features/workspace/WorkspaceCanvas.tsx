@@ -756,7 +756,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
-      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS)) return;
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (activeSessionId !== null
         && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
         && shouldTogglePixelSkinMasterView(
@@ -776,7 +776,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         });
         return;
       }
-      // Alt+arrow is a canvas gesture of its own; the Ctrl/Cmd chords below stay untouched.
+      // Focused terminals and editable fields own Alt+arrow on every platform.
       const direction = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
         ? CANVAS_FOCUS_ARROWS[event.key]
         : undefined;
