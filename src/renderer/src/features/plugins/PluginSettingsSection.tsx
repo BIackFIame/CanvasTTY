@@ -14,7 +14,14 @@ import type {
   PluginUpdateStatus
 } from "../../../../shared/contracts";
 import { t, type TranslationKey } from "../../lib/i18n";
-import { INSTALLED_PAGE_SIZE, SHOWCASE_PAGE_SIZE, clampPage, pageCount, paginate } from "./pluginPagination";
+import {
+  INSTALLED_PAGE_SIZE,
+  SHOWCASE_PAGE_SIZE,
+  clampPage,
+  pageCount,
+  paginate,
+  unresolvedPageUrls
+} from "./pluginPagination";
 import { compareSemver } from "../../../../shared/hostVersion";
 import { UiIcon } from "../../components/UiIcon";
 
@@ -255,25 +262,7 @@ export function PluginSettingsSection({
       const results = await onSearchPlugins(searchQuery);
       setSearchResults(results);
       setSelectedShowcase(null);
-      const urls = results.map((result) => result.url);
-      if (urls.length > 0) {
-        const [manifests, icons] = await Promise.all([
-          onPreviewManifests(urls).catch(() => ({} as Record<string, PluginManifest>)),
-          onFetchPluginIcons(urls).catch(() => ({} as Record<string, string | null>))
-        ]);
-        const byName: Record<string, PluginManifest> = {};
-        for (const result of results) {
-          const manifest = manifests[result.url];
-          if (manifest) byName[result.fullName] = manifest;
-        }
-        setShowcaseManifests(byName);
-        const iconsByName: Record<string, string | null> = {};
-        for (const result of results) {
-          const icon = icons[result.url];
-          if (icon !== undefined) iconsByName[result.fullName] = icon;
-        }
-        setShowcaseIcons(iconsByName);
-      }
+      // Manifests and icons load per-page (see the effect below), not for the full result set here.
     } catch (reason) {
       setError(errorMessage(reason, t(locale, "pluginSearchFailed")));
       setSearchResults([]);
@@ -294,27 +283,7 @@ export function PluginSettingsSection({
       setShowcaseIcons({});
       setShowcaseManifests({});
       setSelectedShowcase(null);
-      const urls = results.map((result) => result.url);
-      if (urls.length > 0) {
-        // Batch-load manifests (descriptions etc.) and icons with two IPC
-        // round-trips, so expanding a tile afterwards is instant.
-        const [manifests, icons] = await Promise.all([
-          onPreviewManifests(urls).catch(() => ({} as Record<string, PluginManifest>)),
-          onFetchPluginIcons(urls).catch(() => ({} as Record<string, string | null>))
-        ]);
-        const byName: Record<string, PluginManifest> = {};
-        for (const result of results) {
-          const manifest = manifests[result.url];
-          if (manifest) byName[result.fullName] = manifest;
-        }
-        setShowcaseManifests(byName);
-        const iconsByName: Record<string, string | null> = {};
-        for (const result of results) {
-          const icon = icons[result.url];
-          if (icon !== undefined) iconsByName[result.fullName] = icon;
-        }
-        setShowcaseIcons(iconsByName);
-      }
+      // Manifests and icons load per-page (see the effect below), not for the full result set here.
     } catch (reason) {
       setError(errorMessage(reason, t(locale, "pluginSearchFailed")));
       setShowcase([]);
@@ -322,6 +291,60 @@ export function PluginSettingsSection({
       setLoadingShowcase(false);
     }
   };
+
+  // Loads manifests (descriptions etc.) and icons only for the showcase/search page currently on
+  // screen, and only for entries that page has not already resolved. Previously the full result set
+  // was fetched right after search/showcase returned, which meant paging through results the user
+  // never scrolled to still cost a manifest and an icon request per entry.
+  useEffect(() => {
+    const results = searchResults ?? showcase;
+    if (!results || results.length === 0) return;
+    const pendingManifestUrls = unresolvedPageUrls(
+      results, showcasePage, SHOWCASE_PAGE_SIZE, new Set(Object.keys(showcaseManifests))
+    );
+    const pendingIconUrls = unresolvedPageUrls(
+      results, showcasePage, SHOWCASE_PAGE_SIZE, new Set(Object.keys(showcaseIcons))
+    );
+    if (pendingManifestUrls.length === 0 && pendingIconUrls.length === 0) return;
+    let cancelled = false;
+    Promise.all([
+      pendingManifestUrls.length > 0
+        ? onPreviewManifests(pendingManifestUrls).catch(() => ({} as Record<string, PluginManifest>))
+        : Promise.resolve({} as Record<string, PluginManifest>),
+      pendingIconUrls.length > 0
+        ? onFetchPluginIcons(pendingIconUrls).catch(() => ({} as Record<string, string | null>))
+        : Promise.resolve({} as Record<string, string | null>)
+    ]).then(([manifests, icons]) => {
+      if (cancelled) return;
+      if (pendingManifestUrls.length > 0) {
+        setShowcaseManifests((current) => {
+          const next = { ...current };
+          for (const result of results) {
+            const manifest = manifests[result.url];
+            if (manifest) next[result.fullName] = manifest;
+          }
+          return next;
+        });
+      }
+      if (pendingIconUrls.length > 0) {
+        setShowcaseIcons((current) => {
+          const next = { ...current };
+          for (const result of results) {
+            const icon = icons[result.url];
+            if (icon !== undefined) next[result.fullName] = icon;
+          }
+          return next;
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // showcaseManifests/showcaseIcons are read (as the "already resolved" set), not depended on: including them
+    // would refire this effect on every write it makes; each write only ever shrinks pendingManifestUrls/
+    // pendingIconUrls for the same page towards [], so the omission cannot leave a page permanently unfetched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchResults, showcase, showcasePage, onPreviewManifests, onFetchPluginIcons]);
 
   const copyGithubCode = (code: string): void => {
     window.canvasTTY.clipboard.writeText(code);

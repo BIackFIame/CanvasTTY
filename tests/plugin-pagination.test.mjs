@@ -5,7 +5,8 @@ import {
   SHOWCASE_PAGE_SIZE,
   clampPage,
   pageCount,
-  paginate
+  paginate,
+  unresolvedPageUrls
 } from "../src/renderer/src/features/plugins/pluginPagination.ts";
 
 // Plugin stubs: id/name only — the test only cares about the array.
@@ -13,6 +14,14 @@ function makePlugins(count) {
   return Array.from({ length: count }, (_, i) => ({
     id: `com.test.plugin-${i + 1}`,
     name: `Plugin ${i + 1}`
+  }));
+}
+
+// Showcase/search result stubs: url + fullName only — what unresolvedPageUrls reads.
+function makeResults(count) {
+  return Array.from({ length: count }, (_, i) => ({
+    url: `https://github.com/example/plugin-${i + 1}`,
+    fullName: `example/plugin-${i + 1}`
   }));
 }
 
@@ -101,4 +110,40 @@ test("paginate returns [] for empty or invalid input", () => {
   assert.deepEqual(paginate([], 0, 6), []);
   assert.deepEqual(paginate(makePlugins(3), 0, 0), []);
   assert.deepEqual(paginate(null, 0, 6), []);
+});
+
+test("unresolvedPageUrls: fetches only the current page's urls, not the full result set", () => {
+  const results = makeResults(37); // more than one showcase page (10 per page)
+  const urls = unresolvedPageUrls(results, 0, SHOWCASE_PAGE_SIZE, new Set());
+  assert.equal(urls.length, SHOWCASE_PAGE_SIZE, "only the visible page's urls are requested");
+  assert.deepEqual(urls, results.slice(0, SHOWCASE_PAGE_SIZE).map((r) => r.url));
+
+  // A later page still asks only for its own slice — never the other 27 items.
+  const page3 = unresolvedPageUrls(results, 3, SHOWCASE_PAGE_SIZE, new Set());
+  assert.equal(page3.length, 7); // 37 - 3*10
+});
+
+test("unresolvedPageUrls: skips items already resolved (cached), even mid-page", () => {
+  const results = makeResults(10);
+  const resolved = new Set([results[0].fullName, results[3].fullName, results[9].fullName]);
+  const urls = unresolvedPageUrls(results, 0, SHOWCASE_PAGE_SIZE, resolved);
+  assert.equal(urls.length, 7);
+  assert.ok(!urls.includes(results[0].url));
+  assert.ok(!urls.includes(results[3].url));
+  assert.ok(!urls.includes(results[9].url));
+
+  // Once every item on the page is resolved, nothing more is fetched for it.
+  const allResolved = new Set(results.map((r) => r.fullName));
+  assert.deepEqual(unresolvedPageUrls(results, 0, SHOWCASE_PAGE_SIZE, allResolved), []);
+});
+
+test("unresolvedPageUrls: returns [] for empty results or an out-of-range page beyond the last", () => {
+  assert.deepEqual(unresolvedPageUrls([], 0, SHOWCASE_PAGE_SIZE, new Set()), []);
+  const results = makeResults(5);
+  // clampPage folds an out-of-range page back into range, so this still returns the (only) page's urls,
+  // not [] — paginate/clampPage's own contract, which unresolvedPageUrls must not change.
+  assert.deepEqual(
+    unresolvedPageUrls(results, 99, SHOWCASE_PAGE_SIZE, new Set()),
+    results.map((r) => r.url)
+  );
 });
