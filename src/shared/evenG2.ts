@@ -43,7 +43,7 @@ export interface EvenG2State {
     pending: { id: string; name: string } | null;
   } | null;
   transport: {
-    kind: "lan" | "https";
+    kind: "lan" | "https" | "usb";
     addresses: EvenG2Address[];
     origin: string;
     origins?: string[];

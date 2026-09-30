@@ -294,12 +294,12 @@ export default function App() {
         {client?.state === "approved" && <button className="menu-toggle" type="button" aria-expanded={menuOpen} aria-controls="session-menu" onClick={() => setMenuOpen(value => !value)}>{menuOpen ? "Close menu" : "Sessions"}</button>}
       </div>
     </header>
-    {!globalThis.isSecureContext && <p className="alert">Open this companion through the desktop’s Tailscale Serve HTTPS address; Web Crypto requires a secure context.</p>}
+    {!globalThis.isSecureContext && <p className="alert">Open this companion through Tailscale Serve HTTPS or USB reverse loopback; Web Crypto requires a secure context.</p>}
     {error && <p className="alert" role="alert">{error}</p>}
     {!client ? <section className="pair-card">
       <h2>Pair this browser</h2><p>On the desktop, enable the companion, choose shared sessions and open a six-digit pairing code. Approval is required on the desktop.</p>
       <form onSubmit={pair}>
-        <p>Host: <code>{location.origin}</code>. To pair a different desktop, open its own HTTPS /mobile/ address first.</p>
+        <p>Host: <code>{location.origin}</code>. To pair a different desktop, open its own Tailscale HTTPS or USB loopback /mobile/ address first.</p>
         <label>Six-digit code<input type="text" inputMode="numeric" pattern="[0-9]{6}" maxLength={6} value={pin} onChange={event => setPin(event.target.value.replace(/\D/g, "").slice(0, 6))} autoComplete="one-time-code" required /></label>
         <button className="primary" disabled={pairBusy || !globalThis.isSecureContext}>{pairBusy ? "Pairing…" : "Request pairing"}</button>
       </form>

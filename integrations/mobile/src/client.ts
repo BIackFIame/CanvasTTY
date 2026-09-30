@@ -12,12 +12,16 @@ type EncryptedTransport = ((input: string, options?: RequestInit) => Promise<Res
 };
 const STORAGE_KEY = "canvastty.mobile.pairing.v1";
 
-// The web companion may only talk to the host that served this page.
+// The web companion may only talk to the host that served this secure page.
 export function exactOrigin(value: string): string {
-  const origin = localOrigin(value.trim());
+  if (!globalThis.isSecureContext || !globalThis.crypto?.subtle)
+    throw new Error("A secure browser context with Web Crypto is required for pairing.");
+  const origin = localOrigin(value.trim(), true);
   const url = new URL(origin);
-  if (url.protocol !== "https:" || !url.hostname.endsWith(".ts.net") || origin !== location.origin)
-    throw new Error("Enter this page's exact HTTPS Tailscale address (*.ts.net).");
+  if (value.trim() !== origin || origin !== location.origin ||
+    !(url.protocol === "https:" && url.hostname.endsWith(".ts.net") ||
+      url.protocol === "http:" && url.hostname === "127.0.0.1" && !!url.port))
+    throw new Error("Enter this page's exact Tailscale HTTPS or USB loopback address.");
   return origin;
 }
 
@@ -27,8 +31,8 @@ export function loadSaved(): Stored | null {
     if (!value) return null;
     const parsed = JSON.parse(value) as Stored;
     if (parsed.state !== "pending" && parsed.state !== "approved") throw new Error("invalid-state");
-    const saved = readLocalConnection(JSON.stringify(parsed));
     const origin = exactOrigin(location.origin);
+    const saved = readLocalConnection(JSON.stringify(parsed), origin.startsWith("http:"));
     if (!saved.connection.origins.includes(origin)) throw new Error("different-host");
     return { ...saved, connection: { ...saved.connection, origins: [origin] }, state: parsed.state };
   } catch {
@@ -44,9 +48,11 @@ export function forgetPairing(): void {
 }
 
 export class CompanionClient {
+  private readonly stored: Stored;
   private send: EncryptedTransport;
-  constructor(private readonly stored: Stored) {
-    this.send = localFetcher(stored.connection);
+  constructor(stored: Stored) {
+    this.stored = stored;
+    this.send = localFetcher(stored.connection, { allowLoopback: exactOrigin(location.origin).startsWith("http:") });
   }
   get state(): Stored["state"] {
     return this.stored.state;
@@ -82,19 +88,17 @@ export class CompanionClient {
 }
 
 export async function startPairing(originInput: string, code: string, signal: AbortSignal): Promise<CompanionClient> {
-  if (!globalThis.isSecureContext || !crypto.subtle)
-    throw new Error("A secure HTTPS browser context is required for pairing.");
   const origin = exactOrigin(originInput);
   if (!/^\d{6}$/.test(code)) throw new Error("Enter the six-digit code shown by CanvasTTY.");
   let connection: LocalConnection;
   try {
-    ({ connection } = await connectionFromCode(code, { origins: [origin], signal }));
+    ({ connection } = await connectionFromCode(code, { origins: [origin], signal, allowLoopback: origin.startsWith("http:") }));
   } catch (error) {
     if (signal.aborted) throw error;
-    throw new Error("Cannot reach CanvasTTY to pair. Check the desktop pairing code and Tailscale Serve address.");
+    throw new Error("Cannot reach CanvasTTY to pair. Check the desktop pairing code and Tailscale Serve or USB reverse setup.");
   }
   if (!connection.origins.includes(origin)) throw new Error("Pairing host changed.");
-  const send = localFetcher({ ...connection, origins: [origin] });
+  const send = localFetcher({ ...connection, origins: [origin] }, { allowLoopback: origin.startsWith("http:") });
   const response = await send("/g2/api/pair", {
     method: "POST",
     headers: { "Content-Type": "application/json" },

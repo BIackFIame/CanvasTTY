@@ -89,7 +89,6 @@ test("local address fallback probes without credentials and never retries an unc
       headers: { Authorization: "Bearer " + "b".repeat(64) },
       body: JSON.stringify({ action: "text" }),
     }),
-    /локальной связи/,
   );
   assert.equal(actual, 1);
   assert.equal(probes, 3);

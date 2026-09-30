@@ -176,6 +176,74 @@ test("encrypted mutations stay scoped and idempotent, and created grants persist
   assert.equal(f.writes.length, 0);
 });
 
+test("USB loopback mode keeps mobile pairing read-only and blocks legacy routes", async (t) => {
+  const f = await fixture(t);
+  const origin = f.base;
+  for (const invalid of [
+    origin.replace("127.0.0.1", "localhost"),
+    origin.replace("127.0.0.1", "192.168.1.2"),
+    `http://127.0.0.1:${f.controller.state().port + 1}`,
+    `http://user@127.0.0.1:${f.controller.state().port}`,
+    origin + "/mobile/",
+    origin + "?code=123456",
+    origin + "#fragment",
+  ]) {
+    await assert.rejects(f.controller.command({ type: "configure", config: {
+      ...f.controller.state().config, publicOrigin: invalid,
+    } }), `invalid origin ${invalid}`);
+  }
+  await f.controller.command({ type: "configure", config: {
+    ...f.controller.state().config, publicOrigin: origin, allowInput: false,
+    allowCreate: false, allowClose: false, allowBrowser: true,
+  } });
+  assert.equal(f.controller.state().transport.kind, "usb");
+  assert.equal(f.controller.state().config.allowBrowser, false);
+  assert.equal((await f.direct("/mobile/", undefined, undefined, "localhost:" + f.controller.state().port)).status, 403);
+  assert.equal((await f.direct("/mobile/", undefined, undefined, new URL(origin).host)).status, 200);
+  await f.controller.command({ type: "begin-pairing" });
+  const code = f.controller.state().pairing.code;
+  const fetcher = (url, options = {}) => fetch(new URL(url).href, options);
+  const bootstrap = await connectionFromCode(code, { origins: [origin], fetcher, allowLoopback: true });
+  const send = localFetcher(bootstrap.connection, { fetcher, allowLoopback: true });
+  const response = await send("/g2/api/pair", {
+    method: "POST", body: JSON.stringify({ code, name: "USB browser" }),
+  });
+  assert.equal(response.status, 202);
+  const { id, token } = await response.json();
+  const connection = validateLocalConnection(send.connection(), true);
+  const encryptedRequest = async (path, method = "GET", body) => {
+    const packet = await sealLocal(connection, { path, method, body, token, sentAt: Date.now() }, "request");
+    const forwarded = await f.direct("/g2/link", packet, undefined, new URL(origin).host);
+    assert.equal(forwarded.status, 200);
+    return unsealLocal(connection, forwarded.body, "response");
+  };
+  assert.equal((await encryptedRequest("/g2/api/pair-status")).body.state, "pending");
+  assert.equal((await encryptedRequest("/g2/api/mobile", "POST", {
+    version: 1, id: randomBytes(16).toString("hex"), sentAt: Date.now(),
+    action: { type: "sessions.overview" },
+  })).status, 401);
+  await f.controller.command({ type: "approve", id });
+  assert.equal(f.controller.state().peers[0].grant.allowBrowser, false);
+  const overview = await encryptedRequest("/g2/api/mobile", "POST", {
+    version: 1, id: randomBytes(16).toString("hex"), sentAt: Date.now(),
+    action: { type: "sessions.overview" },
+  });
+  assert.equal(overview.status, 200);
+  assert.deepEqual(overview.body.sessions.map((session) => session.id), ["one"]);
+  assert.equal((await encryptedRequest("/g2/api/mobile", "POST", {
+    version: 1, id: randomBytes(16).toString("hex"), sentAt: Date.now(),
+    action: { type: "session.key", sessionId: "one", key: "enter" },
+  })).status, 403);
+  assert.equal((await encryptedRequest("/g2/api/home")).status, 403);
+  assert.equal((await f.direct("/g2/api/home", undefined, token, new URL(origin).host)).status, 403);
+  assert.equal(f.writes.length, 0);
+  await f.controller.command({ type: "revoke", id });
+  await assert.rejects(encryptedRequest("/g2/api/mobile", "POST", {
+    version: 1, id: randomBytes(16).toString("hex"), sentAt: Date.now(),
+    action: { type: "sessions.overview" },
+  }));
+});
+
 test("Tailscale connection allows only exact HTTPS origin; mobile static stays within build root", async (t) => {
   const f = await fixture(t);
   assert.equal(localOrigin(f.origin), f.origin);

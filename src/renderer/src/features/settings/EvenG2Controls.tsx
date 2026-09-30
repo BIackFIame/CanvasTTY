@@ -9,8 +9,10 @@ import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import "./evenG2Controls.css";
 
+const USB_ORIGIN = "http://127.0.0.1:3481";
+const isUsbOrigin = (origin: string): boolean => origin === USB_ORIGIN;
 const isWebOrigin = (origin: string): boolean =>
-  /^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net$/.test(origin);
+  isUsbOrigin(origin) || /^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net$/.test(origin);
 type Stage = "overview" | "transport" | "web" | "scope" | "pair";
 export function EvenG2Controls({
   locale,
@@ -149,7 +151,8 @@ export function EvenG2Controls({
   const selected = state.transport.addresses.find(
     (address) => address.name === draft.interfaceName,
   );
-  const webEnabled = isWebOrigin(state.config.publicOrigin);
+  const displayOrigin = stage === "overview" ? state.config.publicOrigin : draft.publicOrigin;
+  const webEnabled = isWebOrigin(displayOrigin);
   const steps: Array<[Stage, string]> = [
     ["transport", t(locale, "evenG2Connection")],
     ["scope", t(locale, "evenG2Access")],
@@ -197,7 +200,7 @@ export function EvenG2Controls({
             {webEnabled ? t(locale, "webCompanionTitle") : t(locale, "evenG2YourSessionsOnYourGlasses")}
           </h3>
           <p>
-            {webEnabled ? t(locale, "webCompanionSubtitle") : t(locale, "evenG2ReadResponsesSpeakToAn")}
+            {webEnabled ? t(locale, isUsbOrigin(displayOrigin) ? "webCompanionUsbSubtitle" : "webCompanionSubtitle") : t(locale, "evenG2ReadResponsesSpeakToAn")}
           </p>
         </div>
         <span
@@ -419,14 +422,27 @@ export function EvenG2Controls({
           </nav>}
           {stage === "web" && (
             <div className="g2-settings__body">
-              <h4>{t(locale, "webCompanionSetupTitle")}</h4>
-              <p>{t(locale, "webCompanionServeWarning")}</p>
-              <p>{t(locale, "webCompanionRunOnHost")} <code>tailscale serve --bg 3481</code> {t(locale, "webCompanionCheckStatus")} <code>tailscale serve status</code>. {t(locale, "webCompanionEnterOrigin")}</p>
+              <h4>{t(locale, isUsbOrigin(draft.publicOrigin) ? "webCompanionUsbTitle" : "webCompanionSetupTitle")}</h4>
+              {isUsbOrigin(draft.publicOrigin) ? (
+                <>
+                  <p>{t(locale, "webCompanionUsbWarning")}</p>
+                  <p>{t(locale, "webCompanionUsbEnable")} <code>adb devices</code>. {t(locale, "webCompanionUsbRun")} <code>adb reverse tcp:3481 tcp:3481</code>.</p>
+                  <p>{t(locale, "webCompanionUsbRemove")} <code>adb reverse --remove tcp:3481</code>.</p>
+                  <button type="button" onClick={() => patch({ publicOrigin: "" })}>{t(locale, "webCompanionUseTailscale")}</button>
+                </>
+              ) : (
+                <>
+                  <p>{t(locale, "webCompanionServeWarning")}</p>
+                  <p>{t(locale, "webCompanionRunOnHost")} <code>tailscale serve --bg 3481</code> {t(locale, "webCompanionCheckStatus")} <code>tailscale serve status</code>. {t(locale, "webCompanionEnterOrigin")}</p>
+                  <button type="button" onClick={() => patch({ publicOrigin: USB_ORIGIN })}>{t(locale, "webCompanionUseUsb")}</button>
+                </>
+              )}
               <label>
-                {t(locale, "webCompanionOriginLabel")}
+                {t(locale, isUsbOrigin(draft.publicOrigin) ? "webCompanionUsbOriginLabel" : "webCompanionOriginLabel")}
                 <input
                   type="url"
                   placeholder="https://device.tailnet.ts.net"
+                  readOnly={isUsbOrigin(draft.publicOrigin)}
                   value={draft.publicOrigin}
                   onChange={(event) => patch({ publicOrigin: event.target.value.trim() })}
                 />
@@ -486,7 +502,7 @@ export function EvenG2Controls({
               <div className="g2-actions">
                 <span className="g2-muted">
                   {draft.publicOrigin
-                    ? t(locale, "evenG2HTTPSAddressSelected")
+                    ? t(locale, isUsbOrigin(draft.publicOrigin) ? "webCompanionUsbOriginLabel" : "evenG2HTTPSAddressSelected")
                     : selected
                       ? t(locale, "evenG2AddressAvailable")
                       : t(locale, "evenG2ConnectThisComputerToWi")}
@@ -701,7 +717,7 @@ export function EvenG2Controls({
                 {webEnabled ? t(locale, "webCompanionPairTitle") : t(locale, "evenG2OpenCanvasTTYInEvenApp")}
               </h4>
               {webEnabled ? (
-                <p>{t(locale, "webCompanionPairOpen")} <a href={`${state.config.publicOrigin}/mobile/`} target="_blank" rel="noreferrer">{state.config.publicOrigin}/mobile/</a>{t(locale, "webCompanionPairInstructions")}</p>
+                <p>{t(locale, isUsbOrigin(state.config.publicOrigin) ? "webCompanionUsbPairOpen" : "webCompanionPairOpen")} <a href={`${state.config.publicOrigin}/mobile/`} target="_blank" rel="noreferrer">{state.config.publicOrigin}/mobile/</a>{t(locale, "webCompanionPairInstructions")}</p>
               ) : (
                 <p>{t(locale, "evenG2EnterTheseSixDigitsIn")}</p>
               )}

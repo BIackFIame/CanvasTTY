@@ -107,6 +107,8 @@ const MOBILE_ACTIONS: Record<string, true> = {
 };
 const TAILSCALE_ORIGIN =
   /^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net$/;
+const isUsbOrigin = (origin: string, port: number): boolean =>
+  port > 0 && origin === `http://127.0.0.1:${port}`;
 
 
 export class EvenG2Controller {
@@ -270,7 +272,8 @@ export class EvenG2Controller {
               allowInput: peer.grant.allowInput === true,
               allowCreate: peer.grant.allowCreate === true,
               allowClose: peer.grant.allowClose === true,
-              allowBrowser: peer.grant.allowBrowser === true,
+              allowBrowser: peer.grant.allowBrowser === true &&
+                !isUsbOrigin(this.config.publicOrigin, this.port),
             });
             this.peers.push({
               id: peer.id,
@@ -346,12 +349,13 @@ export class EvenG2Controller {
       enabled: value.enabled,
       workspace: value.workspace ? resolve(value.workspace) : "",
       interfaceName: value.interfaceName,
-      publicOrigin: httpsOrigin(value.publicOrigin),
+      publicOrigin: isUsbOrigin(value.publicOrigin, this.port)
+        ? value.publicOrigin : httpsOrigin(value.publicOrigin),
       sessionIds: [...new Set(value.sessionIds)],
       allowInput: value.allowInput,
       allowCreate: value.allowCreate,
       allowClose: value.allowClose,
-      allowBrowser: value.allowBrowser,
+      allowBrowser: isUsbOrigin(value.publicOrigin, this.port) ? false : value.allowBrowser,
       speechExecutable: value.speechExecutable,
       speechModel: value.speechModel,
     };
@@ -416,7 +420,8 @@ export class EvenG2Controller {
           }
         : null,
       transport: {
-        kind: this.config.publicOrigin ? "https" : "lan",
+        kind: isUsbOrigin(this.config.publicOrigin, this.port)
+          ? "usb" : this.config.publicOrigin ? "https" : "lan",
         addresses: structuredClone(this.addresses),
         origin: this.boundAddress
           ? this.config.publicOrigin ||
@@ -792,7 +797,8 @@ export class EvenG2Controller {
         async (request: LocalRequest) => {
           if (!this.config.enabled || !this.server?.listening)
             throw new Error("integration-disabled");
-          const webMode = TAILSCALE_ORIGIN.test(this.config.publicOrigin);
+          const webMode = TAILSCALE_ORIGIN.test(this.config.publicOrigin) ||
+            isUsbOrigin(this.config.publicOrigin, this.port);
           if (webMode) {
             if (request.path === "/g2/api/home" && request.method === "GET" && !request.token)
               return { status: 401, body: { error: "unauthorized" } };
@@ -884,7 +890,8 @@ export class EvenG2Controller {
       res.end(readFileSync(path));
       return;
     }
-    if (TAILSCALE_ORIGIN.test(this.config.publicOrigin) &&
+    if ((TAILSCALE_ORIGIN.test(this.config.publicOrigin) ||
+         isUsbOrigin(this.config.publicOrigin, this.port)) &&
         url.pathname.startsWith("/g2/api/") &&
         (url.search || !this.isEncryptedForward(req) ||
           (url.pathname !== "/g2/api/pair" &&
