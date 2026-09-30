@@ -126,8 +126,8 @@ const TERMINAL_FOCUS_IN = "\u001b[I";
 const TERMINAL_FOCUS_OUT = "\u001b[O";
 // The WebGL canvas backing store is layout x devicePixelRatio and xterm 6 has no
 // DPR option, so above 1x its raster would be upscaled by the scene transform.
-// Its cells are the DOM renderer's width snapped down to whole device pixels, so a
-// grid fitted on DOM always fits on WebGL; going back to DOM refits (disableWebgl).
+// Its cells are the DOM renderer's width snapped down to whole device pixels, so
+// both renderer transitions refit the grid to fill the card with the active cells.
 const WEBGL_MAX_SCALE = 1;
 
 const SEARCH_DECORATIONS = {
@@ -557,6 +557,7 @@ function TerminalCardView({
     }
     webglAddonRef.current = webgl;
     terminal.element?.setAttribute("data-renderer", "webgl");
+    fitRef.current?.();
     return true;
   };
 
@@ -569,8 +570,7 @@ function TerminalCardView({
     webgl.dispose();
     terminal.element?.setAttribute("data-renderer", "dom");
     // WebGL snaps the cell width down to whole device pixels, so its cells can be narrower than the DOM
-    // renderer's. A grid fitted while on WebGL may then be too wide for DOM: fit again. A grid fitted on
-    // DOM always fits WebGL, so attaching needs no fit and the PTY size stays put across swaps.
+    // renderer's. A grid fitted while on WebGL may then be too wide for DOM: fit again.
     fitRef.current?.();
     // Disposing the addon drops the canvas but not its context, which counts against Chromium's
     // per-renderer limit until it is collected. Lose it now so the slot is really free. getContext
