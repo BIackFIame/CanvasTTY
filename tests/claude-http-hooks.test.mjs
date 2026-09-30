@@ -175,6 +175,18 @@ test("an input over 512 KB still reports its state, without any of its fields", 
   assert.deepEqual(signals, [{ id: "claude-one", signal: { state: "idle", event: "Stop", turnId: null } }]);
 });
 
+test("an input found over 512 KB only while it streams (no Content-Length) reports its state once", POSIX, async (t) => {
+  const { gateway, signals } = await startGateway(t);
+  const capability = gateway.registerSession("claude-one", "claude", true);
+  const body = JSON.stringify({ prompt_id: "turn-big", last_assistant_message: "x".repeat(600 * 1024) });
+  const response = await post(gateway.httpHookBase, `${CLAUDE_HTTP_HOOK.pathPrefix}idle/Stop`, {
+    headers: hookHeaders(capability, { "transfer-encoding": "chunked" }), body
+  });
+  assert.equal(response.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(signals, [{ id: "claude-one", signal: { state: "idle", event: "Stop", turnId: null } }]);
+});
+
 test("hooks get their answer before the app reacts (HTTP and socket)", POSIX, async (t) => {
   let busyMs = 0;
   const { gateway } = await startGateway(t, {
