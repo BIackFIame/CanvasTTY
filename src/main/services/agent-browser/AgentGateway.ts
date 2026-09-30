@@ -285,6 +285,12 @@ export class AgentGateway {
     };
   }
 
+  /** A live PTY may wait in the CLI's resume or trust UI before its first MCP handshake. */
+  holdPendingForTerminal(connectionId: string): void {
+    const lease = this.leases.get(connectionId);
+    if (lease && !lease.used) lease.expiresAt = Infinity;
+  }
+
   revokeTerminalSession(terminalSessionId: string): void {
     for (const [connectionId, lease] of this.leases) {
       if (lease.actor.terminalSessionId !== terminalSessionId) continue;

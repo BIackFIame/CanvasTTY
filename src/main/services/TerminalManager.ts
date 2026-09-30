@@ -1582,6 +1582,7 @@ export class TerminalManager {
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
+    session.agentBrowser?.retainUntilExit?.();
     process.onData((data) => {
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;

@@ -84,3 +84,60 @@ test("disposing an orchestrator session revokes its capability", async (t) => {
   assert.ok(capability.capabilityToken);
   gateway.revokeTerminalSession(orchestrator.id);
 });
+
+test("browser capabilities are retained only after PTY spawn and released on exit", (t) => {
+  const events = [];
+  const calls = [];
+  const spawn = fakeSpawner(calls);
+  let failSpawn = false;
+  const agentBrowser = {
+    prepareLaunch() {
+      return {
+        agentId: "agent",
+        connectionId: "conn",
+        args: [],
+        environment: {},
+        retainUntilExit() { events.push("retain"); },
+        cleanup() { events.push("cleanup"); }
+      };
+    }
+  };
+  const terminals = new TerminalManager(
+    () => undefined,
+    availableRegistry(),
+    agentBrowser,
+    undefined,
+    true,
+    (command, args, options) => {
+      events.push("spawn");
+      if (failSpawn) throw new Error("PTY spawn failed");
+      return spawn(command, args, options);
+    }
+  );
+  t.after(() => terminals.disposeAll());
+  const request = {
+    provider: "codex",
+    cwd: process.cwd(),
+    profile: "normal",
+    position: { x: 0, y: 0 }
+  };
+
+  const session = terminals.create(request);
+  assert.deepEqual(events, ["spawn", "retain"]);
+  calls[0].process.emitExit(0);
+  assert.deepEqual(events, ["spawn", "retain", "cleanup"]);
+
+  terminals.restart(session.id);
+  assert.deepEqual(events, ["spawn", "retain", "cleanup", "spawn", "retain"]);
+  calls[1].process.emitExit(0);
+  assert.deepEqual(events, ["spawn", "retain", "cleanup", "spawn", "retain", "cleanup"]);
+
+  failSpawn = true;
+  assert.throws(() => terminals.create(request), /PTY spawn failed/);
+  assert.equal(calls.length, 2);
+  assert.deepEqual(events, [
+    "spawn", "retain", "cleanup",
+    "spawn", "retain", "cleanup",
+    "spawn", "cleanup"
+  ]);
+});

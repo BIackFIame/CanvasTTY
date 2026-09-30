@@ -11,6 +11,7 @@ import {
   AgentGateway,
   supportsAgentGatewayPlatform
 } from "../src/main/services/agent-browser/AgentGateway.ts";
+import { AgentBrowserBridge, AGENT_BROWSER_ENV } from "../src/main/services/agent-browser/AgentBrowserBridge.ts";
 import {
   AGENT_BRIDGE_PROTOCOL_VERSION,
   HEARTBEAT_EXPIRY_MS,
@@ -421,6 +422,51 @@ test("AgentGateway rejects expired and identity-mismatched capabilities", POSIX_
   const expiredResponse = await expiredClient.next((message) => message.type === "error");
   assert.equal(expiredResponse.error.code, "SESSION_EXPIRED");
   await assert.rejects(expired.authenticated, /expired/i);
+});
+
+test("a live PTY can authenticate after the default pending TTL and cleanup still revokes it", POSIX_GATEWAY_TEST, async (t) => {
+  let now = 1_000;
+  const gateway = await startedGateway(t, core(), { now: () => now });
+  const root = await fixture(t, "canvastty-live-pty-capability-");
+  const bridge = new AgentBrowserBridge(gateway, {
+    helper: { command: process.execPath, args: ["/app/mcp-helper.mjs"] },
+    providerClis: { get: () => ({ state: "available", executable: process.execPath }) },
+    runtimeDirectory: root,
+    hermesHomeDirectory: join(root, "hermes"),
+    kimiHomeDirectory: join(root, "kimi")
+  });
+  const launch = bridge.prepareLaunch({ terminalSessionId: "live-pty", provider: "codex", cwd: root });
+  t.after(() => launch.cleanup());
+  const capability = {
+    address: launch.environment[AGENT_BROWSER_ENV.address],
+    agentId: launch.agentId,
+    connectionId: launch.connectionId,
+    terminalSessionId: "live-pty",
+    provider: "codex",
+    capabilityToken: launch.environment[AGENT_BROWSER_ENV.capabilityToken]
+  };
+  launch.retainUntilExit();
+  const standalone = gateway.registerAgent({ terminalSessionId: "standalone", provider: "codex", cwd: root });
+  now += 60_001;
+  gateway.expireConnections();
+
+  const retainedClient = await connectClient(capability.address);
+  t.after(() => retainedClient.destroy());
+  retainedClient.send(authMessage(capability));
+  await retainedClient.next((message) => message.type === "authenticated");
+
+  const expiredClient = await connectClient(standalone.address);
+  t.after(() => expiredClient.destroy());
+  expiredClient.send(authMessage(standalone));
+  assert.equal((await expiredClient.next((message) => message.type === "error")).error.code, "AUTH_INVALID");
+  await assert.rejects(standalone.authenticated, /expired/i);
+
+  launch.cleanup();
+  await retainedClient.closed;
+  const revokedClient = await connectClient(capability.address);
+  t.after(() => revokedClient.destroy());
+  revokedClient.send(authMessage(capability));
+  assert.equal((await revokedClient.next((message) => message.type === "error")).error.code, "AUTH_INVALID");
 });
 
 test("AgentGateway heartbeat uses server time and expires silent authenticated clients", POSIX_GATEWAY_TEST, async (t) => {

@@ -20,6 +20,7 @@ export interface PreparedAgentBrowserPtyLaunch {
   connectionId: string;
   args: string[];
   environment: Record<string, string>;
+  retainUntilExit?(): void;
   cleanup(): void;
 }
 
@@ -100,6 +101,9 @@ export class AgentBrowserBridge implements AgentBrowserLaunchCoordinator {
         [AGENT_BROWSER_ENV.terminalSessionId]: capability.terminalSessionId,
         [AGENT_BROWSER_ENV.provider]: capability.provider,
         [AGENT_BROWSER_ENV.capabilityToken]: capability.capabilityToken
+      },
+      retainUntilExit: () => {
+        if (!cleaned) this.gateway.holdPendingForTerminal(capability.connectionId);
       },
       cleanup: () => {
         if (cleaned) return;
