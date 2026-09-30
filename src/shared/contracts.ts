@@ -330,6 +330,14 @@ export interface AppSettings {
   attentionQueueVisible: boolean;
   /** Canvas corner that hosts the attention panel. */
   attentionQueuePlacement: CanvasOverlayPlacement;
+  /** Show the built-in provider conversation history HUD. */
+  agentChatHistoryVisible: boolean;
+  /** Canvas corner that hosts the provider conversation history HUD. */
+  agentChatHistoryPlacement: CanvasOverlayPlacement;
+  /** How to expand the collapsed history panel. */
+  agentChatHistoryExpandMode: "hover" | "click";
+  agentChatHistorySearchAgents: "current" | "all";
+  agentChatHistorySearchSessions: "filtered" | "all";
   /**
    * Serve the local agent-control endpoint (Settings → Agents) that the bundled
    * `canvastty-control.mjs` CLI and Orchestrator sessions talk to. Off by default;
@@ -353,7 +361,32 @@ export interface CreateSessionRequest {
   launchOptions?: Record<string, PluginLaunchValues>;
   /** Where the session runs: a plugin environment kind; omitted = this computer. */
   environment?: SessionEnvironmentChoice;
+  /** Exact provider conversation to resume when this card is created from history. */
+  resumeThreadId?: string;
 }
+
+/** Every non-terminal agent that CanvasTTY can install and resolve. */
+export type AgentChatHistoryProviderId = AgentProviderId;
+
+export interface AgentChatHistoryItem {
+  id: string;
+  provider: AgentChatHistoryProviderId;
+  title: string;
+  cwd: string | null;
+  lastActivityAt: number;
+}
+
+export interface AgentChatHistoryPage {
+  provider: AgentChatHistoryProviderId;
+  items: AgentChatHistoryItem[];
+  nextCursor: string | null;
+  error?: string;
+  warning?: string;
+}
+
+export type AgentChatHistoryResumeResult =
+  | { session: SessionSnapshot; reused: boolean }
+  | { error: { code: "invalid-id" | "cli-unavailable" | "conversation-missing" | "cwd-unknown" | "cwd-unavailable" | "resume-failed"; message: string } };
 
 export interface SessionMetadata {
   id: string;
@@ -361,6 +394,8 @@ export interface SessionMetadata {
   provider: ProviderId;
   /** Bindings actually consumed by this separately launched Codex editor. */
   nativeEditor?: { submit: string; submitAlternate: string; submitSuper: string; newline: string; selectAll: string };
+  /** Provider conversation id, when the session is attached to one. */
+  threadId?: string;
   profile: LaunchProfileId;
   title: string;
   titleCustomized: boolean;
@@ -1386,6 +1421,11 @@ export interface CanvasTTYApi {
     availability(): Promise<AgentCliAvailability>;
     recheck(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   };
+  agentChatHistory: {
+    providers(): Promise<AgentChatHistoryProviderId[]>;
+    list(provider: AgentChatHistoryProviderId, cursor?: string): Promise<AgentChatHistoryPage>;
+    resume(provider: AgentChatHistoryProviderId, id: string, position: Point): Promise<AgentChatHistoryResumeResult>;
+  };
   dialog: {
     pickDirectory(defaultPath?: string): Promise<string | null>;
     pickMedia(): Promise<MediaSelection | null>;
@@ -1645,6 +1685,9 @@ export const IPC = {
   terminalCreate: "terminal:create",
   agentsAvailability: "agents:availability",
   agentsRecheck: "agents:recheck",
+  agentChatHistoryList: "agent-chat-history:list",
+  agentChatHistoryProviders: "agent-chat-history:providers",
+  agentChatHistoryResume: "agent-chat-history:resume",
   terminalRestart: "terminal:restart",
   terminalInput: "terminal:input",
   terminalResize: "terminal:resize",

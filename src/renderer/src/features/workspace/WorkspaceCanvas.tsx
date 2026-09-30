@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
   AgentProviderId,
+  AgentChatHistoryItem,
   AppSettings,
   BrowserCanvasState,
   BrowserSnapshot,
@@ -43,6 +44,7 @@ import { isPixelSkinPackId, usePixelSkinPackAssets } from "../skins/SkinAssets";
 import { CanvasCommandPalette } from "./CanvasCommandPalette";
 import { CanvasContextMenu } from "./CanvasContextMenu";
 import { CanvasMinimap } from "./CanvasMinimap";
+import { AgentChatHistoryHud } from "./AgentChatHistoryHud";
 import { CanvasRegionCard } from "./CanvasRegionCard";
 import { CanvasRegionMenu } from "./CanvasRegionMenu";
 import { cameraFittingContent } from "./canvasCameraGeometry";
@@ -177,6 +179,7 @@ interface WorkspaceCanvasProps {
   onOpenBrowser(position?: Point): void;
   onOpenTerminalUrl(url: string): void;
   onFocusSession(session: SessionSnapshot): void;
+  onResumeHistory(item: AgentChatHistoryItem, position: Point): Promise<SessionSnapshot>;
   activeSessionId: string | null;
   browserSelected: boolean;
   renamingSessionId: string | null;
@@ -456,7 +459,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       settings.homeLayout.map((placement) => placement.widgetId).join(",")
     ].join("|")
   });
-  // One owner for "bring this session to the front": the HOME session rows and the attention queue
+  // One owner for "bring this session to the front": HOME rows, attention and chat history
   // must both raise the card's layer, focus it, and apply the layer raise through onFocusSession.
   const focusSessionFromHome = useCallback((session: SessionSnapshot): void => {
     raiseLayer(terminalLayerId(session.id));
@@ -498,6 +501,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     attention.length,
     settings.attentionQueuePlacement,
     settings.attentionQueueVisible,
+    settings.agentChatHistoryVisible,
+    settings.agentChatHistoryPlacement,
     settings.canvasControlsPlacement,
     settings.minimapPlacement,
     settings.shortcutHintsPlacement,
@@ -951,6 +956,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               captureCanvasWheelOverWidgets={routeWidgetWheelToCanvas || widgetFocus.id !== terminalCanvasWidgetId(session.id)}
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
+              focusRevision={widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0}
               selected={activeSessionId === session.id}
               forceMasterDetail={masterPixelSkinSessionIds.has(session.id)}
               groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
@@ -1098,6 +1104,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               captureCanvasWheelOverWidgets={false}
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
+              focusRevision={widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0}
               selected={activeSessionId === session.id}
               forceMasterDetail={true}
               groupSelected={false}
@@ -1247,10 +1254,15 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       <div className="canvas-overlays" ref={overlays}>
         {CANVAS_OVERLAY_PLACEMENTS.map((placement) => (
           <div className={`canvas-overlay-slot canvas-overlay-slot--${placement}`} key={placement}>
+            {settings.agentChatHistoryVisible && settings.agentChatHistoryPlacement === placement && (
+              <AgentChatHistoryHud settings={settings} sessions={sessions} onFocusSession={focusSessionFromHome} onResume={async (item) => {
+                const session = await props.onResumeHistory(item, viewportCenterWorldPoint());
+                focusSessionFromHome(session);
+              }} />
+            )}
             {/* The canvas scene is transformed and therefore its own stacking context, so anything
                 inside it paints under this layer and scales with the camera. The queue is a
-                screen-anchored HUD: it belongs here, and as the first child of the reversed column
-                it stacks below whatever else shares this corner. */}
+                screen-anchored HUD: it belongs here, alongside the other corner overlays. */}
             {attentionQueueRenderedAt(settings, placement) && (
               <section className="attention-queue" aria-label={t(settings.locale, "needsAttention")}
                 title={t(settings.locale, "needsAttentionHint")}>

@@ -31,7 +31,7 @@ export interface PersistedTerminalSession {
   position: Point;
   size: Size;
   parentSessionId?: string;
-  /** The provider's own conversation id (Codex thread, Claude or OpenCode session) its hook reported. */
+  /** The provider's own conversation id, learned from a lifecycle hook or selected in local history. */
   threadId?: string;
   /** State at quit or at the moment the process exited; v1 records read as "running". */
   lastState: PersistedLastState;

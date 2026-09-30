@@ -179,6 +179,11 @@ export class SettingsStore {
         || !("canvasControlsPlacement" in source)
         || !("attentionQueueVisible" in source)
         || !("attentionQueuePlacement" in source)
+        || !("agentChatHistoryVisible" in source)
+        || !("agentChatHistoryPlacement" in source)
+        || !("agentChatHistoryExpandMode" in source)
+        || !("agentChatHistorySearchAgents" in source)
+        || !("agentChatHistorySearchSessions" in source)
         || !("agentControlEnabled" in source)
         || !("sessionRestoreMode" in source)
         || !("persistCanvasRegions" in source)
@@ -403,6 +408,11 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     attentionNotifications: true,
     attentionQueueVisible: true,
     attentionQueuePlacement: "bottom-right",
+    agentChatHistoryVisible: false,
+    agentChatHistoryPlacement: "top-left",
+    agentChatHistoryExpandMode: "hover",
+    agentChatHistorySearchAgents: "current",
+    agentChatHistorySearchSessions: "filtered",
     agentControlEnabled: false
   };
 }
@@ -660,6 +670,22 @@ export function normalizeSettings(
       source.attentionQueuePlacement,
       fallback.attentionQueuePlacement
     ),
+    agentChatHistoryVisible: typeof source.agentChatHistoryVisible === "boolean"
+      ? source.agentChatHistoryVisible
+      : fallback.agentChatHistoryVisible ?? false,
+    agentChatHistoryPlacement: normalizeCanvasOverlayPlacement(
+      source.agentChatHistoryPlacement,
+      fallback.agentChatHistoryPlacement ?? "top-left"
+    ),
+    agentChatHistoryExpandMode: source.agentChatHistoryExpandMode === "hover" || source.agentChatHistoryExpandMode === "click"
+      ? source.agentChatHistoryExpandMode
+      : fallback.agentChatHistoryExpandMode ?? "hover",
+    agentChatHistorySearchAgents: source.agentChatHistorySearchAgents === "current" || source.agentChatHistorySearchAgents === "all"
+      ? source.agentChatHistorySearchAgents
+      : fallback.agentChatHistorySearchAgents ?? "current",
+    agentChatHistorySearchSessions: source.agentChatHistorySearchSessions === "filtered" || source.agentChatHistorySearchSessions === "all"
+      ? source.agentChatHistorySearchSessions
+      : fallback.agentChatHistorySearchSessions ?? "filtered",
     // Never inferred from anything else: only an explicit boolean turns the endpoint on.
     agentControlEnabled: typeof source.agentControlEnabled === "boolean"
       ? source.agentControlEnabled

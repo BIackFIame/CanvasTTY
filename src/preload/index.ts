@@ -94,6 +94,11 @@ const api: CanvasTTYApi = {
     availability: () => ipcRenderer.invoke(IPC.agentsAvailability),
     recheck: () => ipcRenderer.invoke(IPC.agentsRecheck)
   },
+  agentChatHistory: {
+    providers: () => ipcRenderer.invoke(IPC.agentChatHistoryProviders),
+    list: (provider, cursor) => ipcRenderer.invoke(IPC.agentChatHistoryList, provider, cursor),
+    resume: (provider, id, position) => ipcRenderer.invoke(IPC.agentChatHistoryResume, provider, id, position)
+  },
   dialog: {
     pickDirectory: (defaultPath?: string) => ipcRenderer.invoke(IPC.dialogPickDirectory, defaultPath),
     pickMedia: () => ipcRenderer.invoke(IPC.dialogPickMedia)

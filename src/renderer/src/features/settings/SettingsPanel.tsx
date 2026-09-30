@@ -772,6 +772,40 @@ export function SettingsPanel({
                   />
                 </SettingGroup>
               )}
+              <SettingGroup label={t(locale, "agentChatHistory")} description={t(locale, "agentChatHistoryDescription")}>
+                <Segmented
+                  value={settings.agentChatHistoryVisible ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ agentChatHistoryVisible: value === "on" })}
+                />
+              </SettingGroup>
+              {settings.agentChatHistoryVisible && (
+                <SettingGroup label={t(locale, "agentChatHistoryExpandMode")}>
+                  <Segmented value={settings.agentChatHistoryExpandMode}
+                    options={[["hover", t(locale, "agentChatHistoryExpandHover")], ["click", t(locale, "agentChatHistoryExpandClick")]]}
+                    onChange={(agentChatHistoryExpandMode: AppSettings["agentChatHistoryExpandMode"]) => void onChange({ agentChatHistoryExpandMode })} />
+                </SettingGroup>
+              )}
+              {settings.agentChatHistoryVisible && (
+                <SettingGroup label={t(locale, "agentChatHistoryPlacement")} layout="stacked">
+                  <PlacementChoices value={settings.agentChatHistoryPlacement} locale={locale}
+                    onChange={(agentChatHistoryPlacement) => void onChange({ agentChatHistoryPlacement })} />
+                </SettingGroup>
+              )}
+              {settings.agentChatHistoryVisible && (
+                <>
+                  <SettingGroup label={t(locale, "agentChatHistorySearchAgents")} layout="stacked">
+                    <Segmented value={settings.agentChatHistorySearchAgents}
+                      options={[["current", t(locale, "agentChatHistorySearchCurrentAgent")], ["all", t(locale, "agentChatHistorySearchAllAgents")]]}
+                      onChange={(agentChatHistorySearchAgents: AppSettings["agentChatHistorySearchAgents"]) => void onChange({ agentChatHistorySearchAgents })} />
+                  </SettingGroup>
+                  <SettingGroup label={t(locale, "agentChatHistorySearchSessions")} layout="stacked">
+                    <Segmented value={settings.agentChatHistorySearchSessions}
+                      options={[["filtered", t(locale, "agentChatHistorySearchFiltered")], ["all", t(locale, "agentChatHistoryActivityAll")]]}
+                      onChange={(agentChatHistorySearchSessions: AppSettings["agentChatHistorySearchSessions"]) => void onChange({ agentChatHistorySearchSessions })} />
+                  </SettingGroup>
+                </>
+              )}
               <HomeAppearanceSettings
                 settings={settings}
                 plugins={plugins}

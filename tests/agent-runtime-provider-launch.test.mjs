@@ -85,13 +85,22 @@ test("revoking CanvasTTY lifecycle hooks leaves every provider launch unmodified
 test("providers without a hook adapter never write Grok's shared hook configuration", async (t) => {
   const root = await fixture(t);
   const adapters = adaptersFor(root);
-  for (const provider of ["omp", "pi", "cursor", "minimax", "devin", "antigravity"]) {
+  for (const provider of ["pi", "cursor", "minimax", "devin", "antigravity"]) {
     const launch = adapters.prepare(provider, `session-${provider}`, true);
     assert.deepEqual(launch.args, [], provider);
     assert.deepEqual(launch.environment, {}, provider);
     await assert.rejects(readFile(join(root, "grok", "hooks", "canvastty-runtime-hooks.json"), "utf8"), /ENOENT/u, provider);
     launch.releaseConfiguration();
   }
+});
+
+test("ordinary OMP launches load the lifecycle extension without modifying shared configuration", async (t) => {
+  const root = await fixture(t);
+  const launch = adaptersFor(root).prepare("omp", "session-omp");
+  assert.deepEqual(launch.args, ["--extension", join(root, "omp-extension.mjs")]);
+  assert.deepEqual(launch.environment, {});
+  await assert.rejects(readFile(join(root, "grok", "hooks", "canvastty-runtime-hooks.json")), /ENOENT/u);
+  launch.releaseConfiguration();
 });
 
 test("a revoked shared-config launch removes stale hooks held by an older live session", async (t) => {

@@ -75,6 +75,7 @@ interface TerminalCardProps {
   captureCanvasWheelOverWidgets: boolean;
   focused: boolean;
   focusChangeSource: "explicit" | "hover";
+  focusRevision: number;
   selected: boolean;
   forceMasterDetail: boolean;
   /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
@@ -145,6 +146,7 @@ function TerminalCardView({
   captureCanvasWheelOverWidgets,
   focused,
   focusChangeSource,
+  focusRevision,
   selected,
   forceMasterDetail,
   groupSelected,
@@ -468,6 +470,13 @@ function TerminalCardView({
     const input = terminal.onData((data) => {
       // Hover focus routes keyboard input locally without reporting a synthetic focus transition to the TUI.
       if (suppressFocusReport.current && (data === TERMINAL_FOCUS_IN || data === TERMINAL_FOCUS_OUT)) return;
+      // onData also carries focus, mouse and device reports. Only text (including
+      // bracketed paste) should collapse the history panel.
+      const text = data.startsWith("\u001b[200~")
+        ? data.slice(6).replace(/\u001b\[201~$/, "") : data;
+      if (!text.startsWith("\u001b") && /[^\u0000-\u001f\u007f]/.test(text)) {
+        window.dispatchEvent(new CustomEvent("canvastty:terminal-input", { detail: { sessionId: session.id } }));
+      }
       window.canvasTTY.terminal.input(session.id, data);
     });
     const titleChange = terminal.onTitleChange((title) => setOscTitle(title.trim() ? title : null));
@@ -579,7 +588,7 @@ function TerminalCardView({
       renameInput.current?.blur();
     }
     suppressFocusReport.current = false;
-  }, [focusChangeSource, focused, renaming, summaryMode]);
+  }, [focusChangeSource, focusRevision, focused, renaming, summaryMode]);
 
   useEffect(() => {
     searchOpenRef.current = searchOpen;
