@@ -21,8 +21,10 @@ import { AUTO_MODE, hasAutoMode } from "../src/shared/autoMode.ts";
 
 const at = { x: 0, y: 0 };
 const cli = (provider) => ({ state: "available", provider, executable: `/bin/${provider}`, launcher: "native", environment: {}, checked: [] });
+// The launch as it is built on Linux unless a test names the platform: Claude's own sandbox exists on macOS and Linux
+// only, so what auto adds depends on it (the Windows case is asserted on its own).
 const launch = (provider, profile, args = [], options = {}) =>
-  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, ...options }).args;
+  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, platform: "linux", ...options }).args;
 const settingsOf = (args) => args.flatMap((arg, index) => args[index - 1] === "--settings" ? [JSON.parse(arg)] : []);
 
 const waitFor = async (predicate, timeoutMs = 6_000) => {
@@ -110,6 +112,9 @@ test("auto: Codex --approve-for-me (its workspace-write sandbox), Claude auto wi
   assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:11434");
   // Without other settings the sandbox is its own inline --settings.
   assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { platform: "darwin" })), settingsOf(launch("claude", "auto")), "macOS: the same sandbox");
+  // Claude Code has no sandbox on Windows: auto there is its auto mode alone.
+  assert.deepEqual(launch("claude", "auto", [], { platform: "win32" }), ["--permission-mode", "auto"]);
   // Inside CanvasTTY's isolation layer Claude's own sandbox cannot start (macOS refuses a sandbox in a sandbox): left out.
   assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), []);
   assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto"]);

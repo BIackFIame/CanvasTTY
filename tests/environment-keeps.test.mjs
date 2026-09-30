@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 import { configuredMode } from "../src/main/services/configuredMode.ts";
 import { EnvironmentRegistry } from "../src/main/services/EnvironmentRegistry.ts";
@@ -11,6 +11,9 @@ import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const PLUGIN = "com.example.env";
+// The program the environment wraps the agent in: an absolute path to a program on every platform (the registry
+// refuses anything else; "/bin/sh" is not one on Windows). The spawner is fake, so it never runs.
+const WRAPPER = process.execPath;
 const at = { x: 0, y: 0 };
 const waitFor = async (predicate, timeoutMs = 5_000) => {
   const deadline = Date.now() + timeoutMs;
@@ -28,7 +31,7 @@ function setup(t, keeps, project) {
     call: async (_pluginId, _serviceId, method, params) => {
       const step = method.replace("canvastty.environment.", "");
       if (step === "prepare") return { ref: { box: "b-1" }, label: "box b-1" };
-      if (step === "wrap") return { command: "/bin/sh", args: ["-c", "exec \"$@\"", "box", params.command, ...params.args], cwd: params.cwd };
+      if (step === "wrap") return { command: WRAPPER, args: ["box", params.command, ...params.args], cwd: params.cwd };
       if (step === "resume") return { ok: true };
       return {};
     },
@@ -77,28 +80,32 @@ test("an isolated environment (container, remote) is not wrapped again; a local 
   const container = setup(t, { launch: true, isolated: true, confines: true }, project);
   const inside = container.create("auto");
   await waitFor(() => container.calls.length === 1);
-  assert.equal(container.calls[0].command, "/bin/sh", "no second sandbox around a container");
+  assert.equal(container.calls[0].command, WRAPPER, "no second sandbox around a container");
   assert.equal(container.card(inside.id).isolation.state, "environment");
   // No shell guard is claimed for a wrapped launch (OpenCode would otherwise run commands without asking).
   const local = setup(t, { launch: true }, project);
   const worktree = local.create("auto");
   await waitFor(() => local.calls.length === 1);
   assert.equal(local.calls[0].command, "/usr/bin/sandbox-exec", "the local environment's command runs inside the layer");
-  assert.deepEqual(local.calls[0].args.slice(0, 3), ["-f", "/p.sb", "/bin/sh"]);
+  assert.deepEqual(local.calls[0].args.slice(0, 3), ["-f", "/p.sb", WRAPPER]);
   assert.equal(local.card(worktree.id).isolation.state, "on");
 });
 
 test("manual shows when the CLI's own configuration skips approvals", () => {
+  // configuredMode builds the paths it reads with the host's path rules (backslashes on Windows): so does the fixture.
+  const home = join(sep, "h");
+  const project = join(sep, "p");
+  const at = (...parts) => join(...parts);
   const files = new Map([
-    ["/h/.claude/settings.json", JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } })],
-    ["/h/.codex/config.toml", 'model = "x"\napproval_policy = "never"\n[projects."/p"]\ntrust_level = "trusted"\n'],
-    ["/h/.config/opencode/opencode.json", JSON.stringify({ permission: "allow" })]
+    [at(home, ".claude", "settings.json"), JSON.stringify({ permissions: { defaultMode: "bypassPermissions" } })],
+    [at(home, ".codex", "config.toml"), 'model = "x"\napproval_policy = "never"\n[projects."/p"]\ntrust_level = "trusted"\n'],
+    [at(home, ".config", "opencode", "opencode.json"), JSON.stringify({ permission: "allow" })]
   ]);
   const read = (path) => files.get(path) ?? null;
-  assert.deepEqual(configuredMode("claude", { HOME: "/h" }, "/p", read), { mode: "bypassPermissions", source: "/h/.claude/settings.json" });
-  assert.deepEqual(configuredMode("codex", { HOME: "/h" }, "/p", read), { mode: "approval_policy=never", source: "/h/.codex/config.toml" });
-  assert.deepEqual(configuredMode("opencode", { HOME: "/h" }, "/p", read), { mode: "permission=allow", source: "/h/.config/opencode/opencode.json" });
-  files.set("/p/.claude/settings.local.json", JSON.stringify({ permissions: { defaultMode: "default" } }));
-  assert.equal(configuredMode("claude", { HOME: "/h" }, "/p", read), null, "a later file that asks again wins");
-  assert.equal(configuredMode("grok", { HOME: "/h" }, "/p", read), null);
+  assert.deepEqual(configuredMode("claude", { HOME: home }, project, read), { mode: "bypassPermissions", source: at(home, ".claude", "settings.json") });
+  assert.deepEqual(configuredMode("codex", { HOME: home }, project, read), { mode: "approval_policy=never", source: at(home, ".codex", "config.toml") });
+  assert.deepEqual(configuredMode("opencode", { HOME: home }, project, read), { mode: "permission=allow", source: at(home, ".config", "opencode", "opencode.json") });
+  files.set(at(project, ".claude", "settings.local.json"), JSON.stringify({ permissions: { defaultMode: "default" } }));
+  assert.equal(configuredMode("claude", { HOME: home }, project, read), null, "a later file that asks again wins");
+  assert.equal(configuredMode("grok", { HOME: home }, project, read), null);
 });

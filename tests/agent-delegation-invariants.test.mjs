@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, parse } from "node:path";
 import test from "node:test";
 import { controlRequest, runCli } from "../scripts/canvastty-control.mjs";
 import { ORCHESTRATION_TOOL_NAMES } from "../src/agent-browser/orchestration-catalog.mjs";
@@ -52,8 +52,10 @@ test("a subagent's folder is its orchestrator's project or inside it: /, HOME an
     assert.match(refused.error, /only inside this project's folder .* Only the person can start an agent in another folder/u, outside);
   }
   assert.match(subagentFolder(project, project, join(project, "missing")).error, /does not exist/u);
-  // Unless the person launched the orchestrator there: then that folder is the project.
-  assert.deepEqual(subagentFolder("/", "/", tmpdir()).cwd, await realpath(tmpdir()));
+  // Unless the person launched the orchestrator there: then that folder is the project. The file system root of the
+  // temporary folder: "/" on macOS and Linux, its drive (C:\) on Windows, where "/" means the current drive.
+  const fsRoot = parse(tmpdir()).root;
+  assert.deepEqual(subagentFolder(fsRoot, fsRoot, tmpdir()).cwd, await realpath(tmpdir()));
 });
 
 test("spawn_agent: folder, depth and live-count limits refuse with a reason the orchestrator can act on", async (t) => {

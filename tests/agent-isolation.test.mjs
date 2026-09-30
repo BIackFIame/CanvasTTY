@@ -3,6 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
+import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
 import { AgentIsolation, ISOLATION_FOLDER_PREFIX } from "../src/main/services/isolation/AgentIsolation.ts";
@@ -20,8 +21,9 @@ const onMac = { skip: mac ? false : "macOS seatbelt (sandbox-exec) only" };
 
 /** A fake HOME with the files an escape would go for, a CanvasTTY userData folder and a project in NFD. */
 async function world(t) {
-  // Short: Unix socket paths are limited to ~104 bytes.
-  const base = await realpath(await mkdtemp("/tmp/ctty-iso-test-"));
+  // Short: Unix socket paths are limited to ~104 bytes (/tmp rather than macOS's long per-user folder). Windows has no
+  // /tmp and no Unix socket limit: its temporary folder.
+  const base = await realpath(await mkdtemp(join(process.platform === "win32" ? tmpdir() : "/tmp", "ctty-iso-test-")));
   t.after(() => rm(base, { recursive: true, force: true }));
   const home = join(base, "h");
   const userData = join(base, "u");
@@ -112,7 +114,10 @@ test("the paths: the project and the CLI's own folders writable; other CLIs' cre
     userDataPath: w.userData, sessionId: "s1" });
   assert.ok(moved.writable.includes(join(w.userData, "account-homes", "a1")) && moved.readableAgain.includes(join(w.userData, "account-homes", "a1")));
   assert.throws(() => seatbeltProfile({ ...paths, writable: ['/x"'] }), /cannot be written into an isolation profile/u);
-  const profile = seatbeltProfile(paths);
+  // A seatbelt profile holds macOS paths; this world's paths are Windows paths on the Windows runner (a backslash is
+  // refused like the quote above), so there its fixed rules are read from a profile without paths.
+  const macPaths = process.platform === "win32" ? Object.fromEntries(Object.keys(paths).map((key) => [key, []])) : paths;
+  const profile = seatbeltProfile(macPaths);
   for (const rule of ["(deny file-write*)", "(deny signal)", "(allow signal (target same-sandbox))", "(deny lsopen)", "(deny appleevent-send)",
     "(deny user-preference-write)", "(deny network-outbound (remote unix-socket))"]) assert.ok(profile.includes(rule), rule);
 });
