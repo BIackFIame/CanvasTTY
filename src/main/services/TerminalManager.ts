@@ -506,8 +506,13 @@ export class TerminalManager {
     return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * Every card's metadata, without its scrollback: at initial hydration every card subscribes and calls
+   * readBuffer() for its own history anyway (attachTerminalOutput), so a full copy here would only be
+   * serialized across IPC and thrown away unread. Use readBuffer(id) for a card's actual history.
+   */
   list(): SessionSnapshot[] {
-    return [...this.sessions.values()].map((session) => snapshot(session));
+    return [...this.sessions.values()].map((session) => ({ ...structuredClone(session.metadata), buffer: "" }));
   }
 
   /**
