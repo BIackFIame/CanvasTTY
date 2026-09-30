@@ -6,7 +6,7 @@
 //   npx electron-vite build
 //   node scripts/bench/baseline.mjs [--runs 2] [--modes shell,opencode,claude] [--ladder 1,5,10]
 //        [--idle-seconds 60] [--load-seconds 30] [--kbps 256] [--churn-period-ms 3000]
-//        [--size path/to/CanvasTTY.app] [--json report.json]
+//        [--size path/to/CanvasTTY.app] [--json report.json] [--helpers auto|node|native]
 //   node scripts/bench/baseline.mjs --size-only path/to/CanvasTTY.app
 //
 // Modes run one after another, never in parallel. The agent modes put a stub `opencode` / `claude`
@@ -31,7 +31,7 @@ const TEMP = realpathSync(process.env.BENCH_TMPDIR || "/tmp");
 function options(argv) {
   const result = {
     runs: 2, modes: ["shell", "opencode", "claude"], ladder: "1,5,10", idleSeconds: 60, loadSeconds: 30,
-    kbps: 256, churnPeriodMs: 3000, settleMs: 10_000, size: null, sizeOnly: false, json: null
+    kbps: 256, churnPeriodMs: 3000, settleMs: 10_000, size: null, sizeOnly: false, json: null, helpers: "auto"
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -47,6 +47,7 @@ function options(argv) {
     else if (flag === "--size") result.size = resolve(value());
     else if (flag === "--size-only") { result.size = resolve(value()); result.sizeOnly = true; }
     else if (flag === "--json") result.json = resolve(value());
+    else if (flag === "--helpers") result.helpers = value();
     else throw new Error(`Unknown option ${flag}`);
   }
   return result;
@@ -74,6 +75,12 @@ function appFolder(folder) {
   cpSync(join(ROOT, "src", "agent-runtime"), join(folder, "src", "agent-runtime"), { recursive: true });
   cpSync(join(ROOT, "src", "agent-browser"), join(folder, "src", "agent-browser"), { recursive: true });
   cpSync(join(ROOT, "scripts", "canvastty-control.mjs"), join(folder, "scripts", "canvastty-control.mjs"));
+  // The native helper where it was built (npm run build:helpers -- --host): the app finds it next to the sources. A
+  // link, not a copy: the first exec of a new file costs macOS ~0.2 s of checks, which an installed app pays once.
+  if (existsSync(join(ROOT, "build", "native-helpers"))) {
+    mkdirSync(join(folder, "build"), { recursive: true });
+    symlinkSync(join(ROOT, "build", "native-helpers"), join(folder, "build", "native-helpers"));
+  }
 }
 
 function run(command, args, env, timeoutMs) {
@@ -116,7 +123,9 @@ async function appRun(mode, settings) {
     BENCH_MODE: mode, BENCH_ROOT: ROOT, BENCH_OUT: out, BENCH_USERDATA: userData, BENCH_WORK: work,
     BENCH_NODE: process.execPath, BENCH_FLOOD: join(ROOT, "scripts", "bench-runtime", "flood.mjs"),
     BENCH_LADDER: settings.ladder, BENCH_IDLE_SECONDS: String(settings.idleSeconds), BENCH_LOAD_SECONDS: String(settings.loadSeconds),
-    BENCH_KBPS: String(settings.kbps), BENCH_CHURN_PERIOD_MS: String(settings.churnPeriodMs), BENCH_SETTLE_MS: String(settings.settleMs)
+    BENCH_KBPS: String(settings.kbps), BENCH_CHURN_PERIOD_MS: String(settings.churnPeriodMs), BENCH_SETTLE_MS: String(settings.settleMs),
+    // node: the .mjs helpers under Electron-as-Node; native: canvastty-helper; auto: what the app picks by itself.
+    ...(settings.helpers === "auto" ? {} : { CANVASTTY_HELPERS: settings.helpers })
   };
   const started = Date.now();
   try {

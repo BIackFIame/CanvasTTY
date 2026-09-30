@@ -100,6 +100,8 @@ function kindOf(command) {
   if (/^\/usr\/bin\/time |sandbox-exec/u.test(command)) return "wrapper";
   const helper = /(mcp-helper|orchestration-helper|hook-helper|permission-gate|plugin-hook-runner|canvastty-control)\.mjs/u.exec(command);
   if (helper) return /^\/bin\/sh -c/u.test(command) ? "wrapper" : helper[1];
+  const native = /canvastty-helper (mcp-browser|mcp-orchestration|permission-gate|hook)\b/u.exec(command);
+  if (native) return /^\/bin\/sh -c/u.test(command) ? "wrapper" : `native:${native[1]}`;
   if (command.includes("flood.mjs")) return "flood";
   if (/(^|\/)-?(zsh|bash|sh)(\s|$)/u.test(command)) return "shell";
   return `other:${command.split(/\s+/u)[0].split("/").at(-1)}`;

@@ -151,7 +151,7 @@ function runCommandHook(command, payload, timeoutSeconds) {
         kind: "command", ms: Date.now() - started, code,
         maxRssKb: Math.round(number(/(\d+)\s+maximum resident set size/u) / 1024),
         userS: number(/([\d.]+) user/u), sysS: number(/([\d.]+) sys/u),
-        helper: /([\w-]+)\.mjs/u.exec(command)?.[1] ?? "command", decision: stdout.slice(0, 80)
+        helper: /([\w-]+)\.mjs/u.exec(command)?.[1] ?? (/canvastty-helper'? '([\w-]+)'/u.exec(command)?.[1] ? `native:${/canvastty-helper'? '([\w-]+)'/u.exec(command)[1]}` : "command"), decision: stdout.slice(0, 80)
       });
     });
     child.stdin.end(JSON.stringify(payload));
