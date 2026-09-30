@@ -19,6 +19,7 @@ import { constrainPluginResize } from "./pluginBounds";
 import { PluginFrame } from "./PluginFrame";
 import type { PluginCanvasWheelInput } from "./pluginInputBridge";
 import { pluginCanvasWidgetId } from "../workspace/canvasWidgetFocus";
+import { surfaceIsLive, surfaceLifecycle, useSurfaceOffscreen, useWindowHidden } from "../workspace/surfaceLifecycle";
 
 interface PluginCanvasCardProps {
   instance: PluginCanvasInstance;
@@ -44,6 +45,8 @@ interface PluginCanvasCardProps {
   onCanvasWheel(event: PluginCanvasWheelInput): void;
   /** True while this card is part of the marquee selection. */
   groupSelected?: boolean;
+  /** An ancestor hides the card with CSS (HOME editing hides the whole window layer). */
+  hidden?: boolean;
 }
 
 interface DragState {
@@ -79,7 +82,8 @@ export function PluginCanvasCard({
   onWidgetFocus,
   onWidgetHoverChange,
   onCanvasWheel,
-  groupSelected = false
+  groupSelected = false,
+  hidden = false
 }: PluginCanvasCardProps): React.JSX.Element {
   const dragState = useRef<DragState | null>(null);
   const resizeState = useRef<ResizeState | null>(null);
@@ -94,6 +98,11 @@ export function PluginCanvasCard({
   // Renders when the summary scale changes, not on every camera move.
   const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
   const summaryMode = summaryScale > 1;
+  // The plugin document is suspended whenever nobody can see it: its timers drop to one wake-up a second
+  // and its animation frames wait, but the document (and all its state) stays loaded.
+  const offscreen = useSurfaceOffscreen(camera, { position, size });
+  const windowHidden = useWindowHidden();
+  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, offscreen, windowHidden });
 
   useEffect(() => {
     const bounds = constrainPluginResize(
@@ -211,6 +220,7 @@ export function PluginCanvasCard({
       data-canvas-widget-id={pluginCanvasWidgetId(instance.id)}
       data-canvas-widget-focusable="true"
       data-wheel-owner={summaryMode ? undefined : "local"}
+      data-surface-lifecycle={lifecycle}
       style={{
         width: size.width,
         height: size.height,
@@ -248,6 +258,7 @@ export function PluginCanvasCard({
         canvasInstanceId={instance.id}
         onOpenLauncher={onOpenLauncher}
         onError={onError}
+        suspended={!surfaceIsLive(lifecycle)}
       />
       <button
         className="plugin-canvas-card__summary"

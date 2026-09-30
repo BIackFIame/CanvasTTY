@@ -67,6 +67,10 @@ export interface CanvasTTYPluginHost {
   };
   onContext(listener: (context: CanvasTTYPluginContext) => void): () => void;
   onStorageChange(listener: (key: string, value: unknown) => void): () => void;
+  /** "hidden" while the plugin's card is not drawn (summary zoom, HOME editing, off-screen, minimized window). */
+  visibility(): "visible" | "hidden";
+  /** Called on every change of `visibility()`; the same moment `document` fires `visibilitychange`. */
+  onVisibilityChange(listener: (state: "visible" | "hidden") => void): () => void;
 }
 
 export interface CanvasTTYPluginContext {

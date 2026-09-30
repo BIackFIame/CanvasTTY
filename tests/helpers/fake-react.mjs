@@ -29,6 +29,8 @@ export function useEffect(effect, deps) {
 }
 export const useLayoutEffect = useEffect;
 export function useCallback(callback) { return callback; }
+export function useSyncExternalStore(_subscribe, getSnapshot) { cursor++; return getSnapshot(); }
+export function memo(component) { return component; }
 export function useMemo(factory) { return factory(); }
 export function jsx(type, props, key) { return { type, props, key }; }
 export const jsxs = jsx;
@@ -53,7 +55,7 @@ export function __unmount() {
   slots = []; cursor = 0; queue.length = 0;
 }
 export function __reset() { slots = []; cursor = 0; queue.length = 0; pendingEffects = []; }
-export default { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo };
+export default { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo, useSyncExternalStore, memo };
 `;
 
 const root = fileURLToPath(new URL("../..", import.meta.url));

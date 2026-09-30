@@ -45,6 +45,7 @@ import {
   PLUGIN_API_VERSION
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
+import { PLUGIN_VISIBILITY_BRIDGE_SOURCE } from "../../shared/pluginVisibility.ts";
 import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
 import type { LaunchContributor } from "./LaunchPipeline.ts";
 import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
@@ -3305,6 +3306,12 @@ const PLUGIN_SDK_SOURCE = `(() => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    visibility: () => (document.visibilityState === "hidden" ? "hidden" : "visible"),
+    onVisibilityChange: (listener) => {
+      const notify = () => listener(document.visibilityState === "hidden" ? "hidden" : "visible");
+      document.addEventListener("visibilitychange", notify);
+      return () => document.removeEventListener("visibilitychange", notify);
+    },
     onStorageChange: (listener) => {
       storageListeners.add(listener);
       return () => storageListeners.delete(listener);
@@ -3315,6 +3322,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
 
 const PLUGIN_INPUT_BRIDGE_SOURCE = `(() => {
   if (parent === window) return;
+${PLUGIN_VISIBILITY_BRIDGE_SOURCE}
   let captureWheel = false;
   addEventListener("message", (event) => {
     const message = event.data;

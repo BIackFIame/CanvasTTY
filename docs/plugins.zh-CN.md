@@ -469,6 +469,10 @@ if (library) {
 
 上下文更新包含当前 CanvasTTY 的语言环境和配色方案。插件自行负责其内部本地化和样式；应在 contribution 的预期尺寸下保持可读，且不得虚构加载进度、会话、状态、限额或遥测。
 
+### 可见性
+
+当卡片未被绘制时（缩小为摘要、编辑 HOME 时隐藏、平移到屏幕外或窗口最小化），画布应用会继续存在。宿主不会重新加载 frame，而是像浏览器挂起后台标签页一样挂起它：`document.visibilityState` 为 `"hidden"`（每次变化都会触发 `visibilitychange`），计时器（`setTimeout`、`setInterval`）每秒最多唤醒一次，`requestAnimationFrame` 回调会等到卡片再次显示。DOM、JavaScript 状态、网络请求、音频和 workers 不受影响。订阅：`host.onVisibilityChange((state) => …)`，当前值：`host.visibility()`；不使用 SDK 时可直接监听 `visibilitychange`。宿主消息：`{ source: "canvastty-host", type: "visibility", state: "visible" | "hidden" }`。
+
 ## 安装与管理
 
 1. 把静态包发布到公开 GitHub 仓库的根目录。

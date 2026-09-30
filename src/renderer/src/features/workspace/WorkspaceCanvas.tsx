@@ -1050,6 +1050,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 }}
                 onCanvasWheel={wheelNavigation.applyCanvasWheel}
                 groupSelected={marqueeSelection.has(pluginLayerId(instance.id))}
+                hidden={homeEditing}
               />
             );
           })}
