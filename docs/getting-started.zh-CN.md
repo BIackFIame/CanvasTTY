@@ -7,6 +7,8 @@
 - Node.js 与 npm。
 - 当前平台上 `node-pty` 支持的原生编译工具链。
 - 能运行 Electron 的图形桌面环境。
+- 可选：Go 1.21 或更高版本，用于构建原生智能体 helper（`npm run build:helpers`，`npm run build` 也会调用）。没有 Go 时应用使用 JavaScript helper。
+- Linux 可选：bubblewrap（`bwrap`），用于智能体隔离。
 - 可选：安装 `codex`、`claude`、`qwen`、`kimi`、`opencode`、`hermes`、`grok`、`omp` 或 `pi` 智能体 CLI 并加入 `PATH`，只装你打算使用的启动器对应的即可。
 
 Agents 设置提供官方安装说明链接和安装后的再次检查。CanvasTTY 不会替你安装或登录智能体 CLI。想让某个服务商的会话或订阅限额可用，请先完成该服务商自己的登录流程。
@@ -23,13 +25,13 @@ npm run dev
 ## 第一个会话
 
 1. 在 Home 页点击 **Terminal**，立即在上次使用的项目目录里打开一个 shell。
-2. 点击 **Codex**、**Claude**、**Kimi**、**OpenCode**、**Hermes** 或 **Grok Build**，为对应的固定服务商选择项目目录和启动配置。
+2. 点击 **Codex**、**Claude**、**Kimi**、**OpenCode**、**Hermes** 或 **Grok Build**，为对应的固定服务商选择项目目录和启动模式（默认 Auto）。
 3. 在 Home 打开 **Browser**，创建或恢复内置浏览器卡片。启用 **设置 → 浏览器 → 智能体访问** 后，由 CanvasTTY 启动的智能体会话可以使用已打开的标签页。
 4. 在同一画布上移动实时终端和浏览器，或调整它们的大小。
 5. 缩小画布后借助语义摘要导航；放大后继续使用 xterm 或原生浏览器页面。
 6. 回到 Home，查看真实会话、已连接的浏览器智能体以及适配器提供的服务商配额窗口。
 
-在服务商支持的情况下，**YOLO** 配置会关闭其安全确认提示。对于 OpenCode，CanvasTTY 只在本次启动中添加 inline `permission: "allow"` override，并保留其余合并后的 OpenCode 配置；Hermes 接收原生 `--yolo`，Grok Build 接收原生 `--always-approve`，且都只作用于本次启动。CanvasTTY 会弹出明确的危险确认；只在你愿意让智能体改动的目录中使用该配置。
+启动模式有 **Auto**（默认）、**Manual**、**Accept edits**、**Plan** 与 **Bypass**，只在对应 CLI 支持时提供；它们外面的防护层见[安装与安全](installing-and-security.zh-CN.md#智能体防护层)。在服务商支持的情况下，**Bypass**（YOLO）会关闭其安全确认提示，但仍处于基础防护与智能体隔离之内。对于 OpenCode，CanvasTTY 只在本次启动中添加 inline `permission: "allow"` override，并保留其余合并后的 OpenCode 配置；Hermes 接收原生 `--yolo`，Grok Build 接收原生 `--always-approve`，且都只作用于本次启动。CanvasTTY 会要求你为每个 CLI 确认一次，且不会交给子智能体；只在你愿意让智能体改动的目录中使用它。
 
 ## 终端输入与控制
 
@@ -56,7 +58,7 @@ npm run dev
 | `npm run dev` | 启动 Electron 开发构建 |
 | `npm test` | 运行 Node 测试套件 |
 | `npm run typecheck` | 对 main/preload 和渲染进程项目做类型检查 |
-| `npm run build` | 类型检查并生成生产环境构建产物 |
+| `npm run build` | 构建原生 helper、类型检查并生成生产环境构建产物 |
 | `npm run preview` | 启动构建好的应用，验证生产环境路径 |
 
 提交改动之前，请先跑测试、typecheck 和 build，然后在真实的 Electron 窗口里检查受影响的流程。
