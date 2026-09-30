@@ -5,7 +5,7 @@
 //
 //   npx electron-vite build
 //   node scripts/bench/baseline.mjs [--runs 2] [--modes shell,opencode,claude] [--ladder 1,5,10]
-//        [--idle-seconds 60] [--load-seconds 30] [--kbps 256] [--churn-period-ms 3000]
+//        [--idle-seconds 60] [--settled-ms 10000] [--load-seconds 30] [--kbps 256] [--churn-period-ms 3000]
 //        [--size path/to/CanvasTTY.app] [--json report.json] [--helpers auto|node|native]
 //   node scripts/bench/baseline.mjs --size-only path/to/CanvasTTY.app
 //
@@ -31,7 +31,7 @@ const TEMP = realpathSync(process.env.BENCH_TMPDIR || "/tmp");
 function options(argv) {
   const result = {
     runs: 2, modes: ["shell", "opencode", "claude"], ladder: "1,5,10", idleSeconds: 60, loadSeconds: 30,
-    kbps: 256, churnPeriodMs: 3000, settleMs: 10_000, size: null, sizeOnly: false, json: null, helpers: "auto"
+    kbps: 256, churnPeriodMs: 3000, settleMs: 10_000, settledMs: 10_000, size: null, sizeOnly: false, json: null, helpers: "auto"
   };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
@@ -44,6 +44,7 @@ function options(argv) {
     else if (flag === "--kbps") result.kbps = Number(value());
     else if (flag === "--churn-period-ms") result.churnPeriodMs = Number(value());
     else if (flag === "--settle-ms") result.settleMs = Number(value());
+    else if (flag === "--settled-ms") result.settledMs = Number(value());
     else if (flag === "--size") result.size = resolve(value());
     else if (flag === "--size-only") { result.size = resolve(value()); result.sizeOnly = true; }
     else if (flag === "--json") result.json = resolve(value());
@@ -124,6 +125,7 @@ async function appRun(mode, settings) {
     BENCH_NODE: process.execPath, BENCH_FLOOD: join(ROOT, "scripts", "bench-runtime", "flood.mjs"),
     BENCH_LADDER: settings.ladder, BENCH_IDLE_SECONDS: String(settings.idleSeconds), BENCH_LOAD_SECONDS: String(settings.loadSeconds),
     BENCH_KBPS: String(settings.kbps), BENCH_CHURN_PERIOD_MS: String(settings.churnPeriodMs), BENCH_SETTLE_MS: String(settings.settleMs),
+    BENCH_SETTLED_MS: String(settings.settledMs),
     // node: the .mjs helpers under Electron-as-Node; native: canvastty-helper; auto: what the app picks by itself.
     ...(settings.helpers === "auto" ? {} : { CANVASTTY_HELPERS: settings.helpers })
   };
