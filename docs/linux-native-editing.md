@@ -37,12 +37,12 @@ app with the optional frontend and a separate CanvasTTY profile:
 
 ```sh
 cd /home/kosya/vibecoding/canvastty-pr103-keyboard
-mkdir -p artifacts/native-tui-profile
+mkdir -p /home/kosya/vibecoding/ctty-qa
 PATH="$PWD/artifacts/codex-native-backend:$PATH" \
-CANVASTTY_USER_DATA_DIR="$PWD/artifacts/native-tui-profile" \
+CANVASTTY_USER_DATA_DIR=/home/kosya/vibecoding/ctty-qa \
 CANVASTTY_CODEX_TUI_QA=/home/kosya/vibecoding/codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui \
 CANVASTTY_CODEX_TUI_LAUNCHER_QA=/home/kosya/vibecoding/codex-macos-tui/macos/codex-tui-launch.mjs \
-npm run preview
+node_modules/.bin/electron .
 ```
 
 Open a Codex terminal in the app. The prefixed PATH lets the provider registry
@@ -51,7 +51,10 @@ that backend version before starting its private app-server and patched frontend
 The separate CanvasTTY profile isolates application settings; Codex retains its
 normal authentication/config directory.
 
-After changing CanvasTTY sources, run `npm run build` again before `npm run preview`.
+Keep the profile path short: browser gateway sockets are created below it and
+must fit the Unix socket path limit.
+
+After changing CanvasTTY sources, run `npm run build` again before launching.
 For live development, use the same environment with `npm run dev` instead.
 
 ## Manual behavior to check
