@@ -134,16 +134,22 @@ export class OrchestrationGateway {
       transport.on("fatal", () => {
         void this.stop().catch((error) => console.warn("Orchestration pipe host shutdown failed.", error));
       });
+      let endpoint: string;
       try {
-        const endpoint = await transport.start((socket) => this.accept(socket));
-        if (this.windowsTransport !== transport || generation !== this.generation) throw new Error("Orchestration is shutting down.");
-        this.socketEndpoint = endpoint;
+        endpoint = await transport.start((socket) => this.accept(socket));
       } catch (error) {
         await transport.close();
         if (this.windowsTransport === transport) this.windowsTransport = null;
         this.socketEndpoint = null;
         throw error;
       }
+      if (this.windowsTransport !== transport || generation !== this.generation) {
+        // stop() ran while the pipe host started: close it again and leave the gateway stopped, as on other platforms.
+        await transport.close();
+        if (this.windowsTransport === transport) this.windowsTransport = null;
+        return;
+      }
+      this.socketEndpoint = endpoint;
     } else {
       // Unix domain sockets cap at ~104 path bytes (macOS); fall back to a short
       // current-user directory exactly like the browser gateway does.

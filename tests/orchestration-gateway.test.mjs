@@ -12,6 +12,9 @@ import { ORCHESTRATION_BRIDGE_PROTOCOL_VERSION } from "../src/main/services/agen
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const writes = [];
+// On Windows the gateway listens through the current-user pipe host that CI builds before the tests
+// (npm run test:windows-pipe-host); elsewhere the option is ignored.
+const WINDOWS_PIPE_HOST = join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe");
 
 class TestClient {
   constructor(socket) {
@@ -70,7 +73,7 @@ async function fixture(t) {
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
     handler: new ScopedOrchestrationHandler(control),
-    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe")
+    windowsHostPath: WINDOWS_PIPE_HOST
   });
   await gateway.start();
   t.after(() => gateway.stop());
@@ -342,7 +345,7 @@ test("cancel reaches the running command and the answer is CANCELED, not the lat
         return new Promise((resolve) => { finish = resolve; });
       }
     },
-    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe")
+    windowsHostPath: WINDOWS_PIPE_HOST
   });
   await gateway.start();
   t.after(() => gateway.stop());
@@ -386,7 +389,9 @@ test("a spawn_agent canceled while it was starting closes the agent it created",
 test("start and stop in flight: a second start waits for the first, and a stop during start leaves nothing listening", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-orchestration-lifecycle-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
-  const gateway = new OrchestrationGateway({ runtimeDirectory: join(directory, "runtime"), handler: { execute: async () => ({}) } });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: join(directory, "runtime"), handler: { execute: async () => ({}) }, windowsHostPath: WINDOWS_PIPE_HOST
+  });
   await Promise.all([gateway.start(), gateway.start()]);
   const first = gateway.address;
   assert.ok(first);
