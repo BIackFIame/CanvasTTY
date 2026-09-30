@@ -158,7 +158,7 @@ test("master terminal openings keep output within the themed frame", async () =>
   assert.match(card, /pixelSkinSurfaceBounds\(pixelSkinTheme, pixelDetail, size\.width, size\.height, 26,\s*pixelPack\?\.apertures\[pixelDetail\] \?\? pixelPack\?\.aperture\)/);
   assert.doesNotMatch(card, /pixelDetailRef|skinDetailLevel\([^)]*zoom|pixelDetail === "overview"/);
   // Summary mode starts below zoom 0.5 (summaryScaleForZoom > 1), read from the camera store.
-  assert.match(card, /const summaryScale = useCameraSelector\(camera, \(current\) => summaryScaleForZoom\(current\.zoom\)\);\n\s*const summaryMode = summaryScale > 1;/);
+  assert.match(card, /const summaryScale = useCameraSelector\(camera, \(current\) => summaryScaleForZoom\(current\.zoom\)\);\r?\n\s*const summaryMode = summaryScale > 1;/);
   assert.match(card, /\{RESIZE_DIRECTIONS\.map/);
   assert.match(card, /detail=\{pixelDetail\}/);
   assert.match(card, /terminal-card__skin-drag--\$\{edge\}/);

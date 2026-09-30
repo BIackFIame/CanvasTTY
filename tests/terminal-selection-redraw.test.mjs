@@ -55,5 +55,5 @@ test("the guard matches the xterm build the app bundles and every card installs 
   assert.match(xterm, /handleSelectionChanged\(\w,\w,\w\)\{this\._selectionState\.start=\w,this\._selectionState\.end=\w/u);
   const card = await readFile(new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url), "utf8");
   assert.match(card, /const restoreSelectionRedraws = skipEmptySelectionRedraws\(terminal\);/u);
-  assert.match(card, /restoreSelectionRedraws\(\);\n\s+terminal\.dispose\(\);/u);
+  assert.match(card, /restoreSelectionRedraws\(\);\r?\n\s+terminal\.dispose\(\);/u);
 });

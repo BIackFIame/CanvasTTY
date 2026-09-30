@@ -79,7 +79,7 @@ test("App mounts the canvas only with the snapshot and the heavy surfaces only a
 
 test("WorkspaceCanvas holds back xterm, plugin iframes and the browser view until surfaces may mount", async () => {
   const source = await readFile(canvasPath, "utf8");
-  assert.match(source, /surfacesMounted = true\n\s*\} = props;/);
+  assert.match(source, /surfacesMounted = true\r?\n\s*\} = props;/);
   assert.match(source, /\{surfacesMounted && renderedSessions\.filter\(\(session\) => fullscreenSessionId !== session\.id\)\.map/);
   assert.match(source, /\{surfacesMounted && renderedPluginCanvas\.map/);
   assert.match(source, /\{surfacesMounted && renderedBrowserCanvas && \(\s*<BrowserCard/);
