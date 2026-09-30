@@ -1,6 +1,4 @@
-import { homedir } from "node:os";
 import { stat } from "node:fs/promises";
-import { join } from "node:path";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import type { AgentChatHistoryPage, AgentChatHistoryProviderId, AgentChatHistoryResumeResult, AgentProviderId, Point, SessionSnapshot } from "../../shared/contracts.ts";
 import type { SettingsStore } from "./SettingsStore.ts";
@@ -15,6 +13,7 @@ import { jsonlHistory } from "./agent-history/jsonlHistory.ts";
 import { kimiHistory } from "./agent-history/kimiHistory.ts";
 import { minimaxHistory } from "./agent-history/minimaxHistory.ts";
 import { cursorHistory } from "./agent-history/cursorHistory.ts";
+import { resolveAgentHistoryPaths } from "./agent-history/historyPaths.ts";
 
 const PAGE_SIZE = 50;
 type CachedHistory = HistoryRecords & { generation: number };
@@ -32,19 +31,19 @@ export class AgentChatHistoryService {
     private readonly terminals: TerminalManager,
     hermesHome: string
   ) {
+    const paths = resolveAgentHistoryPaths();
     this.adapters = {
-      codex: codexHistory(process.env.CODEX_HOME || join(homedir(), ".codex")),
+      codex: codexHistory(paths.codex),
       hermes: hermesHistory(hermesHome),
-      grok: grokHistory(process.env.GROK_HOME || join(homedir(), ".grok")),
-      opencode: opencodeHistory(process.env.OPENCODE_HOME || join(homedir(), ".local", "share", "opencode")),
-      claude: jsonlHistory("claude", join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects")),
-      qwen: jsonlHistory("qwen", join(process.env.QWEN_CODE_HOME || join(homedir(), ".qwen"), "tmp")),
-      kimi: kimiHistory(process.env.KIMI_SHARE_DIR || join(homedir(), ".kimi")),
-      omp: jsonlHistory("omp", process.env.PI_CODING_AGENT_SESSION_DIR || join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".omp", "agent"), "sessions")),
-      pi: jsonlHistory("pi", join(process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent"), "sessions")),
-      cursor: cursorHistory(process.env.CURSOR_CONFIG_DIR || (process.env.XDG_CONFIG_HOME
-        ? join(process.env.XDG_CONFIG_HOME, "cursor") : join(homedir(), ".cursor"))),
-      minimax: minimaxHistory(process.env.MINIMAX_DATA_DIR || process.env.MAVIS_DATA_DIR || join(homedir(), ".minimax")),
+      grok: grokHistory(paths.grok),
+      opencode: opencodeHistory(paths.opencode),
+      claude: jsonlHistory("claude", paths.claude),
+      qwen: jsonlHistory("qwen", paths.qwen),
+      kimi: kimiHistory(paths.kimi),
+      omp: jsonlHistory("omp", paths.omp),
+      pi: jsonlHistory("pi", paths.pi),
+      cursor: cursorHistory(paths.cursor),
+      minimax: minimaxHistory(paths.minimax),
       devin: unsupportedHistory("Devin"),
       antigravity: unsupportedHistory("Antigravity")
     };
