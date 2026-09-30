@@ -28,6 +28,7 @@ import {
 } from "../../lib/providers";
 import { sessionStatusIcon, sessionStatusLabel } from "../../lib/sessionStatus";
 import { sessionStatusTone } from "../../lib/sessionStatusTone";
+import { scheduleMinuteTicks } from "./homeClockSchedule";
 import { HomeMediaWidget } from "./HomeMediaWidget";
 import { SessionFailureDetails, sessionFailureDetails } from "./SessionFailureDetails";
 import { PluginFrame } from "../plugins/PluginFrame";
@@ -145,10 +146,7 @@ export function HomeZone({
     if (!gridPointer.current) setDraftGridSize(settings.homeGridSize);
   }, [settings.homeGridSize]);
 
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(new Date()), 1_000);
-    return () => window.clearInterval(timer);
-  }, []);
+  useEffect(() => scheduleMinuteTicks(() => setNow(new Date())), []);
 
   const startLayoutPointer = (
     event: React.PointerEvent<HTMLButtonElement>,
