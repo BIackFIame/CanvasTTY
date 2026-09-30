@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, posix, win32 } from "node:path";
 import { CLAUDE_HTTP_HOOK } from "../../../agent-runtime/runtime-protocol.mjs";
 
 /**
@@ -85,6 +85,8 @@ export class ClaudeHttpHookPolicy {
 
   /** Every settings object Claude reads for this launch that CanvasTTY can see: inline, managed, user, project. */
   private *settingsSources(facts: ClaudeHttpLaunchFacts): Generator<unknown> {
+    // The paths Claude reads on the platform this policy decides for (the host's in the app).
+    const { join, dirname } = pathRules(this.platform);
     for (let index = 0; index < facts.args.length; index++) {
       const argument = facts.args[index]!;
       const value = argument === "--settings" ? facts.args[index + 1] : argument.startsWith("--settings=") ? argument.slice(11) : undefined;
@@ -175,7 +177,10 @@ export class ClaudeVersions {
   }
 }
 
+const pathRules = (platform: NodeJS.Platform): typeof posix => platform === "win32" ? win32 : posix;
+
 function managedSettingsFiles(platform: NodeJS.Platform): string[] {
+  const { join } = pathRules(platform);
   const root = platform === "darwin" ? "/Library/Application Support/ClaudeCode"
     : platform === "win32" ? "C:\\Program Files\\ClaudeCode"
       : "/etc/claude-code";
