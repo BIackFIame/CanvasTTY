@@ -14,10 +14,13 @@ using the official CLI.
   official executable. The global Codex installation remains unchanged.
 - The release archive SHA-256 matches GitHub's asset digest:
   `26586b0d246d41a799b0ef8ee1add370f0fb0721b3709340f28db612381616ea`.
-- The Rust frontend has not been built. It requires Rust 1.95.0, which was not
-  installed during this preparation. CanvasTTY dependencies have not been
-  installed in this worktree.
-- No build, test suite, lint, typecheck or application launch was performed.
+- Rust 1.95.0 is installed alongside the existing toolchains. The adapted frontend
+  built successfully at
+  `../codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui`.
+- CanvasTTY dependencies were installed with `npm ci`; `npm run build`, including
+  its TypeScript checks, completed successfully. Application output is in `out/`.
+- No test suite, separate lint or application launch was performed. Keyboard
+  behavior remains for manual checking.
 
 ## Build and start for manual checking
 
@@ -26,27 +29,30 @@ From the adapted frontend checkout:
 ```sh
 cd /home/kosya/vibecoding/codex-macos-tui/codex-rs
 rustup toolchain install 1.95.0 --profile minimal
-CARGO_PROFILE_DEV_DEBUG=0 rustup run 1.95.0 cargo build --locked -p codex-tui --bin canvastty-codex-tui
+CARGO_PROFILE_DEV_DEBUG=0 rustup run 1.95.0 cargo build --locked -j 6 -p codex-tui --bin canvastty-codex-tui
 ```
 
-Prepare CanvasTTY dependencies in this worktree if needed, then start the dev app
-with the optional frontend and a separate CanvasTTY profile:
+The frontend and CanvasTTY are already built in this workspace. Start the built
+app with the optional frontend and a separate CanvasTTY profile:
 
 ```sh
 cd /home/kosya/vibecoding/canvastty-pr103-keyboard
-npm ci
+mkdir -p artifacts/native-tui-profile
 PATH="$PWD/artifacts/codex-native-backend:$PATH" \
 CANVASTTY_USER_DATA_DIR="$PWD/artifacts/native-tui-profile" \
 CANVASTTY_CODEX_TUI_QA=/home/kosya/vibecoding/codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui \
 CANVASTTY_CODEX_TUI_LAUNCHER_QA=/home/kosya/vibecoding/codex-macos-tui/macos/codex-tui-launch.mjs \
-npm run dev
+npm run preview
 ```
 
-Open a Codex terminal in the dev app. The prefixed PATH lets the provider registry
+Open a Codex terminal in the app. The prefixed PATH lets the provider registry
 resolve the isolated official 0.159.2 executable. The existing launcher checks
 that backend version before starting its private app-server and patched frontend.
 The separate CanvasTTY profile isolates application settings; Codex retains its
 normal authentication/config directory.
+
+After changing CanvasTTY sources, run `npm run build` again before `npm run preview`.
+For live development, use the same environment with `npm run dev` instead.
 
 ## Manual behavior to check
 
