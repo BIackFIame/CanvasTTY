@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
@@ -848,5 +848,33 @@ test("the background Kimi probe gives the same answer as the blocking one", { sk
     // A generous limit: the answers are compared, not the 3 s default, which a loaded machine can hit.
     assert.equal(probeKimiPerRunMcpConfig(kimi, 30_000), expected, body);
     assert.equal(await probeKimiPerRunMcpConfigAsync(kimi, 30_000), expected, body);
+  }
+});
+
+test("the Kimi probe runs with the launch environment it was given, never the app's own", { skip: process.platform === "win32" }, async (t) => {
+  const root = await fixture(t, "canvastty-provider-kimi-probe-env-");
+  const executable = join(root, "kimi");
+  // Answers only when it sees the given environment and nothing of the app's.
+  writeFileSync(executable, "#!/bin/sh\n[ \"$PROBE_GIVEN\" = yes ] && [ -z \"$PROBE_APP_ONLY\" ] && echo '--mcp-config-file'\nexit 0\n", { mode: 0o755 });
+  const kimi = { state: "available", provider: "kimi", executable, launcher: "native", environment: {}, checked: [] };
+  process.env.PROBE_APP_ONLY = "leaked";
+  t.after(() => { delete process.env.PROBE_APP_ONLY; });
+  const given = { PATH: "/usr/bin:/bin", PROBE_GIVEN: "yes" };
+  mkdirSync(join(root, "kimi-home"));
+  assert.equal(probeKimiPerRunMcpConfig(kimi, 30_000, given), true);
+  assert.equal(await probeKimiPerRunMcpConfigAsync(kimi, 30_000, given), true);
+  const adapters = new ProviderLaunchAdapters({
+    helper,
+    providerClis: { get: () => kimi },
+    runtimeDirectory: join(root, "runtime"),
+    hermesHomeDirectory: join(root, "hermes"),
+    kimiHomeDirectory: join(root, "kimi-home"),
+    environment: given
+  });
+  const launch = adapters.prepare("kimi", "connection-kimi");
+  try {
+    assert.ok(launch.args.includes("--mcp-config-file"), "the adapter's own probe saw only its environment");
+  } finally {
+    launch.releaseConfiguration();
   }
 });

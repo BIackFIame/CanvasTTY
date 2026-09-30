@@ -87,6 +87,39 @@ test("spawn_agent: folder, depth and live-count limits refuse with a reason the 
   await spawn({});
 });
 
+test("spawn_agent cancelled before or while the subagent starts leaves no card and no launch behind", async (t) => {
+  const { project, inner } = await folders(t);
+  // A launch policy that has not answered yet: the new agent is still starting meanwhile.
+  const answers = [];
+  const pipeline = {
+    hasPolicy: () => true,
+    normalizeOptions: (_provider, options) => options,
+    unavailable: () => [],
+    forgetSession: async () => undefined,
+    prepare: () => new Promise((resolve) => answers.push(resolve))
+  };
+  const { terminals, calls } = managerWith(t);
+  const control = new AgentControlService(terminals);
+  const handler = new ScopedOrchestrationHandler(control);
+  const orchestrator = terminals.create({ provider: "codex", profile: "auto", cwd: project, position: at, role: "orchestrator" });
+  terminals.configureLaunchPipeline(pipeline);
+  const launches = calls.length;
+  const children = () => terminals.list().filter((session) => session.parentSessionId === orchestrator.id);
+  const spawn = (signal) => handler.execute(orchestrator.id, { id: randomUUID(), tool: "spawn_agent", arguments: { provider: "opencode", cwd: inner, prompt: "go" } }, signal);
+  const canceled = (error) => error.bridgeError?.code === "CANCELED";
+  await assert.rejects(spawn(AbortSignal.abort()), canceled);
+  assert.equal(calls.length, launches, "nothing launched for a call already cancelled");
+  assert.deepEqual(children(), []);
+  // Cancelled while its prompt waits for the new agent to start: the card is closed, not left running.
+  const controller = new AbortController();
+  const pending = spawn(controller.signal);
+  for (let i = 0; i < 200 && answers.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(children().length, 1, "starting");
+  controller.abort();
+  await assert.rejects(pending, canceled);
+  assert.deepEqual(children(), [], "its card was closed");
+});
+
 test("YOLO is enforced in the main process: acknowledged by the person, never for a subagent", async (t) => {
   const { project } = await folders(t);
   const { terminals } = managerWith(t, { acknowledged: ["claude"] });
