@@ -16,6 +16,7 @@ import {
 import {
   BROWSER_STORE_VERSION,
   BrowserStore,
+  activeTabAmong,
   normalizePersistedBrowserState
 } from "../src/main/services/browser/BrowserStore.ts";
 
@@ -264,4 +265,12 @@ test("BrowserStore treats corrupt persisted input as an empty safe session", asy
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("a removed active tab hands the active slot to a remaining tab, never to a missing one", () => {
+  const tabs = new Map([["a", {}], ["c", {}]]);
+  assert.equal(activeTabAmong(tabs, "b"), "a", "the active tab is gone: the first remaining one");
+  assert.equal(activeTabAmong(tabs, "c"), "c", "still there: unchanged");
+  assert.equal(activeTabAmong(new Map(), "b"), null);
+  assert.equal(activeTabAmong(tabs, null), null, "no active tab stays none");
 });

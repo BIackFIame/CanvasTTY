@@ -295,3 +295,67 @@ test("screenshot redaction fails closed when sensitive bounds cannot be resolved
   );
   automation.unregister("tab-fail-closed");
 });
+
+/** A page of `count` visible buttons (ids 1000...). */
+function manyButtons(count) {
+  return (method, params) => {
+    if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
+    if (method === "Accessibility.getFullAXTree") {
+      return { nodes: Array.from({ length: count }, (_, index) => ({ backendDOMNodeId: 1000 + index, frameId: "main", role: { value: "button" }, name: { value: `B${index}` }, properties: [] })) };
+    }
+    if (method === "Page.getLayoutMetrics") return { cssLayoutViewport: { clientWidth: 800, clientHeight: 600 } };
+    if (method === "DOM.getBoxModel") return { model: { border: [10, 10, 50, 10, 50, 30, 10, 30] } };
+    if (method === "DOM.describeNode") return { node: { nodeName: "BUTTON", attributes: [] } };
+    return {};
+  };
+}
+
+test("observe measures only the elements of the page it returns (and one more to know there is a next page)", async () => {
+  const contents = new FakeWebContents();
+  contents.debugger.commandHandler = manyButtons(600);
+  const automation = new BrowserAutomationService();
+  await automation.register("tab-many", contents, 1);
+  const boxes = () => contents.debugger.commands.filter((command) => command.method === "DOM.getBoxModel").length;
+  const first = await automation.observe("tab-many", 1, { limit: 50 });
+  assert.equal(first.elements.length, 50);
+  assert.ok(first.nextCursor);
+  assert.equal(boxes(), 51);
+  const before = boxes();
+  const second = await automation.observe("tab-many", 1, { limit: 50, cursor: first.nextCursor });
+  assert.equal(second.elements[0].name, "B50");
+  assert.equal(boxes() - before, 101);
+  const last = await automation.observe("tab-many", 1, { limit: 200 });
+  assert.equal(last.elements.length, 200);
+  automation.unregister("tab-many");
+});
+
+test("waiting for text or an element polls less often the longer it waits", async () => {
+  const contents = new FakeWebContents();
+  contents.debugger.commandHandler = manyButtons(3);
+  const automation = new BrowserAutomationService();
+  await automation.register("tab-wait", contents, 1);
+  await assert.rejects(automation.waitFor("tab-wait", 1, "element", "never there", 2_000), /timed out/u);
+  const walks = contents.debugger.commands.filter((command) => command.method === "Accessibility.getFullAXTree").length;
+  assert.ok(walks <= 10, `${walks} tree walks in 2 s (every 100 ms would be about 20)`);
+  automation.unregister("tab-wait");
+});
+
+test("the per-document sensitive-node cache stays bounded", async () => {
+  const contents = new FakeWebContents();
+  contents.debugger.commandHandler = manyButtons(200);
+  const automation = new BrowserAutomationService();
+  await automation.register("tab-cache", contents, 1);
+  const session = automation.sessions.get("tab-cache");
+  for (let round = 0; round < 12; round += 1) {
+    contents.debugger.commandHandler = (method, params) => {
+      const answer = manyButtons(200)(method, params);
+      if (method === "Accessibility.getFullAXTree") {
+        for (const node of answer.nodes) node.backendDOMNodeId += round * 1_000;
+      }
+      return answer;
+    };
+    await automation.observe("tab-cache", 1, { limit: 200 });
+  }
+  assert.ok(session.sensitiveNodes.size <= 1_000, `${session.sensitiveNodes.size} cached`);
+  automation.unregister("tab-cache");
+});
