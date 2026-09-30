@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -68,7 +69,8 @@ interface TerminalCardProps {
   palette: PaletteId;
   borderSkin: TerminalBorderSkinId;
   skinDetail: PixelSkinPreferredDetail;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
   focusActivation: FocusActivation;
@@ -139,7 +141,7 @@ function TerminalCardView({
   shortcuts,
   borderSkin: selectedBorderSkin,
   skinDetail,
-  zoom,
+  camera,
   stackIndex,
   snapEnabled,
   focusActivation,
@@ -233,8 +235,11 @@ function TerminalCardView({
     return () => window.clearTimeout(timer);
   }, [actionToast]);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  // The card renders when these derived values change, not on every camera move: a pan renders no card,
+  // and a zoom only at the summary and WebGL thresholds (and while the summary scale grows).
+  const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
+  const summaryMode = summaryScale > 1;
+  const webglScaleAllowed = useCameraSelector(camera, (current) => current.zoom <= WEBGL_MAX_SCALE);
   const terminalBackground = terminalTheme(palette, pixelSkinTheme).background;
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
@@ -563,8 +568,8 @@ function TerminalCardView({
   useEffect(() => {
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
-    webglContextPool().update(session.id, { eligible: !summaryMode && zoom <= WEBGL_MAX_SCALE, focused });
-  }, [session.id, focused, summaryMode, zoom]);
+    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
@@ -640,8 +645,8 @@ function TerminalCardView({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     const nextPosition = snapEnabled
       ? snapMove(rawPosition, state.startBounds.size, snapTargets)
@@ -690,8 +695,8 @@ function TerminalCardView({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const raw: SessionBounds = {
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),

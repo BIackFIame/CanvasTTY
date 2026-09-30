@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import type {
   InstalledPlugin,
   LimitsSnapshot,
@@ -25,7 +26,8 @@ interface PluginCanvasCardProps {
   contribution: PluginCanvasAppContribution;
   locale: LocaleId;
   palette: PaletteId;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
   sessions: readonly SessionSnapshot[];
@@ -62,7 +64,7 @@ export function PluginCanvasCard({
   contribution,
   locale,
   palette,
-  zoom,
+  camera,
   stackIndex,
   snapEnabled,
   sessions,
@@ -89,8 +91,9 @@ export function PluginCanvasCard({
   const [position, setPosition] = useState(initialBounds.position);
   const [size, setSize] = useState(initialBounds.size);
   const liveBounds = useRef<SessionBounds>(initialBounds);
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  // Renders when the summary scale changes, not on every camera move.
+  const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
+  const summaryMode = summaryScale > 1;
 
   useEffect(() => {
     const bounds = constrainPluginResize(
@@ -122,8 +125,8 @@ export function PluginCanvasCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
       position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
@@ -166,8 +169,8 @@ export function PluginCanvasCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const raw: SessionBounds = {
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),

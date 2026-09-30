@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { MutableRefObject } from "react";
 import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
   AgentProviderId,
@@ -48,6 +49,7 @@ import { AgentChatHistoryHud } from "./AgentChatHistoryHud";
 import { CanvasRegionCard } from "./CanvasRegionCard";
 import { CanvasRegionMenu } from "./CanvasRegionMenu";
 import { cameraFittingContent } from "./canvasCameraGeometry";
+import { fixedCameraStore, sceneTransform, useCameraSelector, type CameraStore } from "./cameraStore";
 import {
   clampCanvasMenuPosition,
   routeCanvasContextMenu,
@@ -112,6 +114,8 @@ const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefi
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
 const NO_SNAP_TARGETS: readonly SessionBounds[] = [];
+/** The fullscreen layer is outside the scene: its card always draws at scale 1. */
+const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
 
 /** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
 interface TerminalCardHandlers {
@@ -173,7 +177,8 @@ interface WorkspaceCanvasProps {
   browser: BrowserSnapshot;
   browserViewVisible: boolean;
   homeEditing: boolean;
-  camera: CameraState;
+  /** The canvas camera; the workspace does not render when it moves (see cameraStore). */
+  camera: CameraStore;
   onCameraChange(camera: CameraState): void;
   onGoHome(): void;
   onOpenSettings(): void;
@@ -254,17 +259,32 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const [overlayRects, setOverlayRects] = useState<SessionBounds[]>([]);
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
-  const cameraRef = useRef(camera);
-  cameraRef.current = camera;
+  // The navigation hooks read the camera through a ref; this one always reads the store.
+  const cameraRef = useMemo<MutableRefObject<CameraState>>(() => ({
+    get current() { return camera.get(); },
+    set current(next: CameraState) { camera.set(next); }
+  }), [camera]);
   const commitCamera = useCallback((next: CameraState): void => {
-    cameraRef.current = next;
     onCameraChange(next);
   }, [onCameraChange]);
+  const scene = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // The scene follows the camera without a React render: the transform is written straight to the DOM,
+    // synchronously, before anything that measures the scene (the browser card) renders.
+    const apply = (): void => {
+      if (scene.current) scene.current.style.transform = sceneTransform(camera.get());
+    };
+    apply();
+    return camera.subscribe(() => {
+      apply();
+      // What each terminal card covers on screen decides which ones draw with WebGL. The pool waits for the
+      // camera to settle, so a pan only restarts its timer.
+      webglContextPool().viewportChanged();
+    });
+  }, [camera]);
   useEffect(() => {
-    // What each terminal card covers on screen decides which ones draw with WebGL. The pool waits for the
-    // camera to settle, so a pan only restarts its timer.
     webglContextPool().viewportChanged();
-  }, [camera.x, camera.y, camera.zoom, homeEditing, fullscreenSessionId]);
+  }, [homeEditing, fullscreenSessionId]);
 
   const updateRegionMovePreview = useCallback((regionId: string, bounds: SessionBounds | null): void => {
     setRegionMovePreview((current) => {
@@ -518,11 +538,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   ]);
   const browserOccluded = renderedBrowserCanvas !== null
     && canvasLayerIsOccluded(browserLayerId, layerOrder, boundsByLayer);
-  const browserScreenRect = renderedBrowserCanvas === null
-    ? null
-    : canvasScreenRect(renderedBrowserCanvas, camera);
-  const browserUnderOverlay = browserScreenRect !== null
-    && overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect));
+  // A boolean derived from the camera: the workspace renders only when it flips.
+  const browserUnderOverlay = useCameraSelector(camera, (current) => {
+    if (renderedBrowserCanvas === null) return false;
+    const browserScreenRect = canvasScreenRect(renderedBrowserCanvas, current);
+    return overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect));
+  });
   const wheelNavigation = useCanvasWheelNavigation({
     viewport,
     settings,
@@ -635,18 +656,20 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   }, [settings.uiScale, viewportPoint]);
   const worldPoint = useCallback((clientX: number, clientY: number): Point => {
     const point = viewportPoint(clientX, clientY);
+    const current = camera.get();
     return {
-      x: (point.x - camera.x) / camera.zoom,
-      y: (point.y - camera.y) / camera.zoom
+      x: (point.x - current.x) / current.zoom,
+      y: (point.y - current.y) / current.zoom
     };
-  }, [camera.x, camera.y, camera.zoom, viewportPoint]);
+  }, [camera, viewportPoint]);
   const viewportCenterWorldPoint = useCallback((): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
+    const current = camera.get();
     return {
-      x: ((bounds?.width ?? 1) / 2 - camera.x) / camera.zoom,
-      y: ((bounds?.height ?? 1) / 2 - camera.y) / camera.zoom
+      x: ((bounds?.width ?? 1) / 2 - current.x) / current.zoom,
+      y: ((bounds?.height ?? 1) / 2 - current.y) / current.zoom
     };
-  }, [camera.x, camera.y, camera.zoom]);
+  }, [camera]);
   const centerMenuPosition = useCallback((): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
     return {
@@ -902,13 +925,13 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         setContextMenu(nextContextMenu);
       }}
     >
-      <div className="workspace__scene" style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` }}>
+      <div ref={scene} className="workspace__scene">
         <div className={`workspace__regions ${homeEditing ? "workspace__windows--hidden" : ""}`} aria-hidden={homeEditing}>
           {renderedCanvasRegions.map((region) => (
             <CanvasRegionCard
               key={region.id}
               region={region}
-              zoom={camera.zoom}
+              camera={camera}
               snapEnabled={settings.snapToGrid}
               snapTargets={[
                 homeBounds,
@@ -961,7 +984,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
               skinDetail={settings.terminalSkinDetail}
-              zoom={camera.zoom}
+              camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
               snapEnabled={settings.snapToGrid}
               focusActivation={settings.focusActivation}
@@ -993,7 +1016,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 contribution={contribution}
                 locale={settings.locale}
                 palette={settings.palette}
-                zoom={camera.zoom}
+                camera={camera}
                 stackIndex={canvasLayerZIndex(layerOrder, pluginLayerId(instance.id))}
                 snapEnabled={settings.snapToGrid}
                 sessions={sessions}
@@ -1028,7 +1051,6 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               browser={browser}
               bounds={withGroupNudge(browserLayerId, renderedBrowserCanvas)}
               locale={settings.locale}
-              zoom={camera.zoom}
               camera={camera}
               visible={browserViewVisible && !homeEditing && contextMenu === null
                 && regionEditor === null && !commandPaletteOpen && radialLauncher === null
@@ -1066,7 +1088,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               key={note.id}
               note={withGroupNudge(noteLayerId(note.id), note)}
               locale={settings.locale}
-              zoom={camera.zoom}
+              camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, noteLayerId(note.id))}
               editRequest={noteEditRequest?.id === note.id ? noteEditRequest.version : 0}
               snapEnabled={settings.snapToGrid}
@@ -1093,7 +1115,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
               skinDetail={settings.terminalSkinDetail}
-              zoom={1}
+              camera={FULLSCREEN_CAMERA}
               stackIndex={9999}
               snapEnabled={false}
               focusActivation={settings.focusActivation}
@@ -1288,7 +1310,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               </section>
             )}
             {settings.minimapPlacement === placement && (
-              <CanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
+              <LiveCanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
                 canvasRegions={renderedCanvasRegions} sessions={renderedSessions} stickyNotes={renderedStickyNotes}
                 pluginCanvas={renderedPluginCanvas} browserCanvas={renderedBrowserCanvas}
                 locale={settings.locale} interactionMode={settings.minimapInteractionMode}
@@ -1350,4 +1372,10 @@ function shouldKeepCanvasContextMenu(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(
     "textarea, input, select, [contenteditable='true'], .terminal-card, .plugin-canvas-card, .browser-card, .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-canvas-region-id], [data-sticky-note-id], [data-interactive='true']"
   ));
+}
+
+/** The minimap draws the camera's viewport, so it is the one part of the HUD that renders on every move. */
+function LiveCanvasMinimap(props: Omit<React.ComponentProps<typeof CanvasMinimap>, "camera"> & { camera: CameraStore }): React.JSX.Element {
+  const camera = useCameraSelector(props.camera, (current) => current);
+  return <CanvasMinimap {...props} camera={camera} />;
 }

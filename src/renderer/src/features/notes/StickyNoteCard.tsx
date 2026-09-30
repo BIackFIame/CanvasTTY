@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { CameraStore } from "../workspace/cameraStore";
 import type { LocaleId, Point, SessionBounds, StickyNote } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -13,7 +14,8 @@ import { stickyNoteWheelAttributes } from "./stickyNoteWheelAttributes";
 interface StickyNoteCardProps {
   note: StickyNote;
   locale: LocaleId;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   editRequest: number;
   snapEnabled: boolean;
@@ -41,7 +43,7 @@ const RESIZE_DIRECTIONS: ResizeDirection[] = ["n", "ne", "e", "se", "s", "sw", "
 export function StickyNoteCard({
   note,
   locale,
-  zoom,
+  camera,
   stackIndex,
   editRequest,
   snapEnabled,
@@ -135,8 +137,8 @@ export function StickyNoteCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
       position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
@@ -182,8 +184,8 @@ export function StickyNoteCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const constrained = constrainStickyNoteResize({
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),

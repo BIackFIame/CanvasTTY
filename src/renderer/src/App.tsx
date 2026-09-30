@@ -56,6 +56,7 @@ import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueu
 import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
+import { createCameraStore } from "./features/workspace/cameraStore";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
 import { isPixelSkinPackId } from "./features/skins/SkinAssets";
 import { expandedPixelSkinCardBounds, PIXEL_SKIN_CARD_SIZE } from "./features/skins/pixelSkinCardGeometry";
@@ -249,7 +250,9 @@ export function App(): React.JSX.Element {
   const [mediaData, setMediaData] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
   const [browser, setBrowser] = useState<BrowserSnapshot>(EMPTY_BROWSER_SNAPSHOT);
-  const [camera, setCamera] = useState<CameraState>(() => homeCamera(DEFAULT_HOME_GRID_SIZE));
+  // The camera lives in a store, not in state: a pan or zoom must not render the application tree.
+  const [cameraStore] = useState(() => createCameraStore(homeCamera(DEFAULT_HOME_GRID_SIZE)));
+  const setCamera = cameraStore.set;
   const isHomeCamera = useRef(true);
   const browserCanvasRef = useRef<BrowserCanvasState | null>(null);
   /**
@@ -1255,7 +1258,7 @@ export function App(): React.JSX.Element {
           browser={browser}
           browserViewVisible={!settingsOpen && launchProvider === null && pendingTerminalUrl === null}
           homeEditing={homeEditDraft !== null}
-          camera={camera}
+          camera={cameraStore}
           onCameraChange={changeCamera}
           onGoHome={goHome}
           onOpenSettings={() => setSettingsOpen(true)}
