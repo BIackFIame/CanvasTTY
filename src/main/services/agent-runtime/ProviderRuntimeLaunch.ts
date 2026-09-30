@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { isOwnLifecycleHookText } from "../agentHelpers.ts";
 import {
   atomicWrite,
   ensurePrivateDirectory,
@@ -130,7 +131,10 @@ export class ProviderRuntimeLaunchAdapters {
     }
     if (options.permissionGate) {
       validateHelper(options.permissionGate);
-      if (options.permissionGate.args.length !== 1 || !isAbsolute(options.permissionGate.args[0])) {
+      // Either Electron running one absolute script, or the native helper's permission-gate subcommand.
+      const gate = options.permissionGate;
+      const native = isAbsolute(gate.command) && gate.args.length === 1 && gate.args[0] === "permission-gate";
+      if (!native && (gate.args.length !== 1 || !isAbsolute(gate.args[0]!))) {
         throw new Error("Permission gate must reference one absolute script path.");
       }
     }
@@ -908,7 +912,7 @@ class GrokRuntimeHooks {
     const current = readOptional(path);
     if (current === null) return;
     if (
-      (!current.includes("hook-helper.mjs") && !current.includes("plugin-hook-runner.mjs"))
+      (!isOwnLifecycleHookText(current) && !current.includes("plugin-hook-runner.mjs"))
       || !current.includes('"hooks"')
     ) {
       throw new Error("Grok CanvasTTY lifecycle hook path is occupied by an unowned file.");
@@ -1011,7 +1015,7 @@ function mutateHermesHooks(raw: string, commands: Record<string, string[]>, remo
       && entry.timeout === HOOK_TIMEOUT_SECONDS;
     const related = (entry: unknown) => isRecord(entry)
       && typeof entry.command === "string"
-      && entry.command.includes("hook-helper.mjs")
+      && isOwnLifecycleHookText(entry.command)
       && entry.command.includes(event);
     if (remove && entries.some((entry) => related(entry) && !owned(entry))) {
       throw new Error(`CanvasTTY Hermes lifecycle hook ownership changed for ${event}.`);
