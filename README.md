@@ -92,6 +92,10 @@ npm run typecheck
 npm run build
 ```
 
+## Contributor acknowledgements
+
+Thanks to [@kootik](https://github.com/kootik) for [PR #51](https://github.com/howdeploy/CanvasTTY/pull/51): integrating the open pull requests, resolving conflicts, addressing review findings, and improving agent orchestration. The original commits are preserved in the repository history; `.mailmap` associates their `s079891` author identity with kootik.
+
 ## License
 
 CanvasTTY is released under the [MIT License](LICENSE).
