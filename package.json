@@ -16,7 +16,7 @@
   "scripts": {
     "control": "node scripts/canvastty-control.mjs",
     "dev": "electron-vite dev",
-    "build": "npm run build:speech && npm run build:even && npm run build:mobile && npm run typecheck && electron-vite build",
+    "build": "npm run build:speech && npm run build:even && npm run build:mobile && npm run build:helpers -- --host && npm run typecheck && electron-vite build",
     "package": "npm run build && electron-builder --dir",
     "package:linux": "npm run build && electron-builder --linux AppImage deb --publish never",
     "prepackage:win": "node scripts/build-windows-agent-pipe-host.mjs --require-windows --self-test",
@@ -41,6 +41,7 @@
     "pack:even:local": "npm run pack --workspace integrations/even-g2 -- --local-development",
     "predev": "npm run build:even && npm run build:mobile",
     "build:speech": "node scripts/build-companion-speech.mjs",
+    "build:helpers": "node scripts/build-native-helpers.mjs",
     "pack:even": "npm run pack --workspace integrations/even-g2"
   },
   "dependencies": {
