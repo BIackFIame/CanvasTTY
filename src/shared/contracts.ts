@@ -456,6 +456,29 @@ export interface SessionMetadata {
    * (Claude's defaultMode, Codex's approval_policy/sandbox_mode, OpenCode's permission), what it says and where.
    */
   configuredMode?: { mode: string; source: string };
+  /** Dangerous git settings the isolated agent's session left under its folder (see GitRiskReport). */
+  gitRisk?: GitRiskReport;
+}
+
+/** Something in a repository's git folder that runs a program when the person uses git there (gitAudit.ts). */
+export type GitRiskItem =
+  | { kind: "config"; key: string; value: string }
+  | { kind: "hook"; name: string }
+  | { kind: "attributes" };
+
+/**
+ * What an isolated agent's session left in repositories under its folder that would run outside the layer the next
+ * time the person uses git there. Shown on the card (or, for a closed card, by the app) until the person neutralizes
+ * or keeps it; never changed without them.
+ */
+export interface GitRiskReport {
+  id: string;
+  /** The card's folder. */
+  cwd: string;
+  /** The card's title, for a report about a card that was closed. */
+  title?: string;
+  /** Each repository's working folder (the parent of its .git) and what was found there. */
+  repositories: Array<{ path: string; items: GitRiskItem[] }>;
 }
 
 export interface SessionSnapshot extends SessionMetadata {
@@ -1609,6 +1632,10 @@ export interface CanvasTTYApi {
     onData(listener: (event: TerminalDataEvent) => void, id?: string): () => void;
     onSession(listener: (event: SessionEvent) => void): () => void;
     onRemoved(listener: (event: SessionRemovedEvent) => void): () => void;
+    /** Neutralize (remove the reported keys, disable the hooks) or keep what a git risk report found. */
+    resolveGitRisk(reportId: string, action: "neutralize" | "keep"): Promise<void>;
+    /** A git risk report about a card that was closed (a live card carries its own on SessionMetadata.gitRisk). */
+    onGitRisk(listener: (report: GitRiskReport) => void): () => void;
   };
   updater: {
     state(): Promise<UpdaterState>;
@@ -1762,6 +1789,8 @@ export const IPC = {
   terminalDataBatch: "terminal:data-batch",
   terminalSession: "terminal:session",
   terminalRemoved: "terminal:removed",
+  terminalGitRisk: "terminal:git-risk",
+  terminalResolveGitRisk: "terminal:resolve-git-risk",
   windowMinimize: "window:minimize",
   windowToggleMaximize: "window:toggle-maximize",
   windowClose: "window:close",

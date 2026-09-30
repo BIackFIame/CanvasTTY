@@ -57,6 +57,8 @@ export interface PersistedTerminalSession {
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
+  /** An isolated session ran since then and its repositories were not audited yet, or a report is still open. */
+  gitAuditSince?: number;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
@@ -216,7 +218,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -248,6 +250,7 @@ export function persistedTerminalSession(
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
     ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
   };
@@ -327,6 +330,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0
+        ? { gitAuditSince: session.gitAuditSince } : {}),
       // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
       ...(session.provider !== "terminal" && session.model !== undefined && launchModelProblem(session.provider as ProviderId, session.model) === null
         ? { model: session.model } : {}),

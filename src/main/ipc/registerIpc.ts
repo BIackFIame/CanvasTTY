@@ -827,6 +827,12 @@ export function registerIpc({
     if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
     return terminals.setRestore(id, restore);
   });
+  ipcMain.handle(IPC.terminalResolveGitRisk, (event, reportId: unknown, action: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof reportId !== "string" || reportId.length > 64) throw new Error("Git warning id is invalid.");
+    if (action !== "neutralize" && action !== "keep") throw new Error("Git warning action is invalid.");
+    return terminals.resolveGitRisk(reportId, action);
+  });
   ipcMain.handle(IPC.terminalDispose, (event, id: string, options?: { keepEnvironmentData?: unknown }) => {
     assertMainRenderer(event, getMainWindow);
     // Environment data is kept unless the person explicitly chose Remove.

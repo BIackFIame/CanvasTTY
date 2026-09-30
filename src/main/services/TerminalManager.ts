@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
   CreateSessionRequest,
+  GitRiskReport,
   Point,
   ProviderId,
   SessionBounds,
@@ -64,6 +65,7 @@ import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts"
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
 import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
+import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
@@ -199,8 +201,8 @@ export interface ProviderLifecycleSignal {
 export type FailureOrigin = "restore" | "user";
 
 type Emit = (
-  channel: typeof IPC.terminalData | typeof IPC.terminalSession | typeof IPC.terminalRemoved,
-  payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent
+  channel: typeof IPC.terminalData | typeof IPC.terminalSession | typeof IPC.terminalRemoved | typeof IPC.terminalGitRisk,
+  payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport
 ) => void;
 
 export class TerminalManager {
@@ -252,6 +254,10 @@ export class TerminalManager {
   private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null = null;
   // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
   private readonly isolationCleanups = new Map<string, () => void>();
+  /** Open git risk reports by id: the card it belongs to (none once closed) and what neutralize removes. */
+  private readonly gitRisks = new Map<string, { sessionId: string | null; repositories: GitRiskRepository[] }>();
+  /** When isolated launches started whose card did not exist yet (see wrapIsolated). */
+  private readonly isolationStarts = new Map<string, number>();
   // Plugin owners of cards being created (before the card exists), so their first launch counts as delegated.
   private readonly startingOwners = new Map<string, string>();
   // What a card's first launch found in its CLI's own configuration, before the card exists.
@@ -673,6 +679,7 @@ export class TerminalManager {
       launchWaiters: new Set()
     };
     this.sessions.set(id, session);
+    this.adoptIsolationStart(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
     if (contributed) this.launchContributed(id, session, resume, null, control.answerCaptureGrantExpiresAt);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
@@ -1077,7 +1084,16 @@ export class TerminalManager {
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.isolationStarts.delete(id);
     this.wakeLaunchWaiters(session);
+    // Closed: an open report goes to the app; a pending audit runs and reports there.
+    if (session.metadata.gitRisk) {
+      const open = this.gitRisks.get(session.metadata.gitRisk.id);
+      if (open) open.sessionId = null;
+      this.emit(IPC.terminalGitRisk, { ...structuredClone(session.metadata.gitRisk), title: session.metadata.title });
+    } else if (session.extras.gitAuditSince !== undefined && !this.quitting) {
+      void this.auditGit(id, session);
+    }
     this.hiddenSinceOffset.delete(id);
     this.launchContexts.delete(id);
     this.redaction.clear(`session:${id}`);
@@ -1151,7 +1167,8 @@ export class TerminalManager {
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
-      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {})
+      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {}),
+      ...(descriptor.gitAuditSince !== undefined ? { gitAuditSince: descriptor.gitAuditSince } : {})
     };
 
     let process: IPty | null = null;
@@ -1280,6 +1297,7 @@ export class TerminalManager {
       launchWaiters: new Set()
     };
     this.sessions.set(descriptor.id, session);
+    this.adoptIsolationStart(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
     if (contributed) this.launchContributed(descriptor.id, session, resume, "restore", undefined, true);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
@@ -1289,6 +1307,76 @@ export class TerminalManager {
     // something that happened under the user — announcing it every launch
     // would notify about the same silent state again and again.
     this.emitSession(metadata, metadata.status === "failed" ? "restore" : null);
+    if (extras.gitAuditSince !== undefined) void this.auditGit(descriptor.id, session);
+  }
+
+  /**
+   * Audits the repositories under a session's folder for what its isolated agent left that runs outside the layer
+   * (gitAudit.ts). Findings go on the card, or to the app when the card is gone; nothing is changed without the
+   * person (resolveGitRisk). A clean audit ends the pending one.
+   */
+  private async auditGit(id: string, session: ManagedSession): Promise<void> {
+    const since = session.extras.gitAuditSince;
+    if (since === undefined) return;
+    let repositories: GitRiskRepository[];
+    try {
+      repositories = await auditRepositories(session.metadata.cwd, since);
+    } catch (error) {
+      console.warn("CanvasTTY could not check the repositories an isolated agent worked in.", error);
+      return;
+    }
+    const live = this.sessions.get(id) === session;
+    const running = live && session.metadata.exitCode === null && this.isolationCleanups.has(id);
+    if (repositories.length === 0) {
+      // Still running isolated (a relaunch): its own audit follows when it ends.
+      if (!running && session.metadata.gitRisk === undefined) delete session.extras.gitAuditSince;
+      if (live) this.schedulePersistence();
+      return;
+    }
+    const previous = session.metadata.gitRisk;
+    if (previous) this.gitRisks.delete(previous.id);
+    const report: GitRiskReport = {
+      id: randomUUID(),
+      cwd: session.metadata.cwd,
+      repositories: repositories.map((repository) => ({
+        path: dirname(repository.gitDir),
+        items: repository.items.map((item) => item.kind === "config"
+          ? { ...item, value: this.redactSecrets(item.value).slice(0, 160) }
+          : item)
+      }))
+    };
+    this.gitRisks.set(report.id, { sessionId: live ? id : null, repositories });
+    if (live) {
+      session.metadata.gitRisk = report;
+      this.emitSession(session.metadata);
+      this.schedulePersistence();
+    } else {
+      this.emit(IPC.terminalGitRisk, { ...report, title: session.metadata.title });
+    }
+  }
+
+  private adoptIsolationStart(id: string, session: ManagedSession): void {
+    const started = this.isolationStarts.get(id);
+    if (started === undefined) return;
+    this.isolationStarts.delete(id);
+    session.extras.gitAuditSince ??= started;
+    this.schedulePersistence();
+  }
+
+  /** The person's answer to a git risk report: neutralize removes what was found; keep leaves it. Both close it. */
+  async resolveGitRisk(reportId: string, action: "neutralize" | "keep"): Promise<void> {
+    const open = this.gitRisks.get(reportId);
+    if (!open) throw new Error("This git warning is no longer open.");
+    if (action === "neutralize") await neutralizeRepositories(open.repositories);
+    this.gitRisks.delete(reportId);
+    const session = open.sessionId ? this.sessions.get(open.sessionId) : undefined;
+    if (!session || session.metadata.gitRisk?.id !== reportId) return;
+    delete session.metadata.gitRisk;
+    // A session still running isolated is audited from now on when it ends.
+    if (this.isolationCleanups.has(session.metadata.id) && session.metadata.exitCode === null) session.extras.gitAuditSince = Date.now();
+    else delete session.extras.gitAuditSince;
+    this.emitSession(session.metadata);
+    this.schedulePersistence();
   }
 
   private persistSessions(): Promise<void> {
@@ -1479,6 +1567,17 @@ export class TerminalManager {
     });
     this.releaseIsolation(id);
     this.isolationCleanups.set(id, wrapped.cleanup);
+    // Its repositories are audited once it ends (and on close or restore): from the earliest session not audited yet.
+    // A first launch wraps before its card exists: adoptIsolationStart records it then.
+    const session = this.sessions.get(id);
+    if (session) {
+      if (session.extras.gitAuditSince === undefined) {
+        session.extras.gitAuditSince = Date.now();
+        this.schedulePersistence();
+      }
+    } else if (!this.isolationStarts.has(id)) {
+      this.isolationStarts.set(id, Date.now());
+    }
     return { command: wrapped.command, args: wrapped.args, env: wrapped.env };
   }
 
@@ -1947,6 +2046,7 @@ export class TerminalManager {
   private recordExit(id: string, current: ManagedSession, exitCode: number): void {
     this.flushOutput(id, current);
     this.releaseIsolation(id);
+    if (current.extras.gitAuditSince !== undefined) void this.auditGit(id, current);
     current.metadata.exitCode = exitCode;
     current.metadata.status = exitCode === 0 ? "done" : "failed";
     current.metadata.failureDetails = exitCode === 0
@@ -2003,12 +2103,12 @@ export class TerminalManager {
 }
 
 /** A manager event the main process forwards to its in-process observers. */
-export function reachesObservers(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
+export function reachesObservers(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport): boolean {
   return !("audience" in payload) || payload.audience !== "renderer";
 }
 
 /** A manager event the main process forwards to the renderer. */
-export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
+export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport): boolean {
   return !("audience" in payload) || payload.audience !== "observers";
 }
 

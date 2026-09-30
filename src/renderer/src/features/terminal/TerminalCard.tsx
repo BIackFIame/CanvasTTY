@@ -26,6 +26,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { matchesShortcut } from "../../lib/shortcuts";
+import { GitRiskNotice } from "./GitRiskNotice";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
@@ -1065,6 +1066,9 @@ function TerminalCardView({
             <button type="button" onClick={() => setConfirmClose(false)}>{t(locale, "cancel")}</button>
           </div>
         </div>
+      )}
+      {session.gitRisk && !summaryMode && (
+        <GitRiskNotice report={session.gitRisk} locale={locale} className="terminal-card__git-risk" />
       )}
       {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
         <div className="terminal-card__note" role="status">

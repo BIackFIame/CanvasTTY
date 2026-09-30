@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  GitRiskReport,
   AgentProviderId,
   AgentChatHistoryItem,
   AgentCliAvailability,
@@ -53,6 +54,7 @@ import { resolveAppearanceSettings } from "./features/settings/appearanceSetting
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
 import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
+import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
 import { isPixelSkinPackId } from "./features/skins/SkinAssets";
@@ -268,6 +270,8 @@ export function App(): React.JSX.Element {
   const [fullscreenSessionId, setFullscreenSessionId] = useState<string | null>(null);
   const [pendingTerminalUrl, setPendingTerminalUrl] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  /** Git risk reports about cards that were closed (GitRiskNotice): shown until the person answers them. */
+  const [closedGitRisks, setClosedGitRisks] = useState<GitRiskReport[]>([]);
   const [ready, setReady] = useState(false);
   const [windowState, setWindowState] = useState<WindowState>({
     isMacOS: window.canvasTTY.window.isMacOS,
@@ -298,6 +302,9 @@ export function App(): React.JSX.Element {
     const browserApi = window.canvasTTY.browser;
     const unsubscribeSession = window.canvasTTY.terminal.onSession(({ session }) => {
       if (active) setSessions((current) => upsertSession(current, session));
+    });
+    const unsubscribeGitRisk = window.canvasTTY.terminal.onGitRisk((report) => {
+      if (active) setClosedGitRisks((current) => [...current.filter((entry) => entry.id !== report.id), report].slice(-8));
     });
     const unsubscribeRemoved = window.canvasTTY.terminal.onRemoved(({ id }) => {
       if (!active) return;
@@ -340,6 +347,7 @@ export function App(): React.JSX.Element {
       active = false;
       unsubscribeSession();
       unsubscribeRemoved();
+      unsubscribeGitRisk();
       unsubscribeSettings();
     };
   }, [showToast]);
@@ -1365,6 +1373,14 @@ export function App(): React.JSX.Element {
         onEditHome={startHomeEditor}
         onOpenBrowser={openBrowser}
       />
+      {closedGitRisks.length > 0 && (
+        <div className="git-risk-panel">
+          {closedGitRisks.map((report) => (
+            <GitRiskNotice key={report.id} report={report} locale={settings.locale} closedTitle={report.title ?? report.cwd}
+              onResolved={() => setClosedGitRisks((current) => current.filter((entry) => entry.id !== report.id))} />
+          ))}
+        </div>
+      )}
       <Toast message={toast} />
     </div>
   );
