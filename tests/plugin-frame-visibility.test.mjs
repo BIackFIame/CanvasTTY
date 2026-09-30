@@ -218,7 +218,7 @@ test("the card suspends its frame while HOME editing, zoomed to a summary, off-s
   const props = (overrides = {}) => ({
     instance: { id: "p1", pluginId: plugin.manifest.id, contributionId: "probe", title: "Probe", position: { x: 100, y: 100 }, size: { width: 680, height: 440 } },
     plugin, contribution, locale: "en", palette: "default", camera: cameraStore, stackIndex: 1, snapEnabled: false,
-    sessions: [], limits: null, snapTargets: [], captureCanvasWheelOverWidgets: false,
+    sessions: [], limits: null, getSnapTargets: () => [], captureCanvasWheelOverWidgets: false,
     onActivate() {}, onBoundsChange() {}, onDispose() {}, onOpenLauncher() {}, onError() {},
     onWidgetFocus() {}, onWidgetHoverChange() {}, onCanvasWheel() {},
     ...overrides

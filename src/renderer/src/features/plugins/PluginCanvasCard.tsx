@@ -33,7 +33,8 @@ interface PluginCanvasCardProps {
   snapEnabled: boolean;
   sessions: readonly SessionSnapshot[];
   limits: LimitsSnapshot | null;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onActivate(instance: PluginCanvasInstance): void;
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onDispose(id: string): void;
@@ -53,6 +54,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -72,7 +75,7 @@ export function PluginCanvasCard({
   snapEnabled,
   sessions,
   limits,
-  snapTargets,
+  getSnapTargets,
   onActivate,
   onBoundsChange,
   onDispose,
@@ -124,7 +127,8 @@ export function PluginCanvasCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -138,7 +142,7 @@ export function PluginCanvasCard({
       y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -167,7 +171,8 @@ export function PluginCanvasCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -195,7 +200,7 @@ export function PluginCanvasCard({
       }
     };
     const constrained = constrainPluginResize(raw, state.direction, contribution.minSize);
-    applyBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {

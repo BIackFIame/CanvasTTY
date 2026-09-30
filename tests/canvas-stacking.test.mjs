@@ -10,7 +10,7 @@ import {
   canvasScreenRect,
   keepLiveIds,
   pruneToLive,
-  snapTargetsOf,
+  snapTargetGetters,
   reconcileCanvasLayerOrder
 } from "../src/renderer/src/features/workspace/canvasStacking.ts";
 import { canvasWorldRect } from "../src/renderer/src/features/workspace/canvasSelectionGesture.ts";
@@ -108,15 +108,40 @@ test("a drag or resize cancelled by lost pointer capture snaps the card back to 
   assert.match(cancelDrag, /applyBounds\(\{ position: region\.position, size: region\.size \}\)/u);
 });
 
-test("each window's snap targets are every other window plus the fixed ones, built once per layout, not per render", async () => {
+test("snap targets are built only when a card's drag starts, from the layout of that moment", async () => {
   const home = bounds(0, 0, 1000, 1000);
   const a = bounds(10, 10);
   const b = bounds(300, 10);
   const c = bounds(600, 10);
-  const targets = snapTargetsOf([home], [a, b, c]);
-  assert.deepEqual(targets(b), [home, a, c]);
-  assert.equal(targets(b), targets(b), "the same list while the layout is the same");
+  let reads = 0;
+  let layout = { fixed: [home], windows: [a, b, c], byLayer: new Map([["a", a], ["b", b], ["c", c]]) };
+  const getters = snapTargetGetters(() => { reads += 1; return layout; });
+
+  // Rendering hands every card its getter: the same function each render, and no list is built.
+  const forB = getters.forLayer("b");
+  for (let render = 0; render < 5; render += 1) {
+    assert.equal(getters.forLayer("a"), getters.forLayer("a"));
+    assert.equal(getters.forLayer("b"), forB);
+    getters.forLayer("c");
+  }
+  assert.equal(reads, 0, "no snap-target list is built while cards only render");
+
+  // A drag of b starts: only b's list, every other window plus the fixed targets.
+  assert.deepEqual(forB(), [home, a, c]);
+  assert.equal(reads, 1);
+
+  // A neighbour moved since: the next drag sees the new layout through the same getter.
+  const movedA = bounds(20, 500);
+  layout = { fixed: [home], windows: [movedA, b, c], byLayer: new Map([["a", movedA], ["b", b], ["c", c]]) };
+  assert.deepEqual(forB(), [home, movedA, c]);
+
+  getters.prune(new Set(["a", "c"]));
+  assert.notEqual(getters.forLayer("b"), forB, "a removed card's getter is dropped");
+
   const source = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /allWindowBounds\.filter\(/u, "no per-card filter in render");
-  assert.match(source, /const allWindowBounds = useMemo\(/u);
+  for (const card of ["terminal/TerminalCard", "plugins/PluginCanvasCard", "browser/BrowserCard", "notes/StickyNoteCard"]) {
+    const text = await readFile(new URL(`../src/renderer/src/features/${card}.tsx`, import.meta.url), "utf8");
+    assert.equal((text.match(/snapTargets: snapEnabled \? getSnapTargets\(\) : \[\]/gu) ?? []).length, 2, `${card} takes its targets at drag and resize start`);
+  }
 });

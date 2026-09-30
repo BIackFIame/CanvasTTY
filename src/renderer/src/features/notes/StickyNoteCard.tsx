@@ -19,7 +19,8 @@ interface StickyNoteCardProps {
   stackIndex: number;
   editRequest: number;
   snapEnabled: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onTextChange(id: string, text: string): void;
   onClose(id: string): void;
@@ -31,6 +32,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -47,7 +50,7 @@ export function StickyNoteCard({
   stackIndex,
   editRequest,
   snapEnabled,
-  snapTargets,
+  getSnapTargets,
   onBoundsChange,
   onTextChange,
   onClose,
@@ -127,7 +130,8 @@ export function StickyNoteCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -141,7 +145,7 @@ export function StickyNoteCard({
       y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -173,7 +177,8 @@ export function StickyNoteCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -201,7 +206,7 @@ export function StickyNoteCard({
       }
     }, state.direction);
     applyBounds(snapEnabled
-      ? snapResize(constrained, state.direction, snapTargets, {
+      ? snapResize(constrained, state.direction, state.snapTargets, {
           min: MIN_STICKY_NOTE_SIZE,
           max: MAX_STICKY_NOTE_SIZE
         })

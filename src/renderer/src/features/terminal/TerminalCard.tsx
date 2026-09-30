@@ -93,7 +93,8 @@ interface TerminalCardProps {
   hidden?: boolean;
   renaming: boolean;
   fullscreen: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onToggleFullscreen(): void;
   onActivate(session: SessionSnapshot): void;
   onSelect(id: string): void;
@@ -112,6 +113,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -164,7 +167,7 @@ function TerminalCardView({
   hidden = false,
   renaming,
   fullscreen,
-  snapTargets,
+  getSnapTargets,
   onToggleFullscreen,
   onActivate,
   onSelect,
@@ -661,7 +664,8 @@ function TerminalCardView({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -675,7 +679,7 @@ function TerminalCardView({
       y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     const nextPosition = snapEnabled
-      ? snapMove(rawPosition, state.startBounds.size, snapTargets)
+      ? snapMove(rawPosition, state.startBounds.size, state.snapTargets)
       : rawPosition;
     applyLiveBounds({ position: nextPosition, size: state.startBounds.size });
   };
@@ -710,7 +714,8 @@ function TerminalCardView({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -738,7 +743,7 @@ function TerminalCardView({
       }
     };
     const constrained = constrainResize(raw, state.direction);
-    applyLiveBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyLiveBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {

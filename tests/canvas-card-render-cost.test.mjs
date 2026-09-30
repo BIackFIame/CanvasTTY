@@ -1,34 +1,32 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { canvasCardPropsEqual, sameBoundsList } from "../src/renderer/src/features/terminal/terminalCardProps.ts";
+import { canvasCardPropsEqual } from "../src/renderer/src/features/terminal/terminalCardProps.ts";
 
 // A pan or zoom gesture renders the workspace on every pointer move. TerminalCard is memoized so those
-// renders do not reach the cards: equal props (snap targets by value) skip the card, any real change does not.
+// renders do not reach the cards: equal props skip the card, any real change does not. Snap targets reach the
+// card as a getter that stays the same function, so a neighbour's move does not render it either.
 
 const bounds = (x, y, width = 700, height = 430) => ({ position: { x, y }, size: { width, height } });
 const session = { id: "s1", position: { x: 0, y: 0 }, size: { width: 700, height: 430 } };
-const callbacks = { onActivate() {}, onSelect() {}, onBoundsChange() {} };
+const callbacks = { onActivate() {}, onSelect() {}, onBoundsChange() {}, getSnapTargets() { return []; } };
 const props = (overrides = {}) => ({
   session, zoom: 1, focused: false, selected: false, stackIndex: 3,
-  snapTargets: [bounds(0, 0), bounds(800, 0)], ...callbacks, ...overrides
+  ...callbacks, ...overrides
 });
 
-test("a card's props compare equal across a pan: same data, rebuilt snap target list, same callbacks", () => {
+test("a card's props compare equal across a pan: same data, same callbacks and snap-target getter", () => {
   assert.equal(canvasCardPropsEqual(props(), props()), true);
-  assert.equal(canvasCardPropsEqual(props(), props({ snapTargets: [bounds(0, 0), bounds(800, 0)] })), true);
 });
 
 test("any real change renders the card", () => {
   for (const change of [
     { zoom: 0.49 }, { focused: true }, { selected: true }, { stackIndex: 4 },
     { session: { ...session, title: "renamed" } },
-    { snapTargets: [bounds(0, 0), bounds(801, 0)] }, { snapTargets: [bounds(0, 0)] },
     { onSelect() {} }, { restoreEnabled: true }
   ]) {
     assert.equal(canvasCardPropsEqual(props(), props(change)), false, JSON.stringify(Object.keys(change)));
   }
-  assert.equal(sameBoundsList([bounds(1, 2, 3, 4)], [bounds(1, 2, 3, 5)]), false);
 });
 
 test("TerminalCard is memoized and the workspace hands it callbacks that stay the same functions", async () => {

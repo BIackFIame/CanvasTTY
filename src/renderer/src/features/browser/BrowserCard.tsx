@@ -34,7 +34,8 @@ interface BrowserCardProps {
   focused: boolean;
   selected: boolean;
   showAgentPresence: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onBoundsChange(bounds: BrowserCanvasState): void;
   onActivate(): void;
   onSelect(): void;
@@ -50,6 +51,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -73,7 +76,7 @@ export function BrowserCard({
   focused,
   selected,
   showAgentPresence,
-  snapTargets,
+  getSnapTargets,
   onBoundsChange,
   onActivate,
   onSelect,
@@ -240,7 +243,8 @@ export function BrowserCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -254,7 +258,7 @@ export function BrowserCard({
       y: state.startBounds.position.y + (event.clientY - state.startClient.y) / cameraStore.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -283,7 +287,8 @@ export function BrowserCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -311,7 +316,7 @@ export function BrowserCard({
       }
     };
     const constrained = constrainBrowserResize(raw, state.direction);
-    applyBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {

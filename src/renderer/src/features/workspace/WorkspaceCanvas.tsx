@@ -72,8 +72,9 @@ import {
   keepLiveIds,
   pruneToLive,
   reconcileCanvasLayerOrder,
-  snapTargetsOf
+  snapTargetGetters
 } from "./canvasStacking";
+import type { SnapLayout } from "./canvasStacking";
 import {
   browserCanvasWidgetId,
   canvasWidgetInDirection,
@@ -113,7 +114,7 @@ const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefi
 };
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
-const NO_SNAP_TARGETS: readonly SessionBounds[] = [];
+const NO_SNAP_TARGETS = (): readonly SessionBounds[] => [];
 /** The fullscreen layer is outside the scene: its card always draws at scale 1. */
 const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
 
@@ -403,10 +404,19 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     position: { x: 0, y: 0 },
     size: homeGridPixelSize(settings.homeGridSize)
   }), [settings.homeGridSize]);
-  const snapTargetsFor = useMemo(() => snapTargetsOf([
-    homeBounds,
-    ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size }))
-  ], allWindowBounds), [allWindowBounds, homeBounds, renderedCanvasRegions]);
+  // Snap targets are built only for the card whose drag or resize starts, from the layout of that moment.
+  const snapLayout = useRef<SnapLayout>({ fixed: [], windows: [], byLayer: new Map() });
+  snapLayout.current = {
+    get fixed() {
+      return [homeBounds, ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size }))];
+    },
+    windows: allWindowBounds,
+    byLayer: boundsByLayer
+  };
+  const [snapTargets] = useState(() => snapTargetGetters(() => snapLayout.current));
+  useEffect(() => {
+    snapTargets.prune(new Set(boundsByLayer.keys()));
+  }, [boundsByLayer, snapTargets]);
 
   const selectMarquee = useCallback((bounds: SessionBounds | null): void => {
     if (bounds === null) {
@@ -1006,7 +1016,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               fullscreen={fullscreenSessionId === session.id}
               hidden={homeEditing}
               onToggleFullscreen={toggleFullscreenFor(session.id)}
-              snapTargets={snapTargetsFor(session)}
+              getSnapTargets={snapTargets.forLayer(terminalLayerId(session.id))}
               {...terminalCardCallbacks.canvas}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
             />
@@ -1028,7 +1038,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 snapEnabled={settings.snapToGrid}
                 sessions={sessions}
                 limits={limits}
-                snapTargets={snapTargetsFor(instance)}
+                getSnapTargets={snapTargets.forLayer(pluginLayerId(instance.id))}
                 onActivate={() => {
                   raiseLayer(pluginLayerId(instance.id));
                   focusController.focus(pluginCanvasWidgetId(instance.id), "explicit");
@@ -1070,7 +1080,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === browserCanvasWidgetId}
               selected={browserSelected}
               showAgentPresence={settings.browserShowAgentPresence}
-              snapTargets={snapTargetsFor(renderedBrowserCanvas)}
+              getSnapTargets={snapTargets.forLayer(browserLayerId)}
               onBoundsChange={onBrowserBoundsChange}
               onActivate={() => {
                 raiseLayer(browserLayerId);
@@ -1100,7 +1110,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               stackIndex={canvasLayerZIndex(layerOrder, noteLayerId(note.id))}
               editRequest={noteEditRequest?.id === note.id ? noteEditRequest.version : 0}
               snapEnabled={settings.snapToGrid}
-              snapTargets={snapTargetsFor(note)}
+              getSnapTargets={snapTargets.forLayer(noteLayerId(note.id))}
               onBoundsChange={onStickyNoteBoundsChange}
               onTextChange={onStickyNoteTextChange}
               onClose={onDeleteStickyNote}
@@ -1138,7 +1148,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               renaming={renamingSessionId === session.id}
               fullscreen={true}
               onToggleFullscreen={toggleFullscreenFor(session.id)}
-              snapTargets={NO_SNAP_TARGETS}
+              getSnapTargets={NO_SNAP_TARGETS}
               {...terminalCardCallbacks.fullscreen}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
             />
