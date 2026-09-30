@@ -310,13 +310,17 @@ async function initializeServices(): Promise<void> {
   recoverKimiConfigurationOnStartup(kimiHomeDirectory);
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
-  await settings.load();
   const terminalBorderSkins = new SkinRegistry(userDataPath);
-  await terminalBorderSkins.initialize();
   const pixelSkinPacks = new PixelSkinPackRegistry(userDataPath);
-  await pixelSkinPacks.initialize();
   pluginManager = new PluginManager(userDataPath);
-  await pluginManager.load();
+  // None of these four reads the others' state; awaiting them one after another only adds their
+  // latencies together before the app surface can load. They are independent, so they overlap.
+  await Promise.all([
+    settings.load(),
+    terminalBorderSkins.initialize(),
+    pixelSkinPacks.initialize(),
+    pluginManager.load()
+  ]);
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
