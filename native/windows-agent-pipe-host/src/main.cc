@@ -240,6 +240,8 @@ struct Connection {
   HANDLE pipe;
   HANDLE close_event;
   std::atomic<bool> closing{false};
+  // The parent asked to close: what it queued before is written first (a last error message), then the pipe closes.
+  std::atomic<bool> close_after_drain{false};
   std::atomic<int> active_workers{2};
   std::mutex write_mutex;
   std::mutex queue_mutex;
@@ -306,6 +308,23 @@ bool WriteConnection(const std::shared_ptr<Connection>& connection, const std::u
   return true;
 }
 
+// How long a closing connection may take to write what was queued before the close (a client that stops reading
+// cannot keep it open).
+constexpr DWORD kCloseDrainMilliseconds = 2000;
+
+void CloseAfterDrain(const std::shared_ptr<Connection>& connection) {
+  if (connection == nullptr || connection->closing.load()) return;
+  {
+    std::scoped_lock lock(connection->queue_mutex);
+    connection->close_after_drain.store(true);
+  }
+  connection->queue_changed.notify_all();
+  std::thread([connection]() {
+    Sleep(kCloseDrainMilliseconds);
+    MarkClosing(connection);
+  }).detach();
+}
+
 bool EnqueueWrite(const std::shared_ptr<Connection>& connection, const std::uint8_t* payload,
                   std::uint32_t length) {
   if (connection == nullptr || connection->closing.load()) return false;
@@ -332,9 +351,15 @@ void WriteClient(const std::shared_ptr<Connection>& connection) {
       connection->queue_changed.wait(lock, [&]() {
         return connection->closing.load() ||
                WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0 ||
-               !connection->write_queue.empty();
+               !connection->write_queue.empty() || connection->close_after_drain.load();
       });
       if (connection->closing.load() || WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0) {
+        break;
+      }
+      if (connection->write_queue.empty()) {
+        // close_after_drain with nothing left to write.
+        lock.unlock();
+        MarkClosing(connection);
         break;
       }
       payload = std::move(connection->write_queue.front());
@@ -487,7 +512,8 @@ class InputFrameDecoder {
     const auto connection = FindConnection(connection_id);
     if (type == FrameType::kDestroy) {
       if (payload_length != 0) return ProtocolFailure();
-      MarkClosing(connection);
+      // A write queued just before (an error message for the client) is delivered, not dropped.
+      CloseAfterDrain(connection);
       return true;
     }
     if (type == FrameType::kWrite) {

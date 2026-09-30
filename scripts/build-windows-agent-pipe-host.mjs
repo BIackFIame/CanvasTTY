@@ -92,9 +92,19 @@ async function relaySelfTest(hostPath) {
       throw new Error("The relay self-test host-to-client payload was corrupted.");
     }
 
+    // A last message and the close in one write, as the gateway sends an error and closes: the client gets the
+    // message before the pipe closes (the host used to drop a write still queued when the close arrived).
+    const received = [];
+    socket.on("data", (chunk) => received.push(chunk));
     const closed = waitForServerClose(socket);
-    relay.stdin.write(encodeFrame(17, connected.connectionId, Buffer.alloc(0)));
+    relay.stdin.write(Buffer.concat([
+      encodeFrame(16, connected.connectionId, Buffer.from("last-words")),
+      encodeFrame(17, connected.connectionId, Buffer.alloc(0))
+    ]));
     await bounded(Promise.all([closed, frames.next(4)]));
+    if (Buffer.concat(received).toString("utf8") !== "last-words") {
+      throw new Error("The relay self-test lost the message written just before the close.");
+    }
     const exited = once(relay, "exit");
     relay.stdin.write(encodeFrame(18, 0, Buffer.alloc(0)));
     relay.stdin.end();
