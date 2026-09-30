@@ -61,6 +61,10 @@ npm run dev
 
 The opt-in **Settings → Controls → Even G2** integration adapts CanvasTTY's terminal and AI-agent workflows to Even G2 glasses. Pair with six digits on the same local network, approve access on the computer, then read responses on the glasses HUD, dictate through local Nemotron speech recognition, and create, rename or close shared sessions. The companion includes a More agents picker and supports the desktop's provider list. Its source lives in `integrations/even-g2` and builds with the desktop. See [setup, distribution status and acceptance limits](docs/even-g2.md); a compatible public installer and Even Hub approval are still pending.
 
+## Web companion
+
+The opt-in [Web companion](docs/mobile-companion.md) shares selected sessions with Android, iOS, and desktop browsers through **Tailscale Serve HTTPS**, not Funnel. CanvasTTY binds its companion endpoint to `127.0.0.1:3481` in this mode; pair with a short-lived code and approve each browser on the desktop. Open **Settings → Controls → Web companion** for setup, grants, and revocation. End-to-end Tailscale Serve deployment on Windows, Linux, and macOS remains unverified.
+
 ## Runtime plugins
 
 CanvasTTY includes a permissioned runtime for ready-to-run static GitHub packages: HOME widgets, canvas apps, and separate sandboxed windows. The host SDK now supports persistent user-selected music-library grants, seekable local audio streams, and bounded playlist import/export for full player plugins. See the [authoring and security guide](docs/plugins.md), [manifest schema](docs/canvastty-plugin.schema.json), and [TypeScript SDK declarations](docs/plugin-api.d.ts).

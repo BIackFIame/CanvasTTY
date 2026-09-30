@@ -4,17 +4,20 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readFile, writeFile, mkdir, rename, stat, rm } from "node:fs/promises";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
 import { join, resolve, extname } from "node:path";
 import { isPathInside } from "../../../agent-runtime/path-inside.mjs";
 import { hostname } from "node:os";
 import type { TerminalManager } from "../TerminalManager.ts";
 import type { LimitsSnapshot, ProviderId } from "../../../shared/contracts.ts";
-import type {
-  CompanionGrant,
-  CompanionRequest,
+import { CANVAS_LAUNCHER_ITEMS } from "../../../shared/providerCatalog.ts";
+import {
+  CompanionError,
+  normalizeSessionTitle,
+  type CompanionGrant,
+  type CompanionRequest,
 } from "../../../shared/companion.ts";
 import type {
   EvenG2Config,
@@ -23,7 +26,7 @@ import type {
   EvenG2Telemetry,
   EvenG2Address,
 } from "../../../shared/evenG2.ts";
-import { normalizeSessionTitle } from "../../../shared/companion.ts";
+import type { AgentCliAvailability } from "../../../shared/contracts.ts";
 import { SessionAccess } from "./SessionAccess.ts";
 import { RequestLedger } from "./RequestLedger.ts";
 import { CompanionSessions } from "./CompanionSessions.ts";
@@ -34,6 +37,7 @@ import { LocalLink } from "./LocalLink.ts";
 import {
   sealLocal,
   LOCAL_LINK_LIMIT,
+  localOrigin,
   type LocalPacket,
   type LocalRequest,
 } from "../../../shared/localLink.ts";
@@ -95,6 +99,17 @@ const safeSession = (s: ReturnType<Terminals["listMetadata"]>[number]) => ({
   status: s.status,
   provider: s.provider,
 });
+const MOBILE_ACTIONS: Record<string, true> = {
+  "sessions.list": true, "sessions.overview": true, "session.read": true,
+  "session.output": true, "session.input": true, "session.key": true,
+  "session.interrupt": true, "session.close": true, "session.rename": true,
+  "session.create": true,
+};
+const TAILSCALE_ORIGIN =
+  /^https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net$/;
+const isUsbOrigin = (origin: string, port: number): boolean =>
+  port > 0 && origin === `http://127.0.0.1:${port}`;
+
 
 export class EvenG2Controller {
   private config = defaultConfig();
@@ -111,6 +126,8 @@ export class EvenG2Controller {
   private readonly discovery: LocalDiscovery | null;
   private readonly defaultWorkspace: string;
   private readonly speechSetup: SpeechSetup | null;
+  private readonly mobileRoot: string | null;
+  private readonly mobileForwardSecret = randomBytes(32);
   private extraServers = new Map<string, Server>();
   private readonly access = new SessionAccess();
   private readonly ledger = new RequestLedger();
@@ -145,6 +162,8 @@ export class EvenG2Controller {
     speechWorker: string;
     speech?: SpeechPort;
     limits: () => Promise<LimitsSnapshot>;
+    mobileRoot?: string;
+    providerAvailability?: () => AgentCliAvailability;
     openBrowser: () => Promise<{ title: string; url: string }>;
     port?: number;
     addresses?: () => EvenG2Address[];
@@ -167,6 +186,7 @@ export class EvenG2Controller {
         })
       : null;
     this.terminals = options.terminals;
+    this.mobileRoot = options.mobileRoot ?? null;
     this.webRoot = options.webRoot;
     this.port = options.port ?? 3481;
     this.discover = options.addresses ?? lanAddresses;
@@ -176,6 +196,18 @@ export class EvenG2Controller {
     this.actions = new CompanionSessions(
       {
         list: () => this.terminals.listMetadata().map(safeSession),
+        overview: () => this.terminals.listMetadata().map((s) => ({
+          ...safeSession(s), startedAt: s.startedAt, exitCode: s.exitCode, revision: s.revision,
+        })),
+        output: (id) => ({
+          ...this.terminals.readBuffer(id),
+          ...this.terminals.geometry(id),
+        }),
+        providers: () => ({
+          ...Object.fromEntries(CANVAS_LAUNCHER_ITEMS.map((provider) => [provider, false])),
+          ...options.providerAvailability?.(),
+          terminal: true,
+        }) as Record<ProviderId, boolean>,
         read: (id) => this.presentation.read(id),
         input: (id, data) => {
           const written = this.terminals.inputChecked(id, data);
@@ -240,7 +272,8 @@ export class EvenG2Controller {
               allowInput: peer.grant.allowInput === true,
               allowCreate: peer.grant.allowCreate === true,
               allowClose: peer.grant.allowClose === true,
-              allowBrowser: peer.grant.allowBrowser === true,
+              allowBrowser: peer.grant.allowBrowser === true &&
+                !isUsbOrigin(this.config.publicOrigin, this.port),
             });
             this.peers.push({
               id: peer.id,
@@ -316,12 +349,13 @@ export class EvenG2Controller {
       enabled: value.enabled,
       workspace: value.workspace ? resolve(value.workspace) : "",
       interfaceName: value.interfaceName,
-      publicOrigin: httpsOrigin(value.publicOrigin),
+      publicOrigin: isUsbOrigin(value.publicOrigin, this.port)
+        ? value.publicOrigin : httpsOrigin(value.publicOrigin),
       sessionIds: [...new Set(value.sessionIds)],
       allowInput: value.allowInput,
       allowCreate: value.allowCreate,
       allowClose: value.allowClose,
-      allowBrowser: value.allowBrowser,
+      allowBrowser: isUsbOrigin(value.publicOrigin, this.port) ? false : value.allowBrowser,
       speechExecutable: value.speechExecutable,
       speechModel: value.speechModel,
     };
@@ -386,7 +420,8 @@ export class EvenG2Controller {
           }
         : null,
       transport: {
-        kind: this.config.publicOrigin ? "https" : "lan",
+        kind: isUsbOrigin(this.config.publicOrigin, this.port)
+          ? "usb" : this.config.publicOrigin ? "https" : "lan",
         addresses: structuredClone(this.addresses),
         origin: this.boundAddress
           ? this.config.publicOrigin ||
@@ -451,7 +486,7 @@ export class EvenG2Controller {
         )
           throw new Error("choose-sessions");
         if (this.peers.length >= 8) throw new Error("device-limit");
-        if (this.discovery && !this.discovery.host) throw new Error("local-discovery-unavailable");
+        if (!this.config.publicOrigin && this.discovery && !this.discovery.host) throw new Error("local-discovery-unavailable");
         this.localLink.clearBootstraps();
         const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
         const expiresAt = Date.now() + 120000;
@@ -548,10 +583,22 @@ export class EvenG2Controller {
     try {
       for (const address of targets) {
         const server = createServer((req, res) => {
-          void this.handle(req, res, address).catch(() => {
-            if (!res.headersSent)
-              this.json(res, 409, { error: "request-failed" });
-            else res.destroy();
+          void this.handle(req, res, address).catch((error: unknown) => {
+            if (!res.headersSent) {
+              const mobile = req.url?.split("?")[0] === "/g2/api/mobile";
+              const code = error instanceof CompanionError ? error.code
+                : error instanceof SyntaxError ||
+                  (error instanceof Error && ["json-required", "too-large", "invalid-body"].includes(error.message))
+                  ? "invalid-request" : "request-failed";
+              const status = code === "invalid-request" ? 400
+                : code === "not-paired" ? 401
+                : code === "not-shared" || code === "not-permitted" ? 403
+                : code === "stale-request" ? 408
+                : code === "busy" ? 429
+                : code === "unavailable" ? 404
+                : code === "request-failed" ? 500 : 409;
+              this.json(res, mobile ? status : 409, { error: mobile ? code : "request-failed" });
+            } else res.destroy();
           });
         });
         server.requestTimeout = 70000;
@@ -587,7 +634,8 @@ export class EvenG2Controller {
     }
   }
   private localOrigins(): string[] {
-    if (!this.boundAddress || this.config.publicOrigin) return [];
+    if (this.config.publicOrigin) return [this.config.publicOrigin];
+    if (!this.boundAddress) return [];
     if (this.discovery?.host) return [`http://${this.discovery.host}:${this.port}`];
     const origins = [this.boundAddress, ...this.extraServers.keys()].map((a) =>
       addressOrigin(a, this.port),
@@ -671,6 +719,12 @@ export class EvenG2Controller {
       action,
     };
   }
+  private isEncryptedForward(req: IncomingMessage): boolean {
+    const secret = req.headers["x-canvastty-local-forward"];
+    return ["127.0.0.1", this.boundAddress].includes(req.socket.remoteAddress ?? "") &&
+      typeof secret === "string" && /^[a-f0-9]{64}$/.test(secret) &&
+      timingSafeEqual(Buffer.from(secret, "hex"), this.mobileForwardSecret);
+  }
   private async handle(
     req: IncomingMessage,
     res: ServerResponse,
@@ -691,8 +745,10 @@ export class EvenG2Controller {
     const localHost = this.localName.toLowerCase() + ":" + this.port;
     if (
       req.headers.host?.toLowerCase() !== expectedHost &&
+      req.headers.host?.toLowerCase() !== (this.config.publicOrigin
+        ? new URL(this.config.publicOrigin).host
+        : localHost) &&
       (this.config.publicOrigin ||
-        req.headers.host?.toLowerCase() !== localHost &&
         req.headers.host?.toLowerCase() !== `${this.discovery?.host}:${this.port}`)
     )
       return this.json(res, 403, { error: "invalid-host" });
@@ -707,11 +763,11 @@ export class EvenG2Controller {
       res.end();
       return;
     }
-    if (!this.config.publicOrigin && url.pathname === "/g2/discover" && req.method === "GET") {
+    if (url.pathname === "/g2/discover" && req.method === "GET") {
       return this.json(res, 200, { type: "canvastty-local", version: 2,
         pairing: !!this.pairing && this.pairing.expiresAt > Date.now() && !this.pairing.pending });
     }
-    if (!this.config.publicOrigin && req.method === "POST" &&
+    if (req.method === "POST" &&
       ["/g2/pair-start", "/g2/pair-finish"].includes(url.pathname)) {
       const pair = this.pairing;
       if (!pair || pair.expiresAt <= Date.now() || pair.pending)
@@ -734,17 +790,25 @@ export class EvenG2Controller {
         return this.json(res, 200, { proof: session.proof, packet });
       } catch { return this.json(res, 403, { error: "pairing-unavailable" }); }
     }
-    if (
-      req.method === "POST" &&
-      url.pathname === "/g2/link" &&
-      !this.config.publicOrigin
-    ) {
+    if (req.method === "POST" && url.pathname === "/g2/link") {
       const packet = await this.body(req, LOCAL_LINK_LIMIT + 1024);
       const result = await this.localLink.receive(
         packet as unknown as LocalPacket,
         async (request: LocalRequest) => {
           if (!this.config.enabled || !this.server?.listening)
             throw new Error("integration-disabled");
+          const webMode = TAILSCALE_ORIGIN.test(this.config.publicOrigin) ||
+            isUsbOrigin(this.config.publicOrigin, this.port);
+          if (webMode) {
+            if (request.path === "/g2/api/home" && request.method === "GET" && !request.token)
+              return { status: 401, body: { error: "unauthorized" } };
+            if (!(
+              (request.path === "/g2/api/pair" && request.method === "POST" && packet.bootstrapId) ||
+              (request.path === "/g2/api/pair-status" && request.method === "GET" && packet.deviceId) ||
+              (request.path === "/g2/api/mobile" && request.method === "POST" && packet.deviceId)
+            ))
+              return { status: 403, body: { error: "not-permitted" } };
+          }
           const response = await fetch(
             addressOrigin(this.boundAddress, this.port) + request.path,
             {
@@ -752,6 +816,11 @@ export class EvenG2Controller {
               headers: {
                 "Content-Type": "application/json",
                 Authorization: "Bearer " + request.token,
+                ...((request.path === "/g2/api/mobile" ||
+                  (webMode && (request.path === "/g2/api/pair" || request.path === "/g2/api/pair-status"))) ? {
+                  "X-CanvasTTY-Local-Forward": this.mobileForwardSecret.toString("hex"),
+                  "X-CanvasTTY-Local-Device": typeof packet.deviceId === "string" ? packet.deviceId : "",
+                } : {}),
               },
               body:
                 request.method === "POST"
@@ -768,6 +837,34 @@ export class EvenG2Controller {
           this.pairing?.pending?.id === id,
       );
       return this.json(res, 200, result);
+    }
+    if (req.method === "GET" && (url.pathname === "/mobile" || url.pathname.startsWith("/mobile/"))) {
+      if (!this.mobileRoot || !existsSync(this.mobileRoot))
+        return this.json(res, 404, { error: "not-found" });
+      const root = realpathSync(this.mobileRoot);
+      const file = resolve(root, url.pathname.slice("/mobile/".length) || "index.html");
+      if (!isPathInside(root, file, { allowRoot: false }) || !existsSync(file))
+        return this.json(res, 404, { error: "not-found" });
+      const path = realpathSync(file);
+      if (!isPathInside(root, path, { allowRoot: false }) || !statSync(path).isFile())
+        return this.json(res, 404, { error: "not-found" });
+      const types: Record<string, string> = {
+        ".html": "text/html; charset=utf-8",
+        ".js": "text/javascript; charset=utf-8",
+        ".css": "text/css; charset=utf-8",
+        ".svg": "image/svg+xml",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".woff2": "font/woff2",
+        ".ico": "image/x-icon",
+      };
+      res.writeHead(200, {
+        "Content-Type": types[extname(path)] || "application/octet-stream",
+        "Cache-Control": "no-store",
+        "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+      });
+      res.end(readFileSync(path));
+      return;
     }
     if (
       req.method === "GET" &&
@@ -793,6 +890,14 @@ export class EvenG2Controller {
       res.end(readFileSync(path));
       return;
     }
+    if ((TAILSCALE_ORIGIN.test(this.config.publicOrigin) ||
+         isUsbOrigin(this.config.publicOrigin, this.port)) &&
+        url.pathname.startsWith("/g2/api/") &&
+        (url.search || !this.isEncryptedForward(req) ||
+          (url.pathname !== "/g2/api/pair" &&
+           url.pathname !== "/g2/api/pair-status" &&
+           url.pathname !== "/g2/api/mobile")))
+      return this.json(res, 403, { error: "not-permitted" });
     if (req.method === "POST" && url.pathname === "/g2/api/pair") {
       const data = await this.body(req),
         pair = this.pairing;
@@ -829,6 +934,10 @@ export class EvenG2Controller {
         transportKey: this.localLink.deviceConnection(id, []).key,
       });
     }
+    if (url.pathname === "/g2/api/mobile") {
+      if (req.method !== "POST" || url.search || !this.isEncryptedForward(req))
+        return this.json(res, 403, { error: "not-permitted" });
+    }
     const token = req.headers.authorization?.startsWith("Bearer ")
       ? req.headers.authorization.slice(7)
       : "";
@@ -847,11 +956,23 @@ export class EvenG2Controller {
             : "rejected",
       });
     if (!peer) return this.json(res, 401, { error: "unauthorized" });
+    if (url.pathname === "/g2/api/mobile" &&
+        req.headers["x-canvastty-local-device"] !== peer.id)
+      return this.json(res, 403, { error: "not-permitted" });
     const existing = this.seen.get(peer.id);
     this.seen.set(peer.id, {
       lastSeen: Date.now(),
       telemetry: existing?.telemetry || null,
     });
+    if (url.pathname === "/g2/api/mobile") {
+      const data = await this.body(req, 65_536);
+      const type = (data.action as Record<string, unknown> | null)?.type;
+      if (typeof type !== "string" || !Object.hasOwn(MOBILE_ACTIONS, type))
+        throw new CompanionError("invalid-request");
+      const result = await this.actions.dispatch(peer.id, data);
+      if (type === "session.create") await this.save();
+      return this.json(res, 200, result);
+    }
     const grant = this.access.get(peer.id);
     if (req.method === "GET" && url.pathname === "/g2/api/home") {
       const sessions = await this.actions.dispatch(

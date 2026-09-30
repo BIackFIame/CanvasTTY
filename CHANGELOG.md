@@ -2,6 +2,11 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## Unreleased
+
+- Added an opt-in browser Web companion via Tailscale Serve HTTPS: loopback-only desktop listener, explicit HTTPS origin and session grants, six-digit desktop-approved pairing, packaged mobile web assets, and revocation. Its desktop-matched visual language uses an attention-first Sessions menu on narrow screens (select a session for detail) and side-by-side list/detail on wider screens. No Android app, public Funnel exposure, remote filesystem, or desktop-browser controls.
+- Added an optional Android USB path for Web companion testing without a phone VPN: `adb reverse tcp:3481 tcp:3481` exposes the loopback-only listener to the phone at `http://127.0.0.1:3481/mobile/`. Exact-origin/secure-context checks, desktop-approved encrypted pairing, session grants, and revocation remain in force; USB debugging should be disabled and its authorization revoked afterward. Connection errors use transport-neutral wording across LAN, HTTPS, and USB.
+
 ## 1.7.0
 
 - Fixed Windows orchestration startup by using the existing current-user-only pipe host, and recognized expanded Windows paths in private-data protection. The full Windows test suite now runs before PR merge as well as before release packaging.

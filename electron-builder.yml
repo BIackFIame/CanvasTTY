@@ -59,6 +59,8 @@ extraResources:
       - SKILL.md
   - from: integrations/even-g2/dist
     to: even-g2-web
+  - from: integrations/mobile/dist
+    to: mobile-web
   - from: src/main/services/companion/asr_worker.py
     to: companion/asr_worker.py
   - from: src/agent-browser
