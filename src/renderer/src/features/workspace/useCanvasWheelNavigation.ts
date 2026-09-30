@@ -15,6 +15,7 @@ import {
 } from "../../../../shared/canvasNavigation";
 import { routeCanvasWheelEvent } from "./canvasWheelRouting";
 import { createGestureSettle } from "./gestureSettle";
+import { createRafAccumulator } from "./rafAccumulator";
 import type { CanvasWidgetFocusState } from "./useCanvasWidgetFocus";
 
 export interface CanvasWheelInput extends CanvasWheelDeltas {
@@ -57,8 +58,6 @@ export function useCanvasWheelNavigation({
   const canvasOverrideActiveRef = useRef(false);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const panFrame = useRef<number | null>(null);
-  const pendingPan = useRef<Point>({ x: 0, y: 0 });
   const [zooming, setZooming] = useState(false);
   const [zoomGesture] = useState(() => createGestureSettle(setZooming));
   const markZoomGesture = zoomGesture.mark;
@@ -83,40 +82,58 @@ export function useCanvasWheelNavigation({
     });
   }, [cameraRef, commitCamera, markZoomGesture, viewport]);
 
-  const flushPan = useCallback((): void => {
-    if (panFrame.current !== null) {
-      cancelAnimationFrame(panFrame.current);
-      panFrame.current = null;
-    }
-    const delta = pendingPan.current;
-    if (delta.x === 0 && delta.y === 0) return;
-    pendingPan.current = { x: 0, y: 0 };
-    commitCamera({
+  // Both accumulators coalesce every wheel event of a burst into one commit per animation
+  // frame. A trackpad pan already batched this way; a pinch-zoom used to commit camera state
+  // (and re-render every card) on each of its many events, so it now batches identically.
+  const commitCameraRef = useRef(commitCamera);
+  commitCameraRef.current = commitCamera;
+  const zoomAtRef = useRef(zoomAt);
+  zoomAtRef.current = zoomAt;
+
+  const [panAccumulator] = useState(() => createRafAccumulator<Point>(
+    (pending, next) => ({ x: (pending?.x ?? 0) + next.x, y: (pending?.y ?? 0) + next.y }),
+    (delta) => commitCameraRef.current({
       ...cameraRef.current,
       x: cameraRef.current.x - delta.x,
       y: cameraRef.current.y - delta.y
-    });
-  }, [cameraRef, commitCamera]);
+    })
+  ));
+  const [zoomAccumulator] = useState(() => createRafAccumulator<{ clientX: number; clientY: number; factor: number }>(
+    (pending, next) => ({
+      clientX: next.clientX,
+      clientY: next.clientY,
+      factor: (pending?.factor ?? 1) * next.factor
+    }),
+    (value) => zoomAtRef.current(
+      value.clientX,
+      value.clientY,
+      clamp(cameraRef.current.zoom * value.factor, 0.2, 1.35)
+    )
+  ));
+
+  const flushPan = useCallback((): void => {
+    panAccumulator.flush();
+  }, [panAccumulator]);
 
   const applyCanvasWheel = useCallback((event: CanvasWheelInput): void => {
     window.canvasTTY.canvasNavigation.armOwnerWheelSequence(event.clientX, event.clientY);
     const intent = canvasWheelIntent(event, event, settingsRef.current);
     if (intent.kind === "pan") {
-      pendingPan.current.x += intent.deltaX;
-      pendingPan.current.y += intent.deltaY;
       panGesture.mark();
-      if (panFrame.current === null) panFrame.current = requestAnimationFrame(flushPan);
+      panAccumulator.push({ x: intent.deltaX, y: intent.deltaY });
       return;
     }
     flushPan();
-    zoomAt(event.clientX, event.clientY, clamp(cameraRef.current.zoom * intent.factor, 0.2, 1.35));
-  }, [cameraRef, flushPan, panGesture, zoomAt]);
+    markZoomGesture();
+    zoomAccumulator.push({ clientX: event.clientX, clientY: event.clientY, factor: intent.factor });
+  }, [flushPan, markZoomGesture, panAccumulator, panGesture, zoomAccumulator]);
 
   useEffect(() => () => {
-    if (panFrame.current !== null) cancelAnimationFrame(panFrame.current);
+    panAccumulator.dispose();
+    zoomAccumulator.dispose();
     zoomGesture.dispose();
     panGesture.dispose();
-  }, [panGesture, zoomGesture]);
+  }, [panAccumulator, panGesture, zoomAccumulator, zoomGesture]);
 
   useEffect(() => window.canvasTTY.canvasNavigation.onOverrideState(({ wheelActive, navigationActive }) => {
     wheelOverrideActiveRef.current = wheelActive;
