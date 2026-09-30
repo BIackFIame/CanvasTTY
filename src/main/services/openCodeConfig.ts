@@ -18,8 +18,9 @@ interface OpenCodeStdioHelper {
 
 type OpenCodeConfig = Record<string, unknown>;
 
+/** `helper` null: browser access is off, only canvastty_agents is attached. */
 export function openCodeBrowserEnvironment(
-  helper: OpenCodeStdioHelper,
+  helper: OpenCodeStdioHelper | null,
   environment: Readonly<Record<string, string | undefined>> = process.env,
   orchestrationHelper?: OpenCodeStdioHelper
 ): Record<string, string> {
@@ -30,19 +31,21 @@ export function openCodeBrowserEnvironment(
       ...config,
       mcp: {
         ...mcp,
-        [MCP_SERVER_NAME]: {
-          type: "local",
-          command: [helper.command, ...helper.args],
-          enabled: true,
-          ...(helper.env && Object.keys(helper.env).length > 0
-            ? { environment: helper.env }
-            : {})
-        },
+        ...(helper ? {
+          [MCP_SERVER_NAME]: {
+            type: "local",
+            command: [helper.command, ...helper.args],
+            enabled: true,
+            ...(helper.env && Object.keys(helper.env).length > 0
+              ? { environment: helper.env }
+              : {})
+          }
+        } : {}),
         ...(orchestrationHelper
           ? { [ORCHESTRATION_MCP_SERVER_NAME]: openCodeOrchestrationEntry(orchestrationHelper) }
           : {})
       },
-      permission: allowBrowserTools(config.permission)
+      ...(helper ? { permission: allowBrowserTools(config.permission) } : {})
     })
   };
 }
