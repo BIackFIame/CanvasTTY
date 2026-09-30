@@ -40,6 +40,11 @@ export interface IsolationPaths {
   protectedWrites: string[];
   /** The project's git hook folders: only `*.sample` files may be written there (what `git init` creates). */
   gitHooks: string[];
+  /**
+   * The writable project folder (every spelling; none for a read-only project). No repository anywhere under it gets
+   * hooks or `info/attributes` from the agent: they would run, or pick filters, outside the layer.
+   */
+  projectRoots: string[];
   /** Not readable at all: other agents' credentials, SSH/cloud keys, CanvasTTY's tokens and secret stores. */
   unreadable: string[];
   /** Readable again inside an unreadable folder: what this launch was handed. */
@@ -221,6 +226,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       ...(input.provider === "opencode" ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(xdg.config, "opencode", name)) : [])
     ]),
     gitHooks: all([join(project, ".git", "hooks")]),
+    projectRoots: input.readOnlyProject ? [] : all([project]),
     unreadable: all([...sensitiveHomeFolders(home, xdg.config), ...others, ...privateData]),
     readableAgain: all([...grants, ...movedHomes]),
     socketFolders: all(socketFolders),

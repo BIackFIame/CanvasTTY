@@ -306,6 +306,71 @@ test("seatbelt, for real: writes stay in the project, secrets stay unread, nothi
   assert.notEqual(spawnSync("defaults", ["read", "ctty.isolation.probe"]).status, 0);
 });
 
+test("seatbelt, for real: the launch writes the account home it was handed, not its permission settings, and no other home", onMac, async (t) => {
+  const w = await world(t);
+  const own = join(w.userData, "account-homes", "a1");
+  const other = join(w.userData, "account-homes", "a2");
+  await mkdir(other, { recursive: true });
+  await writeFile(join(other, "auth.json"), "OTHER-ACCOUNT");
+  const grant = join(w.userData, "agent-control", "sessions", "own");
+  const { lines } = run(w, [
+    'echo refreshed > "$CODEX_HOME/auth.json" && cat "$CODEX_HOME/auth.json" >/dev/null && echo HOME-W-ok',
+    'mkdir "$CODEX_HOME/sessions" && mkdir "$CODEX_HOME/sessions/x" && echo s > "$CODEX_HOME/sessions/x/log" && echo HOME-SUB-ok',
+    'echo x > "$CODEX_HOME/config.toml" 2>/dev/null || echo HOME-CONFIG-denied',
+    `cat "${join(other, "auth.json")}" 2>/dev/null || echo OTHER-R-denied`,
+    `echo x > "${join(other, "auth.json")}" 2>/dev/null || echo OTHER-W-denied`,
+    `echo x > "${join(grant, "g")}" 2>/dev/null || echo GRANT-W-denied`,
+    `cat "${join(grant, "connection.json")}" >/dev/null && echo GRANT-R-ok`
+  ].join("; "), { env: { CODEX_HOME: own }, granted: [grant] });
+  assert.deepEqual(lines, ["HOME-W-ok", "HOME-SUB-ok", "HOME-CONFIG-denied", "OTHER-R-denied", "OTHER-W-denied", "GRANT-W-denied", "GRANT-R-ok"]);
+  assert.equal(await readFile(join(own, "auth.json"), "utf8"), "refreshed\n");
+});
+
+test("seatbelt, for real: git init works, but no repository in the project gets a hook or attributes from the agent", onMac, async (t) => {
+  const w = await world(t);
+  const { lines, env } = run(w, [
+    'git init -q . && git -c user.email=a@b -c user.name=n commit -q --allow-empty -m x && echo GIT-ok',
+    '[ -e .git/hooks ] && echo TEMPLATE-HOOKS || echo NO-TEMPLATE-HOOKS',
+    'mkdir -p .git/hooks && (echo evil > .git/hooks/pre-commit) 2>/dev/null || echo W-git-hook-denied',
+    'echo sample > .git/hooks/pre-commit.sample 2>/dev/null && echo W-sample-ok',
+    'mkdir -p .git/info && (echo "* filter=x" > .git/info/attributes) 2>/dev/null || echo W-attributes-denied',
+    'git init -q deep/nested && mkdir -p deep/nested/.git/hooks && (echo evil > deep/nested/.git/hooks/post-commit) 2>/dev/null || echo W-nested-hook-denied',
+    'git config core.hooksPath /tmp/x && echo CONFIG-ok'
+  ].join("; "));
+  assert.deepEqual(lines, ["GIT-ok", "NO-TEMPLATE-HOOKS", "W-git-hook-denied", "W-sample-ok", "W-attributes-denied", "W-nested-hook-denied", "CONFIG-ok"]);
+  assert.ok(env.GIT_TEMPLATE_DIR, "an empty template for git init");
+  assert.equal(existsSync(join(w.project, ".git", "hooks", "pre-commit")), false);
+});
+
+test("bubblewrap: the handed home is writable but its permission settings are read-only again; .git/info cannot gain attributes", async (t) => {
+  const w = await world(t);
+  const accountHome = join(w.userData, "account-homes", "a1");
+  const config = join(accountHome, "config.toml");
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, CODEX_HOME: accountHome },
+    userDataPath: w.userData, sessionId: "s" });
+  const base = [[w.project, "directory"], [accountHome, "directory"], [join(w.userData, "account-homes"), "directory"], [config, "file"]];
+  const text = (extra) => bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => new Map([...base, ...extra]).get(path) ?? null).join(" ");
+  const fresh = text([]);
+  const rebound = fresh.lastIndexOf(`--bind ${accountHome} ${accountHome}`);
+  assert.ok(rebound > fresh.indexOf(`--tmpfs ${join(w.userData, "account-homes")}`));
+  assert.ok(fresh.lastIndexOf(`--ro-bind ${config} ${config}`) > rebound, "config.toml read-only over the rebound home");
+  const info = join(w.project, ".git", "info");
+  assert.ok(fresh.includes(`--tmpfs ${info}`), "no .git/info yet: a throwaway one");
+  const attributes = join(info, "attributes");
+  assert.ok(text([[join(w.project, ".git"), "directory"], [info, "directory"], [attributes, "file"]]).includes(`--ro-bind ${attributes} ${attributes}`));
+  assert.ok(text([[join(w.project, ".git"), "directory"], [info, "directory"]]).includes(`--ro-bind ${info} ${info}`), "no attributes file can be created");
+});
+
+test("an isolated launch gets an empty git template, so git init writes no hooks", async (t) => {
+  const w = await world(t);
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const wrapped = layer.wrap({ sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });
+  try {
+    assert.ok(wrapped.env.GIT_TEMPLATE_DIR);
+    assert.deepEqual(await readdir(wrapped.env.GIT_TEMPLATE_DIR), []);
+  } finally { wrapped.cleanup(); }
+});
+
 test("seatbelt, for real: Claude saves a refreshed sign-in in the login keychain; nothing else there; plan is read-only", onMac, async (t) => {
   const w = await world(t);
   const folder = join(w.home, "Library", "Keychains");
