@@ -16,8 +16,10 @@ const isWebOrigin = (origin: string): boolean =>
 type Stage = "overview" | "transport" | "web" | "scope" | "pair";
 export function EvenG2Controls({
   locale,
+  open = true,
 }: {
   locale: LocaleId;
+  open?: boolean;
 }): React.JSX.Element {
   const [state, setState] = useState<EvenG2State | null>(null);
   const [draft, setDraft] = useState<EvenG2Config | null>(null);
@@ -32,6 +34,7 @@ export function EvenG2Controls({
   const preparingSpeech = useRef(false);
   useEffect(() => { if (panelRef.current?.parentElement) panelRef.current.parentElement.scrollTop = 0; }, [stage]);
   useEffect(() => {
+    if (!open) return;
     let active = true;
     const read = () =>
       void window.canvasTTY.evenG2
@@ -72,7 +75,7 @@ export function EvenG2Controls({
       active = false;
       clearInterval(timer);
     };
-  }, [locale]);
+  }, [locale, open]);
   useEffect(() => {
     if (
       stage === "pair" &&

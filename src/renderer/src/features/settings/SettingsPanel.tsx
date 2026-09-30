@@ -881,6 +881,7 @@ export function SettingsPanel({
               <PluginServicesSettings
                 locale={locale}
                 plugins={plugins}
+                open={open}
                 onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
                 onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
               />
@@ -1058,7 +1059,7 @@ export function SettingsPanel({
 
           {section === "controls" && (
             <>
-              <EvenG2Controls locale={locale} />
+              <EvenG2Controls locale={locale} open={open} />
               <SettingGroup label={t(locale, "focusActivation")}>
                 <Segmented
                   value={settings.focusActivation}

@@ -10,6 +10,7 @@ import { t, type TranslationKey } from "../../lib/i18n";
 interface PluginServicesSettingsProps {
   locale: LocaleId;
   plugins: InstalledPlugin[];
+  open?: boolean;
   onSetNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
 }
@@ -22,6 +23,7 @@ interface PluginServicesSettingsProps {
 export function PluginServicesSettings({
   locale,
   plugins,
+  open = true,
   onSetNativeCodeTrusted,
   onSetDecisionsMayAllow
 }: PluginServicesSettingsProps): React.JSX.Element | null {
@@ -33,6 +35,7 @@ export function PluginServicesSettings({
   const trustedKey = rows.map((plugin) => `${plugin.manifest.id}:${plugin.nativeCodeTrusted}`).join(",");
 
   useEffect(() => {
+    if (!open) return;
     let cancelled = false;
     const refresh = async (): Promise<void> => {
       const entries = await Promise.all(rows.map(async (plugin) => (
@@ -47,7 +50,7 @@ export function PluginServicesSettings({
       window.clearInterval(timer);
     };
     // Rows are derived from plugins; the key captures what changes the report.
-  }, [trustedKey]);
+  }, [trustedKey, open]);
 
   if (rows.length === 0) return null;
 
