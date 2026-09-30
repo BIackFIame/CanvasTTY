@@ -1,0 +1,4 @@
+# canvastty-helper embeds this generated catalog (go:embed) and a test compares it byte for byte with what
+# scripts/build-native-helpers.mjs generates (LF). Checked out with LF everywhere, a Windows checkout
+# (core.autocrlf=true) matches and a helper built there embeds the same bytes as one built on macOS or Linux.
+native/canvastty-helper/catalog.json text eol=lf
