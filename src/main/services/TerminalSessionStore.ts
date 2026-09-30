@@ -83,14 +83,45 @@ export type SessionStoreProblem =
   | { kind: "newer" | "unreadable"; backupPath: null }
   | { kind: "corrupt"; backupPath: string | null };
 
+/** How the store replaces its file; tests pass a rename that fails the way Windows does. */
+export interface SessionStoreFileOptions {
+  rename?: (from: string, to: string) => Promise<void>;
+  platform?: NodeJS.Platform;
+}
+
+// Windows refuses to replace a file another handle has open (a reader, an indexer, antivirus) with EPERM, EACCES or
+// EBUSY; the handle goes away within moments. Retrying for about a second keeps a save from being dropped.
+const WINDOWS_TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160, 320, 400];
+
+export async function replaceFile(
+  from: string,
+  to: string,
+  { rename: move = rename, platform = process.platform }: SessionStoreFileOptions = {}
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await move(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (platform !== "win32" || !code || !WINDOWS_TRANSIENT_RENAME_CODES.has(code) || delay === undefined) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 export class TerminalSessionStore {
   readonly filePath: string;
   private value: PersistedTerminalSessionState = structuredClone(EMPTY_STATE);
   private writeQueue = Promise.resolve();
   private problem: SessionStoreProblem | null = null;
+  private readonly fileOptions: SessionStoreFileOptions;
 
-  constructor(userDataPath: string, fileName = "terminal-sessions.json") {
+  constructor(userDataPath: string, fileName = "terminal-sessions.json", fileOptions: SessionStoreFileOptions = {}) {
     this.filePath = join(userDataPath, fileName);
+    this.fileOptions = fileOptions;
   }
 
   /** What went wrong reading the saved cards at load(), or null. */
@@ -165,9 +196,9 @@ export class TerminalSessionStore {
       await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
       try {
         await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-        await rename(temporaryPath, this.filePath);
+        await replaceFile(temporaryPath, this.filePath, this.fileOptions);
       } catch (error) {
-        // A failed rename (a locked file on Windows) must not leave the temp file behind.
+        // A rename that still fails (a file locked for longer on Windows) must not leave the temp file behind.
         await unlink(temporaryPath).catch(() => undefined);
         throw error;
       }
