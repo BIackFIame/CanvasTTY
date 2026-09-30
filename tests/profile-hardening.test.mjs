@@ -11,7 +11,8 @@ import { availableProfiles, BYPASS_CHANGES_NOTHING, profileAvailable } from "../
 
 // OpenCode 1.18.33's decision for the build agent (agent.ts, permission/index.ts, core/util/wildcard.ts): its
 // defaults, the merged top-level permission, then the merged agent.build.permission; the last rule whose key and
-// pattern both match wins. Config objects merge with remeda's mergeDeep (a key keeps its first place).
+// pattern both match wins. Config objects merge with remeda's mergeDeep (a key keeps its first place). OpenCode
+// merges OPENCODE_PERMISSION after the file and inline top-level rules, before evaluating build-agent rules.
 const OPENCODE_DEFAULTS = { "*": "allow", doom_loop: "ask", external_directory: { "*": "ask" }, question: "deny",
   read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" } };
 const match = (input, pattern) => {
@@ -30,10 +31,16 @@ const mergeDeep = (target, source) => {
   }
   return result;
 };
-/** What OpenCode decides for `tool` on `input`, given the config files it reads (in its order) and the inline config. */
-function decide(files, inlineConfig, tool, input = "*") {
+/** OpenCode's decision from its files, inline config, and original environment, independently of the auto builder. */
+function decide(files, inlineConfig, tool, input = "*", environment = {}) {
   const config = [...files, inlineConfig].reduce((merged, next) => mergeDeep(merged, next), {});
-  const rules = [...fromConfig(OPENCODE_DEFAULTS), ...fromConfig(config.permission), ...fromConfig(config.agent?.build?.permission)];
+  let top = config.permission;
+  if (environment.OPENCODE_PERMISSION) {
+    try {
+      top = mergeDeep(top ?? {}, JSON.parse(environment.OPENCODE_PERMISSION));
+    } catch { /* OpenCode ignores malformed OPENCODE_PERMISSION JSON. */ }
+  }
+  const rules = [...fromConfig(OPENCODE_DEFAULTS), ...fromConfig(top), ...fromConfig(config.agent?.build?.permission)];
   return rules.findLast((rule) => match(tool, rule.permission) && match(input, rule.pattern))?.action ?? "ask";
 }
 const inlineOf = (env) => JSON.parse(env.OPENCODE_CONFIG_CONTENT);
@@ -63,6 +70,112 @@ test("OpenCode auto never overrides the person's wildcard deny or ask (the revie
   const agentLevel = auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { build: { permission: { "*": "deny" } } } }) });
   assert.equal(decide([], agentLevel, "bash", "ls"), "deny");
   assert.equal(decide([], agentLevel, "edit"), "deny");
+});
+
+test("OpenCode auto respects OPENCODE_PERMISSION wildcard deny or ask for every tool", () => {
+  for (const action of ["deny", "ask"]) {
+    const env = { OPENCODE_PERMISSION: ` { "*": "${action}" } ` };
+    const original = { ...env };
+    const delta = openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null });
+    const result = inlineOf(delta);
+    for (const tool of ["read", "glob", "grep", "list", "edit", "bash"]) {
+      const input = tool === "bash" ? "ls -la" : "src/a.ts";
+      assert.equal(decide([], result, tool, input, env), action, `${tool} stays ${action}`);
+      assert.equal(result.agent.build.permission[tool], undefined, `auto adds nothing for ${tool}`);
+    }
+    assert.deepEqual(env, original, "the person's environment is unchanged");
+    assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, original.OPENCODE_PERMISSION, "the original environment value reaches OpenCode verbatim");
+    assert.equal(Object.hasOwn(delta, "OPENCODE_PERMISSION"), false, "auto does not overwrite the environment permission");
+  }
+  const env = { OPENCODE_PERMISSION: JSON.stringify({ "ed*": "deny", "b?sh": "ask" }) };
+  const result = auto(env);
+  assert.equal(decide([], result, "edit", "src/a.ts", env), "deny");
+  assert.equal(decide([], result, "bash", "ls", env), "ask");
+  assert.equal(result.agent.build.permission.edit, undefined);
+  assert.equal(result.agent.build.permission.bash, undefined);
+  assert.equal(decide([], result, "grep", "a", env), "allow", "unrestricted tools still get auto");
+});
+
+test("OpenCode auto keeps whole-tool and command-pattern environment restrictions after its grants", () => {
+  const env = { OPENCODE_PERMISSION: JSON.stringify({ edit: "deny", bash: "ask" }) };
+  const result = auto(env);
+  assert.equal(decide([], result, "edit", "src/a.ts", env), "deny");
+  assert.equal(decide([], result, "bash", "ls", env), "ask");
+  assert.equal(result.agent.build.permission.edit, "deny");
+  assert.equal(result.agent.build.permission.bash, "ask");
+  assert.equal(decide([], result, "read", "src/a.ts", env), "allow");
+
+  const commands = { OPENCODE_PERMISSION: JSON.stringify({ bash: { "git push *": "ask" } }) };
+  const guarded = auto(commands);
+  assert.equal(decide([], guarded, "bash", "git push origin main", commands), "ask");
+  assert.equal(decide([], guarded, "bash", "git push", commands), "ask");
+  assert.equal(decide([], guarded, "bash", "ls -la", commands), "allow", "the guarded shell is still opened for other commands");
+});
+
+test("OpenCode environment permission follows file and inline top-level rules while the person's build rules still win", () => {
+  const file = { permission: { edit: "allow", bash: { "git push *": "deny" } } };
+  const inline = { permission: { edit: "allow", bash: { "git push *": "allow", "npm publish *": "ask" } } };
+  const env = {
+    OPENCODE_CONFIG: "/person/opencode.json",
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(inline),
+    OPENCODE_PERMISSION: JSON.stringify({ edit: "deny", bash: { "git push *": "ask" } })
+  };
+  const readFile = (path) => path === env.OPENCODE_CONFIG ? JSON.stringify(file) : null;
+  assert.deepEqual(openCodePersonRules(env, undefined, readFile).top, {
+    edit: "deny", bash: { "git push *": "ask", "npm publish *": "ask" }
+  });
+  const result = auto(env, { readFile });
+  assert.equal(decide([file], result, "edit", "src/a.ts", env), "deny", "environment deny overrides inline allow before auto evaluates it");
+  assert.equal(decide([file], result, "bash", "git push origin main", env), "ask");
+  assert.equal(decide([file], result, "bash", "npm publish package", env), "ask", "other inline patterns survive the environment merge");
+  assert.equal(decide([file], result, "bash", "ls", env), "allow");
+
+  const fileAgent = { agent: { build: { permission: { edit: "deny", bash: { "git push *": "deny" } } } } };
+  const agentInline = { agent: { build: { permission: { read: "ask", bash: { "git status *": "ask" } } } } };
+  const agentsEnv = {
+    OPENCODE_CONFIG: "/person/agent.json",
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(agentInline),
+    OPENCODE_PERMISSION: JSON.stringify({ edit: "ask", read: "deny", bash: "allow" })
+  };
+  const agentsRead = (path) => path === agentsEnv.OPENCODE_CONFIG ? JSON.stringify(fileAgent) : null;
+  const agentsResult = auto(agentsEnv, { readFile: agentsRead });
+  assert.equal(agentsResult.agent.build.permission.edit, undefined, "auto leaves file build permissions alone");
+  assert.deepEqual(agentsResult.agent.build.permission.bash, agentInline.agent.build.permission.bash, "the inline build rules are preserved");
+  assert.equal(decide([fileAgent], agentsResult, "edit", "src/a.ts", agentsEnv), "deny", "file build deny follows environment ask");
+  assert.equal(decide([fileAgent], agentsResult, "bash", "git push origin main", agentsEnv), "deny");
+  assert.equal(decide([fileAgent], agentsResult, "bash", "git status --short", agentsEnv), "ask");
+  assert.equal(decide([fileAgent], agentsResult, "read", "src/a.ts", agentsEnv), "ask", "inline build ask follows environment deny");
+});
+
+test("OpenCode auto ignores malformed environment JSON but adds nothing for a valid unsupported permission block", () => {
+  const inline = { agent: { build: { permission: { task: "deny" } } } };
+  for (const raw of ["", "{", '{ "edit": "deny", }']) {
+    const env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(inline), OPENCODE_PERMISSION: raw };
+    assert.equal(openCodePersonRules(env, undefined, () => null).unknown, false);
+    const delta = openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null });
+    const result = inlineOf(delta);
+    assert.equal(decide([], result, "edit", "src/a.ts", env), "allow");
+    assert.equal(decide([], result, "bash", "ls", env), "allow");
+    assert.equal(result.agent.build.permission.task, "deny");
+    assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, raw, "malformed values are preserved for OpenCode to handle");
+  }
+  // JSON can parse successfully without being a permission block. Avoid inventing grants when its meaning is unknown.
+  for (const value of [null, [], false, 1, { edit: "invalid" }, { bash: { "git push *": "invalid" } }]) {
+    const env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(inline), OPENCODE_PERMISSION: JSON.stringify(value) };
+    assert.equal(openCodePersonRules(env, undefined, () => null).unknown, true);
+    const delta = openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null });
+    assert.deepEqual(inlineOf(delta).agent.build.permission, inline.agent.build.permission, "the original build rules stay intact and auto adds nothing");
+    assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, env.OPENCODE_PERMISSION);
+  }
+});
+
+test("OpenCode auto without environment restrictions still opens edit and asks for unguarded bash", () => {
+  const result = auto({}, { shellGuarded: false });
+  for (const tool of ["read", "glob", "grep", "list", "edit"]) {
+    assert.equal(decide([], result, tool, "src/a.ts"), "allow", tool);
+  }
+  assert.equal(decide([], result, "read", ".env"), "ask");
+  assert.equal(decide([], result, "bash", "ls"), "ask");
 });
 
 test("OpenCode auto keeps the person's specific rules for a tool after its own, from files and the inline config", async (t) => {
