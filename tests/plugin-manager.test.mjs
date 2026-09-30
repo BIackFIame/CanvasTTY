@@ -1911,3 +1911,50 @@ test("install previews are capped: previewing past the cap evicts the oldest sta
     await rm(userData, { recursive: true, force: true });
   }
 });
+
+test("the showcase page's manifest preview reuses the manifests the listing already fetched", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousToken = process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-manifest-cache-"));
+  const repositories = Array.from({ length: 3 }, (_value, index) => ({
+    full_name: `example/canvastty-plugin-cached-${index + 1}`,
+    description: `Plugin ${index + 1}`,
+    stargazers_count: index,
+    updated_at: "2026-08-01T00:00:00Z"
+  }));
+  const manifestRequests = [];
+  try {
+    globalThis.fetch = async (url) => {
+      const text = String(url);
+      if (text.startsWith("https://api.github.com/search/repositories")) return Response.json({ items: repositories });
+      if (text.startsWith("https://api.github.com/repos/")) return Response.json({ default_branch: "main" });
+      if (text.startsWith("https://raw.githubusercontent.com/") && text.endsWith("canvastty.plugin.json")) {
+        manifestRequests.push(text);
+        const name = text.split("/")[4];
+        return new Response(JSON.stringify({ ...manifest, id: `com.example.${name}` }));
+      }
+      return new Response("missing", { status: 404 });
+    };
+    const manager = new PluginManager(userData);
+    try {
+      await manager.load();
+      const showcase = await manager.listShowcasePlugins();
+      assert.equal(showcase.length, 3);
+      const fetchedByListing = manifestRequests.length;
+      assert.ok(fetchedByListing >= 3);
+
+      // The renderer then asks for the visible page's manifests.
+      const page = await manager.previewManifests(showcase.map((item) => item.url));
+      assert.equal(page.size, 3);
+      assert.equal(manifestRequests.length, fetchedByListing, "no second download of the same manifests");
+    } finally {
+      await manager.dispose();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+    await rm(userData, { recursive: true, force: true });
+  }
+});

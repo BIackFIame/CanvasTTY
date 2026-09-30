@@ -62,6 +62,10 @@ const METADATA_DIR = "metadata";
 const PLATFORM_ID = "canvastty";
 /** Manifest candidates: metadata/ first, then the legacy root. */
 const MANIFEST_CANDIDATES = [`${METADATA_DIR}/${MANIFEST_FILE}`, MANIFEST_FILE];
+/** How long a showcase manifest preview is reused (the listing and its visible page ask for the same ones). */
+const MANIFEST_PREVIEW_TTL_MS = 5 * 60_000;
+/** The showcase lists at most 1000 repositories. */
+const MANIFEST_PREVIEW_CACHE_LIMIT = 1_024;
 /** Icon candidates: metadata/ first, then the legacy root. */
 const ICON_CANDIDATES = [
   `${METADATA_DIR}/icon.png`,
@@ -194,6 +198,7 @@ type DownloadModuleFiles = (
 ) => Promise<void>;
 
 export class PluginManager {
+  private readonly manifestPreviewCache = new Map<string, { at: number; manifest: PluginManifest }>();
   private readonly pluginRoot: string;
   private readonly stagingRoot: string;
   private readonly storageRoot: string;
@@ -876,9 +881,20 @@ export class PluginManager {
     const manifests = new Map<string, PluginManifest>();
     if (unique.length === 0) return manifests;
 
+    // The showcase listing already fetched every manifest to filter by platform; the page the renderer then
+    // shows asks for the same ones. Found manifests are reused for a few minutes instead of downloaded again.
+    const now = Date.now();
+    const toFetch: string[] = [];
+    for (const sourceUrl of unique) {
+      const cached = this.manifestPreviewCache.get(sourceUrl);
+      if (cached && now - cached.at < MANIFEST_PREVIEW_TTL_MS) manifests.set(sourceUrl, cached.manifest);
+      else toFetch.push(sourceUrl);
+    }
+    if (toFetch.length === 0) return manifests;
+
     // Metadata-first: metadata/canvastty.plugin.json, then legacy root file.
     const parsed = new Map<string, { owner: string; repository: string }>();
-    for (const sourceUrl of unique) {
+    for (const sourceUrl of toFetch) {
       try {
         const source = new URL(sourceUrl);
         const parts = source.pathname.split("/").filter(Boolean);
@@ -901,13 +917,23 @@ export class PluginManager {
       for (const [key, result] of results) {
         if (!result.ok || result.text === undefined) continue;
         try {
-          manifests.set(key, validatePluginManifest(JSON.parse(result.text) as unknown));
+          const manifest = validatePluginManifest(JSON.parse(result.text) as unknown);
+          manifests.set(key, manifest);
+          this.rememberManifestPreview(key, manifest, now);
         } catch {
           // Malformed manifest — skipped; tile falls back to a live preview.
         }
       }
     }
     return manifests;
+  }
+
+  private rememberManifestPreview(sourceUrl: string, manifest: PluginManifest, at: number): void {
+    this.manifestPreviewCache.delete(sourceUrl);
+    if (this.manifestPreviewCache.size >= MANIFEST_PREVIEW_CACHE_LIMIT) {
+      this.manifestPreviewCache.delete(this.manifestPreviewCache.keys().next().value!);
+    }
+    this.manifestPreviewCache.set(sourceUrl, { at, manifest });
   }
 
   async checkForUpdates(): Promise<PluginUpdateStatus[]> {
