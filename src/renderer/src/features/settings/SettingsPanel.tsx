@@ -1221,6 +1221,7 @@ export function SettingsPanel({
 
           {section === "plugins" && (
             <PluginSettingsSection
+              open={open}
               settings={settings}
               plugins={plugins}
               onPreviewPlugin={onPreviewPlugin}

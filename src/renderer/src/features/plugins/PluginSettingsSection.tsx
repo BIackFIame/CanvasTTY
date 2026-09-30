@@ -14,6 +14,7 @@ import type {
   PluginUpdateStatus
 } from "../../../../shared/contracts";
 import { t, type TranslationKey } from "../../lib/i18n";
+import { pollWhileOpen, STOP_POLLING } from "../settings/settingsPolling";
 import {
   INSTALLED_PAGE_SIZE,
   SHOWCASE_PAGE_SIZE,
@@ -44,6 +45,8 @@ interface PluginSettingsSectionProps {
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
+  /** Settings is open; the section's polling runs only then. */
+  open?: boolean;
 }
 
 export function PluginSettingsSection({
@@ -61,7 +64,8 @@ export function PluginSettingsSection({
   onSetPluginModules,
   onSetPluginEnabled,
   onUninstallPlugin,
-  onOpenPluginContribution
+  onOpenPluginContribution,
+  open = true
 }: PluginSettingsSectionProps): React.JSX.Element {
   const locale = settings.locale;
   const [sourceUrl, setSourceUrl] = useState("");
@@ -190,36 +194,31 @@ export function PluginSettingsSection({
   useEffect(() => {
     if (!githubCode) return;
     let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async (): Promise<void> => {
+    // The main process owns the device flow; this only reads its status, so it pauses while Settings is
+    // closed and picks up (sign-in finished or code expired) as soon as Settings opens again.
+    const stop = pollWhileOpen(open, githubCode.interval * 1000, async () => {
       if (Date.now() >= githubCode.expiresAt) {
         if (!cancelled) {
           setGithubCode(null);
           setError(t(locale, "githubAuthExpired"));
         }
-        return;
+        return STOP_POLLING;
       }
-      try {
-        const status = await window.canvasTTY.githubAuth.status();
-        if (cancelled) return;
-        setGithubStatus(status);
-        if (status.authorized) {
-          setGithubCode(null);
-          return;
-        }
-      } catch {
-        // The main process owns the device flow; a transient status read can retry.
+      // A transient status read failure is retried on the next tick.
+      const status = await window.canvasTTY.githubAuth.status();
+      if (cancelled) return STOP_POLLING;
+      setGithubStatus(status);
+      if (status.authorized) {
+        setGithubCode(null);
+        return STOP_POLLING;
       }
-      timer = window.setTimeout(() => void poll(), githubCode.interval * 1000);
-    };
-
-    timer = window.setTimeout(() => void poll(), githubCode.interval * 1000);
+      return undefined;
+    }, { immediate: false });
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      stop();
     };
-  }, [githubCode, locale]);
+  }, [githubCode, locale, open]);
 
   const inspect = async (): Promise<void> => {
     if (busy || sourceUrl.trim().length === 0) return;
