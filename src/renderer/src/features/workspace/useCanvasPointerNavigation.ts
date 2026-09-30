@@ -152,6 +152,16 @@ export function useCanvasPointerNavigation({
     groupDrag.current = null;
     setGroupNudge(null);
     setPanning(false);
+    // Losing focus leaves no pointermove to ever clear edgePointer or stop this RAF loop
+    // (handlePointerLeave, the loop's other exit, only fires on a real pointer leave), so
+    // without this the edge-pan loop keeps requesting frames and committing camera state
+    // indefinitely in the background after the window loses focus.
+    if (edgeFrame.current !== null) {
+      cancelAnimationFrame(edgeFrame.current);
+      edgeFrame.current = null;
+    }
+    edgePointer.current = null;
+    edgeLastTime.current = 0;
   }, [viewport]);
 
   const localPoint = useCallback((clientX: number, clientY: number): Point | null => {
