@@ -166,6 +166,32 @@ test("BrowserAuditStore prunes expired rotations while retaining a verifiable ch
   assert.equal(firstSurviving.previousHash.length, 64);
 });
 
+test("deleting an initial rotated segment outside retention pruning fails verification", async (t) => {
+  const root = await fixture(t, "canvastty-audit-deleted-segment-");
+  let now = 1_700_000_000_000;
+  const store = new BrowserAuditStore(root, { maxBytes: 1_024, now: () => now });
+  for (let index = 0; index < 5; index += 1) {
+    now += 1_000;
+    await store.append(auditInput(`segment-${index}`, {
+      timestamp: now,
+      details: { note: `${index}-${"x".repeat(700)}` }
+    }));
+  }
+
+  const directory = dirname(store.filePath);
+  const rotated = (await auditFiles(store)).filter((name) => name.startsWith("browser-audit-")).sort();
+  assert.ok(rotated.length >= 1, "the fixture must actually rotate at least once");
+
+  // Remove the earliest rotated segment directly, the way a bug or an external
+  // actor could - never through pruneExpired(), so no anchor was ever recorded
+  // for what remains.
+  await rm(join(directory, rotated[0]));
+
+  const reopened = new BrowserAuditStore(root, { maxBytes: 1_024, now: () => now });
+  const verification = await reopened.verify();
+  assert.equal(verification.valid, false, "verification must not accept the truncated chain as a fresh genesis");
+});
+
 test("BrowserAuditStore propagates storage failures instead of pretending to audit", async (t) => {
   const root = await fixture(t, "canvastty-audit-failure-");
   await writeFile(join(root, "browser"), "directory blocker");

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, dirname, join } from "node:path";
-import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rename, stat, truncate, unlink, writeFile } from "node:fs/promises";
 import { canonicalStringify } from "../../../agent-browser/tool-catalog.mjs";
 import { hasSensitiveAssignment, isSensitiveName } from "../safety/sensitiveNames.ts";
 
@@ -62,8 +62,18 @@ export interface BrowserAuditStoreOptions {
   now?: () => number;
 }
 
+/** Persisted alongside the log: the trusted chain-start record whenever retention pruning has
+ * trimmed away earlier segments, so verification can tell a sanctioned trim from a rotated
+ * segment removed some other way. */
+interface AuditAnchor {
+  sequence: number;
+  hash: string;
+  previousHash: string | null;
+}
+
 export class BrowserAuditStore {
   readonly filePath: string;
+  private readonly anchorPath: string;
   private readonly maxBytes: number;
   private readonly retentionMs: number;
   private readonly now: () => number;
@@ -75,6 +85,7 @@ export class BrowserAuditStore {
 
   constructor(userDataPath: string, options: BrowserAuditStoreOptions = {}) {
     this.filePath = join(userDataPath, "browser", "audit", "browser-audit.jsonl");
+    this.anchorPath = join(userDataPath, "browser", "audit", "browser-audit-anchor.json");
     this.maxBytes = Math.max(1_024, options.maxBytes ?? DEFAULT_MAX_BYTES);
     this.retentionMs = Math.max(1_000, options.retentionMs ?? DEFAULT_RETENTION_MS);
     this.now = options.now ?? Date.now;
@@ -138,6 +149,7 @@ export class BrowserAuditStore {
   async verify(): Promise<{ valid: boolean; records: number; lastHash: string | null }> {
     await this.ensureInitialized();
     const files = await this.auditFiles();
+    const anchor = await this.loadAnchor();
     let previousHash: string | null = null;
     let records = 0;
     for (const path of files) {
@@ -151,7 +163,8 @@ export class BrowserAuditStore {
           return { valid: false, records, lastHash: previousHash };
         }
         const { hash, ...base } = record;
-        if ((records > 0 && record.previousHash !== previousHash) || !recordHashMatches(base, hash)) {
+        if ((records > 0 ? record.previousHash !== previousHash : !isTrustedChainStart(record, anchor))
+          || !recordHashMatches(base, hash)) {
           return { valid: false, records, lastHash: previousHash };
         }
         previousHash = hash;
@@ -171,6 +184,7 @@ export class BrowserAuditStore {
     await this.repairTornTail();
     await this.pruneExpired();
     const files = await this.auditFiles();
+    const anchor = await this.loadAnchor();
     let previousHash: string | null = null;
     let sequence = 0;
     let records = 0;
@@ -181,7 +195,8 @@ export class BrowserAuditStore {
         try {
           const record = JSON.parse(line) as BrowserAuditRecord;
           const { hash, ...base } = record;
-          if ((records > 0 && record.previousHash !== previousHash) || !recordHashMatches(base, hash)) {
+          if ((records > 0 ? record.previousHash !== previousHash : !isTrustedChainStart(record, anchor))
+            || !recordHashMatches(base, hash)) {
             throw new Error("Browser audit hash chain is invalid.");
           }
           previousHash = hash;
@@ -246,11 +261,63 @@ export class BrowserAuditStore {
     const directory = dirname(this.filePath);
     const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
     const cutoff = this.now() - this.retentionMs;
+    let removedAny = false;
     for (const entry of entries) {
       if (!entry.isFile() || !/^browser-audit-.+\.jsonl$/.test(entry.name)) continue;
       const path = join(directory, entry.name);
       const metadata = await stat(path).catch(() => null);
-      if (metadata && metadata.mtimeMs < cutoff) await unlink(path).catch(() => undefined);
+      if (metadata && metadata.mtimeMs < cutoff) {
+        await unlink(path).catch(() => undefined);
+        removedAny = true;
+      }
+    }
+    if (removedAny) await this.recordAnchor();
+  }
+
+  /**
+   * Records the trusted chain-start whenever retention pruning removes the earliest
+   * segment(s), so verify()/initialize() can distinguish a sanctioned trim from a rotated
+   * segment that disappeared some other way (see isTrustedChainStart).
+   */
+  private async recordAnchor(): Promise<void> {
+    const files = await this.auditFiles();
+    for (const path of files) {
+      const content = await readFile(path, "utf8").catch(() => "");
+      const firstLine = content.split("\n").find((line) => line.length > 0);
+      if (!firstLine) continue;
+      try {
+        const record = JSON.parse(firstLine) as BrowserAuditRecord;
+        const anchor: AuditAnchor = {
+          sequence: record.sequence,
+          hash: record.hash,
+          previousHash: record.previousHash
+        };
+        await mkdir(dirname(this.anchorPath), { recursive: true });
+        const temporaryPath = `${this.anchorPath}.${process.pid}.tmp`;
+        await writeFile(temporaryPath, JSON.stringify(anchor), { encoding: "utf8", mode: 0o600 });
+        await rename(temporaryPath, this.anchorPath);
+      } catch {
+        // Leave any existing anchor as-is; the next legitimate prune will retry.
+      }
+      return;
+    }
+    // No segment survived pruning: there is nothing left to anchor.
+    await unlink(this.anchorPath).catch(() => undefined);
+  }
+
+  private async loadAnchor(): Promise<AuditAnchor | null> {
+    try {
+      const parsed = JSON.parse(await readFile(this.anchorPath, "utf8")) as Partial<AuditAnchor>;
+      if (
+        typeof parsed.hash === "string"
+        && Number.isInteger(parsed.sequence)
+        && (parsed.previousHash === null || typeof parsed.previousHash === "string")
+      ) {
+        return { sequence: parsed.sequence!, hash: parsed.hash, previousHash: parsed.previousHash ?? null };
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
@@ -315,6 +382,22 @@ function recordHashMatches(record: Omit<BrowserAuditRecord, "hash">, hash: unkno
   if (typeof hash !== "string") return false;
   return hashRecord(record) === hash
     || createHash("sha256").update(canonicalStringify(record, { lenient: true, compareKeys: byLocale })).digest("hex") === hash;
+}
+
+/**
+ * A chain-start record is trusted either as a true genesis (no previous record ever existed,
+ * so previousHash is null) or as the exact record retention pruning anchored when it trimmed
+ * away everything before it. Anything else — including a rotated segment removed some other
+ * way, which leaves a non-null previousHash with no matching anchor — is rejected.
+ */
+function isTrustedChainStart(record: BrowserAuditRecord, anchor: AuditAnchor | null): boolean {
+  if (record.previousHash === null) return true;
+  return Boolean(
+    anchor
+    && anchor.sequence === record.sequence
+    && anchor.hash === record.hash
+    && anchor.previousHash === record.previousHash
+  );
 }
 
 const byCodeUnit = (left: string, right: string): number => (left < right ? -1 : left > right ? 1 : 0);
