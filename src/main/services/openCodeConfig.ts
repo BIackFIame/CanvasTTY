@@ -3,7 +3,10 @@ import { MCP_SERVER_NAME } from "../../agent-browser/tool-catalog.mjs";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 import { otherSpellings } from "./onDiskPath.ts";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { lazyRequire } from "../lazyRequire.ts";
+
+const lazyYaml = lazyRequire<typeof import("yaml")>("yaml");
 
 const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
 
@@ -73,30 +76,36 @@ export function openCodeYoloEnvironment(
 }
 
 /**
- * OpenCode's "auto" profile for this run (OpenCode 1.18 has no auto flag). Its permission rules are a list where the
- * last matching rule wins (Permission.evaluate: findLast), and an agent's own `permission` is appended after the
- * top-level one (agent config: merge(agent, fromConfig(agent.permission))). So the rules go under `agent.build`,
- * OpenCode's default agent: they come after the person's own top-level rules without replacing them, and every tool
- * not named here keeps whatever the person's configuration says.
+ * OpenCode's "auto" profile for this run (OpenCode 1.18 has no auto flag). How OpenCode 1.18.33 decides
+ * (packages/opencode/src/agent/agent.ts, permission/index.ts): the build agent's rules are its defaults, then the
+ * merged top-level `permission`, then the merged `agent.build.permission`; Permission.evaluate takes the LAST rule
+ * whose permission key and pattern both match (`*` and `?` wildcards, the key included, so `"*": "deny"` covers
+ * every tool). Config files and this run's inline config are merged with remeda's mergeDeep: a key keeps the place
+ * where it first appeared.
  *
- * - read, glob, grep, list: allowed, except `.env` files (OpenCode's own default asks for those).
- * - edit (OpenCode's edit, write and apply_patch): allowed.
- * - bash: allowed only when `shellGuarded` (CanvasTTY's base protection is on and its guard runs in this OpenCode:
- *   hard denies still deny before OpenCode's own check); otherwise it asks, as without auto.
- * - external_directory is not touched: a path outside the project still asks (each tool checks it first).
+ * Auto adds rules under `agent.build` for the tools it opens (read, glob, grep, list, edit, bash), and never grants
+ * what the person's own configuration denies or asks about:
+ * - a tool that any of the person's deny or ask rules reaches through another key (`"*"`, `"ed*"`, …) is left alone,
+ *   as is a tool the person's config files already name under `agent.build.permission` (merging would put auto's
+ *   rules after theirs). Such a tool behaves exactly as without auto;
+ * - for any other tool, auto's rules come first and the person's own rules for that tool (top-level and this run's
+ *   agent.build, in their order) after them, so the person's rules still win;
+ * - a config file that exists but cannot be read or parsed leaves every tool alone.
+ * Auto's rules: read, glob, grep, list allowed, except `.env` files (they ask, like OpenCode's default); edit (edit,
+ * write, apply_patch) allowed; bash allowed only when `shellGuarded` (CanvasTTY's base protection is on and its guard
+ * runs in this OpenCode), otherwise it asks. external_directory is not touched: a path outside the project still asks.
  * `thirdPartyModel` (a launch contributor put OpenCode on another model) keeps bash asking, like accept-edits.
  */
 export function openCodeAutoEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
-  options: { shellGuarded: boolean; thirdPartyModel?: boolean; cwd?: string; readFile?: (path: string) => string | null }
+  options: { shellGuarded: boolean; thirdPartyModel?: boolean; cwd?: string; readFile?: (path: string) => string | null; platform?: NodeJS.Platform }
 ): Record<string, string> {
   const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
   const agents = objectField(config.agent, "agent");
   const build = objectField(agents.build, "agent.build");
   const permission = build.permission === undefined ? {} : objectField(build.permission, "agent.build.permission");
-  // The person's own deny and ask rules (their config files and this run's inline config) come after the auto rules,
-  // so they still win: auto never allows what the person denied or wanted to be asked about.
   const person = openCodePersonRules(environment, options.cwd, options.readFile);
+  const auto = openCodeAutoPermission(options.shellGuarded && options.thirdPartyModel !== true);
   return {
     [OPENCODE_CONFIG_CONTENT]: JSON.stringify({
       ...config,
@@ -104,84 +113,196 @@ export function openCodeAutoEnvironment(
         ...agents,
         build: {
           ...build,
-          permission: withPersonRules({
-            ...permission,
-            ...openCodeAutoPermission(options.shellGuarded && options.thirdPartyModel !== true)
-          }, person)
+          permission: autoWithPersonRules(permission, auto, person, options.platform ?? process.platform)
         }
       }
     })
   };
 }
 
-type Rule = string | Record<string, string>;
+type Action = "allow" | "ask" | "deny";
+type Rule = Action | Record<string, Action>;
+type PermissionBlock = Record<string, Rule>;
+
+/** The person's OpenCode permission rules, merged the way OpenCode merges its configuration. */
+export interface OpenCodePersonRules {
+  /** The merged top-level `permission` of the config files and this run's inline config. */
+  top: PermissionBlock;
+  /** The merged `agent.build.permission` of the config files and agent files (this run's inline one is not here). */
+  fileAgent: PermissionBlock;
+  /** This run's inline `agent.build.permission`. */
+  inlineAgent: PermissionBlock;
+  /** A config file exists but could not be read or parsed: auto must not assume anything about it. */
+  unknown: boolean;
+}
 
 /**
- * The deny and ask rules the person's OpenCode configuration sets for the tools auto allows (read, glob, grep, list,
- * edit, bash): the global and project config files, OPENCODE_CONFIG, and the inline config this run started with,
- * top-level `permission` and `agent.build.permission` alike. Allow rules are left out (auto allows those already).
+ * The person's OpenCode configuration as OpenCode 1.18 loads it: the global config files, OPENCODE_CONFIG, the
+ * project's opencode.json(c) from the file system root down to the working folder, `.opencode` folders and
+ * OPENCODE_CONFIG_DIR (their opencode.json(c) and `agent/build.md`), and this run's inline config. Remote
+ * (well-known) configurations of a signed-in organization are not read.
  */
 export function openCodePersonRules(
   environment: Readonly<Record<string, string | undefined>>,
   cwd?: string,
   readFile: (path: string) => string | null = readTextFile
-): Record<string, Rule> {
+): OpenCodePersonRules {
   const home = environment.HOME ?? "";
   const configHome = environment.XDG_CONFIG_HOME || (home ? join(home, ".config") : "");
-  const files = [
-    ...(configHome ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(configHome, "opencode", name)) : []),
-    ...(environment.OPENCODE_CONFIG ? [environment.OPENCODE_CONFIG] : []),
-    ...(cwd ? ["opencode.json", "opencode.jsonc", join(".opencode", "opencode.json"), join(".opencode", "opencode.jsonc")].map((name) => join(cwd, name)) : [])
+  const globalDir = configHome ? join(configHome, "opencode") : "";
+  const projectDirs = cwd ? ancestors(cwd).reverse() : [];
+  const configDirs = [
+    ...(globalDir ? [globalDir] : []),
+    ...projectDirs.map((dir) => join(dir, ".opencode")),
+    ...(environment.OPENCODE_CONFIG_DIR ? [environment.OPENCODE_CONFIG_DIR] : [])
   ];
-  const configs: unknown[] = [];
-  for (const file of files) {
+  const jsonFiles = [
+    ...(globalDir ? ["config.json", "opencode.json", "opencode.jsonc"].map((name) => join(globalDir, name)) : []),
+    ...(environment.OPENCODE_CONFIG ? [environment.OPENCODE_CONFIG] : []),
+    ...projectDirs.flatMap((dir) => ["opencode.json", "opencode.jsonc"].map((name) => join(dir, name))),
+    ...configDirs.slice(globalDir ? 1 : 0).flatMap((dir) => ["opencode.json", "opencode.jsonc"].map((name) => join(dir, name)))
+  ];
+  let top: PermissionBlock = {};
+  let fileAgent: PermissionBlock = {};
+  let unknown = false;
+  const take = (value: unknown, into: "top" | "agent"): void => {
+    const block = permissionBlock(value);
+    if (block === null) { unknown = true; return; }
+    if (into === "top") top = mergeDeep(top, block);
+    else fileAgent = mergeDeep(fileAgent, block);
+  };
+  for (const file of jsonFiles) {
     const text = readFile(file);
-    if (text !== null) configs.push(parseLoose(text));
+    if (text === null) continue;
+    const parsed = parseLoose(text);
+    if (!isObject(parsed)) { if (text.trim()) unknown = true; continue; }
+    if (parsed.permission !== undefined) take(parsed.permission, "top");
+    const agent = isObject(parsed.agent) && isObject(parsed.agent.build) ? parsed.agent.build.permission : undefined;
+    if (agent !== undefined) take(agent, "agent");
   }
-  configs.push(parseLoose(environment[OPENCODE_CONFIG_CONTENT] ?? ""));
-  const rules: Record<string, Rule> = {};
-  for (const config of configs) {
-    if (!isObject(config)) continue;
-    const agent = isObject(config.agent) && isObject(config.agent.build) ? config.agent.build.permission : undefined;
-    for (const permission of [config.permission, agent]) {
-      if (permission === "deny" || permission === "ask") {
-        for (const tool of AUTO_TOOLS) rules[tool] = permission;
-        continue;
-      }
-      if (!isObject(permission)) continue;
-      for (const tool of AUTO_TOOLS) {
-        const value = permission[tool];
-        if (value === "deny" || value === "ask") { rules[tool] = value; continue; }
-        if (!isObject(value)) continue;
-        const current = rules[tool];
-        if (typeof current === "string") continue;
-        const kept: Record<string, string> = { ...(current ?? {}) };
-        for (const [pattern, action] of Object.entries(value)) {
-          if (action === "deny" || action === "ask") { delete kept[pattern]; kept[pattern] = action; }
-        }
-        if (Object.keys(kept).length > 0) rules[tool] = kept;
-      }
+  for (const dir of configDirs) {
+    for (const file of [join(dir, "agent", "build.md"), join(dir, "agents", "build.md")]) {
+      const text = readFile(file);
+      if (text === null) continue;
+      const front = markdownFrontMatter(text);
+      if (front === null) { unknown = true; continue; }
+      if (front.permission !== undefined) take(front.permission, "agent");
     }
   }
-  return rules;
+  const inline = parseLoose(environment[OPENCODE_CONFIG_CONTENT] ?? "");
+  let inlineAgent: PermissionBlock = {};
+  if (isObject(inline)) {
+    if (inline.permission !== undefined) take(inline.permission, "top");
+    const agent = isObject(inline.agent) && isObject(inline.agent.build) ? inline.agent.build.permission : undefined;
+    if (agent !== undefined) {
+      const block = permissionBlock(agent);
+      if (block === null) unknown = true;
+      else inlineAgent = block;
+    }
+  }
+  return { top, fileAgent, inlineAgent, unknown };
 }
 
 const AUTO_TOOLS = ["read", "glob", "grep", "list", "edit", "bash"] as const;
 
-/** Appends the person's rules after the auto rules: a whole-tool deny/ask replaces the tool, patterns go last. */
-function withPersonRules(permission: OpenCodeConfig, person: Record<string, Rule>): OpenCodeConfig {
-  const result: OpenCodeConfig = { ...permission };
-  for (const [tool, rule] of Object.entries(person)) {
-    if (typeof rule === "string") { result[tool] = rule; continue; }
-    const current = result[tool];
-    const merged: Record<string, string> = typeof current === "string" ? { "*": current } : isObject(current) ? { ...(current as Record<string, string>) } : {};
-    for (const [pattern, action] of Object.entries(rule)) {
-      delete merged[pattern];
-      merged[pattern] = action;
-    }
-    result[tool] = merged;
+/**
+ * This run's `agent.build.permission`: the inline one it started with, then auto's rules for each tool it may open
+ * (see openCodeAutoEnvironment), each followed by the person's own rules for that tool.
+ */
+function autoWithPersonRules(
+  inline: OpenCodeConfig,
+  auto: PermissionBlock,
+  person: OpenCodePersonRules,
+  platform: NodeJS.Platform
+): OpenCodeConfig {
+  const result: OpenCodeConfig = { ...inline };
+  if (person.unknown) return result;
+  const personRules = [...permissionRules(person.top), ...permissionRules(person.fileAgent), ...permissionRules(person.inlineAgent)];
+  for (const tool of AUTO_TOOLS) {
+    const reachedElsewhere = personRules.some((rule) => rule.permission !== tool && rule.action !== "allow"
+      && wildcardMatch(tool, rule.permission, platform));
+    if (reachedElsewhere || Object.hasOwn(person.fileAgent, tool)) continue;
+    const patterns: Record<string, Action> = {};
+    const add = (rule: Rule | undefined): void => {
+      if (rule === undefined) return;
+      for (const [pattern, action] of Object.entries(typeof rule === "string" ? { "*": rule } : rule)) {
+        delete patterns[pattern];
+        patterns[pattern] = action;
+      }
+    };
+    add(auto[tool]);
+    add(person.top[tool]);
+    add(person.inlineAgent[tool]);
+    const keys = Object.keys(patterns);
+    delete result[tool];
+    result[tool] = keys.length === 1 && keys[0] === "*" ? patterns["*"] : patterns;
   }
   return result;
+}
+
+/** OpenCode's Permission.fromConfig: one rule per tool action, one per pattern of a tool object, in order. */
+function permissionRules(block: PermissionBlock): Array<{ permission: string; pattern: string; action: Action }> {
+  return Object.entries(block).flatMap(([permission, rule]) => typeof rule === "string"
+    ? [{ permission, pattern: "*", action: rule }]
+    : Object.entries(rule).map(([pattern, action]) => ({ permission, pattern, action })));
+}
+
+/** A permission value as OpenCode's schema reads it (a single action means every tool), or null when it is not one. */
+function permissionBlock(value: unknown): PermissionBlock | null {
+  if (isAction(value)) return { "*": value };
+  if (!isObject(value)) return null;
+  const block: PermissionBlock = {};
+  for (const [key, rule] of Object.entries(value)) {
+    if (isAction(rule)) { block[key] = rule; continue; }
+    if (!isObject(rule) || !Object.values(rule).every(isAction)) return null;
+    block[key] = { ...(rule as Record<string, Action>) };
+  }
+  return block;
+}
+
+function isAction(value: unknown): value is Action {
+  return value === "allow" || value === "ask" || value === "deny";
+}
+
+/** remeda's mergeDeep as OpenCode uses it for configuration: a key keeps its first place, objects merge. */
+function mergeDeep(target: PermissionBlock, source: PermissionBlock): PermissionBlock {
+  const result: PermissionBlock = { ...target };
+  for (const [key, value] of Object.entries(source)) {
+    const current = result[key];
+    result[key] = isObject(current) && isObject(value) ? { ...current, ...value } : value;
+  }
+  return result;
+}
+
+/** OpenCode's Wildcard.match (packages/core/src/util/wildcard.ts). */
+export function wildcardMatch(input: string, pattern: string, platform: NodeJS.Platform = process.platform): boolean {
+  let escaped = pattern.replaceAll("\\", "/").replace(/[.+^${}()|[\]\\]/gu, "\\$&").replace(/\*/gu, ".*").replace(/\?/gu, ".");
+  if (escaped.endsWith(" .*")) escaped = `${escaped.slice(0, -3)}( .*)?`;
+  return new RegExp(`^${escaped}$`, platform === "win32" ? "si" : "s").test(input.replaceAll("\\", "/"));
+}
+
+/** The YAML front matter of an agent file, or null when it cannot be read; {} when there is none. */
+function markdownFrontMatter(text: string): Record<string, unknown> | null {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u.exec(text);
+  if (!match) return {};
+  try {
+    const parsed = (lazyYaml().parse(match[1]) as unknown) ?? {};
+    return isObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function ancestors(folder: string): string[] {
+  const found: string[] = [];
+  let current = folder;
+  for (let i = 0; i < 64; i++) {
+    found.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return found;
 }
 
 function parseLoose(text: string): unknown {
@@ -195,7 +316,7 @@ function readTextFile(path: string): string | null {
 }
 
 /** The auto rules (see openCodeAutoEnvironment); insertion order matters, the last matching rule wins. */
-export function openCodeAutoPermission(allowShell: boolean): OpenCodeConfig {
+export function openCodeAutoPermission(allowShell: boolean): Record<string, Action | Record<string, Action>> {
   return {
     read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" },
     glob: "allow",

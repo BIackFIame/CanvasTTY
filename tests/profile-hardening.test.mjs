@@ -8,32 +8,121 @@ import { permissionConfigProblem } from "../src/main/services/LaunchPipeline.ts"
 import { coreOwnedLaunchArgument } from "../src/main/services/terminalLaunch.ts";
 import { availableProfiles, BYPASS_CHANGES_NOTHING, profileAvailable } from "../src/shared/autoMode.ts";
 
-const rulesOf = (env) => JSON.parse(env.OPENCODE_CONFIG_CONTENT).agent.build.permission;
 
-test("OpenCode auto keeps the person's own deny and ask rules after its allow rules", async (t) => {
+// OpenCode 1.18.33's decision for the build agent (agent.ts, permission/index.ts, core/util/wildcard.ts): its
+// defaults, the merged top-level permission, then the merged agent.build.permission; the last rule whose key and
+// pattern both match wins. Config objects merge with remeda's mergeDeep (a key keeps its first place).
+const OPENCODE_DEFAULTS = { "*": "allow", doom_loop: "ask", external_directory: { "*": "ask" }, question: "deny",
+  read: { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" } };
+const match = (input, pattern) => {
+  let escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+  if (escaped.endsWith(" .*")) escaped = `${escaped.slice(0, -3)}( .*)?`;
+  return new RegExp(`^${escaped}$`, "s").test(input);
+};
+const fromConfig = (block = {}) => Object.entries(typeof block === "string" ? { "*": block } : block).flatMap(([permission, rule]) =>
+  typeof rule === "string" ? [{ permission, pattern: "*", action: rule }] : Object.entries(rule).map(([pattern, action]) => ({ permission, pattern, action })));
+const mergeDeep = (target, source) => {
+  const result = { ...target };
+  for (const [key, value] of Object.entries(source ?? {})) {
+    const current = result[key];
+    const plain = (item) => item && typeof item === "object" && !Array.isArray(item);
+    result[key] = plain(current) && plain(value) ? mergeDeep(current, value) : value;
+  }
+  return result;
+};
+/** What OpenCode decides for `tool` on `input`, given the config files it reads (in its order) and the inline config. */
+function decide(files, inlineConfig, tool, input = "*") {
+  const config = [...files, inlineConfig].reduce((merged, next) => mergeDeep(merged, next), {});
+  const rules = [...fromConfig(OPENCODE_DEFAULTS), ...fromConfig(config.permission), ...fromConfig(config.agent?.build?.permission)];
+  return rules.findLast((rule) => match(tool, rule.permission) && match(input, rule.pattern))?.action ?? "ask";
+}
+const inlineOf = (env) => JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+const auto = (env, options = {}) => inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null, ...options }));
+
+test("OpenCode auto never overrides the person's wildcard deny or ask (the reviewer's case)", () => {
+  for (const action of ["deny", "ask"]) {
+    const person = { permission: { "*": action } };
+    const result = auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify(person) });
+    for (const tool of ["read", "glob", "grep", "list", "edit", "bash"]) {
+      assert.equal(decide([], result, tool, "src/a.ts"), action, `${tool} stays ${action}`);
+      assert.equal(result.agent?.build?.permission?.[tool], undefined, `auto adds nothing for ${tool}`);
+    }
+  }
+  // A single word for the whole permission means every tool, like "*".
+  assert.equal(decide([], auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: "deny" }) }), "edit"), "deny");
+  // A wildcard key reaches the tools it matches only.
+  const partial = auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { "ed*": "deny", "b?sh": "ask" } }) });
+  assert.equal(decide([], partial, "edit"), "deny");
+  assert.equal(decide([], partial, "bash", "ls"), "ask");
+  assert.equal(decide([], partial, "grep"), "allow", "the tools the person did not restrict still get auto");
+  // The person's own later allow keeps working, and auto does not turn their catch-all ask into an allow elsewhere.
+  const mixed = auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { "*": "ask", read: "allow" } }) });
+  assert.equal(decide([], mixed, "read", "a.ts"), "allow");
+  assert.equal(decide([], mixed, "edit", "a.ts"), "ask");
+  // An agent-level wildcard in the inline config counts the same.
+  const agentLevel = auto({ OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { build: { permission: { "*": "deny" } } } }) });
+  assert.equal(decide([], agentLevel, "bash", "ls"), "deny");
+  assert.equal(decide([], agentLevel, "edit"), "deny");
+});
+
+test("OpenCode auto keeps the person's specific rules for a tool after its own, from files and the inline config", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "ctty-opencode-rules-"));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const project = join(home, "p");
+  const project = join(home, "work", "p");
   await mkdir(join(home, ".config", "opencode"), { recursive: true });
-  await mkdir(project);
+  await mkdir(project, { recursive: true });
   // JSONC, as OpenCode allows: comments and a trailing comma.
-  await writeFile(join(home, ".config", "opencode", "opencode.jsonc"), `{
+  const globalText = `{
     // mine
     "permission": { "read": { "*.pem": "deny", "*.md": "allow" }, "bash": { "git push *": "ask" }, },
-  }`);
-  await writeFile(join(project, "opencode.json"), JSON.stringify({ agent: { build: { permission: { edit: { "secrets/**": "deny" } } } } }));
-  const env = { HOME: home, OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission: { grep: "ask" } }) };
-  assert.deepEqual(openCodePersonRules(env, project), {
-    read: { "*.pem": "deny" }, bash: { "git push *": "ask" }, edit: { "secrets/**": "deny" }, grep: "ask"
-  });
-  const rules = rulesOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: project }));
-  // Last matching rule wins in OpenCode: the person's come last.
-  assert.deepEqual(Object.entries(rules.read).at(-1), ["*.pem", "deny"]);
-  assert.equal(rules.read["*"], "allow");
-  assert.deepEqual(rules.bash, { "*": "allow", "git push *": "ask" });
-  assert.deepEqual(rules.edit, { "*": "allow", "secrets/**": "deny" });
-  assert.equal(rules.grep, "ask", "a whole-tool ask replaces auto's allow");
-  assert.equal(rules.glob, "allow");
+  }`;
+  await writeFile(join(home, ".config", "opencode", "opencode.jsonc"), globalText);
+  // A project config one folder up from where the agent starts.
+  const parentConfig = { permission: { edit: { "secrets/**": "deny" } } };
+  await writeFile(join(home, "work", "opencode.json"), JSON.stringify(parentConfig));
+  const inline = { permission: { grep: "ask" } };
+  const env = { HOME: home, OPENCODE_CONFIG_CONTENT: JSON.stringify(inline) };
+  const person = openCodePersonRules(env, project);
+  assert.equal(person.unknown, false);
+  assert.deepEqual(person.top, { read: { "*.pem": "deny", "*.md": "allow" }, bash: { "git push *": "ask" }, edit: { "secrets/**": "deny" }, grep: "ask" });
+  const result = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: project }));
+  const files = [{ permission: { read: { "*.pem": "deny", "*.md": "allow" }, bash: { "git push *": "ask" } } }, parentConfig];
+  assert.equal(decide(files, result, "bash", "ls -la"), "allow", "auto opens the shell (guarded)");
+  assert.equal(decide(files, result, "bash", "git push origin main"), "ask", "the person's ask still wins");
+  assert.equal(decide(files, result, "edit", "secrets/key.txt"), "deny");
+  assert.equal(decide(files, result, "edit", "src/a.ts"), "allow");
+  assert.equal(decide(files, result, "read", "id.pem"), "deny");
+  assert.equal(decide(files, result, "read", ".env"), "ask");
+  assert.equal(decide(files, result, "grep"), "ask", "a whole-tool ask replaces auto's allow");
+  assert.equal(result.agent.build.permission.grep, "ask");
+  assert.equal(decide(files, result, "glob"), "allow");
+});
+
+test("OpenCode auto leaves a tool alone when the person's files name it for the build agent, or cannot be read", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-opencode-agent-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const project = join(home, "p");
+  await mkdir(join(project, ".opencode", "agent"), { recursive: true });
+  await mkdir(join(home, ".config", "opencode"), { recursive: true });
+  // A file-level agent.build rule would keep its place when OpenCode merges the inline config in: auto stays out.
+  const fileAgent = { agent: { build: { permission: { bash: { "rm *": "deny" } } } } };
+  await writeFile(join(project, "opencode.json"), JSON.stringify(fileAgent));
+  // An agent file's front matter counts as the build agent's permission too.
+  await writeFile(join(project, ".opencode", "agent", "build.md"), "---\npermission:\n  edit: ask\n---\nBuild things.\n");
+  const env = { HOME: home };
+  const result = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: project }));
+  assert.equal(result.agent.build.permission.bash, undefined);
+  assert.equal(result.agent.build.permission.edit, undefined);
+  assert.equal(result.agent.build.permission.grep, "allow");
+  const files = [fileAgent, { agent: { build: { permission: { edit: "ask" } } } }];
+  assert.equal(decide(files, result, "bash", "rm -rf x"), "deny");
+  assert.equal(decide(files, result, "edit"), "ask");
+
+  // A configuration that exists but cannot be parsed: auto assumes nothing and opens nothing.
+  await writeFile(join(home, ".config", "opencode", "opencode.json"), "{ \"permission\": { \"*\": \"deny\" ");
+  const broken = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: project }));
+  assert.equal(openCodePersonRules(env, project).unknown, true);
+  assert.deepEqual(broken.agent.build.permission, {});
 });
 
 test("a plugin cannot hand OpenCode or Kimi a configuration that decides approvals", () => {
