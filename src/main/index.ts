@@ -23,6 +23,7 @@ import { TerminalManager, reachesObservers, reachesRenderer } from "./services/T
 import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
+import { AgentChatHistoryService } from "./services/AgentChatHistoryService";
 import { LimitsService } from "./services/LimitsService";
 import {
   createProviderCliRegistry,
@@ -143,6 +144,7 @@ let pluginMediaService: PluginMediaService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
 let providerSecretsService: ProviderSecretsService | null = null;
 let hermesHudService: HermesHudService | null = null;
+let agentChatHistory: AgentChatHistoryService | null = null;
 let browserService: BrowserService | null = null;
 let canvasNavigationInput: CanvasNavigationInputController | null = null;
 let agentGateway: AgentGateway | null = null;
@@ -546,6 +548,7 @@ async function initializeServices(): Promise<void> {
   terminalManager.configureRedaction(redaction);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
+  agentChatHistory = new AgentChatHistoryService(settings, providerClis, terminalManager, hermesHomeDirectory);
 
   // Plugin services see card events and control only the cards they start (EP-4).
   const sessionsForPlugins = new PluginSessions({
@@ -708,6 +711,7 @@ async function initializeServices(): Promise<void> {
     },
     terminals: terminalManager,
     limits: limitsService,
+    agentChatHistory,
     plugins: pluginManager,
     pluginServices,
     pluginCards,
@@ -1098,6 +1102,7 @@ app.on("child-process-gone", (_event, details) => {
 void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
+  agentChatHistory?.dispose();
   if (agentControl) await Promise.allSettled([agentControl.close()]);
   for (const request of browserRequests.values()) { clearTimeout(request.timer); request.reject(new Error("App closing")); }
   browserRequests.clear();

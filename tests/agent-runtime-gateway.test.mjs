@@ -173,14 +173,14 @@ test("RuntimeGateway normalizes uppercase UUID to lowercase canonical UUID for c
   assert.equal(signals[0].signal.threadId, lowerUuid);
 });
 
-test("RuntimeGateway ignores threadId when non-canonical or from a provider without exact resume", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+test("RuntimeGateway keeps Qwen conversation IDs and rejects non-canonical IDs", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
   await gateway.start();
   t.after(() => gateway.close());
 
-  // 1. Cross-provider: qwen has no exact resume, so its session_id UUID is dropped
+  // Qwen reports its native UUID so exact history resume can match the live card.
   const qwenCap = gateway.registerSession("terminal-qwen-test", "qwen");
   const validUuid = "12345678-1234-1234-1234-123456789abc";
   const helper = new URL("../src/agent-runtime/hook-helper.mjs", import.meta.url);
@@ -199,7 +199,7 @@ test("RuntimeGateway ignores threadId when non-canonical or from a provider with
   const qwenResult = await childResult(qwenChild);
   assert.equal(qwenResult.code, 0, qwenResult.stderr);
   assert.equal(signals.length, 1);
-  assert.equal(signals[0].signal.threadId, undefined);
+  assert.equal(signals[0].signal.threadId, validUuid);
 
   // 2. Malformed UUID: not canonical format (e.g. invalid chars, wrong length, path traversal)
   const codexCap = gateway.registerSession("terminal-codex-malformed", "codex");
@@ -231,10 +231,10 @@ test("RuntimeGateway ignores threadId when non-canonical or from a provider with
     assert.equal(signals[i].signal.threadId, undefined);
   }
 
-  // 3. Direct protocol injection with cross-provider threadId is rejected
+  // Direct protocol injection with an OpenCode id is rejected for Qwen.
   await send(qwenCap.address, {
     ...message(qwenCap, "working", "UserPromptSubmit", "turn-qwen-direct"),
-    threadId: validUuid
+    threadId: "ses_foreign123"
   });
   // Signal should not be delivered or accepted
   assert.equal(signals.filter((s) => s.id === "terminal-qwen-test").length, 1);

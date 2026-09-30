@@ -3,6 +3,7 @@ import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron"
 import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type {
   AppSettings,
+  AgentChatHistoryProviderId,
   AgentCliAvailability,
   BrowserCommand,
   CanvasNavigationPointerBindingInput,
@@ -17,6 +18,7 @@ import type {
   PixelTerminalBorderSkinId,
   ProviderId,
   ProviderSecretId,
+  Point,
   SessionBounds
 } from "../../shared/contracts";
 import { IPC, PROVIDER_SECRET_IDS, isProviderId } from "../../shared/contracts";
@@ -27,6 +29,7 @@ import { isCustomTerminalBorderSkinId, type SkinRegistry } from "../services/Ski
 import { isPixelSkinSlot, isPixelTerminalBorderSkinId, type PixelSkinPackRegistry } from "../services/PixelSkinPackRegistry";
 import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
+import type { AgentChatHistoryService } from "../services/AgentChatHistoryService";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
 import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
@@ -49,6 +52,7 @@ interface Dependencies {
   providerClis: ProviderCliRegistry;
   recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
+  agentChatHistory: AgentChatHistoryService;
   limits: LimitsService;
   plugins: PluginManager;
   pluginServices: PluginServiceSupervisor;
@@ -86,6 +90,7 @@ export function registerIpc({
   providerClis,
   recheckProviderClis,
   terminals,
+  agentChatHistory,
   limits,
   plugins,
   pluginServices,
@@ -177,9 +182,24 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return recheckProviderClis();
   });
+  ipcMain.handle(IPC.agentChatHistoryProviders, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return agentChatHistory.providers();
+  });
+  ipcMain.handle(IPC.agentChatHistoryList, (event, provider: AgentChatHistoryProviderId, cursor?: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (cursor !== undefined && (typeof cursor !== "string" || cursor.length > 64)) throw new Error("Invalid history cursor.");
+    return agentChatHistory.list(provider, cursor);
+  });
+  ipcMain.handle(IPC.agentChatHistoryResume, (event, provider: AgentChatHistoryProviderId, id: string, position: Point) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) throw new Error("Invalid history card position.");
+    return agentChatHistory.resume(provider, id, position);
+  });
   ipcMain.handle(IPC.settingsUpdate, async (event, patch: Partial<AppSettings>) => {
     assertMainRenderer(event, getMainWindow);
     const next = await settings.update(patch);
+    agentChatHistory.settingsChanged();
     await applyBrowserSettings(next);
     return next;
   });

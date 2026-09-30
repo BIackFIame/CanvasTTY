@@ -131,7 +131,7 @@ test("Codex restore throws on malformed resumeThreadId", () => {
   }
 });
 
-test("Claude and OpenCode resume their own session by id; other providers keep their continue flags", () => {
+test("Claude, OpenCode and Qwen resume their own session by id", () => {
   const uuid = "12345678-1234-4234-8234-123456789abc";
   const claude = resolveTerminalLaunch("claude", "normal", ["--bridge"], {
     providerCli: available("claude", "/resolved/claude"),
@@ -160,7 +160,7 @@ test("Claude and OpenCode resume their own session by id; other providers keep t
     resumePrevious: true,
     resumeThreadId: uuid
   });
-  assert.deepEqual(qwen.args, ["--yolo", "--continue"]);
+  assert.deepEqual(qwen.args, ["--yolo", "--resume", uuid]);
 });
 
 test("Windows batch quoting with Codex resume thread UUID", () => {

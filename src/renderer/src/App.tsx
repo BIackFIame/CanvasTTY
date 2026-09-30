@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentProviderId,
+  AgentChatHistoryItem,
   AgentCliAvailability,
   AppSettings,
   BrowserCanvasState,
@@ -140,6 +141,11 @@ const FALLBACK_SETTINGS: AppSettings = {
   attentionNotifications: true,
   attentionQueueVisible: true,
   attentionQueuePlacement: "bottom-right",
+  agentChatHistoryVisible: false,
+  agentChatHistoryPlacement: "top-left",
+  agentChatHistoryExpandMode: "hover",
+  agentChatHistorySearchAgents: "current",
+  agentChatHistorySearchSessions: "filtered",
   agentControlEnabled: false
 };
 
@@ -814,6 +820,22 @@ export function App(): React.JSX.Element {
     setCamera(focusCamera(session.position, session.size));
   }, []);
 
+  const resumeHistory = useCallback(async (item: AgentChatHistoryItem, center: Point): Promise<SessionSnapshot> => {
+    const current = settingsRef.current;
+    const pixelSkin = isPixelSkinThemeId(current.terminalBorderSkin) || isPixelSkinPackId(current.terminalBorderSkin);
+    const size = pixelSkin ? PIXEL_SKIN_CARD_SIZE : DEFAULT_SESSION_SIZE;
+    const position = centeredWindowPosition(center, size);
+    const result = await window.canvasTTY.agentChatHistory.resume(item.provider, item.id, position);
+    if ("error" in result) throw new Error(result.error.message);
+    const { session, reused: alreadyOpen } = result;
+    const sized = pixelSkin && !alreadyOpen ? { ...session, size: { ...size } } : session;
+    if (pixelSkin && !alreadyOpen) window.canvasTTY.terminal.setBounds(session.id, { position: session.position, size });
+    sessionsRef.current = upsertSnapshot(sessionsRef.current, sized);
+    setSessions((sessions) => upsertSnapshot(sessions, sized));
+    if (!alreadyOpen && session.status === "failed") throw new Error(session.failureDetails || "The conversation could not be resumed. Check the terminal card.");
+    return sized;
+  }, []);
+
   const renameSession = useCallback(async (id: string, title: string): Promise<void> => {
     try {
       const metadata = await window.canvasTTY.terminal.rename(id, title);
@@ -1242,6 +1264,7 @@ export function App(): React.JSX.Element {
           onDisposePluginCanvas={disposePluginCanvas}
           onFocusPluginCanvas={focusPluginCanvas}
           onFocusSession={focusSession}
+          onResumeHistory={resumeHistory}
           activeSessionId={activeSessionId}
           browserSelected={browserSelected}
           renamingSessionId={renamingSessionId}

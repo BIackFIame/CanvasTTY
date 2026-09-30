@@ -22,17 +22,21 @@ export const RUNTIME_STATES = Object.freeze(["idle", "working", "needs_approval"
 
 // A provider's own conversation id, as its lifecycle hook reports it, lets a restored
 // card resume exactly that conversation. It ends up in the provider's argv, so only
-// the shapes those CLIs issue are accepted: canonical UUIDs for Codex threads and
-// Claude sessions (lower-cased), `ses_` tokens for OpenCode sessions.
+// UUID conversation ids are lower-cased, OpenCode uses `ses_` tokens, Hermes
+// uses timestamp-like ids, and MiniMax uses opaque safe session tokens.
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OPENCODE_SESSION_RE = /^ses_[A-Za-z0-9]{1,120}$/;
+const HERMES_SESSION_RE = /^\d{8}_\d{6}_[0-9a-f]{6,32}$/i;
+const MINIMAX_SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 export function normalizeThreadId(provider, value) {
   if (typeof value !== "string") return undefined;
-  if (provider === "codex" || provider === "claude") {
+  if (["codex", "claude", "grok", "qwen", "kimi", "pi", "omp", "cursor"].includes(provider)) {
     return CANONICAL_UUID_RE.test(value) ? value.toLowerCase() : undefined;
   }
   if (provider === "opencode") return OPENCODE_SESSION_RE.test(value) ? value : undefined;
+  if (provider === "hermes") return HERMES_SESSION_RE.test(value) ? value : undefined;
+  if (provider === "minimax") return MINIMAX_SESSION_RE.test(value) ? value : undefined;
   return undefined;
 }
 

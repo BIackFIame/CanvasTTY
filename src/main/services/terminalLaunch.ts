@@ -108,12 +108,19 @@ function resolveResumeArguments(
   return RESUME_ARGUMENTS[provider];
 }
 
-// The same exact resume for the other CLIs whose hook reports that CLI's own session
-// id, each checked against its --help: `claude -r, --resume [value]`,
-// `opencode -s, --session <id>`. Everything else continues with RESUME_ARGUMENTS.
+// Exact provider ids, from hooks or local history. Providers without a verified
+// by-id flag continue to use RESUME_ARGUMENTS.
 const RESUME_BY_ID_ARGUMENTS: Partial<Record<Exclude<ProviderId, "terminal" | "codex">, (id: string) => string[]>> = {
   claude: (id) => ["--resume", id],
-  opencode: (id) => ["--session", id]
+  opencode: (id) => ["--session", id],
+  hermes: (id) => ["--resume", id],
+  grok: (id) => ["--resume", id],
+  qwen: (id) => ["--resume", id],
+  kimi: (id) => ["--session", id],
+  pi: (id) => ["--session", id],
+  omp: (id) => ["--session", id],
+  minimax: (id) => ["--session", id],
+  cursor: (id) => ["--resume", id]
 };
 
 export function canResumeThreadById(provider: ProviderId): boolean {

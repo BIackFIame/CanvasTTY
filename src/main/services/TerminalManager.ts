@@ -54,7 +54,7 @@ import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
-import { resolveTerminalLaunch } from "./terminalLaunch.ts";
+import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
 import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
@@ -294,7 +294,7 @@ export class TerminalManager {
     const session = this.sessions.get(id);
     if (!session) return null;
     return {
-      metadata: structuredClone(session.metadata),
+      metadata: publicSessionMetadata(session),
       workingDirectory: this.launchContexts.get(id)?.cwd ?? session.metadata.cwd,
       environment: session.extras.environment ? structuredClone(session.extras.environment) : null,
       restored: session.restored === true,
@@ -362,7 +362,7 @@ export class TerminalManager {
     else session.metadata.skipRestore = true;
     this.emitSession(session.metadata);
     this.schedulePersistence();
-    return structuredClone(session.metadata);
+    return publicSessionMetadata(session);
   }
 
   async shutdown(): Promise<void> {
@@ -422,13 +422,13 @@ export class TerminalManager {
   }
 
   listMetadata(): SessionMetadata[] {
-    return [...this.sessions.values()].map((session) => structuredClone(session.metadata));
+    return [...this.sessions.values()].map(publicSessionMetadata);
   }
 
   /** One session's metadata by id, or null. Unlike list(), a lookup never copies any scrollback. */
   getMetadata(id: string): SessionMetadata | null {
     const session = this.sessions.get(id);
-    return session ? structuredClone(session.metadata) : null;
+    return session ? publicSessionMetadata(session) : null;
   }
 
   geometry(id: string): { cols: number; rows: number } {
@@ -460,6 +460,11 @@ export class TerminalManager {
     control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number } = {}
   ): SessionSnapshot {
     assertCreateRequest(request);
+    const threadId = request.resumeThreadId === undefined ? undefined : normalizeThreadId(request.provider, request.resumeThreadId);
+    if (request.resumeThreadId !== undefined && (!threadId || !canResumeThreadById(request.provider) || request.environment)) {
+      throw new Error("Invalid local conversation resume request.");
+    }
+    const resume: ResumeRequest = threadId ? { threadId } : null;
     if (control.captureResult && request.provider !== "codex") {
       throw new Error("Result capture requires a Codex session.");
     }
@@ -502,7 +507,7 @@ export class TerminalManager {
     const launched = awaitMeasuredGrid || contributed
       ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
       : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, null, control.captureResult, role,
+        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
         control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
@@ -523,7 +528,8 @@ export class TerminalManager {
         ? createProviderLifecycleParser(request.provider, request.cwd)
         : null,
       awaitingInitialResize: awaitMeasuredGrid,
-      resumeOnLaunch: null,
+      resumeOnLaunch: resume,
+      ...(threadId ? { threadId } : {}),
       captureResult: control.captureResult === true,
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
@@ -538,13 +544,21 @@ export class TerminalManager {
     };
     this.sessions.set(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
-    if (contributed) this.launchContributed(id, session, null, null, control.answerCaptureGrantExpiresAt);
+    if (contributed) this.launchContributed(id, session, resume, null, control.answerCaptureGrantExpiresAt);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
     if (runtimeStatus) session.metadata.status = runtimeStatus;
 
     this.emitSession(metadata);
     this.schedulePersistence();
     return snapshot(session);
+  }
+
+  /** History belongs to this computer; a plugin environment's same id is a different conversation. */
+  findLocalConversation(provider: ProviderId, threadId: string): SessionSnapshot | null {
+    const matches = [...this.sessions.values()].filter((candidate) => candidate.metadata.provider === provider
+      && candidate.threadId === threadId && !candidate.extras.environment && !candidate.extras.environmentChoice);
+    const session = matches.find((candidate) => candidate.metadata.exitCode === null) ?? matches[0];
+    return session ? snapshot(session) : null;
   }
 
   restart(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
@@ -792,7 +806,7 @@ export class TerminalManager {
     session.metadata.titleCustomized = true;
     this.emitSession(session.metadata);
     this.schedulePersistence();
-    return structuredClone(session.metadata);
+    return publicSessionMetadata(session);
   }
 
   /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
@@ -802,7 +816,8 @@ export class TerminalManager {
     if (source === "hook") session.hookSignals = (session.hookSignals ?? 0) + 1;
 
     const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
-    if (threadId && threadId !== session.threadId) {
+    const threadChanged = Boolean(threadId && threadId !== session.threadId);
+    if (threadChanged) {
       session.threadId = threadId;
       this.schedulePersistence();
     }
@@ -810,7 +825,7 @@ export class TerminalManager {
     const nextStatus = signal.state;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
-    if (session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
+    if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
@@ -1111,7 +1126,8 @@ export class TerminalManager {
   private emitSession(metadata: SessionMetadata, failureOrigin: FailureOrigin | null = null): void {
     metadata.revision += 1;
     this.emittingFailureOrigin = failureOrigin;
-    this.emit(IPC.terminalSession, { session: structuredClone(metadata) });
+    const session = this.sessions.get(metadata.id);
+    this.emit(IPC.terminalSession, { session: session ? publicSessionMetadata(session) : structuredClone(metadata) });
     // The emit callback is the only legitimate reader and has already run.
     this.emittingFailureOrigin = null;
   }
@@ -1825,9 +1841,16 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function publicSessionMetadata(session: ManagedSession): SessionMetadata {
+  const metadata = structuredClone(session.metadata);
+  if (session.threadId) metadata.threadId = session.threadId;
+  else delete metadata.threadId;
+  return metadata;
+}
+
 function snapshot(session: ManagedSession): SessionSnapshot {
   return {
-    ...structuredClone(session.metadata),
+    ...publicSessionMetadata(session),
     buffer: session.bufferChunks.slice(session.bufferStart).join("")
   };
 }

@@ -169,3 +169,36 @@ test("restarting a Codex card after an exit clears stale thread ID and launches 
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("conversation identity survives every public metadata update and clears on a fresh restart", async t => {
+  const events = [];
+  let exit;
+  const inst = new TerminalManager((channel, payload) => events.push({ channel, payload }), registry(), undefined, undefined, true,
+    (command) => ({ ...spawner([])(command, [], {}), onExit(handler) { exit = handler; return { dispose() {} }; } }));
+  t.after(() => inst.shutdown());
+  const created = inst.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
+  inst.applyProviderSignal(created.id, { kind: "lifecycle", state: "idle", threadId: FIRST_THREAD });
+  assert.equal(inst.rename(created.id, "Renamed").threadId, FIRST_THREAD);
+  assert.equal(inst.setRestore(created.id, false).threadId, FIRST_THREAD);
+  assert.equal(inst.getMetadata(created.id).threadId, FIRST_THREAD);
+  assert.equal(inst.listMetadata()[0].threadId, FIRST_THREAD);
+  assert.equal(inst.pluginContext(created.id).metadata.threadId, FIRST_THREAD);
+  assert.equal(events.filter(event => event.payload?.session?.id === created.id).at(-1).payload.session.threadId, FIRST_THREAD);
+  exit({ exitCode: 0 });
+  inst.restart(created.id);
+  assert.equal(inst.getMetadata(created.id).threadId, undefined);
+  assert.equal(events.filter(event => event.payload?.session?.id === created.id).at(-1).payload.session.threadId, undefined);
+});
+
+test("local history reuses a running card before an exited card with the same conversation", async t => {
+  const exits = [];
+  const inst = new TerminalManager(() => undefined, registry(), undefined, undefined, true,
+    (command) => ({ ...spawner([])(command, [], {}), onExit(handler) { exits.push(handler); return { dispose() {} }; } }));
+  t.after(() => inst.shutdown());
+  const create = () => inst.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 }, resumeThreadId: FIRST_THREAD });
+  create();
+  exits[0]({ exitCode: 0 });
+  const active = create();
+  assert.equal(inst.findLocalConversation("codex", FIRST_THREAD).id, active.id);
+  assert.equal(inst.findLocalConversation("hermes", FIRST_THREAD), null);
+});

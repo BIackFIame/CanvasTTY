@@ -112,9 +112,9 @@ test("threadId persists and normalizes to canonical lower-case UUID for codex pr
   const persisted = persistedTerminalSession(sessionMetadata, `  ${threadIdUpper}  `);
   assert.equal(persisted.threadId, threadIdCanonical);
 
-  // A provider without exact resume ignores the id; Claude keeps its UUID session id
+  // Providers with exact UUID resume keep their canonical session id.
   const qwenPersisted = persistedTerminalSession({ ...sessionMetadata, provider: "qwen" }, threadIdUpper);
-  assert.equal(qwenPersisted.threadId, undefined);
+  assert.equal(qwenPersisted.threadId, threadIdCanonical);
   assert.equal(persistedTerminalSession({ ...sessionMetadata, provider: "claude" }, threadIdUpper).threadId, threadIdCanonical);
 
   // Malformed thread IDs are ignored in persistedTerminalSession helper
