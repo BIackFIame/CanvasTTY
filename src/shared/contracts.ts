@@ -288,6 +288,7 @@ export interface AppSettings {
   terminalSkinAnimationEnabled: boolean;
   appSkin: AppSkinId;
   snapToGrid: boolean;
+  copyOnSelect: boolean;
   invertTerminalWheel: boolean;
   invertCanvasWheel: boolean;
   edgePan: boolean;

@@ -953,6 +953,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               snapEnabled={settings.snapToGrid}
               focusActivation={settings.focusActivation}
               invertTerminalWheel={settings.invertTerminalWheel}
+              copyOnSelect={settings.copyOnSelect}
               captureCanvasWheelOverWidgets={routeWidgetWheelToCanvas || widgetFocus.id !== terminalCanvasWidgetId(session.id)}
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
@@ -1101,6 +1102,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               snapEnabled={false}
               focusActivation={settings.focusActivation}
               invertTerminalWheel={settings.invertTerminalWheel}
+              copyOnSelect={settings.copyOnSelect}
               captureCanvasWheelOverWidgets={false}
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}

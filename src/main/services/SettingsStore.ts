@@ -372,6 +372,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     terminalSkinAnimationEnabled: true,
     appSkin: "classic",
     snapToGrid: true,
+    copyOnSelect: false,
     invertTerminalWheel: true,
     invertCanvasWheel: false,
     edgePan: false,
@@ -591,6 +592,7 @@ export function normalizeSettings(
       ? source.appSkin as AppSkinId
       : fallback.appSkin,
     snapToGrid: typeof source.snapToGrid === "boolean" ? source.snapToGrid : fallback.snapToGrid,
+    copyOnSelect: typeof source.copyOnSelect === "boolean" ? source.copyOnSelect : fallback.copyOnSelect,
     invertTerminalWheel: typeof source.invertTerminalWheel === "boolean"
       ? source.invertTerminalWheel
       : fallback.invertTerminalWheel,

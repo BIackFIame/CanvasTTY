@@ -64,7 +64,8 @@ export function remapTerminalMouseCoordinates(
 export function attachTerminalMouseCoordinateAdapter(
   screen: HTMLElement,
   getWheelMultiplier: () => 1 | -1 = () => 1,
-  shouldRouteWheelToCanvas: () => boolean = () => false
+  shouldRouteWheelToCanvas: () => boolean = () => false,
+  shouldForceSelectionWithShift: () => boolean = () => false
 ): () => void {
   const ownerDocument = screen.ownerDocument;
   const syntheticEvents = new WeakSet<Event>();
@@ -86,14 +87,17 @@ export function attachTerminalMouseCoordinateAdapter(
     );
     const needsRemap = Math.abs(adjusted.x - event.clientX) > 0.01
       || Math.abs(adjusted.y - event.clientY) > 0.01;
-    if (!needsRemap) {
+    // On macOS xterm forces selection with Option, which is the canvas pan key.
+    // Translate Shift only for xterm mouse events; pointer navigation stays intact.
+    const forceSelection = shouldForceSelectionWithShift() && event.shiftKey && event.button === 0;
+    if (!needsRemap && !forceSelection) {
       if (event.type === "mouseup") dragging = false;
       return;
     }
 
     event.preventDefault();
     event.stopImmediatePropagation();
-    const remapped = cloneMouseEvent(event, adjusted);
+    const remapped = cloneMouseEvent(event, adjusted, forceSelection);
     syntheticEvents.add(remapped);
     target.dispatchEvent(remapped);
     if (event.type === "mouseup") dragging = false;
@@ -131,7 +135,7 @@ export function attachTerminalMouseCoordinateAdapter(
   };
 }
 
-function cloneMouseEvent(event: MouseEvent, point: ClientPoint): MouseEvent {
+function cloneMouseEvent(event: MouseEvent, point: ClientPoint, forceSelection = false): MouseEvent {
   return new MouseEvent(event.type, {
     bubbles: true,
     cancelable: true,
@@ -144,7 +148,7 @@ function cloneMouseEvent(event: MouseEvent, point: ClientPoint): MouseEvent {
     clientY: point.y,
     ctrlKey: event.ctrlKey,
     shiftKey: event.shiftKey,
-    altKey: event.altKey,
+    altKey: event.altKey || forceSelection,
     metaKey: event.metaKey,
     button: event.button,
     buttons: event.buttons,

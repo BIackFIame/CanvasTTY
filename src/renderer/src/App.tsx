@@ -108,6 +108,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   terminalSkinAnimationEnabled: true,
   appSkin: "classic",
   snapToGrid: true,
+  copyOnSelect: false,
   invertTerminalWheel: true,
   invertCanvasWheel: false,
   edgePan: false,
