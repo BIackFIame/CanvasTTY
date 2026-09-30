@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { otherSpellings } from "../onDiskPath.ts";
@@ -183,7 +183,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const ownFolders = [...own.folders, ...movedHomes];
   // Other CLIs' credentials where they are by default and where the launch environment moved them (their own home
   // variables, XDG_*): an exported GROK_HOME is where Grok's sign-in really is.
-  const hides = (folder: string): boolean => [home, input.cwd].some((kept) => kept === folder || kept.startsWith(`${folder.replace(/\/+$/u, "")}/`));
+  const hides = (folder: string): boolean => [home, input.cwd].some((kept) => isWithin(kept, folder));
   const others = AGENT_PROVIDERS.filter((provider) => provider !== input.provider)
     .flatMap((provider) => {
       const defaults = providerFolders(provider, {}, home);
@@ -236,10 +236,16 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   };
 }
 
+/** `path` is `folder` or inside it, by the host's path rules (separators, a drive on Windows). */
+function isWithin(path: string, folder: string): boolean {
+  const rest = relative(folder, path);
+  return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+}
+
 /** The folders between `home` (exclusive) and `folder` (exclusive). */
 function ancestorsBelow(home: string, folder: string): string[] {
   const found: string[] = [];
-  for (let current = dirname(folder); current !== home && current.startsWith(`${home}/`); current = dirname(current)) found.push(current);
+  for (let current = dirname(folder); current !== home && isWithin(current, home); current = dirname(current)) found.push(current);
   return found;
 }
 
