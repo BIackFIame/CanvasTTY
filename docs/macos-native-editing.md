@@ -19,6 +19,11 @@ canvas has focus. This focus rule applies on macOS only.
 - Command+A sends Super+A to the Codex draft editor. It selects the whole draft
   with the optional frontend below, including lines outside the viewport; it
   does not select terminal scrollback.
+- Codex Enter, Shift+Enter and Command+Enter retain distinct terminal events.
+  With the optional frontend, Enter and Shift+Enter add a newline to the draft;
+  only Command+Enter submits (or queues during a running turn). This also applies
+  to the provisional startup draft. Enter still confirms trust, resume and other
+  dialogs, and embedded question editors retain their existing keys.
 - Command+A in ordinary application inputs, textareas and contenteditable fields
   keeps native field selection. Physical key codes also support non-Latin
   keyboard layouts. Additional modifier combinations keep their existing path.
@@ -27,7 +32,7 @@ canvas has focus. This focus rule applies on macOS only.
 
 **Stock Codex 0.159.2 does not implement whole-draft selection.** The renderer
 bridge alone cannot provide it. The demonstrated implementation is a separate
-[Codex TUI frontend](https://github.com/mrcertis/codex-macos-tui/tree/d8f7729bb529a88f611239c4e85807db80d0bc34/macos)
+[Codex TUI frontend](https://github.com/mrcertis/codex-macos-tui/tree/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos)
 based on official Codex `rust-v0.159.2`. Its launcher requires official
 `codex-cli 0.159.2` as the backend and refuses other backend versions.
 
@@ -44,7 +49,7 @@ Contents/Resources/codex-native-tui/
 Both frontend and launcher must be present; a partial bundle gives an explicit
 launch error. With neither resource present, the usual CLI launch is used. The
 standard build does not download or include the external frontend automatically.
-The [build and packaging recipe](https://github.com/mrcertis/codex-macos-tui/blob/d8f7729bb529a88f611239c4e85807db80d0bc34/macos/README.md#canvastty-170-integration)
+The [build and packaging recipe](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos/README.md#canvastty-170-integration)
 uses adjacent CanvasTTY and Codex checkouts. On this branch, skip its `git apply`
 steps because the integration is already applied. The recipe has been exercised
 on Apple Silicon; Intel packaging remains unverified.

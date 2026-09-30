@@ -11,6 +11,37 @@ const appStylesPath = new URL("../src/renderer/src/styles/app.css", import.meta.
 const terminalManagerPath = new URL("../src/main/services/TerminalManager.ts", import.meta.url);
 const contractsPath = new URL("../src/shared/contracts.ts", import.meta.url);
 
+test("actual macOS Codex handler preserves all three Enter chords before xterm can collapse them", async () => {
+  const source = await readFile(terminalCardPath, "utf8");
+  const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
+  assert.ok(body);
+  const writes = [];
+  const window = { canvasTTY: {
+    window: { isMacOS: true },
+    terminal: { input: (id, sequence) => writes.push([id, sequence]) }
+  } };
+  const handler = new Function("window", "session", ...Object.keys(terminalShortcuts),
+    `return (event) => {${body}}`)(window, { id: "draft", provider: "codex" }, ...Object.values(terminalShortcuts));
+  for (const code of ["Enter", "NumpadEnter"]) {
+    for (const [modifiers, sequence] of [
+      [{}, "\r"], [{ shiftKey: true }, "\u001b[13;2u"], [{ metaKey: true }, "\u001b[13;9u"]
+    ]) {
+      let prevented = false;
+      let stopped = false;
+      const event = { type: "keydown", key: "Enter", code, ctrlKey: false, altKey: false,
+        shiftKey: false, metaKey: false, ...modifiers,
+        preventDefault() { prevented = true; }, stopPropagation() { stopped = true; } };
+      assert.equal(handler(event), false, "xterm must not encode these keys as identical CR bytes");
+      assert.deepEqual([prevented, stopped, writes.pop()], [true, true, ["draft", sequence]]);
+    }
+  }
+  for (const modifiers of [{ ctrlKey: true }, { altKey: true }, { metaKey: true, shiftKey: true }, { type: "keyup" }]) {
+    assert.equal(handler({ type: "keydown", key: "Enter", code: "Enter", ctrlKey: false, altKey: false,
+      shiftKey: false, metaKey: false, ...modifiers }), true);
+  }
+  assert.deepEqual(writes, []);
+});
+
 test("Command+A dispatches native Codex selection and leaves other providers and CLI keys alone", async () => {
   const source = await readFile(terminalCardPath, "utf8");
   const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];

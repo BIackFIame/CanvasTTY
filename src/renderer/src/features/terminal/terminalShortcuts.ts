@@ -14,6 +14,14 @@ interface TerminalKeyEvent {
 export const SHIFT_ENTER_SEQUENCE = "\u001b[13;2u";
 export const CODEX_SELECT_ALL_SEQUENCE = "\u001b[97;9u";
 
+export function macCodexEnterSequence(event: TerminalKeyEvent, isMacOS: boolean, provider: string): string | null {
+  if (!isMacOS || provider !== "codex" || event.type !== "keydown"
+    || !(event.key === "Enter" || event.code === "Enter" || event.code === "NumpadEnter")
+    || event.ctrlKey || event.altKey || (event.metaKey && event.shiftKey)) return null;
+  if (event.metaKey) return "\u001b[13;9u";
+  return event.shiftKey ? SHIFT_ENTER_SEQUENCE : "\r";
+}
+
 export function shouldSelectCodexDraft(event: TerminalKeyEvent, isMacOS: boolean, provider: string): boolean {
   return isMacOS && provider === "codex"
     && event.type === "keydown"

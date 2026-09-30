@@ -31,6 +31,7 @@ import {
   CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
   isMacTerminalClipboardShortcut,
+  macCodexEnterSequence,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
@@ -337,6 +338,13 @@ function TerminalCardView({
     };
     fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
+      const codexEnter = macCodexEnterSequence(event, window.canvasTTY.window.isMacOS, session.provider);
+      if (codexEnter !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        window.canvasTTY.terminal.input(session.id, codexEnter);
+        return false;
+      }
       const selectCodexDraft = shouldSelectCodexDraft(event, window.canvasTTY.window.isMacOS, session.provider);
       if (window.canvasTTY.window.isMacOS && !isMacTerminalClipboardShortcut(event) && !selectCodexDraft) return true;
       if (selectCodexDraft) {
