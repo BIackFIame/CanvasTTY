@@ -9,6 +9,7 @@ import {
   PluginManager,
   downloadGithubRepository,
   extractGithubTarball,
+  readBoundedBody,
   injectPluginInputBridge,
   normalizeGithubUrl,
   validatePluginManifest
@@ -1864,4 +1865,21 @@ test("plugin storage that cannot be read is not replaced by the next write", { s
     console.warn = warn;
     await rm(userData, { recursive: true, force: true });
   }
+});
+
+test("a plugin download past its size bound is cancelled, which closes the connection, not only released", async () => {
+  let cancelled = null;
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(1024));
+    },
+    cancel(reason) { cancelled = reason; }
+  });
+  await assert.rejects(readBoundedBody(body, 4_096, "too large"), /too large/u);
+  assert.ok(cancelled instanceof Error && /too large/u.test(cancelled.message), "the stream was cancelled");
+  assert.ok(pulls <= 6, "nothing more was read");
+  const small = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.close(); } });
+  assert.deepEqual([...await readBoundedBody(small, 4_096, "too large")], [1, 2]);
 });
