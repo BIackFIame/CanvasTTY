@@ -56,6 +56,7 @@ import type { ResizeDirection } from "../workspace/snap";
 import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
 import { compactPath, renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
+import { markBootOnce } from "../../lib/bootMarks";
 import { webglContextPool } from "./webglContextPool";
 import { skipEmptySelectionRedraws } from "./terminalSelectionRedraw";
 import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
@@ -327,6 +328,9 @@ function TerminalCardView({
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    // The first terminal card to attach xterm and become interactive: at startup this is a restored
+    // session (new sessions cannot exist yet), so this doubles as "restored terminal interactive".
+    markBootOnce("restoredTerminalInteractive");
     setOscTitle(null);
     const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
     const restoreSelectionRedraws = skipEmptySelectionRedraws(terminal);

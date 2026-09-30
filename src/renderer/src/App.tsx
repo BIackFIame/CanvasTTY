@@ -58,6 +58,7 @@ import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
 import { isPixelSkinPackId } from "./features/skins/SkinAssets";
 import { expandedPixelSkinCardBounds, PIXEL_SKIN_CARD_SIZE } from "./features/skins/pixelSkinCardGeometry";
 import type { LimitsLoadState } from "./features/home/homeModel";
+import { markBootOnce } from "./lib/bootMarks";
 import { t } from "./lib/i18n";
 import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
 import {
@@ -294,6 +295,12 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     browserCanvasRef.current = settings.browserCanvas;
   }, [settings.browserCanvas]);
+
+  useEffect(() => {
+    // The first frame where the loading screen is gone and the workspace shows real data: the
+    // point startup-latency measurements care about, not just "some DOM exists".
+    if (ready) requestAnimationFrame(() => markBootOnce("firstStableFrame"));
+  }, [ready]);
 
   useEffect(() => {
     if (!toast) return;

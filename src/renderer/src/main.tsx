@@ -2,6 +2,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@xterm/xterm/css/xterm.css";
 import { App } from "./App";
+import { markBootOnce } from "./lib/bootMarks";
 import { handleUncaughtRenderError } from "./lib/uncaughtErrorRecovery";
 import "./styles/tokens.css";
 import "./styles/app.css";
@@ -22,3 +23,6 @@ createRoot(container, {
     <App />
   </StrictMode>
 );
+// The first paint after this initial render commits: the earliest point the window shows anything
+// other than a blank/loading document.
+requestAnimationFrame(() => requestAnimationFrame(() => markBootOnce("rendererFirstPaint")));
