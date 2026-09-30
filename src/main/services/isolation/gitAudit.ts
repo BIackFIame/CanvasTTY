@@ -148,11 +148,17 @@ export function removeConfigEntries(text: string, keys: readonly string[]): stri
   return lines.filter((_line, index) => !drop.has(index)).join("\n");
 }
 
+/**
+ * File times come from the kernel's coarse clock (Linux updates it once per tick, up to 10 ms), which can read
+ * earlier than Date.now() taken just before: a file written right after the session started could look older.
+ */
+const FILE_CLOCK_SLACK_MS = 50;
+
 /** Whether `path` changed (created, written, renamed, chmod) at or after `since`. */
 async function changedSince(path: string, since: number): Promise<boolean> {
   try {
     const info = await lstat(path);
-    return Math.max(info.ctimeMs, info.mtimeMs, info.birthtimeMs || 0) >= since;
+    return Math.max(info.ctimeMs, info.mtimeMs, info.birthtimeMs || 0) >= since - FILE_CLOCK_SLACK_MS;
   } catch {
     return false;
   }

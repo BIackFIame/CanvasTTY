@@ -51,9 +51,9 @@ test("only repositories changed since the session started are reported, with eac
   const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-audit-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const old = await repo(root, "old", "[core]\n\thooksPath = /person/own/hooks\n");
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  // Older than the audit's 50 ms allowance for coarse file clocks.
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const since = Date.now();
-  await new Promise((resolve) => setTimeout(resolve, 30));
   const top = await repo(root, ".", "[core]\n\tbare = false\n\tfsmonitor = /tmp/run-me\n[user]\n\tname = n\n");
   await writeFile(join(top, "hooks", "post-commit"), "#!/bin/sh\nevil\n", { mode: 0o755 });
   await writeFile(join(top, "hooks", "pre-commit.sample"), "sample");
@@ -75,6 +75,16 @@ test("only repositories changed since the session started are reported, with eac
   assert.deepEqual(await readdir(join(nested, "info")), ["attributes.disabled-by-canvastty"]);
   assert.match(await readFile(join(old, "config"), "utf8"), /hooksPath/u, "the person's own repository is untouched");
   assert.deepEqual(await auditRepositories(root, since), []);
+});
+
+test("a change the file clock stamps slightly before the session's start still counts (coarse kernel clocks)", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-clock-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const gitDir = await repo(root, ".", "[core]\n\tfsmonitor = /tmp/run-me\n");
+  // Linux stamps files from a clock that may lag Date.now() by a tick: the start recorded just before the write can
+  // read a few milliseconds later than the file's own time.
+  const found = await auditRepositories(root, Date.now() + 20);
+  assert.deepEqual(found.map((entry) => entry.gitDir), [gitDir]);
 });
 
 /** Real git, with no configuration of the machine or the person. */
@@ -120,6 +130,7 @@ test("a linked worktree's hooks and shared config are audited in its main reposi
   git(main, "commit", "-q", "--allow-empty", "-m", "first");
   git(main, "worktree", "add", "-q", join(project, "wt"));
   git(main, "config", "extensions.worktreeConfig", "true");
+  await new Promise((resolve) => setTimeout(resolve, 150));
   const since = Date.now();
   await new Promise((resolve) => setTimeout(resolve, 30));
   // From inside the linked worktree: a hook (git runs it from the main repository) and a per-worktree setting.
