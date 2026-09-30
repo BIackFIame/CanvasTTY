@@ -15,7 +15,8 @@ import {
   type UpdaterState,
   type UpdaterStateEvent
 } from "../shared/contracts";
-import { registerIpc } from "./ipc/registerIpc";
+import { registerCriticalIpc, registerIpc } from "./ipc/registerIpc";
+import { IpcReadinessGate, type IpcRegistrar } from "./ipc/IpcReadinessGate";
 import { SettingsStore } from "./services/SettingsStore";
 import { SkinRegistry } from "./services/SkinRegistry";
 import { PixelSkinPackRegistry } from "./services/PixelSkinPackRegistry";
@@ -185,11 +186,13 @@ const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
 
 /**
- * Creates the shell window and starts loading the startup page into it. The
- * page load is not awaited here: services start next to it, and startApplication
- * waits for it to settle before it loads the application surface.
+ * Creates the shell window. Nothing is loaded into it here: startApplication loads
+ * the application surface into it at once, next to the services starting. (An
+ * intermediate startup page cost a second renderer navigation before the real one
+ * could begin, and replacing a page that is still loading races its ERR_ABORTED
+ * into the next load's promise; with one navigation there is nothing to race.)
  */
-function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
+function createWindow(): BrowserWindow {
   if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(appIcon);
   markMainBoot("windowCreateStart");
   const window = new BrowserWindow({
@@ -247,9 +250,9 @@ function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad }
     browserService?.cancelCanvasNavigationGesture();
   });
 
-  // Both handlers are registered before the startup page load: a close landing
-  // inside that load has to be visible to the load's own failure handling, and
-  // the dead window must not stay in `mainWindow` until the load settles.
+  // Both handlers are registered before the first load: a close landing inside
+  // that load has to be visible to the load's own failure handling, and the dead
+  // window must not stay in `mainWindow` until the load settles.
   window.on("close", () => {
     mainWindowClosing = true;
   });
@@ -260,31 +263,8 @@ function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad }
       observeMainWindowState?.(null);
     }
   });
-
-  const startupPage: StartupPageLoad = window
-    .loadURL(startupPageUrl({ locale: app.getLocale(), isMacOS: process.platform === "darwin" }))
-    .then(
-      () => null,
-      (error: unknown) => {
-        // A close during this load aborts the navigation (ERR_ABORTED / ERR_FAILED).
-        // That is a quit, not a failed startup; a real error on a live window is
-        // handed to startApplication to report.
-        if (shellWindowGone(window)) {
-          console.warn("CanvasTTY startup page load stopped: its window is gone, the application is closing.", error);
-          return null;
-        }
-        return error ?? new Error("The startup page did not load.");
-      }
-    );
-  return { window, startupPage };
+  return window;
 }
-
-/**
- * The startup page load of a fresh shell window: it settles with the load error
- * to report as a failed startup, or null once the page loaded (or its window is
- * gone). It never rejects.
- */
-type StartupPageLoad = Promise<unknown>;
 
 /**
  * True when the shell window is on its way out: its close was requested (the
@@ -296,7 +276,13 @@ function shellWindowGone(window: BrowserWindow): boolean {
   return mainWindowClosing || window.isDestroyed() || window.webContents.isDestroyed();
 }
 
-async function initializeServices(): Promise<void> {
+/**
+ * Starts every main-process service. It runs next to the application surface load: handlers are registered through
+ * `ipc` (the readiness gate) group by group as their services come up — the critical group first, the core group
+ * once sessions are restored, the Even G2 companion last — so a renderer call never reaches a service that does not
+ * exist yet; it waits for it.
+ */
+async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // Deny-by-default web permissions on the default session: the app window and plugin windows
   // never need camera, microphone, location, notifications or device access. The Browser card uses
   // its own partition with its own policy in BrowserService.
@@ -324,6 +310,18 @@ async function initializeServices(): Promise<void> {
     pixelSkinPacks.initialize(),
     pluginManager.load()
   ]);
+  // The renderer is already loading: what its first frame reads (settings, appearance, CLI availability, installed
+  // plugins, window chrome) answers from here on; every other call waits in the gate for its own service group.
+  protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
+  observeMainWindowState = registerCriticalIpc(ipc, {
+    settings,
+    terminalBorderSkins,
+    pixelSkinPacks,
+    providerClis,
+    plugins: pluginManager,
+    getMainWindow: () => mainWindow
+  });
+  markMainBoot("criticalServicesReady");
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
@@ -410,8 +408,27 @@ async function initializeServices(): Promise<void> {
       ? { downloadRoot: join(userDataPath, "browser-smoke-downloads") }
       : {})
   });
-  await browserService.ready();
+  // The browser store loads next to the gateways below; BrowserService's own methods wait for it, and the core
+  // handlers are registered only after it (browserReady below).
+  const browserReady = browserService.ready();
   browserService.setCanvasNavigationActive(canvasNavigationInput.active);
+  // Stores independent of everything above load meanwhile, not one after another at the end.
+  githubAuth = new GithubAuthService(app.getPath("userData"), undefined, {
+    fetcher: (input, init) => net.fetch(input, init)
+  });
+  pluginMediaService = new PluginMediaService(
+    app.getPath("userData"),
+    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission)
+  );
+  providerSecretsService = new ProviderSecretsService(app.getPath("userData"), {
+    isAvailable: securePluginStorageAvailable,
+    encrypt: (value) => safeStorage.encryptString(value),
+    decrypt: (value) => safeStorage.decryptString(value)
+  }, (values) => redaction.add("vault", values));
+  const storesLoaded = Promise.all([githubAuth.load(), pluginMediaService.load(), providerSecretsService.load()]);
+  // Awaited below; a failure meanwhile must not surface as an unhandled rejection first.
+  browserReady.catch(() => undefined);
+  storesLoaded.catch(() => undefined);
 
   if (supportsAgentGatewayPlatform()) {
     const runtimeDirectory = join(userDataPath, "browser", "runtime");
@@ -702,46 +719,11 @@ async function initializeServices(): Promise<void> {
   };
   await applyAgentControlSetting(settings.get().agentControlEnabled);
   limitsService = new LimitsService(providerClis, app.getVersion());
-  evenG2 = new EvenG2Controller({
-    userDataPath, terminals: terminalManager,
-    localDiscovery: process.platform === "darwin",
-    defaultWorkspace: join(app.getPath("documents"), "CanvasTTY Projects"),
-    bundledSpeech: process.platform === "darwin" ? (app.isPackaged ? join(process.resourcesPath, "companion/speech/canvastty-speech") : join(app.getAppPath(), "artifacts/companion-speech", process.arch, "canvastty-speech")) : undefined,
-    webRoot: app.isPackaged ? join(process.resourcesPath,"even-g2-web") : join(app.getAppPath(),"integrations/even-g2/dist"),
-    mobileRoot: app.isPackaged ? join(process.resourcesPath, "mobile-web") : join(app.getAppPath(), "integrations/mobile/dist"),
-    providerAvailability: () => providerCliAvailability(providerClis!),
-    speechWorker: app.isPackaged ? join(process.resourcesPath,"companion/asr_worker.py") : join(app.getAppPath(),"src/main/services/companion/asr_worker.py"),
-    limits: () => limitsService!.get(), openBrowser: showCompanionBrowser
-  });
-  await evenG2.load();
-  const assertCompanionSender = (event: Electron.IpcMainInvokeEvent):void => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Untrusted companion caller");
-  };
-  ipcMain.handle(IPC.evenG2State, event => { assertCompanionSender(event); return evenG2!.state(); });
-  ipcMain.handle(IPC.evenG2Command, async (event, command) => { assertCompanionSender(event); return evenG2!.command(command); });
-  githubAuth = new GithubAuthService(app.getPath("userData"), undefined, {
-    fetcher: (input, init) => net.fetch(input, init)
-  });
-  await githubAuth.load();
+  await Promise.all([browserReady, storesLoaded]);
   pluginManager.registerTokenProvider(() => githubAuth!.getToken());
-  pluginMediaService = new PluginMediaService(
-    app.getPath("userData"),
-    (pluginId, permission) => pluginManager!.assertPermission(pluginId, permission)
-  );
-  await pluginMediaService.load();
-  providerSecretsService = new ProviderSecretsService(app.getPath("userData"), {
-    isAvailable: securePluginStorageAvailable,
-    encrypt: (value) => safeStorage.encryptString(value),
-    decrypt: (value) => safeStorage.decryptString(value)
-  }, (values) => redaction.add("vault", values));
-  await providerSecretsService.load();
-  protocol.handle("canvastty-plugin", (request) => pluginManager!.protocolResponse(request.url));
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
-  observeMainWindowState = registerIpc({
+  registerIpc(ipc, {
     settings,
-    terminalBorderSkins,
-    pixelSkinPacks,
-    providerClis,
     recheckProviderClis: async () => {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();
@@ -801,6 +783,25 @@ async function initializeServices(): Promise<void> {
       install: installUpdaterUpdate
     }
   });
+  markMainBoot("coreServicesReady");
+  // The Even G2 companion is the last group: nothing on the first frame needs it.
+  evenG2 = new EvenG2Controller({
+    userDataPath, terminals: terminalManager,
+    localDiscovery: process.platform === "darwin",
+    defaultWorkspace: join(app.getPath("documents"), "CanvasTTY Projects"),
+    bundledSpeech: process.platform === "darwin" ? (app.isPackaged ? join(process.resourcesPath, "companion/speech/canvastty-speech") : join(app.getAppPath(), "artifacts/companion-speech", process.arch, "canvastty-speech")) : undefined,
+    webRoot: app.isPackaged ? join(process.resourcesPath,"even-g2-web") : join(app.getAppPath(),"integrations/even-g2/dist"),
+    mobileRoot: app.isPackaged ? join(process.resourcesPath, "mobile-web") : join(app.getAppPath(), "integrations/mobile/dist"),
+    providerAvailability: () => providerCliAvailability(providerClis!),
+    speechWorker: app.isPackaged ? join(process.resourcesPath,"companion/asr_worker.py") : join(app.getAppPath(),"src/main/services/companion/asr_worker.py"),
+    limits: () => limitsService!.get(), openBrowser: showCompanionBrowser
+  });
+  await evenG2.load();
+  const assertCompanionSender = (event: Electron.IpcMainInvokeEvent):void => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error("Untrusted companion caller");
+  };
+  ipc.handle(IPC.evenG2State, event => { assertCompanionSender(event); return evenG2!.state(); });
+  ipc.handle(IPC.evenG2Command, async (event, command) => { assertCompanionSender(event); return evenG2!.command(command); });
   servicesReady = true;
   markMainBoot("servicesReady");
 }
@@ -829,10 +830,8 @@ async function loadApplicationSurface(window: BrowserWindow): Promise<void> {
   }
 }
 
-async function loadApplication(window: BrowserWindow): Promise<void> {
-  await loadApplicationSurface(window);
-  markMainBoot("applicationLoaded");
-
+/** Test-only startup hooks (smoke runs behind env flags), once the surface and the services are up. */
+async function runStartupSmokes(window: BrowserWindow): Promise<void> {
   if (process.env.CANVASTTY_SMOKE_TEST === "1") {
     await window.webContents.executeJavaScript(
       "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
@@ -876,18 +875,34 @@ function parseProviderSmokeTargets(value: string): ProviderSmokeTarget[] {
   return targets as ProviderSmokeTarget[];
 }
 
+/**
+ * The gate every IPC handler is registered through while the services start
+ * (IpcReadinessGate): created once, before the first renderer load, with a
+ * placeholder on every channel. Browser page wheel channels are left out: only
+ * browser tabs send them, and tabs exist only once the browser service does.
+ */
+let ipcGate: IpcReadinessGate | null = null;
+function ipcReadinessGate(): IpcReadinessGate {
+  if (ipcGate) return ipcGate;
+  const ungated = new Set<string>([IPC.evenG2BrowserResponse, IPC.browserPageWheelDecision, IPC.browserPageWheel]);
+  ipcGate = new IpcReadinessGate(ipcMain, {
+    channels: Object.values(IPC).filter((channel) => !ungated.has(channel)),
+    // The renderer's synchronous sends block it until they are answered: before the
+    // browser service is up there is no browser to route a wheel or focus change to.
+    syncReplies: { [IPC.canvasNavigationOwnerWheel]: true, [IPC.browserSetInputFocused]: true }
+  });
+  return ipcGate;
+}
+
 async function startApplication(): Promise<void> {
   // A quit already under way owns the process: starting (or restarting) into it
   // would build services for a window the user just closed.
   if (startupRunning || shutdownRunning || shutdownComplete) return;
   startupRunning = true;
   let window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : null;
-  let startupPage: StartupPageLoad | null = null;
 
   try {
-    // Services start while the startup page is still loading; the page is only
-    // there until the application surface replaces it.
-    if (!window) ({ window, startupPage } = createWindow());
+    if (!window) window = createWindow();
     if (process.env.CANVASTTY_CLI_RESOLUTION_SMOKE === "1") {
       const registry = buildProviderCliRegistry();
       console.log(`CANVASTTY_CLI_RESOLUTION_SMOKE_READY ${JSON.stringify(registry.snapshot())}`);
@@ -898,21 +913,23 @@ async function startApplication(): Promise<void> {
     // and every remaining step targets that window. The window is visible from
     // the first moment, so this close can land inside any startup await.
     if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
-    if (!servicesReady) await initializeServices();
-    if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
-    if (startupPage) {
-      // The application surface must not replace a page that is still loading:
-      // Chromium can report that page's ERR_ABORTED after the next navigation has
-      // started, and Electron's loadFile/loadURL promise takes the first main-frame
-      // load failure it sees as its own, so startup would fail with the startup
-      // page's abort. The page usually settles before services are up.
-      const failure = await startupPage;
-      if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
-      if (failure !== null) throw failure;
-    }
-    initializeUpdater();
+    // The application surface loads while the services start: its calls wait in
+    // the readiness gate until the service group behind each channel is up.
+    const services = servicesReady ? null : initializeServices(ipcReadinessGate());
     markMainBoot("applicationLoadStart");
-    await loadApplication(window);
+    const surfaceLoad = loadApplicationSurface(window).then(() => markMainBoot("applicationLoaded"));
+    const [surface, started] = await Promise.allSettled([surfaceLoad, services]);
+    if (shutdownRunning || shutdownComplete || shellWindowGone(window)) return;
+    // Both settled before anything is reported: the failure page must not replace
+    // a surface that is still loading (its ERR_ABORTED would land in this load).
+    if (started.status === "rejected") {
+      ipcGate?.fail(started.reason instanceof Error ? started.reason : new Error(String(started.reason)));
+      throw started.reason;
+    }
+    ipcGate?.settle();
+    if (surface.status === "rejected") throw surface.reason;
+    initializeUpdater();
+    await runStartupSmokes(window);
   } catch (error) {
     // A load aborted by that same close surfaces here as ERR_FAILED or
     // "Object has been destroyed" — a normal exit, not a startup failure.

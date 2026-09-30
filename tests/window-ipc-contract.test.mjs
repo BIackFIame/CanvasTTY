@@ -22,7 +22,7 @@ test("window bridge exposes native fullscreen state updates without a renderer t
   assert.match(preload, /onState: \(listener\) => subscribe\(IPC\.windowState, listener\)/);
   assert.match(ipc, /createWindowStateObserver<BrowserWindow>/);
   assert.match(ipc, /return observeMainWindow/);
-  assert.match(main, /observeMainWindowState = registerIpc\(/);
+  assert.match(main, /observeMainWindowState = registerCriticalIpc\(/);
   assert.match(main, /observeMainWindowState\?\.\(window\)/);
   assert.match(main, /observeMainWindowState\?\.\(null\)/);
   assert.doesNotMatch(contracts, /toggleFullScreen/);
