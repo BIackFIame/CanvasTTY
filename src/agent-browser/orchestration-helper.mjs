@@ -7,6 +7,7 @@ import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
 import { NdjsonLineReader } from "../agent-runtime/ndjson.mjs";
 import {
+  DEFAULT_AGENT_WAIT_SECONDS,
   MAX_ORCHESTRATION_PAYLOAD_BYTES,
   ORCHESTRATION_MCP_SERVER_NAME,
   ORCHESTRATION_TOOL_DEFINITIONS,
@@ -21,6 +22,10 @@ const PROTOCOL_VERSION = 1;
 // connections, spaced CONNECT_RETRY_MS apart, before it fails; the next call starts over.
 const CONNECT_ATTEMPTS = 3;
 const CONNECT_RETRY_MS = 250;
+// A call the gateway never answers fails instead of waiting forever: wait_for_agent after its own timeout and a
+// margin, every other call after three minutes.
+const CALL_TIMEOUT_MS = 180_000;
+const WAIT_MARGIN_MS = 30_000;
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-06-18";
 const ENV = {
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
@@ -28,6 +33,8 @@ const ENV = {
   terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID",
   connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID"
 };
+/** Replaces every call's timeout (tests). */
+const CALL_TIMEOUT_ENV = "CANVASTTY_ORCHESTRATION_CALL_TIMEOUT_MS";
 
 export const ORCHESTRATION_AGENT_INSTRUCTIONS = [
   "CanvasTTY agent tools delegate work to other providers' agent sessions and read back their terminal output.",
@@ -52,6 +59,7 @@ export class OrchestrationClient {
   constructor(identity, options = {}) {
     this.identity = identity;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
+    this.callTimeoutMs = options.callTimeoutMs ?? null;
     this.createConnection = options.createConnection ?? createConnection;
     this.socket = null;
     this.lines = responseLines();
@@ -145,6 +153,7 @@ export class OrchestrationClient {
       const pending = this.pending.get(message.id);
       if (!pending) return;
       this.pending.delete(message.id);
+      clearTimeout(pending.timer);
       if (message.error) pending.reject(new BridgeError(message.error));
       else pending.resolve(message.result ?? {});
     }
@@ -157,8 +166,10 @@ export class OrchestrationClient {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
+    // What the gateway had is lost with the connection; a call still waiting to be sent waits for the next one.
+    for (const [id, pending] of this.pending) {
+      if (pending.sent) this.settle(id, pending, error, false);
+    }
     if (!this.authenticatedState) {
       this.failAuthentication(error);
       return;
@@ -191,21 +202,61 @@ export class OrchestrationClient {
   }
 
   async call(tool, args, id = `helper-${randomUUID()}`) {
-    return this.request({ type: "request", id, tool, arguments: args });
+    return this.request({ type: "request", id, tool, arguments: args }, this.timeoutFor(tool, args));
   }
 
   /** The tools this session sees: core tools for orchestrators, plugin tools by role. */
   async listTools(id = `helper-${randomUUID()}`) {
-    const result = await this.request({ type: "list_tools", id });
+    const result = await this.request({ type: "list_tools", id }, this.timeoutFor(null, null));
     return Array.isArray(result.tools) ? result.tools : [];
   }
 
-  async request(message) {
-    await this.connect();
+  timeoutFor(tool, args) {
+    if (this.callTimeoutMs !== null) return this.callTimeoutMs;
+    if (tool !== "wait_for_agent") return CALL_TIMEOUT_MS;
+    const seconds = Number.isInteger(args?.timeoutSeconds) ? args.timeoutSeconds : DEFAULT_AGENT_WAIT_SECONDS;
+    return seconds * 1000 + WAIT_MARGIN_MS;
+  }
+
+  /** Registered before connecting, so a cancellation or a timeout while it connects ends it too. */
+  request(message, timeoutMs) {
     return new Promise((resolve, reject) => {
-      this.pending.set(message.id, { resolve, reject });
-      this.socket.write(`${canonicalStringify({ v: PROTOCOL_VERSION, ...message })}\n`);
+      const pending = { resolve, reject, sent: false, timer: null };
+      this.pending.set(message.id, pending);
+      pending.timer = setTimeout(() => this.settle(message.id, pending, timedOut(), true), timeoutMs);
+      pending.timer.unref?.();
+      this.connect().then(() => {
+        if (this.pending.get(message.id) !== pending) return;
+        if (!this.socket) {
+          this.settle(message.id, pending, unavailable(), false);
+          return;
+        }
+        try {
+          const line = `${canonicalStringify({ v: PROTOCOL_VERSION, ...message })}\n`;
+          pending.sent = true;
+          this.socket.write(line);
+        } catch (error) {
+          this.settle(message.id, pending, error, false);
+        }
+      }, (error) => this.settle(message.id, pending, error, false));
     });
+  }
+
+  /** The MCP client cancelled this call: it ends here and at the gateway. */
+  cancel(id) {
+    const pending = this.pending.get(id);
+    if (pending) this.settle(id, pending, canceled(), true);
+  }
+
+  /** Ends one call with `error`; with `stopGateway`, a call the gateway already has is cancelled there. */
+  settle(id, pending, error, stopGateway) {
+    if (this.pending.get(id) !== pending) return;
+    this.pending.delete(id);
+    clearTimeout(pending.timer);
+    if (stopGateway && pending.sent && this.socket && !this.closed) {
+      this.socket.write(`${canonicalStringify({ v: PROTOCOL_VERSION, type: "cancel", id })}\n`);
+    }
+    pending.reject(error);
   }
 
   close() {
@@ -213,8 +264,7 @@ export class OrchestrationClient {
     if (this.heartbeatTimer !== null) clearInterval(this.heartbeatTimer);
     this.socket?.destroy();
     this.socket = null;
-    for (const pending of this.pending.values()) pending.reject(unavailable());
-    this.pending.clear();
+    for (const [id, pending] of this.pending) this.settle(id, pending, unavailable(), false);
   }
 }
 
@@ -226,12 +276,28 @@ function unavailable() {
   });
 }
 
+function timedOut() {
+  return new BridgeError({ code: "TIMEOUT", message: "Orchestration command timed out.", retryable: true });
+}
+
+function canceled() {
+  return new BridgeError({ code: "CANCELED", message: "Orchestration command was canceled by the MCP client.", retryable: true });
+}
+
 export function createOrchestrationDispatcher(client) {
+  // MCP request id (canonical JSON) -> the bridge id of its call, so a cancellation reaches the gateway.
+  const activeRequests = new Map();
   return async function dispatch(request) {
     if (!request || typeof request !== "object" || request.jsonrpc !== "2.0" || !("method" in request)) {
       throw new JsonRpcError(-32600, "Invalid Request");
     }
     if (request.method === "notifications/initialized") return null;
+    if (request.method === "notifications/cancelled") {
+      const key = mcpRequestKey(request.params?.requestId);
+      const bridgeRequestId = key === null ? undefined : activeRequests.get(key);
+      if (bridgeRequestId) client.cancel?.(bridgeRequestId);
+      return null;
+    }
     if (request.method === "ping") return response(request.id, {});
     if (request.method === "initialize") {
       await client.connect();
@@ -264,8 +330,11 @@ export function createOrchestrationDispatcher(client) {
           });
         }
       }
+      const key = mcpRequestKey(request.id);
+      const bridgeRequestId = `helper-${randomUUID()}`;
+      if (key !== null) activeRequests.set(key, bridgeRequestId);
       try {
-        const result = await client.call(params.name, params.arguments ?? {});
+        const result = await client.call(params.name, params.arguments ?? {}, bridgeRequestId);
         if (isPluginOrchestrationTool(params.name) && typeof result.text === "string") {
           return response(request.id, { content: [{ type: "text", text: result.text }], isError: result.isError === true });
         }
@@ -279,11 +348,19 @@ export function createOrchestrationDispatcher(client) {
           content: [{ type: "text", text: canonicalStringify({ ok: false, error: payload }) }],
           isError: true
         });
+      } finally {
+        if (key !== null && activeRequests.get(key) === bridgeRequestId) activeRequests.delete(key);
       }
     }
     if (typeof request.id === "undefined") return null;
     throw new JsonRpcError(-32601, "Method not found");
   };
+}
+
+/** An MCP request id as a map key; null for an id that cannot name a request (nor be cancelled). */
+function mcpRequestKey(value) {
+  if (typeof value !== "string" && (typeof value !== "number" || !Number.isFinite(value)) && value !== null) return null;
+  return canonicalStringify(value);
 }
 
 class JsonRpcError extends Error {
@@ -330,8 +407,11 @@ async function run() {
     process.exitCode = 1;
     return;
   }
-  for (const key of Object.values(ENV)) delete process.env[key];
-  const client = new OrchestrationClient(identity);
+  const callTimeoutMs = Number(process.env[CALL_TIMEOUT_ENV]);
+  for (const key of [...Object.values(ENV), CALL_TIMEOUT_ENV]) delete process.env[key];
+  const client = new OrchestrationClient(identity, {
+    ...(Number.isInteger(callTimeoutMs) && callTimeoutMs >= 1 && callTimeoutMs <= 600_000 ? { callTimeoutMs } : {})
+  });
   const dispatch = createOrchestrationDispatcher(client);
   const requests = new NdjsonLineReader({
     maxLineBytes: MAX_ORCHESTRATION_PAYLOAD_BYTES,

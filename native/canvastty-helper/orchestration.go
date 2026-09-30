@@ -6,6 +6,7 @@ package main
 // the rotated token.
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -17,7 +18,19 @@ const maxOrchestrationPayloadBytes = 128 * 1024
 const (
 	orchestrationConnectAttempts = 3
 	orchestrationConnectRetry    = 250 * time.Millisecond
+	// A call the gateway never answers fails instead of waiting forever: wait_for_agent after its own timeout and a
+	// margin, every other call after three minutes.
+	orchestrationCallTimeout = 180 * time.Second
+	orchestrationWaitMargin  = 30 * time.Second
 )
+
+// orchestrationPending is one call: registered before connecting, so a cancellation or a timeout while it connects
+// ends it too.
+type orchestrationPending struct {
+	result *future
+	sent   bool
+	timer  *time.Timer
+}
 
 // orchestrationError is orchestration-helper.mjs BridgeError: the gateway's error payload as is.
 type orchestrationError struct {
@@ -30,6 +43,14 @@ func (e *orchestrationError) Error() string { return e.message }
 func newOrchestrationError(payload any) *orchestrationError {
 	message, _ := field(payload, "message").(string)
 	return &orchestrationError{payload: payload, message: message}
+}
+
+func orchestrationTimedOut() *orchestrationError {
+	return newOrchestrationError(obj("code", "TIMEOUT", "message", "Orchestration command timed out.", "retryable", true))
+}
+
+func orchestrationCanceled() *orchestrationError {
+	return newOrchestrationError(obj("code", "CANCELED", "message", "Orchestration command was canceled by the MCP client.", "retryable", true))
 }
 
 func orchestrationUnavailable() *orchestrationError {
@@ -51,7 +72,8 @@ type orchestrationClient struct {
 	connectTimeout     time.Duration
 	socket             *asyncSocket
 	lines              *lineReader
-	pending            map[string]*future
+	pending            map[string]*orchestrationPending
+	callTimeout        time.Duration
 	authenticated      *future
 	authenticatedState bool
 	heartbeats         []*time.Timer
@@ -66,7 +88,7 @@ func newOrchestrationClient(identity orchestrationIdentity) *orchestrationClient
 		identity:       identity,
 		connectTimeout: 10 * time.Second,
 		lines:          newLineReader(maxOrchestrationPayloadBytes, func() bool { return false }),
-		pending:        map[string]*future{},
+		pending:        map[string]*orchestrationPending{},
 	}
 }
 
@@ -170,14 +192,15 @@ func (c *orchestrationClient) handleMessage(socket *asyncSocket, message any) {
 			return
 		}
 		delete(c.pending, id)
+		pending.timer.Stop()
 		if errorPayload := field(message, "error"); truthy(errorPayload) {
-			pending.reject(newOrchestrationError(errorPayload))
+			pending.result.reject(newOrchestrationError(errorPayload))
 		} else {
 			result := field(message, "result")
 			if result == nil || isUndefined(result) {
 				result = newObject()
 			}
-			pending.resolve(result)
+			pending.result.resolve(result)
 		}
 	}
 }
@@ -238,9 +261,11 @@ func (c *orchestrationClient) handleDisconnect(socket *asyncSocket, err error) {
 	}
 	c.socket = nil
 	c.stopHeartbeats()
+	// What the gateway had is lost with the connection; a call still waiting to be sent waits for the next one.
 	for id, pending := range c.pending {
-		pending.reject(err)
-		delete(c.pending, id)
+		if pending.sent {
+			c.settle(id, pending, err, false)
+		}
 	}
 	if !c.authenticatedState {
 		c.failAuthentication(err)
@@ -282,40 +307,84 @@ func (c *orchestrationClient) failAuthentication(err error) {
 	}
 }
 
-func (c *orchestrationClient) request(message *jsObject, id string) (any, error) {
-	if _, err := c.connect().wait(); err != nil {
-		return nil, err
-	}
+func (c *orchestrationClient) request(message *jsObject, id string, timeout time.Duration) (any, error) {
+	pending := &orchestrationPending{result: newFuture()}
 	c.mu.Lock()
-	if c.socket == nil {
-		// `this.socket.write` on null: a TypeError rejects the request.
-		c.mu.Unlock()
-		return nil, &internalError{message: "Cannot read properties of null (reading 'write')"}
-	}
-	pending := newFuture()
 	c.pending[id] = pending
-	full := obj("v", float64(browserProtocolVersion))
-	for _, key := range message.keys {
-		full.set(key, message.values[key])
-	}
-	text, err := canonicalStringify(full)
-	if err != nil {
-		c.mu.Unlock()
-		return nil, &internalError{message: err.Error()}
-	}
-	c.socket.write([]byte(text + "\n"))
+	pending.timer = time.AfterFunc(timeout, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.settle(id, pending, orchestrationTimedOut(), true)
+	})
 	c.mu.Unlock()
-	return pending.wait()
+	_, err := c.connect().wait()
+	c.mu.Lock()
+	switch {
+	case c.pending[id] != pending:
+	case err != nil:
+		c.settle(id, pending, err, false)
+	case c.socket == nil:
+		c.settle(id, pending, orchestrationUnavailable(), false)
+	default:
+		full := obj("v", float64(browserProtocolVersion))
+		for _, key := range message.keys {
+			full.set(key, message.values[key])
+		}
+		if text, stringifyErr := canonicalStringify(full); stringifyErr != nil {
+			c.settle(id, pending, &internalError{message: stringifyErr.Error()}, false)
+		} else {
+			pending.sent = true
+			c.socket.write([]byte(text + "\n"))
+		}
+	}
+	c.mu.Unlock()
+	return pending.result.wait()
 }
 
-func (c *orchestrationClient) call(tool string, args any) (any, error) {
-	id := "helper-" + randomUUID()
-	return c.request(obj("type", "request", "id", id, "tool", tool, "arguments", args), id)
+// cancel is the MCP client cancelling a call: it ends here and at the gateway.
+func (c *orchestrationClient) cancel(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if pending, ok := c.pending[id]; ok {
+		c.settle(id, pending, orchestrationCanceled(), true)
+	}
+}
+
+// settle ends one call with err; with stopGateway, a call the gateway already has is cancelled there. c.mu is held.
+func (c *orchestrationClient) settle(id string, pending *orchestrationPending, err error, stopGateway bool) {
+	if c.pending[id] != pending {
+		return
+	}
+	delete(c.pending, id)
+	pending.timer.Stop()
+	if stopGateway && pending.sent && c.socket != nil && !c.closed {
+		text, _ := canonicalStringify(obj("v", float64(browserProtocolVersion), "type", "cancel", "id", id))
+		c.socket.write([]byte(text + "\n"))
+	}
+	pending.result.reject(err)
+}
+
+func (c *orchestrationClient) timeoutFor(tool string, args any) time.Duration {
+	if c.callTimeout > 0 {
+		return c.callTimeout
+	}
+	if tool != "wait_for_agent" {
+		return orchestrationCallTimeout
+	}
+	seconds := float64(catalogInt("orchestration", "defaultAgentWaitSeconds"))
+	if value, ok := field(args, "timeoutSeconds").(float64); ok && value == math.Trunc(value) && !math.IsInf(value, 0) {
+		seconds = value
+	}
+	return time.Duration(seconds*float64(time.Second)) + orchestrationWaitMargin
+}
+
+func (c *orchestrationClient) call(tool string, args any, id string) (any, error) {
+	return c.request(obj("type", "request", "id", id, "tool", tool, "arguments", args), id, c.timeoutFor(tool, args))
 }
 
 func (c *orchestrationClient) listTools() (any, error) {
 	id := "helper-" + randomUUID()
-	result, err := c.request(obj("type", "list_tools", "id", id), id)
+	result, err := c.request(obj("type", "list_tools", "id", id), id, c.timeoutFor("", nil))
 	if err != nil {
 		return nil, err
 	}
@@ -335,8 +404,7 @@ func (c *orchestrationClient) close() {
 	}
 	c.socket = nil
 	for id, pending := range c.pending {
-		pending.reject(orchestrationUnavailable())
-		delete(c.pending, id)
+		c.settle(id, pending, orchestrationUnavailable(), false)
 	}
 }
 
@@ -361,6 +429,16 @@ func orchestrationFailure(payload any) *jsObject {
 }
 
 func orchestrationDispatcher(client *orchestrationClient) func(any) (*jsObject, error) {
+	// MCP request id (canonical JSON) -> the bridge id of its call, so a cancellation reaches the gateway.
+	var activeMu sync.Mutex
+	active := map[string]string{}
+	requestKey := func(value any) (string, bool) {
+		key, err := mcpRequestKey(value)
+		if err != nil || key == nil {
+			return "", false
+		}
+		return key.(string), true
+	}
 	return func(request any) (*jsObject, error) {
 		if err := requestShapeError(request); err != nil {
 			return nil, err
@@ -368,6 +446,16 @@ func orchestrationDispatcher(client *orchestrationClient) func(any) (*jsObject, 
 		id := field(request, "id")
 		switch field(request, "method") {
 		case "notifications/initialized":
+			return nil, nil
+		case "notifications/cancelled":
+			if key, ok := requestKey(field(field(request, "params"), "requestId")); ok {
+				activeMu.Lock()
+				bridgeID := active[key]
+				activeMu.Unlock()
+				if bridgeID != "" {
+					client.cancel(bridgeID)
+				}
+			}
 			return nil, nil
 		case "ping":
 			return response(id, newObject()), nil
@@ -407,7 +495,21 @@ func orchestrationDispatcher(client *orchestrationClient) func(any) (*jsObject, 
 					return response(id, orchestrationFailure(obj("code", "INVALID_REQUEST", "message", message, "retryable", false))), nil
 				}
 			}
-			result, err := client.call(name, args)
+			key, keyed := requestKey(id)
+			bridgeID := "helper-" + randomUUID()
+			if keyed {
+				activeMu.Lock()
+				active[key] = bridgeID
+				activeMu.Unlock()
+				defer func() {
+					activeMu.Lock()
+					if active[key] == bridgeID {
+						delete(active, key)
+					}
+					activeMu.Unlock()
+				}()
+			}
+			result, err := client.call(name, args, bridgeID)
 			if err == nil {
 				if text, ok := field(result, "text").(string); ok && isPluginOrchestrationTool(name) {
 					return response(id, obj("content", []any{obj("type", "text", "text", text)}, "isError", field(result, "isError") == true)), nil
@@ -447,6 +549,10 @@ func runOrchestrationMCP() int {
 	client := newOrchestrationClient(orchestrationIdentity{
 		address: values[0], capabilityToken: values[1], terminalSessionID: values[2], connectionID: values[3],
 	})
+	// Replaces every call's timeout (tests).
+	if timeout := envNumber("CANVASTTY_ORCHESTRATION_CALL_TIMEOUT_MS"); timeout == math.Trunc(timeout) && timeout >= 1 && timeout <= 600_000 {
+		client.callTimeout = time.Duration(timeout * float64(time.Millisecond))
+	}
 	server := &mcpServer{
 		maxBytes:      maxOrchestrationPayloadBytes,
 		requestLimit:  "Request exceeds 128KB",

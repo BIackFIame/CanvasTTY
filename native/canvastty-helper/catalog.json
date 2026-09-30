@@ -1172,6 +1172,7 @@
       "antigravity"
     ],
     "maxPluginToolNameLength": 64,
-    "maxLaunchOptionsBytes": 16384
+    "maxLaunchOptionsBytes": 16384,
+    "defaultAgentWaitSeconds": 55
   }
 }
