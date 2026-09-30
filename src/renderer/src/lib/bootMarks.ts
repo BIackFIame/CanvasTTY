@@ -7,6 +7,8 @@
 export interface BootMark {
   readonly name: string;
   readonly atMs: number;
+  /** Wall-clock time of the mark, so a harness can place it on the main process's time axis. */
+  readonly epochMs: number;
 }
 
 const origin = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -27,7 +29,8 @@ export function markBootOnce(name: string): void {
   if (seen.has(name)) return;
   seen.add(name);
   const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-  marks = [...marks, { name, atMs: Math.round(now - origin) }];
+  const epochMs = typeof performance !== "undefined" ? performance.timeOrigin + now : now;
+  marks = [...marks, { name, atMs: Math.round(now - origin), epochMs: Math.round(epochMs) }];
   publish();
 }
 

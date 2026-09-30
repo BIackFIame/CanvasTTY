@@ -328,9 +328,6 @@ function TerminalCardView({
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
-    // The first terminal card to attach xterm and become interactive: at startup this is a restored
-    // session (new sessions cannot exist yet), so this doubles as "restored terminal interactive".
-    markBootOnce("restoredTerminalInteractive");
     setOscTitle(null);
     const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
     const restoreSelectionRedraws = skipEmptySelectionRedraws(terminal);
@@ -498,6 +495,9 @@ function TerminalCardView({
       }
       window.canvasTTY.terminal.input(session.id, data);
     });
+    // The first terminal card whose xterm is attached and forwards keystrokes: at startup this is a restored
+    // session (new sessions cannot exist yet), so this doubles as "restored terminal interactive".
+    markBootOnce("restoredTerminalInteractive");
     const titleChange = terminal.onTitleChange((title) => setOscTitle(title.trim() ? title : null));
     const searchResults = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
       setSearchMatches({

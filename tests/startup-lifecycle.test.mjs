@@ -56,6 +56,7 @@ test("services start while the startup page loads, and the application surface w
     createWindow: () => { events.push("window"); return { window: {}, startupPage: pendingPage() }; },
     initializeServices: async () => { events.push("services"); },
     initializeUpdater: () => events.push("updater"),
+    markMainBoot: () => undefined,
     loadApplication: async () => { events.push("app"); },
     showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); }
   };

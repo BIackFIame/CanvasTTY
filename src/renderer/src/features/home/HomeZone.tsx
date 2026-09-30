@@ -18,7 +18,6 @@ import {
   HOME_GRID_MAX_ROWS
 } from "../../../../shared/contracts.ts";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import { markBootOnce } from "../../lib/bootMarks";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import {
@@ -148,10 +147,6 @@ export function HomeZone({
   }, [settings.homeGridSize]);
 
   useEffect(() => scheduleMinuteTicks(() => setNow(new Date())), []);
-
-  // HOME is on screen with its real launcher/limit model, not just an empty shell: this is what
-  // "actionable" means for startup measurement, so it fires once on mount, not on every model change.
-  useEffect(() => { markBootOnce("homeActionable"); }, []);
 
   const startLayoutPointer = (
     event: React.PointerEvent<HTMLButtonElement>,

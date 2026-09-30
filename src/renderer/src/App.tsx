@@ -298,8 +298,15 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     // The first frame where the loading screen is gone and the workspace shows real data: the
-    // point startup-latency measurements care about, not just "some DOM exists".
-    if (ready) requestAnimationFrame(() => markBootOnce("firstStableFrame"));
+    // point startup-latency measurements care about, not just "some DOM exists". Two frames: the
+    // second callback runs after the first frame with this commit was produced. HOME is actionable in
+    // that same frame when it is on screen: its data (settings, availability, sessions) is loaded and
+    // the main process answered, so a launcher click reaches a live service.
+    if (!ready) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      markBootOnce("firstStableFrame");
+      if (document.querySelector(".home-zone") && !document.querySelector(".loading-screen")) markBootOnce("homeActionable");
+    }));
   }, [ready]);
 
   useEffect(() => {

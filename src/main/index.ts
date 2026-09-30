@@ -83,6 +83,7 @@ import {
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
 import { lazyRequire } from "./lazyRequire";
+import { markMainBoot } from "./bootMarks";
 
 // electron-updater (and what it pulls in) is loaded only by a packaged app that
 // checks for updates, never at startup of a dev build.
@@ -190,6 +191,7 @@ if (!hasSingleInstanceLock) app.quit();
  */
 function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad } {
   if (process.platform === "darwin" && !app.isPackaged) app.dock?.setIcon(appIcon);
+  markMainBoot("windowCreateStart");
   const window = new BrowserWindow({
     icon: appIcon,
     width: 1440,
@@ -207,6 +209,7 @@ function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad }
     }
   });
   mainWindow = window;
+  markMainBoot("windowCreated");
   observeMainWindowState?.(window);
   // A fresh window is not closing; the previous one's flag must not leak in.
   mainWindowClosing = false;
@@ -799,6 +802,7 @@ async function initializeServices(): Promise<void> {
     }
   });
   servicesReady = true;
+  markMainBoot("servicesReady");
 }
 
 /**
@@ -827,6 +831,7 @@ async function loadApplicationSurface(window: BrowserWindow): Promise<void> {
 
 async function loadApplication(window: BrowserWindow): Promise<void> {
   await loadApplicationSurface(window);
+  markMainBoot("applicationLoaded");
 
   if (process.env.CANVASTTY_SMOKE_TEST === "1") {
     await window.webContents.executeJavaScript(
@@ -906,6 +911,7 @@ async function startApplication(): Promise<void> {
       if (failure !== null) throw failure;
     }
     initializeUpdater();
+    markMainBoot("applicationLoadStart");
     await loadApplication(window);
   } catch (error) {
     // A load aborted by that same close surfaces here as ERR_FAILED or
@@ -1084,7 +1090,10 @@ function updaterFailureReason(error: unknown): "offline" | "error" {
 
 if (hasSingleInstanceLock) {
   void app.whenReady()
-    .then(startApplication)
+    .then(() => {
+      markMainBoot("appReady");
+      return startApplication();
+    })
     .catch((error) => {
       const detail = error instanceof Error ? error.stack ?? error.message : String(error);
       console.error("CanvasTTY could not create its startup window.", error);
