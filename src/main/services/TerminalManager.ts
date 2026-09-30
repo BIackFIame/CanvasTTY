@@ -86,6 +86,15 @@ import {
 
 const MAX_SCROLLBACK_CHARS = 240_000;
 const OUTPUT_BATCH_MS = 16;
+/**
+ * A flood of PTY output (e.g. `cat` on a huge file) can emit many `data` events before the batch timer's
+ * callback runs, since each event only needs the event loop, not the timer's turn. Without a cap, pendingOutput
+ * grows unbounded for that whole burst. Once a session's queued output crosses this many UTF-16 code units, it
+ * is flushed immediately instead of waiting for the timer.
+ */
+const MAX_PENDING_OUTPUT_CHARS = 1_048_576;
+/** How long repeated setBounds/rename/etc. calls are coalesced before the session store is rewritten once. */
+const PERSISTENCE_DEBOUNCE_MS = 150;
 const DEFAULT_TERMINAL_SIZE = { width: 700, height: 430 };
 const MIN_TERMINAL_SIZE = { width: 420, height: 260 };
 const MAX_TERMINAL_SIZE = { width: 1_600, height: 1_100 };
@@ -100,6 +109,7 @@ interface ManagedSession {
   bufferLength: number;
   outputOffset: number;
   pendingOutput: string[];
+  pendingOutputChars: number;
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
@@ -247,6 +257,9 @@ export class TerminalManager {
   // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
   private readonly liveProcesses = new Map<IPty, Promise<void>>();
   private suppressPersistence = false;
+  // Coalesces rapid persistence requests (a drag fires setBounds many times a second) into one
+  // normalize+stringify+atomic-write of the session store instead of one per call.
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
   private controlConnection: ControlConnection | null = null;
@@ -449,6 +462,10 @@ export class TerminalManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.persistenceTimer !== null) {
+      clearTimeout(this.persistenceTimer);
+      this.persistenceTimer = null;
+    }
     await this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
@@ -656,6 +673,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
       agentOrchestration: launched.agentOrchestration,
@@ -938,7 +956,7 @@ export class TerminalManager {
       height: clamp(bounds.size.height, MIN_TERMINAL_SIZE.height, MAX_TERMINAL_SIZE.height)
     };
     this.emitSession(session.metadata);
-    this.schedulePersistence();
+    this.scheduleBoundsPersistence();
   }
 
   rename(id: string, title: string): SessionMetadata {
@@ -1277,6 +1295,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser,
       agentRuntime,
       agentOrchestration,
@@ -1392,6 +1411,23 @@ export class TerminalManager {
     void this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved.", error);
     });
+  }
+
+  /**
+   * Same as `schedulePersistence`, but coalesced: a drag fires `setBounds` many times a second, and each one
+   * used to normalize, stringify and atomically rewrite the whole session store. Rapid geometry updates are
+   * batched into a single write instead, `PERSISTENCE_DEBOUNCE_MS` after the last of them.
+   */
+  private scheduleBoundsPersistence(): void {
+    if (this.persistenceTimer !== null) return;
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      void this.persistSessions().catch((error) => {
+        console.warn("CanvasTTY terminal window state could not be saved.", error);
+      });
+    }, PERSISTENCE_DEBOUNCE_MS);
+    // A background timer must never be the reason the process (or a test) stays alive.
+    this.persistenceTimer.unref?.();
   }
 
   private emitSession(metadata: SessionMetadata, failureOrigin: FailureOrigin | null = null): void {
@@ -2067,6 +2103,13 @@ export class TerminalManager {
 
   private queueOutput(id: string, session: ManagedSession, data: string): void {
     session.pendingOutput.push(data);
+    session.pendingOutputChars += data.length;
+    // A flood (e.g. `cat` on a huge file) can push many chunks before the batch timer's callback gets a
+    // turn; flush this session now instead of letting its buffer grow without bound.
+    if (session.pendingOutputChars >= MAX_PENDING_OUTPUT_CHARS) {
+      this.flushOutput(id, session);
+      return;
+    }
     this.queuedOutput.set(id, session);
     if (this.outputTimer !== null) return;
     // Keep a TUI's clear-and-redraw sequence in one renderer update whenever possible.
@@ -2091,6 +2134,7 @@ export class TerminalManager {
 
     const data = session.pendingOutput.join("");
     session.pendingOutput.length = 0;
+    session.pendingOutputChars = 0;
     // While the card is hidden the batch is for the observers only: the
     // renderer catches up through the replay in setVisible.
     this.emit(IPC.terminalData, {
