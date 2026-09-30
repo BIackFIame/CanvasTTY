@@ -260,8 +260,9 @@ export function AgentChatHistoryHud({ settings, sessions, onFocusSession, onResu
                 <UiIcon name={isProjectCollapsed(group) ? "plus" : "minus"} size="1em" />
                 <strong>{group.label}</strong><small>{group.items.length}</small>
               </button>
-              {!isProjectCollapsed(group) && group.items.map((item) => {
+              {group.items.map((item) => {
                 const activeSession = activeHistorySessions.get(`${item.provider}:${item.id}`);
+                if (isProjectCollapsed(group) && !activeSession) return null;
                 const working = activeSession?.status === "working";
                 return (
                 <div key={`${item.provider}:${item.id}`}>
