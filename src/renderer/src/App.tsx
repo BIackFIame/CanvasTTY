@@ -330,6 +330,8 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     let active = true;
+    // Cards removed before the startup list arrives: that list is older and must not restore them.
+    const removedBeforeList = new Set<string>();
     const unsubscribeSession = window.canvasTTY.terminal.onSession(({ session }) => {
       if (active) setSessions((current) => upsertSession(current, session));
     });
@@ -338,6 +340,7 @@ export function App(): React.JSX.Element {
     });
     const unsubscribeRemoved = window.canvasTTY.terminal.onRemoved(({ id }) => {
       if (!active) return;
+      removedBeforeList.add(id);
       setSessions((current) => current.filter((session) => session.id !== id));
       setActiveSessionId((current) => current === id ? null : current);
       setRenamingSessionId((current) => current === id ? null : current);
@@ -351,7 +354,7 @@ export function App(): React.JSX.Element {
         if (!active) return;
         setSettings(snapshot.settings);
         setAgentAvailability(snapshot.availability);
-        setSessions((current) => mergeSessionSnapshots(current, snapshot.sessions));
+        setSessions((current) => mergeSessionSnapshots(current, snapshot.sessions, removedBeforeList));
         setPlugins(snapshot.plugins);
         if (isHomeCamera.current) setCamera(homeCamera(snapshot.settings.homeGridSize));
       })
