@@ -2023,6 +2023,10 @@ function environmentBadge(environment: PersistedEnvironmentRef): NonNullable<Ses
  * bridge) the title's idle stands.
  */
 function resetLaunchSignals(session: ManagedSession): void {
+  // Nor is its conversation: its answer and turn counts would answer a wait for the new one.
+  delete session.answer;
+  delete session.turnStarts;
+  delete session.promptTurnMark;
   delete session.hookSignals;
   delete session.titleState;
   if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
