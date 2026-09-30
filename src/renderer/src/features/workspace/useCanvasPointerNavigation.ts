@@ -17,7 +17,7 @@ import {
   type CanvasGroupDragState,
   type CanvasMarqueeRect
 } from "./canvasSelectionGesture";
-import { EDGE_PAN_SPEEDS, edgePanVelocity } from "./edgePan";
+import { EDGE_PAN_SPEEDS, createEdgePanLoop, edgePanVelocity } from "./edgePan";
 
 interface PanState {
   pointerId: number;
@@ -102,9 +102,15 @@ export function useCanvasPointerNavigation({
   const [marquee, setMarquee] = useState<CanvasMarqueeRect | null>(null);
   const groupDrag = useRef<CanvasGroupDragState | null>(null);
   const [groupNudge, setGroupNudge] = useState<Point | null>(null);
-  const edgePointer = useRef<Point | null>(null);
-  const edgeFrame = useRef<number | null>(null);
-  const edgeLastTime = useRef(0);
+  // Read by the edge-pan loop each frame; assigned below once the gesture state they check exists.
+  const edgePanVelocityRef = useRef<(pointer: Point) => Point | null>(() => null);
+  const edgePanCommitRef = useRef<(velocity: Point, dt: number) => void>(() => undefined);
+  const [edgePan] = useState(() => createEdgePanLoop({
+    requestFrame: (callback) => requestAnimationFrame(callback),
+    cancelFrame: (handle) => cancelAnimationFrame(handle),
+    velocity: (pointer) => edgePanVelocityRef.current(pointer),
+    commit: (velocity, dt) => edgePanCommitRef.current(velocity, dt)
+  }));
 
   const panTo = useCallback((clientX: number, clientY: number): void => {
     const state = panState.current;
@@ -152,17 +158,10 @@ export function useCanvasPointerNavigation({
     groupDrag.current = null;
     setGroupNudge(null);
     setPanning(false);
-    // Losing focus leaves no pointermove to ever clear edgePointer or stop this RAF loop
-    // (handlePointerLeave, the loop's other exit, only fires on a real pointer leave), so
-    // without this the edge-pan loop keeps requesting frames and committing camera state
-    // indefinitely in the background after the window loses focus.
-    if (edgeFrame.current !== null) {
-      cancelAnimationFrame(edgeFrame.current);
-      edgeFrame.current = null;
-    }
-    edgePointer.current = null;
-    edgeLastTime.current = 0;
-  }, [viewport]);
+    // Losing focus leaves no pointermove to ever clear the edge-pan pointer (handlePointerLeave,
+    // the loop's other exit, only fires on a real pointer leave): stop the loop here.
+    edgePan.stop();
+  }, [edgePan, viewport]);
 
   const localPoint = useCallback((clientX: number, clientY: number): Point | null => {
     const bounds = viewport.current?.getBoundingClientRect();
@@ -252,7 +251,7 @@ export function useCanvasPointerNavigation({
   }, [cancelPointerGesture]);
 
   useEffect(() => () => {
-    if (edgeFrame.current !== null) cancelAnimationFrame(edgeFrame.current);
+    edgePan.stop();
     if (panState.current) window.canvasTTY.canvasNavigation.setPointerGestureActive(false);
   }, []);
 
@@ -351,28 +350,24 @@ export function useCanvasPointerNavigation({
     return true;
   }, [cameraRef, isMousePanBinding]);
 
-  const edgePanStep = useCallback((time: number): void => {
-    edgeFrame.current = null;
-    const pointer = edgePointer.current;
-    if (!pointer || panState.current || nativePanState.current || marqueeState.current || groupDrag.current
-      || !settingsRef.current.edgePan) return;
+  edgePanVelocityRef.current = (pointer) => {
+    if (panState.current || nativePanState.current || marqueeState.current || groupDrag.current
+      || !settingsRef.current.edgePan) return null;
     const bounds = viewport.current?.getBoundingClientRect();
-    if (!bounds) return;
+    if (!bounds) return null;
     const hovered = document.elementFromPoint(pointer.x, pointer.y);
-    if (hovered?.closest('[data-interactive="true"]')) return;
-    const velocity = edgePanVelocity(pointer, bounds, {
+    if (hovered?.closest('[data-interactive="true"]')) return null;
+    return edgePanVelocity(pointer, bounds, {
       maxSpeed: EDGE_PAN_SPEEDS[settingsRef.current.edgePanSpeed]
     });
-    if (!velocity) return;
-    const dt = edgeLastTime.current === 0 ? 0 : Math.min(0.05, (time - edgeLastTime.current) / 1000);
-    edgeLastTime.current = time;
+  };
+  edgePanCommitRef.current = (velocity, dt) => {
     commitCamera({
       ...cameraRef.current,
       x: cameraRef.current.x + velocity.x * dt,
       y: cameraRef.current.y + velocity.y * dt
     });
-    edgeFrame.current = requestAnimationFrame(edgePanStep);
-  }, [cameraRef, commitCamera, viewport]);
+  };
 
   const startGroupDrag = useCallback((event: React.PointerEvent<HTMLDivElement>, layerId: string): boolean => {
     // Deliberately non-preempting: the press still reaches the card, so focus, the
@@ -441,23 +436,19 @@ export function useCanvasPointerNavigation({
     const state = panState.current;
     if (state?.pointerId === event.pointerId) panTo(event.clientX, event.clientY);
     if (!settingsRef.current.edgePan) {
-      edgePointer.current = null;
+      edgePan.leave();
       return;
     }
-    edgePointer.current = { x: event.clientX, y: event.clientY };
-    if (edgeFrame.current === null) {
-      edgeLastTime.current = 0;
-      edgeFrame.current = requestAnimationFrame(edgePanStep);
-    }
-  }, [edgePanStep, panTo]);
+    edgePan.move({ x: event.clientX, y: event.clientY });
+  }, [edgePan, panTo]);
 
   const handlePointerEnd = useCallback((event: React.PointerEvent<HTMLDivElement>): void => {
     if (panState.current?.pointerId === event.pointerId) finishPan();
   }, [finishPan]);
 
   const handlePointerLeave = useCallback((): void => {
-    edgePointer.current = null;
-  }, []);
+    edgePan.leave();
+  }, [edgePan]);
 
   return {
     panning,
