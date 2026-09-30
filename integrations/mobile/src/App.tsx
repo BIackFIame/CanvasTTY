@@ -76,12 +76,14 @@ export default function App() {
   const [refresh, setRefresh] = useState(0);
   const pairController = useRef<AbortController | null>(null);
   const mutationInFlight = useRef(false);
+  const viewRevision = useRef(0);
   const outputCursor = useRef<{ sessionId: string; cursor: number | null }>({ sessionId: "", cursor: null });
 
   // Reset synchronously before the polling effect starts for a new selection.
   function selectSession(id: string, closeMenu = true) {
     if (closeMenu) setMenuOpen(false);
     if (id === selected) return;
+    viewRevision.current += 1;
     outputCursor.current = { sessionId: id, cursor: null };
     setFrame(null);
     setGapFor("");
@@ -247,6 +249,7 @@ export default function App() {
     } finally { pairController.current = null; setPairBusy(false); }
   }
   function disconnect() {
+    viewRevision.current += 1;
     pairController.current?.abort();
     forgetPairing();
     setClient(null);
@@ -258,12 +261,13 @@ export default function App() {
   }
   async function act<T>(action: Action, onSuccess?: (value: T) => void) {
     if (!client || mutationInFlight.current || !connected) return;
+    const revision = viewRevision.current;
     mutationInFlight.current = true;
     setMutation(true);
     setError("");
     try {
       const result = await client.action<T>(action);
-      onSuccess?.(result);
+      if (viewRevision.current === revision) onSuccess?.(result);
       setRefresh(value => value + 1);
     } catch (failure) {
       setError(`Action outcome may be unknown: ${message(failure)}. Check the desktop before sending again.`);

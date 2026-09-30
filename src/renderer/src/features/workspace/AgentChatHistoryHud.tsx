@@ -28,7 +28,7 @@ const ACTIVITY_WINDOWS: Record<Exclude<ActivityFilter, "all">, number> = {
 
 function projectLabel(cwd: string | null, unknownLabel: string): string {
   if (!cwd) return unknownLabel;
-  return cwd.split("/").filter(Boolean).at(-1) ?? cwd;
+  return cwd.split(/[/\\]/).filter(Boolean).at(-1) ?? cwd;
 }
 
 export function AgentChatHistoryHud({ settings, sessions, onFocusSession, onResume }: AgentChatHistoryHudProps): React.JSX.Element {
