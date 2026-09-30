@@ -7,6 +7,7 @@ import { LaunchRefusal } from "../launchRefusal.ts";
 import { isolationPaths } from "./isolationPaths.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments } from "./bubblewrap.ts";
+import { LinuxHostPaths } from "./linuxHostPaths.ts";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 /** The prefix of a launch's own folder (its profile and TMPDIR) in the temporary folder. */
@@ -27,6 +28,8 @@ export interface AgentIsolationOptions {
   /** bubblewrap's path on Linux; found on PATH when omitted, null when it is not installed. */
   bubblewrapPath?: string | null;
   exists?: (path: string) => boolean;
+  /** Linux: the host folders and placeholders bubblewrap needs (shared across launches); tests pass their own. */
+  linuxHostPaths?: LinuxHostPaths;
 }
 
 export interface IsolationDecisionInput {
@@ -80,11 +83,13 @@ export class AgentIsolation {
   private readonly options: AgentIsolationOptions;
   private readonly platform: NodeJS.Platform;
   private bubblewrap: string | null | undefined;
+  private readonly linuxHostPaths: LinuxHostPaths;
 
   constructor(options: AgentIsolationOptions) {
     this.options = options;
     this.platform = options.platform ?? process.platform;
     this.bubblewrap = options.bubblewrapPath;
+    this.linuxHostPaths = options.linuxHostPaths ?? new LinuxHostPaths();
   }
 
   /** The layer this computer has, or why it has none. */
@@ -143,7 +148,10 @@ export class AgentIsolation {
     const available = this.availability();
     if ("reason" in available) throw new LaunchRefusal(`agent isolation is not available: ${available.reason} The agent was not started without it.`);
     let folder: string | null = null;
+    let releaseHostPaths: (() => void) | null = null;
     const cleanup = (): void => {
+      releaseHostPaths?.();
+      releaseHostPaths = null;
       if (folder) rmSync(folder, { recursive: true, force: true });
       folder = null;
     };
@@ -171,6 +179,9 @@ export class AgentIsolation {
         writeFileSync(profilePath, seatbeltProfile(paths), { mode: 0o600, flag: "wx" });
         return { command: this.options.sandboxExecPath ?? SANDBOX_EXEC, args: ["-f", profilePath, launch.command, ...launch.args], env, cleanup };
       }
+      // bubblewrap mounts only what exists: the CLI's own missing folders are created and a missing protected file
+      // gets a placeholder first (LinuxHostPaths), both undone by cleanup().
+      releaseHostPaths = this.linuxHostPaths.prepare(paths);
       const kind = (path: string): "file" | "directory" | null => {
         try { const stat = statSync(path); return stat.isDirectory() ? "directory" : stat.isFile() ? "file" : null; } catch { return null; }
       };
