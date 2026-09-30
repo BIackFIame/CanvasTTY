@@ -62,10 +62,10 @@ For live development, use the same environment with `npm run dev` instead.
 1. With two canvas windows present and Codex input focused, Alt+Up reaches the
    CLI instead of switching canvas focus. Alt+arrow still navigates windows when
    the canvas itself has keyboard focus.
-2. Enter and Shift+Enter add newlines. Ctrl+Enter submits or queues; Super+Enter
-   is an alias when the window manager delivers it. Tab completes without sending.
-3. Startup draft Enter/Shift+Enter remain newlines. Trust, resume and approval
-   dialogs retain their ordinary confirmation keys.
+2. Enter submits or queues; Ctrl+Enter and Super+Enter are aliases when delivered
+   by the window manager. Shift+Enter adds a newline. Tab completes without sending.
+3. Startup draft Enter confirms submission; Shift+Enter adds a newline. Trust,
+   resume and approval dialogs retain their ordinary confirmation keys.
 4. After initialization, Ctrl+A selects multiline/offscreen draft text. Ctrl+C
    copies it; typing, paste and Backspace replace/delete the selection. Large
    pasted content is copied as actual text rather than its placeholder marker.
