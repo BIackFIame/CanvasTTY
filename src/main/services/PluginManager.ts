@@ -78,6 +78,13 @@ const VERSIONS_FILE = "plugin-versions.json";
 const SEARCH_MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 15_000;
 const PREVIEW_TTL_MS = 10 * 60_000;
+/**
+ * Aggregate cap on install previews held at once. Each preview downloads a repository into its own
+ * staging directory and is only swept lazily (on the next previewInstall/install call) once its TTL
+ * passes; without a cap, previewing many plugins inside one TTL window (e.g. paging through the
+ * showcase) accumulates one staging directory per preview until the oldest ones happen to expire.
+ */
+const MAX_PENDING_PREVIEWS = 20;
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_RETRY_DELAY_MS = 1_500;
@@ -355,6 +362,7 @@ export class PluginManager {
         manifest,
         expiresAt: Date.now() + PREVIEW_TTL_MS
       };
+      await this.enforcePendingPreviewCap();
       this.pending.set(token, { directory, packageRoot, preview });
       return structuredClone(preview);
     } catch (error) {
@@ -1257,6 +1265,23 @@ export class PluginManager {
       this.pending.delete(token);
       void rm(pending.directory, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Keeps at most MAX_PENDING_PREVIEWS - 1 previews before a new one is added, evicting the oldest
+   * (insertion order) first so the map and its staging directories never grow past the cap even when
+   * every preview is still within its TTL.
+   */
+  private async enforcePendingPreviewCap(): Promise<void> {
+    const evicted: Promise<void>[] = [];
+    while (this.pending.size >= MAX_PENDING_PREVIEWS) {
+      const oldest = this.pending.keys().next();
+      if (oldest.done) break;
+      const pending = this.pending.get(oldest.value);
+      this.pending.delete(oldest.value);
+      if (pending) evicted.push(rm(pending.directory, { recursive: true, force: true }));
+    }
+    if (evicted.length > 0) await Promise.all(evicted);
   }
 
   private persistRegistry(): Promise<void> {

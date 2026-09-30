@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1882,4 +1882,32 @@ test("a plugin download past its size bound is cancelled, which closes the conne
   assert.ok(pulls <= 6, "nothing more was read");
   const small = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.close(); } });
   assert.deepEqual([...await readBoundedBody(small, 4_096, "too large")], [1, 2]);
+});
+
+test("install previews are capped: previewing past the cap evicts the oldest staging directories", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-preview-cap-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    await manager.load();
+    const tokens = [];
+    // One more than the cap: every preview stays well within its 10-minute TTL, so only the
+    // aggregate cap (not expiry) can bound how many staging directories accumulate.
+    for (let i = 0; i < 21; i += 1) {
+      tokens.push((await manager.previewInstall("https://github.com/example/studio-kit")).token);
+    }
+    const staged = (await readdir(join(userData, "plugin-staging"))).filter((name) => name.startsWith("preview-"));
+    assert.ok(staged.length <= 20, `expected at most 20 staged preview directories, found ${staged.length}`);
+
+    // The oldest previews were evicted: their tokens no longer install.
+    await assert.rejects(manager.install(tokens[0]), /expired/);
+    // The newest preview is still installable.
+    const installed = await manager.install(tokens[tokens.length - 1]);
+    assert.equal(installed.manifest.id, "com.example.studio-kit");
+  } finally {
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+  }
 });
