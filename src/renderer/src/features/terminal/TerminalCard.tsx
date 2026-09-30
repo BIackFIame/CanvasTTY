@@ -57,6 +57,7 @@ import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
 import { compactPath, renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
 import { webglContextPool } from "./webglContextPool";
+import { skipEmptySelectionRedraws } from "./terminalSelectionRedraw";
 import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
 import { isPixelSkinThemeId, pixelSkinStateForSession } from "../skins/skinCatalog";
 import { isPixelSkinPackId, usePixelSkinPackSummary } from "../skins/SkinAssets";
@@ -321,6 +322,7 @@ function TerminalCardView({
     terminal.open(host);
     setOscTitle(null);
     const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
+    const restoreSelectionRedraws = skipEmptySelectionRedraws(terminal);
     let lastReportedGrid = "";
     const reportGrid = (cols: number, rows: number): void => {
       const grid = `${cols}x${rows}`;
@@ -508,6 +510,7 @@ function TerminalCardView({
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
       detachRedrawViewport();
+      restoreSelectionRedraws();
       terminal.dispose();
     };
   }, [session.id]);
