@@ -17,6 +17,10 @@ import {
 } from "./orchestration-catalog.mjs";
 
 const PROTOCOL_VERSION = 1;
+// Before the first authentication the gateway may still be starting (or restarting): a call tries this many
+// connections, spaced CONNECT_RETRY_MS apart, before it fails; the next call starts over.
+const CONNECT_ATTEMPTS = 3;
+const CONNECT_RETRY_MS = 250;
 const DEFAULT_MCP_PROTOCOL_VERSION = "2025-06-18";
 const ENV = {
   address: "CANVASTTY_ORCHESTRATION_ADDRESS",
@@ -57,11 +61,13 @@ export class OrchestrationClient {
     this.heartbeatTimer = null;
     this.closed = false;
     this.reconnectToken = null;
+    this.connectAttempts = 0;
   }
 
   connect() {
     if (this.closed) return Promise.reject(unavailable());
     if (this.authenticated) return this.authenticated;
+    this.connectAttempts = 0;
     this.authenticated = new Promise((resolve, reject) => {
       this.resolveAuthenticated = resolve;
       this.rejectAuthenticated = reject;
@@ -168,8 +174,20 @@ export class OrchestrationClient {
   }
 
   failAuthentication(error) {
-    this.rejectAuthenticated?.(error);
+    this.connectAttempts += 1;
+    if (!this.closed && this.connectAttempts < CONNECT_ATTEMPTS) {
+      setTimeout(() => {
+        if (this.closed) this.failAuthentication(error);
+        else if (!this.socket) this.openConnection();
+      }, CONNECT_RETRY_MS).unref?.();
+      return;
+    }
+    // Not cached: a later call connects again instead of failing for the rest of the session.
+    const reject = this.rejectAuthenticated;
+    this.authenticated = null;
+    this.resolveAuthenticated = undefined;
     this.rejectAuthenticated = undefined;
+    reject?.(error);
   }
 
   async call(tool, args, id = `helper-${randomUUID()}`) {

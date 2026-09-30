@@ -499,6 +499,44 @@ test("orchestration MCP: an unreachable gateway, a failing tool list and a dropp
   assert.match(reconnected.received[1][0], /"capabilityToken":"rotated-0"/u);
 });
 
+test("orchestration MCP: a gateway that is not up yet is retried, and a failed first connection is not final", OPTIONS, async () => {
+  // Connections below `refuse` are dropped before authentication, like a gateway that is (re)starting.
+  const flakyGateway = (refuse) => () => lineServer(
+    (connection, message) => {
+      if (message?.type === "authenticate") connection.send({ v: 1, type: "authenticated", reconnectToken: `rotated-${connection.index}`, heartbeatIntervalMs: 5_000 });
+      if (message?.type === "request") connection.send({ v: 1, type: "response", id: message.id, result: { agents: [] } });
+    },
+    (connection) => {
+      if (connection.index < refuse) connection.socket.destroy();
+    }
+  );
+  // One dropped attempt: the same initialize still succeeds on a later attempt.
+  const retried = await scenario("orchestration", {
+    makeGateway: flakyGateway(1),
+    async script({ helper }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1), 10_000);
+      helper.send(call(2, "list_agents", {}));
+      await helper.until(outputHasId(2), 10_000);
+    }
+  });
+  assert.ok(retried.output.some((line) => line.includes('"id":1') && line.includes('"result"')), "initialize succeeded after a retry");
+  assert.ok(retried.output.some((line) => line.includes('"id":2') && line.includes("agents")), "the call went through");
+  // Every attempt of the first call is dropped: it fails, but the next call connects again instead of failing forever.
+  const recovered = await scenario("orchestration", {
+    makeGateway: flakyGateway(3),
+    async script({ helper, gateway }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1), 10_000);
+      assert.equal(gateway.connections.length, 3, "the first call tried a bounded number of times");
+      helper.send(call(2, "list_agents", {}));
+      await helper.until(outputHasId(2), 10_000);
+    }
+  });
+  assert.ok(recovered.output.some((line) => line.includes('"id":1') && line.includes('"error"')), "the first initialize failed");
+  assert.ok(recovered.output.some((line) => line.includes('"id":2') && line.includes("agents") && line.includes('"isError":false')), "a later call reconnected");
+});
+
 test("orchestration MCP: the real OrchestrationGateway serves both implementations", OPTIONS, async (t) => {
   const runtimeDirectory = await mkdtemp(join(tmpdir(), "canvastty-native-orch-"));
   t.after(() => rm(runtimeDirectory, { recursive: true, force: true }));

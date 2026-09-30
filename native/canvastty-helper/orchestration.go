@@ -12,6 +12,13 @@ import (
 
 const maxOrchestrationPayloadBytes = 128 * 1024
 
+// Before the first authentication the gateway may still be starting (or restarting): a call tries this many
+// connections, spaced orchestrationConnectRetry apart, before it fails; the next call starts over.
+const (
+	orchestrationConnectAttempts = 3
+	orchestrationConnectRetry    = 250 * time.Millisecond
+)
+
 // orchestrationError is orchestration-helper.mjs BridgeError: the gateway's error payload as is.
 type orchestrationError struct {
 	payload any
@@ -51,6 +58,7 @@ type orchestrationClient struct {
 	heartbeatID        int
 	closed             bool
 	reconnectToken     any
+	connectAttempts    int
 }
 
 func newOrchestrationClient(identity orchestrationIdentity) *orchestrationClient {
@@ -71,6 +79,7 @@ func (c *orchestrationClient) connect() *future {
 	if c.authenticated != nil {
 		return c.authenticated
 	}
+	c.connectAttempts = 0
 	c.authenticated = newFuture()
 	c.openConnection()
 	return c.authenticated
@@ -234,9 +243,7 @@ func (c *orchestrationClient) handleDisconnect(socket *asyncSocket, err error) {
 		delete(c.pending, id)
 	}
 	if !c.authenticatedState {
-		if c.authenticated != nil {
-			c.authenticated.reject(err)
-		}
+		c.failAuthentication(err)
 		return
 	}
 	// The bootstrap token is consumed; the rotated reconnect token keeps this helper usable after a socket drop.
@@ -249,6 +256,29 @@ func (c *orchestrationClient) handleDisconnect(socket *asyncSocket, err error) {
 				c.openConnection()
 			}
 		})
+	}
+}
+
+// failAuthentication is a connection lost before the first authentication: retried a few times, then the waiting
+// calls fail and the next call connects again instead of failing for the rest of the session. c.mu is held.
+func (c *orchestrationClient) failAuthentication(err error) {
+	c.connectAttempts++
+	if !c.closed && c.connectAttempts < orchestrationConnectAttempts {
+		time.AfterFunc(orchestrationConnectRetry, func() {
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			if c.closed {
+				c.failAuthentication(err)
+			} else if c.socket == nil {
+				c.openConnection()
+			}
+		})
+		return
+	}
+	authenticated := c.authenticated
+	c.authenticated = nil
+	if authenticated != nil {
+		authenticated.reject(err)
 	}
 }
 
