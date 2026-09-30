@@ -8,6 +8,8 @@ import {
   canvasLayerIsOccluded,
   canvasLayerZIndex,
   canvasScreenRect,
+  keepLiveIds,
+  pruneToLive,
   reconcileCanvasLayerOrder
 } from "../src/renderer/src/features/workspace/canvasStacking.ts";
 import { canvasWorldRect } from "../src/renderer/src/features/workspace/canvasSelectionGesture.ts";
@@ -74,4 +76,20 @@ test("embedded plugin focus participates in ordinary click-to-front activation",
     import.meta.url
   ), "utf8");
   assert.match(source, /<iframe[\s\S]*?onFocus=\{onFocus\}/);
+});
+
+test("per-session canvas state forgets closed sessions and keeps its identity while nothing closed", async () => {
+  const live = new Set(["a", "b"]);
+  const toggles = new Map([["a", () => "a"], ["gone", () => "gone"], ["b", () => "b"]]);
+  const a = toggles.get("a");
+  pruneToLive(toggles, live);
+  assert.deepEqual([...toggles.keys()], ["a", "b"]);
+  assert.equal(toggles.get("a"), a, "a live session keeps its callback");
+  const master = new Set(["a", "gone"]);
+  assert.deepEqual([...keepLiveIds(master, live)], ["a"]);
+  const unchanged = new Set(["b"]);
+  assert.equal(keepLiveIds(unchanged, live), unchanged, "no state change when nothing closed");
+  const source = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
+  assert.match(source, /pruneToLive\(fullscreenToggles\.current, liveSessionIds\)/u);
+  assert.match(source, /setMasterPixelSkinSessionIds\(\(current\) => keepLiveIds\(current, liveSessionIds\)\)/u);
 });

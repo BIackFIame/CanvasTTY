@@ -67,6 +67,8 @@ import {
   canvasLayerIsOccluded,
   canvasLayerZIndex,
   canvasScreenRect,
+  keepLiveIds,
+  pruneToLive,
   reconcileCanvasLayerOrder
 } from "./canvasStacking";
 import {
@@ -598,6 +600,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     }
     return toggle;
   };
+  // Closed sessions leave nothing behind in per-session state.
+  const liveSessionIds = useMemo(() => new Set(sessions.map((session) => session.id)), [sessions]);
+  useEffect(() => {
+    pruneToLive(fullscreenToggles.current, liveSessionIds);
+    setMasterPixelSkinSessionIds((current) => keepLiveIds(current, liveSessionIds));
+  }, [liveSessionIds]);
   const canvasOverrideActive = wheelNavigation.canvasOverrideActive;
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
   const editedRegion = regionEditor?.mode === "edit"

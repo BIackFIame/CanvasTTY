@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, resolve, sep } from "node:path";
 import test from "node:test";
 
 import { AGENT_RUNTIME_ENV, CAPTURE_RESULT_ENV, CLAUDE_HTTP_HOOK } from "../src/agent-runtime/runtime-protocol.mjs";
@@ -296,11 +296,35 @@ test("the bridge uses HTTP only for Claude, only when the policy allows and the 
   assert.equal(verdicts.length, 2);
 });
 
+/** What is at a path when `files` (path -> text) is the whole file system. */
+const entryIn = (files) => (path) => files.has(path) || files.has(resolve(path)) ? "file"
+  : [...files.keys()].some((file) => file.startsWith(`${path}/`) || file.startsWith(`${resolve(path)}${sep}`)) ? "directory" : null;
+
+test("the policy's project walk costs one stat per folder without .claude and stops at the repository root or HOME", () => {
+  const files = new Map([["/profile/work/a/.claude/settings.json", "{}"]]);
+  const looked = [];
+  const read = [];
+  const entry = entryIn(files);
+  const policy = new ClaudeHttpHookPolicy({
+    platform: "darwin", home: "/profile", managedSettingsPaths: [], version: () => "2.1.281",
+    readText: (path) => { read.push(path); return files.get(path) ?? null; },
+    entry: (path) => { looked.push(path); return entry(path); }
+  });
+  const facts = { executable: "/bin/claude", profile: "default", environmentWrapped: false, env: { PATH: "/bin" }, args: [], cwd: "/profile/work/a/b/c" };
+  assert.equal(policy.verdict(facts).ok, true);
+  assert.deepEqual(looked, [
+    "/profile/work/a/b/c/.claude", "/profile/work/a/b/c/.git", "/profile/work/a/b/.claude", "/profile/work/a/b/.git",
+    "/profile/work/a/.claude", "/profile/work/a/.git", "/profile/work/.claude", "/profile/work/.git", "/profile/.claude", "/profile/.git"
+  ], "never above HOME");
+  assert.deepEqual(read, ["/profile/.claude/settings.json", "/profile/work/a/.claude/settings.json", "/profile/work/a/.claude/settings.local.json"],
+    "settings files are read only where a .claude folder is");
+});
+
 test("the policy keeps the helper wherever an HTTP hook could not reach the gateway", () => {
   const files = new Map();
   const policy = (options = {}) => new ClaudeHttpHookPolicy({
     platform: "darwin", home: "/profile", managedSettingsPaths: ["/managed/managed-settings.json"],
-    readText: (path) => files.get(resolve(path)) ?? null, version: () => "2.1.281", ...options
+    readText: (path) => files.get(resolve(path)) ?? null, version: () => "2.1.281", entry: entryIn(files), ...options
   });
   const facts = { executable: "/bin/claude", profile: "default", environmentWrapped: false, env: { PATH: "/bin" }, args: [], cwd: "/work/repo/sub" };
   assert.deepEqual(policy().verdict(facts), { ok: true });

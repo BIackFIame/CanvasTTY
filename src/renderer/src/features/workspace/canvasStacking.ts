@@ -12,6 +12,21 @@ export function reconcileCanvasLayerOrder(
   return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
 }
 
+/** The ids of `current` that are still live; `current` itself when none is gone (no state change). */
+export function keepLiveIds(current: ReadonlySet<string>, live: ReadonlySet<string>): ReadonlySet<string> {
+  for (const id of current) {
+    if (!live.has(id)) return new Set([...current].filter((candidate) => live.has(candidate)));
+  }
+  return current;
+}
+
+/** Drops, in place, the entries of a per-id cache whose id is no longer live. */
+export function pruneToLive(cache: Map<string, unknown>, live: ReadonlySet<string>): void {
+  for (const id of cache.keys()) {
+    if (!live.has(id)) cache.delete(id);
+  }
+}
+
 export function bringCanvasLayerToFront(current: readonly string[], id: string): string[] {
   if (!current.includes(id) || current.at(-1) === id) return [...current];
   return [...current.filter((candidate) => candidate !== id), id];
