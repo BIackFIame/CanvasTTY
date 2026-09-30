@@ -84,6 +84,12 @@ interface TerminalCardProps {
   forceMasterDetail: boolean;
   /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
   groupSelected?: boolean;
+  /**
+   * The card is CSS-hidden by an ancestor (HOME editing hides the whole window layer). Gates the
+   * same main-process output stream that summary mode gates: a hidden card has nothing to draw,
+   * so there is no reason to keep delivering terminalData to it or parsing it through xterm.
+   */
+  hidden?: boolean;
   renaming: boolean;
   fullscreen: boolean;
   snapTargets: readonly SessionBounds[];
@@ -154,6 +160,7 @@ function TerminalCardView({
   selected,
   forceMasterDetail,
   groupSelected,
+  hidden = false,
   renaming,
   fullscreen,
   snapTargets,
@@ -581,11 +588,13 @@ function TerminalCardView({
 
   useEffect(() => {
     // Gate the main-process output stream: in summary mode the card is a cheap
-    // thumbnail, so the renderer skips terminalData (scrollback stays
-    // authoritative and the missing suffix is replayed when it turns visible).
-    window.canvasTTY.terminal.setVisible(session.id, !summaryMode);
+    // thumbnail, and while `hidden` (HOME editing hides the whole window layer with
+    // CSS) the card draws nothing at all, so either way the renderer skips
+    // terminalData (scrollback stays authoritative and the missing suffix is
+    // replayed once the card is visible and out of summary mode again).
+    window.canvasTTY.terminal.setVisible(session.id, !summaryMode && !hidden);
     return () => window.canvasTTY.terminal.setVisible(session.id, false);
-  }, [session.id, summaryMode]);
+  }, [session.id, summaryMode, hidden]);
 
   useEffect(() => {
     const terminal = terminalRef.current;

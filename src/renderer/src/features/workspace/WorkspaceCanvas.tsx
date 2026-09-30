@@ -998,6 +998,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
               renaming={renamingSessionId === session.id}
               fullscreen={fullscreenSessionId === session.id}
+              hidden={homeEditing}
               onToggleFullscreen={toggleFullscreenFor(session.id)}
               snapTargets={snapTargetsFor(session)}
               {...terminalCardCallbacks.canvas}
