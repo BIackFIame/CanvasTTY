@@ -49,15 +49,18 @@ export function localOrigin(value: unknown, allowLoopback = false): string {
   const mdns = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(host);
   const loopback =
     allowLoopback && ["127.0.0.1", "localhost", "[::1]"].includes(host);
+  const tailscale = url.protocol === "https:" &&
+    /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.ts\.net$/.test(host);
   if (
-    url.protocol !== "http:" ||
+    (url.protocol !== "http:" && !tailscale) ||
     url.username ||
     url.password ||
     url.pathname !== "/" ||
     url.search ||
     url.hash ||
-    !url.port ||
-    !(ipv4 || ipv6 || mdns || loopback)
+    (url.protocol === "http:" && !url.port) ||
+    (tailscale && (url.port !== "" || value !== url.origin)) ||
+    !(ipv4 || ipv6 || mdns || loopback || tailscale)
   )
     throw new Error("Only a local computer address is allowed");
   return url.origin;
@@ -212,6 +215,7 @@ export function validateLocalRequest(value: LocalRequest): void {
   ]);
   const posts = new Set([
     "/g2/api/pair",
+    "/g2/api/mobile",
     "/g2/api/create",
     "/g2/api/session-close",
     "/g2/api/session-rename",

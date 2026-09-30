@@ -9,6 +9,27 @@ export interface CompanionSession {
   provider: ProviderId;
   status: SessionStatus;
 }
+export interface CompanionOverviewSession extends CompanionSession {
+  startedAt: number;
+  exitCode: number | null;
+  revision: number;
+}
+
+export interface CompanionOverview {
+  sessions: CompanionOverviewSession[];
+  providers: Record<ProviderId, boolean>;
+  permissions: { allowInput: boolean; allowCreate: boolean; allowClose: boolean };
+}
+
+export interface CompanionOutput {
+  data: string;
+  offset: number;
+  gap: boolean;
+  hasMore: boolean;
+  cols: number;
+  rows: number;
+}
+
 
 export interface CompanionGrant {
   deviceId: string;
@@ -22,6 +43,9 @@ export interface CompanionGrant {
 
 export type CompanionAction =
   | { type: "sessions.list" }
+  | { type: "sessions.overview" }
+  | { type: "session.output"; sessionId: string; cursor: number | null }
+  | { type: "session.key"; sessionId: string; key: CompanionKey }
   | { type: "session.read"; sessionId: string }
   | { type: "session.input"; sessionId: string; text: string }
   | { type: "session.interrupt"; sessionId: string }
@@ -30,6 +54,10 @@ export type CompanionAction =
   | { type: "session.create"; provider: ProviderId }
   | { type: "browser.open"; sessionId: string }
   | { type: "limits.read" };
+
+export type CompanionKey =
+  | "ctrl-c" | "enter" | "up" | "down" | "left" | "right"
+  | "tab" | "backspace" | "escape";
 
 export interface CompanionRequest {
   version: typeof COMPANION_PROTOCOL_VERSION;
@@ -60,6 +88,8 @@ export class CompanionError extends Error {
 
 const SESSION_ACTIONS = new Set([
   "session.read",
+  "session.output",
+  "session.key",
   "session.input",
   "session.interrupt",
   "session.close",
@@ -121,11 +151,21 @@ export function parseCompanionRequest(value: unknown): CompanionRequest {
       )
         throw new CompanionError("invalid-request");
     }
+    if (type === "session.output") {
+      keys.push("cursor");
+      if (action.cursor !== null && (!Number.isSafeInteger(action.cursor) || (action.cursor as number) < 0))
+        throw new CompanionError("invalid-request");
+    }
+    if (type === "session.key") {
+      keys.push("key");
+      if (!["ctrl-c", "enter", "up", "down", "left", "right", "tab", "backspace", "escape"].includes(action.key as string))
+        throw new CompanionError("invalid-request");
+    }
   } else if (type === "session.create") {
     keys.push("provider");
     if (!CANVAS_LAUNCHER_ITEMS.includes(action.provider as ProviderId))
       throw new CompanionError("invalid-request");
-  } else if (type !== "sessions.list" && type !== "limits.read") {
+  } else if (type !== "sessions.list" && type !== "sessions.overview" && type !== "limits.read") {
     throw new CompanionError("invalid-request");
   }
   if (Object.keys(action).some((key) => !keys.includes(key)))

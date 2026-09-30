@@ -618,6 +618,8 @@ async function initializeServices(): Promise<void> {
     defaultWorkspace: join(app.getPath("documents"), "CanvasTTY Projects"),
     bundledSpeech: process.platform === "darwin" ? (app.isPackaged ? join(process.resourcesPath, "companion/speech/canvastty-speech") : join(app.getAppPath(), "artifacts/companion-speech", process.arch, "canvastty-speech")) : undefined,
     webRoot: app.isPackaged ? join(process.resourcesPath,"even-g2-web") : join(app.getAppPath(),"integrations/even-g2/dist"),
+    mobileRoot: app.isPackaged ? join(process.resourcesPath, "mobile-web") : join(app.getAppPath(), "integrations/mobile/dist"),
+    providerAvailability: () => providerCliAvailability(providerClis!),
     speechWorker: app.isPackaged ? join(process.resourcesPath,"companion/asr_worker.py") : join(app.getAppPath(),"src/main/services/companion/asr_worker.py"),
     limits: () => limitsService!.get(), openBrowser: showCompanionBrowser
   });

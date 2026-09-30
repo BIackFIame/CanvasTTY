@@ -149,6 +149,9 @@ export function readLocalConnection(value) {
   };
 }
 
+/** @param {string} value
+ * @param {{fetcher?: typeof fetch, signal?: AbortSignal, origins?: string[], allowLoopback?: boolean, onTrace?: (message: string) => void}} [options]
+ */
 export async function connectionFromCode(value, {
   fetcher = fetch, signal, origins = LOCAL_DISCOVERY_ORIGINS, allowLoopback = false, onTrace = () => {},
 } = {}) {

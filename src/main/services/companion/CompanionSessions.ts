@@ -1,3 +1,4 @@
+import { CANVAS_LAUNCHER_ITEMS } from "../../../shared/providerCatalog.ts";
 import type { LimitsSnapshot, ProviderId } from "../../../shared/contracts.ts";
 import {
   CompanionError,
@@ -6,6 +7,10 @@ import {
   type CompanionAction,
   type CompanionGrant,
   type CompanionSession,
+  type CompanionOutput,
+  type CompanionOverview,
+  type CompanionOverviewSession,
+  type CompanionKey,
 } from "../../../shared/companion.ts";
 import { RequestLedger } from "./RequestLedger.ts";
 import { SessionAccess } from "./SessionAccess.ts";
@@ -17,6 +22,9 @@ export interface CompanionView {
 
 export interface CompanionHost {
   list(): CompanionSession[];
+  overview?(): CompanionOverviewSession[];
+  output?(sessionId: string): { buffer: string; outputOffset: number; cols: number; rows: number };
+  providers?(): Record<ProviderId, boolean>;
   read(sessionId: string): Promise<CompanionView>;
   input(sessionId: string, data: string): boolean;
   close(sessionId: string): void;
@@ -44,6 +52,11 @@ function publicBrowserUrl(value: string): string {
     return "";
   }
 }
+
+const KEY_BYTES: Record<CompanionKey, string> = {
+  "ctrl-c": "\x03", enter: "\r", up: "\x1b[A", down: "\x1b[B",
+  left: "\x1b[D", right: "\x1b[C", tab: "\t", backspace: "\x7f", escape: "\x1b",
+};
 
 /** Transport-independent operations for an already authenticated device. */
 export class CompanionSessions {
@@ -80,6 +93,7 @@ export class CompanionSessions {
     if (
       ((action.type === "session.input" ||
         action.type === "session.interrupt" ||
+        action.type === "session.key" ||
         action.type === "session.rename") &&
         !grant.allowInput) ||
       (action.type === "session.create" && !grant.allowCreate) ||
@@ -100,6 +114,30 @@ export class CompanionSessions {
         .filter((session) => grant.sessionIds.includes(session.id))
         .map(publicSession);
     }
+    if (action.type === "sessions.overview") {
+      if (!this.host.overview) throw new CompanionError("unavailable");
+      const providers = this.host.providers?.() ?? Object.fromEntries(
+        CANVAS_LAUNCHER_ITEMS.map((provider) => [provider, provider === "terminal"]),
+      ) as Record<ProviderId, boolean>;
+      return {
+        sessions: this.host.overview()
+          .filter((session) => grant.sessionIds.includes(session.id))
+          .map((session) => ({
+            ...publicSession(session),
+            startedAt: session.startedAt,
+            exitCode: session.exitCode,
+            revision: session.revision,
+          })),
+        providers: Object.fromEntries(CANVAS_LAUNCHER_ITEMS.map(
+          (provider) => [provider, providers[provider] === true],
+        )) as Record<ProviderId, boolean>,
+        permissions: {
+          allowInput: grant.allowInput,
+          allowCreate: grant.allowCreate,
+          allowClose: grant.allowClose,
+        },
+      } satisfies CompanionOverview;
+    }
     if (action.type === "limits.read") {
       const limits = await this.host.limits();
       this.access.assertCurrent(grant);
@@ -118,6 +156,30 @@ export class CompanionSessions {
       this.access.assertCurrent(grant);
       return { body: view.body.slice(-16_000), revision: view.revision };
     }
+    if (action.type === "session.output") {
+      if (!this.host.output) throw new CompanionError("unavailable");
+      const { buffer, outputOffset, cols, rows } = this.host.output(action.sessionId);
+      const first = outputOffset - buffer.length;
+      let start = action.cursor === null || action.cursor > outputOffset
+        ? Math.max(first, outputOffset - 16_000)
+        : Math.max(first, action.cursor);
+      let gap = action.cursor === null
+        ? start > 0
+        : action.cursor < first || action.cursor > outputOffset;
+      // Never hand the UI half a UTF-16 surrogate pair at a page boundary.
+      if (start > first && start < outputOffset &&
+          /[\uDC00-\uDFFF]/u.test(buffer[start - first])) {
+        start++;
+        gap = true;
+      }
+      let data = buffer.slice(start - first, start - first + 16_000);
+      if (data.length && start + data.length < outputOffset &&
+          /[\uD800-\uDBFF]/u.test(data[data.length - 1]) &&
+          /[\uDC00-\uDFFF]/u.test(buffer[start - first + data.length]))
+        data = data.slice(0, -1);
+      const offset = start + data.length;
+      return { data, offset, gap, hasMore: offset < outputOffset, cols, rows } satisfies CompanionOutput;
+    }
     if (action.type === "browser.open") {
       const browser = await this.host.openBrowser();
       this.access.assertCurrent(grant);
@@ -133,6 +195,11 @@ export class CompanionSessions {
     if (action.type === "session.close") {
       this.host.close(action.sessionId);
       return { closed: true, sessionId: action.sessionId };
+    }
+    if (action.type === "session.key") {
+      if (!this.host.input(action.sessionId, KEY_BYTES[action.key]))
+        throw new CompanionError("unavailable");
+      return { delivered: true, sessionId: action.sessionId };
     }
     const data =
       action.type === "session.interrupt"

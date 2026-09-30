@@ -122,6 +122,7 @@
   justify-content: space-between;
   gap: 18px;
   margin: 0 var(--g2-inset) 18px;
+  flex-wrap: wrap;
   padding-top: 14px;
   border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
 }
@@ -131,6 +132,7 @@
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-muted-on-dark);
+  overflow-wrap: anywhere;
 }
 .g2-steps {
   display: flex;
@@ -175,6 +177,10 @@
   font-size: 12px;
   line-height: 1.65;
   color: var(--text-muted-on-dark);
+}
+.g2-settings__body a,
+.g2-settings__body code {
+  overflow-wrap: anywhere;
 }
 .g2-settings__body ol {
   padding-left: 19px;
