@@ -11,7 +11,9 @@ import type {
 import { BrowserAutomationService, type BrowserPointerResult } from "./BrowserAutomationService.ts";
 import { BrowserAuditStore } from "./BrowserAuditStore.ts";
 import { BrowserCommandDispatcher } from "./BrowserCommandDispatcher.ts";
-import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
+import { BrowserKernelError, EngineFallbackRequired, throwIfAborted, type EngineFallbackReason } from "./BrowserErrors.ts";
+import { isEngineRequest } from "./BrowserEngineTabs.ts";
+import { CHROMIUM_ENGINE } from "./TabDriver.ts";
 import { BrowserPolicyService, DEFAULT_BROWSER_URL } from "./BrowserPolicyService.ts";
 import { isSensitiveName } from "../safety/sensitiveNames.ts";
 import type { AgentDisconnectReason } from "../agent-browser/protocol.ts";
@@ -44,7 +46,62 @@ export interface BrowserCoreHost {
    * the tab's page was loaded again: its earlier element refs are stale.
    */
   prepareTab?(tabId: string): Promise<{ reloaded: boolean }>;
+  /**
+   * Opens a tab for this actor. An agent's tab may go to a plugin-contributed engine (then it stays in the background:
+   * `tabId` is not the active tab); a person's tab always opens in Chromium. Without it, `newTab` opens every tab.
+   */
+  openTab?(url: string, options: { engine?: string; actor: BrowserActor }): Promise<BrowserOpenedTab>;
+  /** The engine driving a tab: `chromium` or null for Browser card tabs, the engine id for a contributed engine's tab. */
+  tabEngine?(tabId: string): string | null;
+  /**
+   * Moves a contributed engine's tab to Chromium under the same id at the next document revision. Resolves once the
+   * page loaded (bounded), or at once when the person revealed the tab.
+   */
+  moveTabToChromium?(tabId: string, reason: EngineFallbackReason): Promise<void>;
 }
+
+export interface BrowserOpenedTab {
+  snapshot: BrowserSnapshot;
+  tabId: string | null;
+  /** `chromium` or the contributed engine's id. */
+  engine: string;
+  notice?: string;
+}
+
+const ENGINE_FALLBACK_TEXT: Record<EngineFallbackReason, string> = {
+  "bot-wall": "the site showed a bot check",
+  "thin-text": "the engine got too little text from the page",
+  "unsupported-method": "the engine does not support this command",
+  "unsupported-action": "the engine cannot do this action",
+  screenshot: "screenshots need Chromium",
+  "engine-disconnected": "the engine stopped",
+  revealed: "the tab was shown",
+  "remembered-site": "this site needed Chromium earlier"
+};
+
+export function engineFallbackNotice(reason: EngineFallbackReason): string {
+  return `Browser tab moved to Chromium (${ENGINE_FALLBACK_TEXT[reason]}). It keeps its tab ID; element refs from before are stale, observe it again.`;
+}
+
+/** Commands a contributed engine's tab never runs: the tab moves to Chromium first. */
+function upfrontFallback(command: BrowserCommand): EngineFallbackReason | null {
+  switch (command.type) {
+    case "browser_screenshot": return "screenshot";
+    case "browser_activate_tab": return "revealed";
+    case "browser_drag":
+    case "browser_download_wait": return "unsupported-action";
+    case "browser_wait_for": return command.condition === "download" ? "unsupported-action" : null;
+    default: return null;
+  }
+}
+
+/** Commands that act on an element ref: after a move to Chromium their refs are stale, so they are not run again. */
+function actsOnRef(command: BrowserCommand): boolean {
+  return command.ref !== undefined || command.targetRef !== undefined;
+}
+
+/** Agents' background tabs, per agent: commands without a tab id go to the tab the agent opened last. */
+const MAX_BACKGROUND_TAB_ACTORS = 256;
 
 export const BROWSER_TAB_RELOADED_NOTICE =
   "Browser tab was reloaded: CanvasTTY had put it to sleep while it was hidden. Element refs from before are stale; observe it again.";
@@ -62,6 +119,7 @@ export class BrowserCore {
   private readonly automation: BrowserAutomationService;
   private readonly policy: BrowserPolicyService;
   private readonly dispatcher: BrowserCommandDispatcher;
+  private readonly backgroundTabs = new Map<string, string>();
 
   constructor(options: BrowserCoreOptions) {
     this.host = options.host;
@@ -77,7 +135,7 @@ export class BrowserCore {
   }
 
   execute(actor: BrowserActor, command: BrowserCommand, signal?: AbortSignal): Promise<BrowserResult> {
-    const normalized = normalizeTabCommand(command, this.host.getSnapshot().activeTabId);
+    const normalized = normalizeTabCommand(command, this.defaultTabId(actor));
     return this.dispatcher.execute(actor, normalized, signal).then((result) => (
       actor.kind === "agent" ? sanitizeAgentResult(result) : result
     ));
@@ -109,6 +167,7 @@ export class BrowserCore {
   agentDisconnected(actor: BrowserActor, reason?: AgentDisconnectReason): void {
     // A dropped socket reconnects with the same connection; a revoked or expired one does not.
     this.dispatcher.clearActor(actor, { reconnecting: reason === "closed" });
+    if (reason !== "closed" && actor.kind === "agent") this.backgroundTabs.delete(backgroundKey(actor));
     this.host.disconnectActor(actor);
   }
 
@@ -150,6 +209,16 @@ export class BrowserCore {
     }
     if (command.type === "browser_new_tab") {
       const url = command.url === undefined ? DEFAULT_BROWSER_URL : this.policy.assertNavigationUrl(command.url);
+      if (this.host.openTab) {
+        const opened = await this.host.openTab(url, { engine: command.engine, actor });
+        this.host.touchActor(actor, opened.tabId);
+        if (actor.kind === "agent") this.rememberBackgroundTab(actor, opened);
+        return {
+          data: dataForActor(actor, opened.snapshot),
+          tabId: opened.tabId,
+          ...(opened.notice ? { notice: opened.notice } : {})
+        };
+      }
       const snapshot = await this.host.newTab(url);
       this.host.touchActor(actor, snapshot.activeTabId);
       return { data: dataForActor(actor, snapshot), tabId: snapshot.activeTabId };
@@ -165,9 +234,9 @@ export class BrowserCore {
       ? { reloaded: false }
       : await this.host.prepareTab(requiredTabId);
     throwIfAborted(signal);
-    if (!wake.reloaded) return await this.executeTabCommand(actor, command, requiredTabId, signal);
+    if (!wake.reloaded) return await this.executeOnEngine(actor, command, requiredTabId, signal);
     try {
-      return { ...await this.executeTabCommand(actor, command, requiredTabId, signal), notice: BROWSER_TAB_RELOADED_NOTICE };
+      return { ...await this.executeOnEngine(actor, command, requiredTabId, signal), notice: BROWSER_TAB_RELOADED_NOTICE };
     } catch (error) {
       if (!(error instanceof BrowserKernelError)) throw error;
       throw new BrowserKernelError(error.code, error.message, {
@@ -175,6 +244,81 @@ export class BrowserCore {
         details: { ...(error.details ?? {}), tabReloaded: true },
         cause: error
       });
+    }
+  }
+
+  /**
+   * Runs a tab command, moving a contributed engine's tab to Chromium when it has to: before the command for what the
+   * engine never does (screenshots, showing the tab, drags, downloads), after it when automation asks for it (a bot
+   * wall, thin text, a missing CDP method, the engine gone). The command then runs again on Chromium, except one that
+   * acts on an element ref: those refs are stale, and the agent is told to observe again.
+   */
+  private async executeOnEngine(
+    actor: BrowserActor,
+    command: BrowserCommand,
+    tabId: string,
+    signal: AbortSignal
+  ): Promise<{ data?: unknown; tabId?: string | null; notice?: string }> {
+    const move = this.host.moveTabToChromium?.bind(this.host);
+    const engine = this.host.tabEngine?.(tabId) ?? null;
+    if (move && engine !== null && engine !== CHROMIUM_ENGINE) {
+      const reason = upfrontFallback(command);
+      if (reason) {
+        await move(tabId, reason);
+        throwIfAborted(signal);
+        try {
+          const result = await this.executeTabCommand(actor, command, tabId, signal);
+          return reason === "revealed" ? result : { ...result, notice: engineFallbackNotice(reason) };
+        } catch (error) {
+          // The move happened even when the command then failed on Chromium: the agent must know its refs are stale.
+          if (!(error instanceof BrowserKernelError) || reason === "revealed") throw error;
+          throw new BrowserKernelError(error.code, error.message, {
+            retryable: error.retryable,
+            details: { ...(error.details ?? {}), movedToChromium: true },
+            cause: error
+          });
+        }
+      }
+    }
+    try {
+      return await this.executeTabCommand(actor, command, tabId, signal);
+    } catch (error) {
+      if (!(error instanceof EngineFallbackRequired)) throw error;
+      if (!move) {
+        throw new BrowserKernelError("BRIDGE_UNAVAILABLE", "Browser engine cannot continue this tab.", { retryable: true, cause: error });
+      }
+      await move(tabId, error.reason);
+      throwIfAborted(signal);
+      if (actsOnRef(command)) {
+        throw new BrowserKernelError("STALE_REF", engineFallbackNotice(error.reason), {
+          retryable: true,
+          details: { movedToChromium: true },
+          cause: error
+        });
+      }
+      return { ...await this.executeTabCommand(actor, command, tabId, signal), notice: engineFallbackNotice(error.reason) };
+    }
+  }
+
+  /** The tab a command without a tab id goes to: the agent's own background tab while it exists, else the active one. */
+  private defaultTabId(actor: BrowserActor): string | null {
+    const active = this.host.getSnapshot().activeTabId;
+    if (actor.kind !== "agent") return active;
+    const key = backgroundKey(actor);
+    const background = this.backgroundTabs.get(key);
+    if (!background) return active;
+    if (this.host.getTab(background)) return background;
+    this.backgroundTabs.delete(key);
+    return active;
+  }
+
+  private rememberBackgroundTab(actor: Extract<BrowserActor, { kind: "agent" }>, opened: BrowserOpenedTab): void {
+    const key = backgroundKey(actor);
+    this.backgroundTabs.delete(key);
+    if (!opened.tabId || opened.tabId === opened.snapshot.activeTabId) return;
+    this.backgroundTabs.set(key, opened.tabId);
+    while (this.backgroundTabs.size > MAX_BACKGROUND_TAB_ACTORS) {
+      this.backgroundTabs.delete(this.backgroundTabs.keys().next().value!);
     }
   }
 
@@ -207,6 +351,8 @@ export class BrowserCore {
         return { data: dataForActor(actor, snapshot), tabId: requiredTabId };
       }
       case "browser_activate_tab":
+        // The agent chose a tab to work on in the open: its commands without a tab id go to the active tab again.
+        if (actor.kind === "agent") this.backgroundTabs.delete(backgroundKey(actor));
         return { data: dataForActor(actor, await this.host.activateTab(requiredTabId)), tabId: requiredTabId };
       case "browser_navigate": {
         const url = this.policy.assertNavigationUrl(command.url);
@@ -339,6 +485,10 @@ export class BrowserCore {
   }
 }
 
+function backgroundKey(actor: Extract<BrowserActor, { kind: "agent" }>): string {
+  return `${actor.agentId}\u0000${actor.terminalSessionId}`;
+}
+
 function boundedTimeout(value: number | undefined): number {
   return Number.isFinite(value) ? Math.min(120_000, Math.max(50, value!)) : 120_000;
 }
@@ -361,6 +511,9 @@ function assertCommandArguments(command: BrowserCommand): void {
     if (typeof ref === "string" && !/^ref_[a-zA-Z0-9_-]{1,160}$/.test(ref)) {
       throw new BrowserKernelError("STALE_REF", "Browser element reference is invalid.", { retryable: true });
     }
+  }
+  if (command.engine !== undefined && (command.type !== "browser_new_tab" || !isEngineRequest(command.engine))) {
+    throw new BrowserKernelError("PERMISSION_DENIED", "Browser engine must be auto, chromium or an installed engine id.");
   }
   if (command.type === "browser_navigate" && typeof command.url !== "string") {
     throw new BrowserKernelError("INVALID_URL", "Browser navigate requires a URL.");

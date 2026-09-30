@@ -9,7 +9,8 @@ import type {
   BrowserObservation,
   BrowserObservedElement
 } from "../../../shared/contracts.ts";
-import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
+import { BrowserKernelError, EngineFallbackRequired, throwIfAborted } from "./BrowserErrors.ts";
+import { CHROMIUM_ENGINE, ElectronTabDriver, type TabDriver } from "./TabDriver.ts";
 import { SENSITIVE_FIELD_SOURCE, isSensitiveFieldIdentity } from "../safety/sensitiveNames.ts";
 
 const MAX_OBSERVE_ELEMENTS = 200;
@@ -89,12 +90,11 @@ interface RefEntry {
 
 interface TabSession {
   tabId: string;
-  contents: WebContents;
+  driver: TabDriver;
   revision: number;
   refs: Map<string, RefEntry>;
   attachPromise: Promise<void> | null;
-  messageListener: (_event: unknown, method: string, params: unknown) => void;
-  detachListener: (_event: unknown, reason: string) => void;
+  unlisten: () => void;
   onDialog?: (dialog: BrowserDialogSnapshot | null) => void;
   presences: AgentPresenceSnapshot[];
   presenceContextId: number | null;
@@ -107,6 +107,9 @@ interface TabSession {
   dialogBlockedCommands: Set<Promise<void>>;
   inflightRequests: Set<string>;
   networkLastChangeAt: number;
+  /** Contributed engines only: the main document's HTTP status and whether a bot challenge was requested. */
+  documentStatus: number | null;
+  challengeSeen: boolean;
 }
 
 interface ElectronDialogInfo {
@@ -155,17 +158,29 @@ export interface BrowserAutomationOptions {
    * paused (frozen) tab here, so no CDP command waits on a page whose tasks are stopped.
    */
   beforeCommand?(tabId: string): Promise<void>;
+  /**
+   * Before a screenshot of a tab nobody sees: lets the host give it a surface to paint on for the capture (a tab that
+   * moved from a contributed engine is drawn under the active tab, hidden by it). Returns what undoes that, or null
+   * when the host did nothing.
+   */
+  captureSurface?(tabId: string): Promise<(() => void) | null>;
 }
+
+/** A surface lent for one capture paints after a moment: this many tries, this far apart. */
+const LENT_SURFACE_CAPTURE_TRIES = 8;
+const LENT_SURFACE_CAPTURE_DELAY_MS = 120;
 
 export class BrowserAutomationService {
   private readonly sessions = new Map<string, TabSession>();
   private readonly busyTimers = new Map<string, NodeJS.Timeout>();
   private readonly onBusyChange?: (tabId: string, busy: boolean) => void;
   private readonly beforeCommand?: (tabId: string) => Promise<void>;
+  private readonly captureSurface?: (tabId: string) => Promise<(() => void) | null>;
 
   constructor(onBusyChange?: (tabId: string, busy: boolean) => void, options: BrowserAutomationOptions = {}) {
     this.onBusyChange = onBusyChange;
     this.beforeCommand = options.beforeCommand;
+    this.captureSurface = options.captureSurface;
   }
 
   /**
@@ -175,9 +190,9 @@ export class BrowserAutomationService {
    */
   async setLifecycleState(tabId: string, state: "frozen" | "active"): Promise<void> {
     const session = this.sessions.get(tabId);
-    if (!session || session.contents.isDestroyed()) return;
+    if (!session || session.driver.isDestroyed()) return;
     await this.attach(session);
-    await session.contents.debugger.sendCommand("Page.setWebLifecycleState", { state });
+    await session.driver.send("Page.setWebLifecycleState", { state });
   }
 
   /**
@@ -186,25 +201,25 @@ export class BrowserAutomationService {
    */
   async hasBeforeUnload(tabId: string): Promise<boolean> {
     const session = this.sessions.get(tabId);
-    if (!session || session.contents.isDestroyed()) return true;
+    if (!session || session.driver.isDestroyed()) return true;
     const group = "canvastty-lifecycle";
     const probe = async (): Promise<boolean> => {
       await this.attach(session);
-      const debuggerApi = session.contents.debugger;
+      const driver = session.driver;
       try {
-        const windowObject = await debuggerApi.sendCommand("Runtime.evaluate", {
+        const windowObject = await driver.send("Runtime.evaluate", {
           expression: "window",
           objectGroup: group,
           silent: true
         }) as { result?: { objectId?: string } };
         const objectId = windowObject.result?.objectId;
         if (!objectId) return true;
-        const listeners = await debuggerApi.sendCommand("DOMDebugger.getEventListeners", { objectId }) as {
+        const listeners = await driver.send("DOMDebugger.getEventListeners", { objectId }) as {
           listeners?: Array<{ type?: string }>;
         };
         return (listeners.listeners ?? []).some((listener) => listener.type === "beforeunload");
       } finally {
-        await debuggerApi.sendCommand("Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+        await driver.send("Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
       }
     };
     return await withTimeout(probe(), LIFECYCLE_PROBE_TIMEOUT_MS).catch(() => true);
@@ -234,6 +249,7 @@ export class BrowserAutomationService {
     this.onBusyChange?.(tabId, false);
   }
 
+  /** Registers a Browser card tab: its Electron WebContents is the driver. */
   async register(
     tabId: string,
     contents: WebContents,
@@ -241,32 +257,34 @@ export class BrowserAutomationService {
     onDialog?: (dialog: BrowserDialogSnapshot | null) => void
   ): Promise<void> {
     const current = this.sessions.get(tabId);
-    if (current?.contents === contents) {
+    if (current?.driver instanceof ElectronTabDriver && current.driver.contents === contents) {
       current.revision = revision;
       current.onDialog = onDialog;
       await this.attach(current);
       return;
     }
-    if (current) this.unregister(tabId);
+    await this.registerDriver(tabId, new ElectronTabDriver(contents), revision, onDialog);
+  }
+
+  /**
+   * Registers a tab behind any driver: a contributed engine's tab (CdpTabDriver) comes here directly. Such a tab has
+   * no JavaScript dialogs to answer, no lifecycle states and no presence overlay: nobody sees it.
+   */
+  async registerDriver(
+    tabId: string,
+    driver: TabDriver,
+    revision: number,
+    onDialog?: (dialog: BrowserDialogSnapshot | null) => void
+  ): Promise<void> {
+    if (this.sessions.has(tabId)) this.unregister(tabId);
 
     const session: TabSession = {
       tabId,
-      contents,
+      driver,
       revision,
       refs: new Map(),
       attachPromise: null,
-      messageListener: (_event, method, params) => this.onMessage(tabId, method, params),
-      detachListener: () => {
-        const live = this.sessions.get(tabId);
-        if (live) {
-          live.attachPromise = null;
-          live.presenceContextId = null;
-          live.presenceLastPayload = null;
-          live.refs.clear();
-          live.inflightRequests.clear();
-          live.networkLastChangeAt = Date.now();
-        }
-      },
+      unlisten: () => undefined,
       onDialog,
       presences: [],
       presenceContextId: null,
@@ -278,20 +296,41 @@ export class BrowserAutomationService {
       dialogOpenedWaiters: new Set(),
       dialogBlockedCommands: new Set(),
       inflightRequests: new Set(),
-      networkLastChangeAt: Date.now()
+      networkLastChangeAt: Date.now(),
+      documentStatus: null,
+      challengeSeen: false
     };
     this.sessions.set(tabId, session);
-    // Electron consumes JavaScript dialogs in its private WebContents handler before
-    // CDP can emit Page.javascriptDialogOpening. Replace that handler for this
-    // dedicated remote WebContents so alert/confirm/prompt remain pending until the
-    // trusted browser chrome or an authenticated agent answers them.
-    const dialogEvents = contents as unknown as EventEmitter;
-    dialogEvents.removeAllListeners(ELECTRON_RUN_DIALOG_EVENT);
-    dialogEvents.on(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
-    dialogEvents.prependListener(ELECTRON_CANCEL_DIALOGS_EVENT, session.electronCancelDialogsListener);
-    contents.debugger.on("message", session.messageListener);
-    contents.debugger.on("detach", session.detachListener);
+    if (driver instanceof ElectronTabDriver) {
+      // Electron consumes JavaScript dialogs in its private WebContents handler before
+      // CDP can emit Page.javascriptDialogOpening. Replace that handler for this
+      // dedicated remote WebContents so alert/confirm/prompt remain pending until the
+      // trusted browser chrome or an authenticated agent answers them.
+      const dialogEvents = driver.contents as unknown as EventEmitter;
+      dialogEvents.removeAllListeners(ELECTRON_RUN_DIALOG_EVENT);
+      dialogEvents.on(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
+      dialogEvents.prependListener(ELECTRON_CANCEL_DIALOGS_EVENT, session.electronCancelDialogsListener);
+    }
+    session.unlisten = driver.listen({
+      message: (method, params) => this.onMessage(tabId, method, params),
+      detach: () => {
+        const live = this.sessions.get(tabId);
+        if (live) {
+          live.attachPromise = null;
+          live.presenceContextId = null;
+          live.presenceLastPayload = null;
+          live.refs.clear();
+          live.inflightRequests.clear();
+          live.networkLastChangeAt = Date.now();
+        }
+      }
+    });
     await this.attach(session);
+  }
+
+  /** The engine driving a registered tab (`chromium` for Browser card tabs), or null. */
+  engineOf(tabId: string): string | null {
+    return this.sessions.get(tabId)?.driver.engine ?? null;
   }
 
   unregister(tabId: string): void {
@@ -300,14 +339,15 @@ export class BrowserAutomationService {
     this.sessions.delete(tabId);
     this.clearBusy(tabId);
     this.cancelElectronDialog(tabId, session);
-    const dialogEvents = session.contents as unknown as EventEmitter;
-    dialogEvents.removeListener(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
-    dialogEvents.removeListener(ELECTRON_CANCEL_DIALOGS_EVENT, session.electronCancelDialogsListener);
-    session.contents.debugger.removeListener("message", session.messageListener);
-    session.contents.debugger.removeListener("detach", session.detachListener);
-    if (!session.contents.isDestroyed() && session.contents.debugger.isAttached()) {
+    if (session.driver instanceof ElectronTabDriver) {
+      const dialogEvents = session.driver.contents as unknown as EventEmitter;
+      dialogEvents.removeListener(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
+      dialogEvents.removeListener(ELECTRON_CANCEL_DIALOGS_EVENT, session.electronCancelDialogsListener);
+    }
+    session.unlisten();
+    if (!session.driver.isDestroyed() && session.driver.isAttached()) {
       try {
-        session.contents.debugger.detach();
+        session.driver.detach();
       } catch {
         // Closing a tab can race with Chromium detaching the debugger.
       }
@@ -330,30 +370,41 @@ export class BrowserAutomationService {
   ): Promise<BrowserObservation> {
     const session = await this.ready(tabId, revision);
     throwIfAborted(options.signal);
-    const nodes = (await this.fullAxTree(session, options.signal)).filter((node) => {
+    const tree = await this.fullAxTree(session, options.signal);
+    if (isContributed(session) && options.cursor === undefined) await this.assertEngineContent(session, tree, false);
+    const nodes = tree.filter((node) => {
       const role = axString(node.role);
       return !node.ignored && node.backendDOMNodeId && INTERACTIVE_ROLES.has(role);
     }).slice(0, 1_000);
-    const metrics = await this.command<{ cssLayoutViewport?: { clientWidth?: number; clientHeight?: number } }>(
-      session,
-      "Page.getLayoutMetrics"
-    );
-    const viewportWidth = metrics.cssLayoutViewport?.clientWidth ?? Number.MAX_SAFE_INTEGER;
-    const viewportHeight = metrics.cssLayoutViewport?.clientHeight ?? Number.MAX_SAFE_INTEGER;
-    if (viewportWidth <= 0 || viewportHeight <= 0) throw viewportUnavailable();
     const offset = decodeCursor(options.cursor, revision);
     const limit = clampInteger(options.limit, 1, MAX_OBSERVE_ELEMENTS, 80);
     // One box-model round trip per element: measured only up to this page and one more (is there a next page?).
     const wanted = offset + limit + 1;
-    const visible: Array<{ node: CdpAxNode; bounds: BrowserElementBounds }> = [];
-    for (const node of nodes) {
-      if (visible.length >= wanted) break;
-      throwIfAborted(options.signal);
-      const bounds = await this.box(session, node.backendDOMNodeId!);
-      if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
-      if (bounds.x + bounds.width <= 0 || bounds.y + bounds.height <= 0
-        || bounds.x >= viewportWidth || bounds.y >= viewportHeight) continue;
-      visible.push({ node, bounds });
+    const visible: Array<{ node: CdpAxNode; bounds: BrowserElementBounds | null }> = [];
+    if (!session.driver.layout) {
+      // An engine without real layout has no meaningful boxes or viewport: every interactive node counts, in
+      // document order, and actions on them go through the DOM instead of coordinates.
+      for (const node of nodes) {
+        if (visible.length >= wanted) break;
+        visible.push({ node, bounds: null });
+      }
+    } else {
+      const metrics = await this.command<{ cssLayoutViewport?: { clientWidth?: number; clientHeight?: number } }>(
+        session,
+        "Page.getLayoutMetrics"
+      );
+      const viewportWidth = metrics.cssLayoutViewport?.clientWidth ?? Number.MAX_SAFE_INTEGER;
+      const viewportHeight = metrics.cssLayoutViewport?.clientHeight ?? Number.MAX_SAFE_INTEGER;
+      if (viewportWidth <= 0 || viewportHeight <= 0) throw viewportUnavailable();
+      for (const node of nodes) {
+        if (visible.length >= wanted) break;
+        throwIfAborted(options.signal);
+        const bounds = await this.box(session, node.backendDOMNodeId!);
+        if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
+        if (bounds.x + bounds.width <= 0 || bounds.y + bounds.height <= 0
+          || bounds.x >= viewportWidth || bounds.y >= viewportHeight) continue;
+        visible.push({ node, bounds });
+      }
     }
     const page = visible.slice(offset, offset + limit);
     const elements: BrowserObservedElement[] = [];
@@ -390,8 +441,8 @@ export class BrowserAutomationService {
     return {
       untrustedWebContent: true,
       tabId,
-      url: session.contents.getURL(),
-      title: session.contents.getTitle(),
+      url: session.driver.url(),
+      title: session.driver.title(),
       documentRevision: revision,
       elements,
       nextCursor: nextOffset < visible.length ? encodeCursor(revision, nextOffset) : null
@@ -405,7 +456,9 @@ export class BrowserAutomationService {
   ): Promise<BrowserReadPage> {
     const session = await this.ready(tabId, revision);
     throwIfAborted(options.signal);
-    const readable = (await this.fullAxTree(session, options.signal)).filter((node) => (
+    const tree = await this.fullAxTree(session, options.signal);
+    if (isContributed(session) && options.cursor === undefined) await this.assertEngineContent(session, tree, true);
+    const readable = tree.filter((node) => (
       !node.ignored && READABLE_ROLES.has(axString(node.role))
     ));
     const offset = decodeCursor(options.cursor, revision);
@@ -447,8 +500,8 @@ export class BrowserAutomationService {
     return {
       untrustedWebContent: true,
       tabId,
-      url: session.contents.getURL(),
-      title: session.contents.getTitle(),
+      url: session.driver.url(),
+      title: session.driver.title(),
       documentRevision: revision,
       text: parts.join("\n"),
       links,
@@ -462,10 +515,14 @@ export class BrowserAutomationService {
   async screenshot(tabId: string, revision: number, signal?: AbortSignal): Promise<BrowserScreenshot> {
     const session = await this.ready(tabId, revision);
     throwIfAborted(signal);
+    // A contributed engine's picture is not what the site looks like (Lightpanda draws no CSS): Chromium takes it.
+    if (!(session.driver instanceof ElectronTabDriver)) throw new EngineFallbackRequired("screenshot");
+    const contents = session.driver.contents;
     const sensitiveBefore = await this.sensitiveBoundsForScreenshot(session);
     const masks = await this.maskSensitiveInputs(session);
+    const lent = this.captureSurface ? await this.captureSurface(tabId).catch(() => null) : null;
     try {
-      let image = await session.contents.capturePage();
+      let image = lent ? await captureLentSurface(contents, signal) : await contents.capturePage();
       throwIfAborted(signal);
       const capturedSize = image.getSize();
       if (image.isEmpty() || capturedSize.width <= 0 || capturedSize.height <= 0) throw viewportUnavailable();
@@ -503,6 +560,7 @@ export class BrowserAutomationService {
         height: size.height
       };
     } finally {
+      lent?.();
       await this.restoreSensitiveInputs(session, masks).catch(() => undefined);
     }
   }
@@ -542,7 +600,7 @@ export class BrowserAutomationService {
     backendNodeId: number
   ): Promise<BrowserElementBounds | null> {
     try {
-      const response = await session.contents.debugger.sendCommand("DOM.getBoxModel", {
+      const response = await session.driver.send("DOM.getBoxModel", {
         backendNodeId
       }) as { model?: { border?: number[]; content?: number[] } };
       const quad = response.model?.border ?? response.model?.content;
@@ -620,8 +678,12 @@ export class BrowserAutomationService {
     ref: BrowserElementRef | string | undefined,
     signal?: AbortSignal
   ): Promise<BrowserPointerResult> {
-    const { session, point } = await this.refPoint(tabId, revision, ref);
+    const { session, entry, point } = await this.refPoint(tabId, revision, ref);
     throwIfAborted(signal);
+    if (!session.driver.layout) {
+      await this.domCall(session, entry, DOM_CLICK_FUNCTION);
+      return point;
+    }
     const pressed = await this.commandAllowDialog(session, "Input.dispatchMouseEvent", {
       type: "mousePressed", ...point, button: "left", clickCount: 1
     });
@@ -638,8 +700,12 @@ export class BrowserAutomationService {
     ref: BrowserElementRef | string | undefined,
     signal?: AbortSignal
   ): Promise<BrowserPointerResult> {
-    const { session, point } = await this.refPoint(tabId, revision, ref);
+    const { session, entry, point } = await this.refPoint(tabId, revision, ref);
     throwIfAborted(signal);
+    if (!session.driver.layout) {
+      await this.domCall(session, entry, DOM_HOVER_FUNCTION);
+      return point;
+    }
     await this.commandAllowDialog(session, "Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
     return point;
   }
@@ -748,13 +814,27 @@ export class BrowserAutomationService {
   ): Promise<BrowserPointerResult> {
     const session = await this.ready(tabId, revision);
     throwIfAborted(signal);
-    const point = ref === undefined
-      ? await this.viewportCenter(session)
-      : (await this.refPoint(tabId, revision, ref)).point;
     const fallback = direction === "up" ? { x: 0, y: -600 }
       : direction === "left" ? { x: -600, y: 0 }
         : direction === "right" ? { x: 600, y: 0 }
           : { x: 0, y: 600 };
+    if (!session.driver.layout) {
+      const x = clampNumber(deltaX, -5_000, 5_000, fallback.x);
+      const y = clampNumber(deltaY, -5_000, 5_000, fallback.y);
+      if (ref === undefined) {
+        await this.commandAllowDialog(session, "Runtime.evaluate", {
+          expression: `window.scrollBy(${x},${y})`,
+          silent: true
+        });
+      } else {
+        const { entry } = await this.refPoint(tabId, revision, ref);
+        await this.domCall(session, entry, DOM_SCROLL_FUNCTION, [{ value: x }, { value: y }]);
+      }
+      return { x: 0, y: 0 };
+    }
+    const point = ref === undefined
+      ? await this.viewportCenter(session)
+      : (await this.refPoint(tabId, revision, ref)).point;
     await this.commandAllowDialog(session, "Input.dispatchMouseEvent", {
       type: "mouseWheel",
       ...point,
@@ -809,6 +889,8 @@ export class BrowserAutomationService {
     const source = await this.refPoint(tabId, revision, ref);
     const target = await this.refPoint(tabId, revision, targetRef);
     throwIfAborted(signal);
+    // Dragging is pointer geometry through and through: an engine without layout cannot do it.
+    if (!source.session.driver.layout) throw new EngineFallbackRequired("unsupported-action");
     const positioned = await this.commandAllowDialog(source.session, "Input.dispatchMouseEvent", {
       type: "mouseMoved", ...source.point
     });
@@ -890,7 +972,7 @@ export class BrowserAutomationService {
     while (Date.now() - startedAt < timeoutMs) {
       throwIfAborted(signal);
       const session = await this.ready(tabId, revision);
-      if (condition === "load" && !session.contents.isLoading()) return { matched: true };
+      if (condition === "load" && !session.driver.isLoading()) return { matched: true };
       if (condition === "network-idle") {
         const networkIdleSince = session.inflightRequests.size === 0
           ? session.networkLastChangeAt
@@ -898,14 +980,14 @@ export class BrowserAutomationService {
         // Keep isLoading as an extra document-readiness guard, but network
         // idleness is defined by CDP request lifecycle events rather than this
         // coarse WebContents flag.
-        if (networkIdleSince !== null && !session.contents.isLoading()) {
+        if (networkIdleSince !== null && !session.driver.isLoading()) {
           idleSince = Math.max(idleSince ?? 0, networkIdleSince);
         } else {
           idleSince = null;
         }
         if (idleSince !== null && Date.now() - idleSince >= 500) return { matched: true };
       }
-      if (condition === "url" && value && session.contents.getURL().includes(value)) return { matched: true };
+      if (condition === "url" && value && session.driver.url().includes(value)) return { matched: true };
       if (condition === "text" && value) {
         let cursor: string | undefined;
         for (let pageIndex = 0; pageIndex < 20; pageIndex += 1) {
@@ -950,7 +1032,8 @@ export class BrowserAutomationService {
 
   private async ready(tabId: string, revision: number): Promise<TabSession> {
     const session = this.requireSession(tabId);
-    if (session.contents.isDestroyed()) {
+    if (session.driver.isDestroyed()) {
+      if (isContributed(session)) throw new EngineFallbackRequired("engine-disconnected");
       throw new BrowserKernelError("TAB_CLOSED", "Browser tab is closed.");
     }
     if (session.revision !== revision) throw staleRef(session.revision);
@@ -964,7 +1047,7 @@ export class BrowserAutomationService {
           cause: error
         });
       }
-      if (this.sessions.get(tabId) !== session || session.contents.isDestroyed()) {
+      if (this.sessions.get(tabId) !== session || session.driver.isDestroyed()) {
         throw new BrowserKernelError("TAB_CLOSED", "Browser tab is closed.");
       }
     }
@@ -982,14 +1065,14 @@ export class BrowserAutomationService {
     if (session.attachPromise) return session.attachPromise;
     session.attachPromise = (async () => {
       try {
-        if (!session.contents.debugger.isAttached()) session.contents.debugger.attach(CDP_VERSION);
-        await session.contents.debugger.sendCommand("Page.enable");
-        await session.contents.debugger.sendCommand("DOM.enable");
-        await session.contents.debugger.sendCommand("Runtime.enable");
-        await session.contents.debugger.sendCommand("Accessibility.enable");
+        if (!session.driver.isAttached()) session.driver.attach(CDP_VERSION);
+        await session.driver.send("Page.enable");
+        await session.driver.send("DOM.enable");
+        await session.driver.send("Runtime.enable");
+        await session.driver.send("Accessibility.enable");
         session.inflightRequests.clear();
         session.networkLastChangeAt = Date.now();
-        await session.contents.debugger.sendCommand("Network.enable");
+        await session.driver.send("Network.enable");
         if (session.presences.length > 0) await this.renderPresence(session);
       } catch (error) {
         session.attachPromise = null;
@@ -1009,8 +1092,13 @@ export class BrowserAutomationService {
   ): Promise<T> {
     this.markBusy(session.tabId);
     try {
-      return await session.contents.debugger.sendCommand(method, params) as T;
+      return await session.driver.send(method, params) as T;
     } catch (error) {
+      if (isContributed(session)) {
+        // A contributed engine that lost its connection, or lacks the method, hands the tab to Chromium.
+        if (session.driver.isDestroyed()) throw new EngineFallbackRequired("engine-disconnected");
+        if (isUnsupportedMethodError(error)) throw new EngineFallbackRequired("unsupported-method", `The browser engine does not support ${method}.`);
+      }
       if (/node|document|object/i.test(error instanceof Error ? error.message : String(error))) throw staleRef();
       throw new BrowserKernelError("BRIDGE_UNAVAILABLE", "Chromium automation command failed.", {
         retryable: true,
@@ -1149,6 +1237,8 @@ export class BrowserAutomationService {
   ): Promise<{ session: TabSession; entry: RefEntry; point: BrowserPointerResult }> {
     const session = await this.ready(tabId, revision);
     const entry = this.resolveRef(session, tabId, revision, ref);
+    // Without layout there is no point to aim at: callers act on the element itself.
+    if (!session.driver.layout) return { session, entry, point: { x: 0, y: 0 } };
     const bounds = await this.box(session, entry.value.backendNodeId) ?? entry.bounds;
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) throw staleRef();
     return {
@@ -1158,9 +1248,70 @@ export class BrowserAutomationService {
     };
   }
 
+  /** Resolves the element and calls a function on it through the DOM: how engines without layout click and hover. */
+  private async domCall(
+    session: TabSession,
+    entry: RefEntry,
+    functionDeclaration: string,
+    args: Array<{ value: unknown }> = []
+  ): Promise<void> {
+    const resolved = await this.command<{ object?: { objectId?: string } }>(session, "DOM.resolveNode", {
+      backendNodeId: entry.value.backendNodeId
+    });
+    const objectId = resolved.object?.objectId;
+    if (!objectId) throw staleRef();
+    const call = await this.commandAllowDialog<{ exceptionDetails?: unknown }>(session, "Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration,
+      arguments: args,
+      silent: true
+    });
+    if (call.completed && call.value.exceptionDetails) throw staleRef();
+  }
+
+  /**
+   * A contributed engine's page, on the first page of a read or an observation: a bot wall (a challenge title or
+   * text, a challenge request, a 403, 429 or 503 document) or, for a read, text far too thin for the page's size
+   * hands the tab to Chromium. The thin-text check waits until the page has loaded and its requests have settled.
+   */
+  private async assertEngineContent(session: TabSession, tree: readonly CdpAxNode[], checkThin: boolean): Promise<void> {
+    let text = "";
+    for (const node of tree) {
+      if (node.ignored || !READABLE_ROLES.has(axString(node.role))) continue;
+      const name = axString(node.name).trim();
+      if (!name) continue;
+      text += `${name}\n`;
+      if (text.length > ENGINE_TEXT_SAMPLE_CHARS) break;
+    }
+    const textChars = text.trim().length;
+    if (session.challengeSeen
+      || (session.documentStatus !== null && BOT_WALL_STATUSES.has(session.documentStatus))
+      || BOT_WALL_TITLE.test(session.driver.title())
+      || (textChars < BOT_WALL_MAX_TEXT_CHARS && BOT_WALL_TEXT.test(text))) {
+      throw new EngineFallbackRequired("bot-wall");
+    }
+    if (!checkThin || session.driver.isLoading() || session.inflightRequests.size > 0) return;
+    // More text than the thin rules could ever call thin: no need to measure the page.
+    if (textChars >= ENGINE_TEXT_SAMPLE_CHARS) return;
+    let htmlChars = 0;
+    try {
+      const response = await this.command<{ result?: { value?: unknown } }>(session, "Runtime.evaluate", {
+        expression: "document.documentElement ? document.documentElement.outerHTML.length : 0",
+        returnByValue: true,
+        silent: true
+      });
+      htmlChars = typeof response.result?.value === "number" ? response.result.value : 0;
+    } catch (error) {
+      if (error instanceof EngineFallbackRequired) throw error;
+      return;
+    }
+    if (isThinText(textChars, htmlChars)) throw new EngineFallbackRequired("thin-text");
+  }
+
   private onMessage(tabId: string, method: string, params: unknown): void {
     const session = this.sessions.get(tabId);
     if (!session || !params || typeof params !== "object") return;
+    if (isContributed(session)) trackEngineDocument(session, method, params);
     if (method === "Network.requestWillBeSent") {
       const requestId = (params as { requestId?: unknown }).requestId;
       if (typeof requestId === "string" && requestId) {
@@ -1264,7 +1415,7 @@ export class BrowserAutomationService {
   }
 
   private async renderPresence(session: TabSession): Promise<void> {
-    if (!session.contents.debugger.isAttached()) return;
+    if (!session.driver.isAttached()) return;
     let worldCreated = false;
     if (session.presenceContextId === null) {
       const tree = await this.command<{ frameTree?: { frame?: { id?: string } } }>(session, "Page.getFrameTree");
@@ -1299,6 +1450,73 @@ export class BrowserAutomationService {
       silent: true
     });
   }
+}
+
+const DOM_CLICK_FUNCTION = "function(){if(typeof this.scrollIntoView==='function')this.scrollIntoView({block:'center'});if(typeof this.focus==='function')this.focus();if(typeof this.click==='function')this.click();else this.dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true}));}";
+const DOM_HOVER_FUNCTION = "function(){for(const type of ['mouseover','mouseenter','mousemove'])this.dispatchEvent(new MouseEvent(type,{bubbles:type!=='mouseenter',cancelable:true}));}";
+const DOM_SCROLL_FUNCTION = "function(x,y){if(typeof this.scrollBy==='function')this.scrollBy(x,y);}";
+
+/** Characters of page text sampled for the bot-wall and thin-text checks. */
+const ENGINE_TEXT_SAMPLE_CHARS = 10_000;
+/** Under this much text a page counts as thin when its HTML is at least THIN_TEXT_MIN_HTML_CHARS. */
+const THIN_TEXT_CHARS = 200;
+const THIN_TEXT_MIN_HTML_CHARS = 3_000;
+/** Or when its text is under this share of the HTML (for pages up to THIN_RATIO_MAX_HTML_CHARS). */
+const THIN_TEXT_RATIO = 0.002;
+const THIN_RATIO_MIN_HTML_CHARS = 100_000;
+const THIN_RATIO_MAX_HTML_CHARS = 4_000_000;
+/** Challenge phrases count only on short pages: an article may quote them. */
+const BOT_WALL_MAX_TEXT_CHARS = 3_000;
+const BOT_WALL_STATUSES = new Set([403, 429, 503]);
+const BOT_WALL_TITLE = /^\s*(?:just a moment|attention required|access denied|are you a robot|verifying you are human|security check)\b|captcha/i;
+const BOT_WALL_TEXT = /performing security verification|checking (?:if the site connection is secure|your browser)|verify(?:ing)? (?:that )?you are (?:a )?human|bots use duckduckgo|enable javascript and cookies to continue|unusual traffic from your computer|press (?:and|&) hold/i;
+const CHALLENGE_REQUEST = /\/cdn-cgi\/challenge-platform\//;
+
+export function isThinText(textChars: number, htmlChars: number): boolean {
+  if (htmlChars >= THIN_TEXT_MIN_HTML_CHARS && textChars < THIN_TEXT_CHARS) return true;
+  return htmlChars >= THIN_RATIO_MIN_HTML_CHARS && htmlChars <= THIN_RATIO_MAX_HTML_CHARS
+    && textChars < htmlChars * THIN_TEXT_RATIO;
+}
+
+/** The main document's status and bot-challenge requests, for the bot-wall check (contributed engines). */
+function trackEngineDocument(session: TabSession, method: string, params: object): void {
+  if (method === "Network.responseReceived") {
+    const source = params as { type?: unknown; response?: { status?: unknown } };
+    if (source.type !== "Document") return;
+    session.documentStatus = typeof source.response?.status === "number" ? source.response.status : null;
+    session.challengeSeen = false;
+  } else if (method === "Network.requestWillBeSent") {
+    const url = (params as { request?: { url?: unknown } }).request?.url;
+    if (typeof url === "string" && CHALLENGE_REQUEST.test(url)) session.challengeSeen = true;
+  }
+}
+
+function isUnsupportedMethodError(error: unknown): boolean {
+  if (error && typeof error === "object" && (error as { code?: unknown }).code === -32601) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /wasn't found|method not found|unknown method|not[ _]implemented|unknown command/i.test(message);
+}
+
+/** A surface lent for the capture needs a frame or two before it has pixels. */
+async function captureLentSurface(contents: WebContents, signal?: AbortSignal): Promise<Electron.NativeImage> {
+  let last: Electron.NativeImage | null = null;
+  for (let attempt = 0; attempt < LENT_SURFACE_CAPTURE_TRIES; attempt += 1) {
+    throwIfAborted(signal);
+    try {
+      last = await contents.capturePage();
+      if (!last.isEmpty() && last.getSize().width > 0) return last;
+    } catch {
+      // The compositor has no frame for the view yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, LENT_SURFACE_CAPTURE_DELAY_MS));
+  }
+  if (last) return last;
+  throw viewportUnavailable();
+}
+
+/** A tab a plugin-contributed engine drives (not a Browser card tab). */
+function isContributed(session: TabSession): boolean {
+  return session.driver.engine !== CHROMIUM_ENGINE;
 }
 
 function presenceExpression(payload: string): string {

@@ -35,6 +35,7 @@ import type {
   PluginServiceLaunch,
   PluginAgentTool,
   PluginCardAction,
+  PluginBrowserEngine,
   PluginCardActionFilter,
   PluginUpdateStatus,
   Size
@@ -53,6 +54,7 @@ import type { DecisionService } from "./DecisionHooks.ts";
 import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 import type { AgentToolProvider } from "./PluginAgentTools.ts";
 import type { CardActionProvider } from "./PluginCards.ts";
+import type { BrowserEngineProvider } from "./browser/BrowserEngineTabs.ts";
 import { AGENT_PROVIDERS } from "../../shared/contracts.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
@@ -144,7 +146,8 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "sessions:read-screen",
   "sessions:launch",
   "sessions:control",
-  "cards:decorate"
+  "cards:decorate",
+  "browser:engine"
 ]);
 
 interface StoredPluginRecord {
@@ -640,6 +643,18 @@ export class PluginManager {
   cardActionProviders(): CardActionProvider[] {
     return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
       pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    }));
+  }
+
+  /** Services whose browser engine may take agents' background tabs: enabled, native code trusted, `browser:engine`. */
+  browserEngineProviders(): BrowserEngineProvider[] {
+    return this.trustedServicesWith("browser:engine", (service) => service.browserEngine).map(({ plugin, service, name }) => ({
+      pluginId: plugin,
+      pluginName: name,
+      serviceId: service.id,
+      engineId: service.browserEngine!.id,
+      title: service.browserEngine!.title,
+      layout: service.browserEngine!.layout
     }));
   }
 
@@ -1510,6 +1525,9 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     if (service.cardActions && !permissions.includes("cards:decorate") && !granted?.includes("cards:decorate")) {
       throw new Error(`Plugin service ${service.id} adds card actions and needs the cards:decorate permission.`);
     }
+    if (service.browserEngine && !permissions.includes("browser:engine") && !granted?.includes("browser:engine")) {
+      throw new Error(`Plugin service ${service.id} contributes a browser engine and needs the browser:engine permission.`);
+    }
   }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
@@ -1641,7 +1659,7 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
     assertOnlyKeys(candidate, [
-      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions"
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine"
     ], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
@@ -1661,13 +1679,15 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     const decide = candidate.decide === undefined ? undefined : validateServiceDecide(candidate.decide);
     const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
     const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
+    const browserEngine = candidate.browserEngine === undefined ? undefined : validateBrowserEngine(candidate.browserEngine);
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
       ...(environments ? { environments } : {}),
       ...(decide ? { decide } : {}),
       ...(tools ? { tools } : {}),
-      ...(cardActions ? { cardActions } : {})
+      ...(cardActions ? { cardActions } : {}),
+      ...(browserEngine ? { browserEngine } : {})
     };
   });
   // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
@@ -1675,6 +1695,9 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   if (new Set(toolNames).size !== toolNames.length) throw new Error("Plugin agent tool names must be unique.");
   const actionIds = services.flatMap((service) => service.cardActions ?? []).map((action) => action.id);
   if (new Set(actionIds).size !== actionIds.length) throw new Error("Plugin card action ids must be unique.");
+  // Agents name an engine by its id, so a plugin declares each id once.
+  const engineIds = services.flatMap((service) => service.browserEngine ? [service.browserEngine.id] : []);
+  if (new Set(engineIds).size !== engineIds.length) throw new Error("Plugin browser engine ids must be unique.");
   // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
   if (services.filter((service) => service.decide).length > 1) {
     throw new Error("At most one plugin service may decide on tool calls.");
@@ -1760,6 +1783,22 @@ function validateServiceTools(value: unknown): PluginAgentTool[] {
     }
     return { name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])] };
   });
+}
+
+const BROWSER_ENGINE_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+const RESERVED_BROWSER_ENGINE_IDS = new Set(["auto", "chromium"]);
+
+function validateBrowserEngine(value: unknown): PluginBrowserEngine {
+  if (!isRecord(value)) throw new Error("Plugin service browserEngine must be an object.");
+  assertOnlyKeys(value, ["id", "title", "description", "layout"], "Plugin browser engine");
+  const id = requiredString(value.id, "browser engine id", 64);
+  if (!BROWSER_ENGINE_ID.test(id) || RESERVED_BROWSER_ENGINE_IDS.has(id)) {
+    throw new Error(`Plugin browser engine id is invalid or reserved: ${id}.`);
+  }
+  const title = requiredString(value.title, "browser engine title", 80);
+  const description = optionalString(value.description, "browser engine description", 240);
+  if (value.layout !== undefined && typeof value.layout !== "boolean") throw new Error("Plugin browser engine layout must be true or false.");
+  return { id, title, ...(description ? { description } : {}), layout: value.layout === true };
 }
 
 const MAX_CARD_ACTIONS = 8;

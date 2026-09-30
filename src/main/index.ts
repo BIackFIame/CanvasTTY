@@ -118,6 +118,8 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+/** A contributed browser engine may have to start its process before it can open a tab. */
+const BROWSER_ENGINE_OPEN_TIMEOUT_MS = 20_000;
 let mainWindow: BrowserWindow | null = null;
 let evenG2: EvenG2Controller | null = null;
 const browserRequests = new Map<string, { resolve():void; reject(error:Error):void; timer:ReturnType<typeof setTimeout> }>();
@@ -406,6 +408,16 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     ...browserLifecycleTimingOverride(process.env.CANVASTTY_BROWSER_LIFECYCLE_MS),
     canvasWheelCaptureMode: settings.get().canvasWheelCaptureMode,
     canvasNavigationInput,
+    // Agents' background tabs may run in a plugin-contributed engine (browser:engine); policy stays in the core.
+    engines: {
+      providers: () => pluginManager!.browserEngineProviders()
+        .filter((provider) => pluginServices!.running(provider.pluginId, provider.serviceId)),
+      openTab: (provider, tabId) => pluginServices!.hostCall(provider.pluginId, provider.serviceId,
+        "canvastty.browserEngine.openTab", { engineId: provider.engineId, tabId }, BROWSER_ENGINE_OPEN_TIMEOUT_MS),
+      closeTab: (provider, tabId) => {
+        pluginServices?.notify(provider.pluginId, provider.serviceId, "canvastty.browserEngine.closeTab", { engineId: provider.engineId, tabId });
+      }
+    },
     ...(process.env.CANVASTTY_BROWSER_SMOKE_URL
       ? { downloadRoot: join(userDataPath, "browser-smoke-downloads") }
       : {})

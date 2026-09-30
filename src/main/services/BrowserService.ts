@@ -41,7 +41,10 @@ import { BrowserCanvasSinkViewportController } from "./browser/BrowserCanvasSink
 import { BrowserAuditStore } from "./browser/BrowserAuditStore.ts";
 import { browserPageWheelReply, type BrowserPageWheelReply } from "./browser/BrowserCanvasWheel.ts";
 import { clipBrowserViewportBounds, normalizeBrowserViewportBounds, sameBrowserViewport } from "./browser/BrowserViewport.ts";
-import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab } from "./browser/BrowserCore.ts";
+import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab, type BrowserOpenedTab } from "./browser/BrowserCore.ts";
+import { BrowserEngineTabs, type BrowserEngineProvider } from "./browser/BrowserEngineTabs.ts";
+import type { EngineFallbackReason } from "./browser/BrowserErrors.ts";
+import { CHROMIUM_ENGINE } from "./browser/TabDriver.ts";
 import { BrowserKernelError } from "./browser/BrowserErrors.ts";
 import { NativeViewSync } from "./browser/NativeViewSync.ts";
 import {
@@ -72,6 +75,10 @@ const SLEEP_PREVIEW_JPEG_QUALITY = 60;
 /** Waits bounded so a stuck page cannot hold a tab's lifecycle queue (and the commands behind it). */
 const SLEEP_CAPTURE_TIMEOUT_MS = 2_000;
 const WAKE_LOAD_TIMEOUT_MS = 10_000;
+/** How long a tab that moved from a contributed engine to Chromium may load before the command runs anyway. */
+const ENGINE_FALLBACK_LOAD_TIMEOUT_MS = 15_000;
+/** A background tab has never been shown and has no size; screenshots and layout need one. */
+const BACKGROUND_TAB_SIZE = { width: 1280, height: 800 };
 
 // Mirrors the `.browser-card { border-radius: 17px }` declaration in src/renderer/src/styles/app.css: the
 // stylesheet owns this visual property, so the two have to stay in sync by hand.
@@ -138,6 +145,15 @@ export interface BrowserServiceOptions {
   pauseHiddenTabs?: boolean;
   /** Timing overrides for the hidden-tab lifecycle (measurements and smoke runs). */
   tabLifecycle?: Pick<TabLifecycleOptions, "freezeAfterMs" | "discardAfterMs" | "maxLiveHiddenTabs">;
+  /** Plugin-contributed browser engines for agents' background tabs (`browser:engine`). */
+  engines?: BrowserEngineHost;
+}
+
+/** How BrowserService reaches the plugin services that contribute browser engines. */
+export interface BrowserEngineHost {
+  providers(): BrowserEngineProvider[];
+  openTab(provider: BrowserEngineProvider, tabId: string): Promise<unknown>;
+  closeTab(provider: BrowserEngineProvider, tabId: string): void;
 }
 
 export class BrowserService {
@@ -155,9 +171,16 @@ export class BrowserService {
   private readonly wakingTabs = new Set<string>();
   private readonly automation = new BrowserAutomationService(
     (tabId, busy) => this.setTabAutomationBusy(tabId, busy),
-    { beforeCommand: async (tabId) => { await this.lifecycle.ensureLive(tabId); } }
+    {
+      beforeCommand: async (tabId) => { await this.lifecycle.ensureLive(tabId); },
+      captureSurface: async (tabId) => this.lendCaptureSurface(tabId)
+    }
   );
+  /** Chromium tabs a contributed engine's tab moved to: never shown unless someone shows them. */
+  private readonly movedEngineTabs = new Set<string>();
   private readonly agents: AgentRegistry;
+  /** Agents' background tabs in plugin-contributed engines: no view, never shown, never saved. */
+  private readonly engineTabs: BrowserEngineTabs;
   private readonly canvasGestures: BrowserCanvasGestureController;
   private readonly canvasPointers: BrowserCanvasPointerRouter;
   private readonly clipView = new View();
@@ -217,6 +240,20 @@ export class BrowserService {
     this.audit = new BrowserAuditStore(userDataPath, { now: this.now });
     // Presence that stopped heartbeating expires on its own; the timer runs only while an agent is present.
     this.agents = new AgentRegistry(this.now, { onExpired: () => this.presenceChanged() });
+    const engines = options.engines;
+    this.engineTabs = new BrowserEngineTabs({
+      automation: this.automation,
+      providers: () => engines?.providers() ?? [],
+      openEngineTab: (provider, tabId) => engines
+        ? engines.openTab(provider, tabId)
+        : Promise.reject(new Error("No browser engine is installed.")),
+      closeEngineTab: (provider, tabId) => engines?.closeTab(provider, tabId),
+      openChromiumTab: (tabId, url, revision, openOptions) => this.openBackgroundChromiumTab(tabId, url, revision, openOptions),
+      changed: () => {
+        if (!this.disposed) this.emit();
+      },
+      now: this.now
+    });
     this.canvasGestures = new BrowserCanvasGestureController({
       getOwner: () => this.getOwner(),
       getViewport: () => this.viewport,
@@ -269,6 +306,9 @@ export class BrowserService {
       getTab: (tabId) => this.coreTab(tabId),
       ensureRuntime: () => this.ensureRuntime(),
       newTab: (url) => this.hostNewTab(url),
+      openTab: (url, openOptions) => this.hostOpenTab(url, openOptions),
+      tabEngine: (tabId) => this.engineTabs.engineOf(tabId) ?? (this.tabs.has(tabId) ? CHROMIUM_ENGINE : null),
+      moveTabToChromium: (tabId, reason) => this.moveTabToChromium(tabId, reason),
       closeTab: (tabId) => this.hostCloseTab(tabId),
       activateTab: (tabId) => this.hostActivateTab(tabId),
       navigateTab: (tabId, url) => this.hostNavigate(tabId, url),
@@ -299,9 +339,12 @@ export class BrowserService {
   getState(): BrowserSnapshot {
     const agentValues = this.agents.snapshot();
     const runtimeTabs = [...this.tabs.values()];
-    const tabs = runtimeTabs.length > 0
-      ? runtimeTabs.map((tab) => this.tabSnapshot(tab, agentValues))
-      : this.persisted.tabs.map((tab) => this.persistedTabSnapshot(tab, agentValues));
+    const tabs = [
+      ...runtimeTabs.length > 0
+        ? runtimeTabs.map((tab) => this.tabSnapshot(tab, agentValues))
+        : this.persisted.tabs.map((tab) => this.persistedTabSnapshot(tab, agentValues)),
+      ...this.engineTabs.snapshots(agentValues)
+    ];
     return {
       tabs,
       activeTabId: runtimeTabs.length > 0 ? this.activeTabId : this.persisted.activeTabId,
@@ -389,6 +432,7 @@ export class BrowserService {
     this.canvasGestures.endSequence(false);
     this.canvasGestures.clear();
     this.agents.dispose();
+    this.engineTabs.dispose();
     this.destroyRuntimeTabs();
     if (this.browserSession && this.browserPagePreloadId) {
       this.browserSession.unregisterPreloadScript(this.browserPagePreloadId);
@@ -559,6 +603,8 @@ export class BrowserService {
   }
 
   private coreTab(tabId: string): BrowserCoreTab | null {
+    const engineTab = this.engineTabs.coreTab(tabId);
+    if (engineTab) return engineTab;
     const tab = this.tabs.get(tabId);
     if (tab) {
       return { id: tab.id, url: this.tabUrl(tab), documentRevision: tab.documentRevision, status: tab.status };
@@ -567,9 +613,107 @@ export class BrowserService {
     return saved ? { id: saved.id, url: saved.url, documentRevision: 0, status: "ready" } : null;
   }
 
+  /**
+   * An agent's tab goes to a contributed engine when `choose` picks one: it opens in the background and the active tab
+   * stays. If the engine cannot open it, or none applies, it is a normal Chromium tab (made active, as always).
+   */
+  private async hostOpenTab(url: string, options: { engine?: string; actor: BrowserActor }): Promise<BrowserOpenedTab> {
+    const choice = this.engineTabs.choose({ engine: options.engine, actor: options.actor, url });
+    if (choice.provider) {
+      await this.ensureRuntime();
+      if (this.tabs.size + this.engineTabs.size >= MAX_BROWSER_TABS) {
+        throw new BrowserKernelError("RATE_LIMITED", `Browser tab limit is ${MAX_BROWSER_TABS}.`);
+      }
+      const normalized = this.policy.assertNavigationUrl(url);
+      try {
+        const tabId = await this.engineTabs.open(choice.provider, normalized);
+        return { snapshot: this.getState(), tabId, engine: choice.provider.engineId };
+      } catch (error) {
+        console.warn("CanvasTTY browser engine could not open a tab; using Chromium.", error);
+        const snapshot = await this.hostNewTab(url);
+        return {
+          snapshot,
+          tabId: snapshot.activeTabId,
+          engine: CHROMIUM_ENGINE,
+          ...(options.engine && options.engine !== "auto"
+            ? { notice: `Browser engine "${choice.provider.engineId}" could not open the tab; it opened in Chromium.` }
+            : {})
+        };
+      }
+    }
+    const snapshot = await this.hostNewTab(url);
+    return { snapshot, tabId: snapshot.activeTabId, engine: CHROMIUM_ENGINE, ...(choice.notice ? { notice: choice.notice } : {}) };
+  }
+
+  private async moveTabToChromium(tabId: string, reason: EngineFallbackReason): Promise<void> {
+    await this.ensureRuntime();
+    await this.engineTabs.moveToChromium(tabId, reason, { waitForLoad: reason !== "revealed" });
+  }
+
+  /**
+   * The Chromium tab a contributed engine's tab continues in: same id, the given revision, not activated. It gets the
+   * size of a normal page (it was never on screen) so layout and screenshots work while it stays hidden.
+   */
+  private async openBackgroundChromiumTab(
+    tabId: string,
+    url: string,
+    revision: number,
+    options: { waitForLoad: boolean }
+  ): Promise<void> {
+    if (this.disposed) throw new BrowserKernelError("BRIDGE_UNAVAILABLE", "Browser service is disposed.");
+    const normalized = this.policy.assertNavigationUrl(url);
+    const tab = this.createRuntimeTab(tabId, normalized, revision);
+    this.movedEngineTabs.add(tabId);
+    this.native.setBounds(tab.view, {
+      x: 0,
+      y: 0,
+      width: Math.max(BACKGROUND_TAB_SIZE.width, Math.round(this.viewport.width)),
+      height: Math.max(BACKGROUND_TAB_SIZE.height, Math.round(this.viewport.height))
+    });
+    await this.persistRuntime();
+    this.syncViews();
+    this.emit();
+    const loading = this.loadTab(tab, normalized);
+    if (!options.waitForLoad) return;
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      loading,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, ENGINE_FALLBACK_LOAD_TIMEOUT_MS);
+      })
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  /**
+   * A tab that moved from a contributed engine for a screenshot has never been on screen, and Chromium paints only
+   * what is shown. For the capture it is placed under the active tab, with the same bounds: it paints, the active tab
+   * covers it, and it is taken out again right after. Without a shown active tab there is nothing to lend (the
+   * screenshot then answers VIEWPORT_UNAVAILABLE as for any hidden tab).
+   */
+  private async lendCaptureSurface(tabId: string): Promise<(() => void) | null> {
+    if (!this.movedEngineTabs.has(tabId) || tabId === this.activeTabId) return null;
+    const tab = this.tabs.get(tabId);
+    const active = this.activeTabId ? this.tabs.get(this.activeTabId) : undefined;
+    if (!tab || tab.visible || tab.sleeping || tab.view.webContents.isDestroyed()) return null;
+    if (!active || !active.visible || this.clipTabId !== active.id) return null;
+    const bounds = active.view.getBounds();
+    if (bounds.width <= 0 || bounds.height <= 0) return null;
+    this.clipView.addChildView(tab.view, 0);
+    this.native.setBounds(tab.view, bounds);
+    this.native.setVisible(tab.view, true);
+    return () => {
+      // Shown meanwhile: it is the clip view's active tab now, and syncViews owns it.
+      if (this.clipTabId === tab.id) return;
+      this.native.setVisible(tab.view, false);
+      this.clipView.removeChildView(tab.view);
+    };
+  }
+
   private async hostNewTab(url: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
-    if (this.tabs.size >= MAX_BROWSER_TABS) {
+    if (this.tabs.size + this.engineTabs.size >= MAX_BROWSER_TABS) {
       throw new BrowserKernelError("RATE_LIMITED", `Browser tab limit is ${MAX_BROWSER_TABS}.`);
     }
     const normalized = this.policy.assertNavigationUrl(url);
@@ -585,6 +729,8 @@ export class BrowserService {
 
   private async hostActivateTab(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    // A contributed engine's tab is never shown: it becomes a Chromium tab first.
+    if (this.engineTabs.has(tabId)) await this.engineTabs.moveToChromium(tabId, "revealed", { waitForLoad: false });
     const tab = this.requireTab(tabId);
     this.canvasPointers.cancelNavigationGesture();
     this.invalidateCanvasSequence(false);
@@ -608,6 +754,11 @@ export class BrowserService {
 
   private async hostCloseTab(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    if (this.engineTabs.has(tabId)) {
+      this.engineTabs.close(tabId);
+      this.pendingDialogs.delete(tabId);
+      return this.getState();
+    }
     const tab = this.requireTab(tabId);
     if (this.activeTabId === tabId) {
       this.invalidateCanvasSequence(false);
@@ -624,6 +775,10 @@ export class BrowserService {
 
   private async hostNavigate(tabId: string, url: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    if (this.engineTabs.has(tabId)) {
+      await this.engineTabs.navigate(tabId, this.policy.assertNavigationUrl(url));
+      return this.getState();
+    }
     const tab = this.requireTab(tabId);
     const normalized = this.policy.assertNavigationUrl(url);
     tab.lastSafeUrl = normalized;
@@ -642,6 +797,10 @@ export class BrowserService {
 
   private async hostBack(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    if (this.engineTabs.has(tabId)) {
+      await this.engineTabs.history(tabId, -1);
+      return this.getState();
+    }
     const tab = this.requireTab(tabId);
     if (tab.view.webContents.navigationHistory.canGoBack()) {
       tab.loading = true;
@@ -656,6 +815,10 @@ export class BrowserService {
 
   private async hostForward(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    if (this.engineTabs.has(tabId)) {
+      await this.engineTabs.history(tabId, 1);
+      return this.getState();
+    }
     const tab = this.requireTab(tabId);
     if (tab.view.webContents.navigationHistory.canGoForward()) {
       tab.loading = true;
@@ -670,6 +833,10 @@ export class BrowserService {
 
   private async hostReload(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    if (this.engineTabs.has(tabId)) {
+      await this.engineTabs.reload(tabId);
+      return this.getState();
+    }
     this.requireTab(tabId);
     // A sleeping tab's wake is a load of its page already; a paused one resumes before it reloads.
     if ((await this.lifecycle.ensureLive(tabId)).reloaded) {
@@ -1106,6 +1273,7 @@ export class BrowserService {
   }
 
   private destroyTab(tab: BrowserTab): void {
+    this.movedEngineTabs.delete(tab.id);
     this.lifecycle.untrack(tab.id);
     this.wakingTabs.delete(tab.id);
     this.canvasPointers.cancelTab(tab.id);

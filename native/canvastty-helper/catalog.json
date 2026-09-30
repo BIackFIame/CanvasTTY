@@ -15,7 +15,7 @@
       },
       {
         "name": "browser_new_tab",
-        "description": "Open a new visible tab. Re-observe after navigation before using element refs.",
+        "description": "Open a new tab; use the returned tabId for later commands. engine: auto (default) opens it in the background in a lighter engine when the person installed one (reading, observing, clicking by element), otherwise as a visible Chromium tab; chromium always opens a visible Chromium tab. A background tab moves to Chromium by itself when needed (screenshots, bot checks, unreadable pages, or when shown): same tabId, stale refs, and the result says so.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -23,6 +23,11 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 2048
+            },
+            "engine": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
             }
           },
           "required": [],

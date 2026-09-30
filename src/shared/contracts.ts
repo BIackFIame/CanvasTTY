@@ -556,7 +556,8 @@ export type PluginPermission =
   | "sessions:read-screen"
   | "sessions:launch"
   | "sessions:control"
-  | "cards:decorate";
+  | "cards:decorate"
+  | "browser:engine";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -632,6 +633,18 @@ export interface PluginService {
   tools?: PluginAgentTool[];
   /** Card actions (`cards:decorate`): menu items on matching cards; the host calls `canvastty.cards.invoke`. */
   cardActions?: PluginCardAction[];
+  /** A browser engine (`browser:engine`) for agents' background tabs; the host calls `canvastty.browserEngine.*`. */
+  browserEngine?: PluginBrowserEngine;
+}
+
+/** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */
+export interface PluginBrowserEngine {
+  /** What agents pass as `engine` to browser_new_tab; `[a-z0-9][a-z0-9._-]*`, never `auto` or `chromium`. */
+  id: string;
+  title: string;
+  description?: string;
+  /** The engine lays pages out for real. Without layout (the default) clicks and hovers go through the DOM. */
+  layout: boolean;
 }
 
 /** A tool a plugin service offers to agents through canvastty_agents. */
@@ -1189,6 +1202,11 @@ export interface BrowserTabSnapshot {
   lifecycle?: BrowserTabLifecycleState;
   /** The last picture of a sleeping tab, for the card; only on the active tab. Never sent to agents. */
   preview?: string | null;
+  /**
+   * Set on an agent's background tab that a plugin-contributed browser engine drives (the engine id). Such a tab is
+   * never shown: showing it moves it to Chromium first. Absent on Chromium tabs.
+   */
+  engine?: string;
 }
 
 export type BrowserTabLifecycleState = "paused" | "sleeping";
@@ -1376,6 +1394,11 @@ export interface BrowserCommand {
   cursor?: string;
   limit?: number;
   expectedRevision?: number;
+  /**
+   * browser_new_tab only: `auto` (default), `chromium`, or a plugin-contributed engine's id. `auto` gives an agent's
+   * new tab the installed engine when one runs; a person's tabs always use Chromium.
+   */
+  engine?: string;
 }
 
 export interface BrowserResult<T = unknown> {
