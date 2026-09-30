@@ -296,9 +296,14 @@ export class RuntimeGateway {
     return this.leases.get(terminalSessionId)?.latest?.state ?? null;
   }
 
-  revokeTerminalSession(terminalSessionId: string): void {
+  /**
+   * Ends a session's lease. A launch's own cleanup passes its capability token, so a cleanup that runs
+   * late (after the card was relaunched under the same id) cannot revoke the newer launch's lease.
+   */
+  revokeTerminalSession(terminalSessionId: string, capabilityToken?: string): void {
     const lease = this.leases.get(terminalSessionId);
     if (!lease) return;
+    if (capabilityToken !== undefined && !tokenMatches(capabilityToken, lease.tokenDigest)) return;
     lease.tokenDigest.fill(0);
     this.leases.delete(terminalSessionId);
     for (const check of lease.checks) check.abort();
