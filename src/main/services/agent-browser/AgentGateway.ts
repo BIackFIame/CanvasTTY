@@ -43,6 +43,8 @@ import {
 const DEFAULT_CAPABILITY_TTL_MS = 60_000;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
+/** A host that dies within this long of starting counts toward MAX_TRANSPORT_RESTART_ATTEMPTS; a longer run resets it. */
+const TRANSPORT_FAST_FAILURE_WINDOW_MS = 60_000;
 
 export const WINDOWS_AGENT_GATEWAY_UNAVAILABLE =
   "Agent browser access on Windows requires the packaged current-user-only named-pipe host.";
@@ -112,6 +114,9 @@ export class AgentGateway {
   /** Bumped by close(): a Unix bring-up still creating or opening its socket then knows it was closed. */
   private closeGeneration = 0;
   private restartTimer: NodeJS.Timeout | undefined;
+  /** The pipe name the first host published; a replacement listens on it again so helpers can reconnect. */
+  private windowsPipeName: string | null = null;
+  private transportStartedAt: number | null = null;
   private restartAttempts = 0;
   private restartToken = 0;
   private recovering = false;
@@ -166,10 +171,12 @@ export class AgentGateway {
     const settle = () => {
       if (this.startPromise === starting) this.startPromise = null;
     };
+    const recovering = this.recovering;
     void starting.then(() => {
       settle();
       this.recovering = false;
-      this.restartAttempts = 0;
+      // A replacement host counts as recovered only once it outlives the fast-failure window (see the fatal handler).
+      if (!recovering) this.restartAttempts = 0;
     }, settle);
     return starting;
   }
@@ -179,7 +186,8 @@ export class AgentGateway {
     const transport = this.windowsPipeHostFactory({
       hostPath: this.windowsHostPath,
       platform: this.platform,
-      parentPid: process.pid
+      parentPid: process.pid,
+      ...(this.windowsPipeName ? { pipeName: this.windowsPipeName } : {})
     });
     this.windowsTransport = transport;
     transport.on("fatal", () => this.handleTransportFatal(transport));
@@ -192,6 +200,8 @@ export class AgentGateway {
         throw new Error("Windows agent pipe host was superseded during startup.");
       }
       this.endpoint = endpoint;
+      this.windowsPipeName = endpoint;
+      this.transportStartedAt = this.now();
       this.expiryTimer = setInterval(() => this.expireConnections(), 1_000);
       this.expiryTimer.unref();
       return endpoint;
@@ -335,6 +345,8 @@ export class AgentGateway {
     this.server = null;
     this.windowsTransport = null;
     this.endpoint = null;
+    this.windowsPipeName = null;
+    this.transportStartedAt = null;
     this.ownedRuntimeDirectory = null;
     if (server) await closeServer(server);
     if (windowsTransport) await windowsTransport.close();
@@ -344,7 +356,10 @@ export class AgentGateway {
   private handleTransportFatal(transport: WindowsPipeHostTransport): void {
     // A transport that was already replaced must not disturb its successor.
     if (this.windowsTransport !== transport) return;
+    const ranFor = this.transportStartedAt === null ? 0 : this.now() - this.transportStartedAt;
+    if (ranFor >= TRANSPORT_FAST_FAILURE_WINDOW_MS) this.restartAttempts = 0;
     this.windowsTransport = null;
+    this.transportStartedAt = null;
     this.endpoint = null;
     clearInterval(this.expiryTimer);
     this.expiryTimer = undefined;
@@ -387,7 +402,6 @@ export class AgentGateway {
         return;
       }
       this.recovering = false;
-      this.restartAttempts = 0;
     } catch {
       if (token === this.restartToken && this.enabled) this.scheduleTransportRestart();
     }

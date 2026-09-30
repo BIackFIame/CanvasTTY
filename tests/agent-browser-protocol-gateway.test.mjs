@@ -354,6 +354,43 @@ test("AgentGateway restarts a failed Windows host and cancels recovery when disa
   assert.equal(transports.length, 2);
 });
 
+test("AgentGateway restarts the Windows host on its published pipe name and gives up on a host that keeps dying at once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const transports = [];
+  const gateway = new AgentGateway(core(), {
+    platform: "win32",
+    windowsHostPath: "/fake/host.exe",
+    windowsPipeHostFactory: (options) => {
+      const transport = new EventEmitter();
+      transport.options = options;
+      transport.isRunning = false;
+      transport.start = async () => {
+        transport.isRunning = true;
+        return options.pipeName ?? "published-pipe";
+      };
+      transport.close = async () => { transport.isRunning = false; };
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+
+  assert.equal(await gateway.start(), "published-pipe");
+  assert.equal(transports[0].options.pipeName, undefined);
+  // Each replacement dies right after it starts: the attempts must not reset on such a short-lived success.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const live = transports.at(-1);
+    live.isRunning = false;
+    live.emit("fatal", new Error("host exited"));
+    t.mock.timers.tick(30_000);
+    await new Promise(setImmediate);
+  }
+  assert.equal(transports.length, 4, "three replacements, then recovery gives up");
+  assert.deepEqual(transports.slice(1).map((transport) => transport.options.pipeName), [
+    "published-pipe", "published-pipe", "published-pipe"
+  ]);
+});
+
 test("AgentGateway idempotently authenticates live helpers and rotates reconnect capability", POSIX_GATEWAY_TEST, async (t) => {
   let connected = 0;
   const disconnects = [];

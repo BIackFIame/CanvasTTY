@@ -191,3 +191,45 @@ test("Windows pipe transport: a failed host that exits late does not end the hos
   assert.equal(fatal.length, 1, "no failure is reported for the new host");
   await transport.close();
 });
+
+test("Windows pipe transport asks a restarted host for the published pipe name and rejects any other", async () => {
+  const name = `\\\\.\\pipe\\canvastty-agent-${"0f".repeat(16)}`;
+  assert.throws(() => new WindowsPipeHostTransport({
+    platform: "win32",
+    hostPath: join(process.cwd(), "package.json"),
+    pipeName: "\\\\.\\pipe\\someone-else"
+  }), /not one the host generates/u);
+
+  const child = fakeHost();
+  const spawned = [];
+  const transport = new WindowsPipeHostTransport({
+    platform: "win32",
+    hostPath: join(process.cwd(), "package.json"),
+    pipeName: name,
+    spawnHost: (_path, args) => {
+      spawned.push(args);
+      return child;
+    }
+  });
+  const starting = transport.start(() => undefined);
+  while (spawned.length === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.deepEqual(spawned[0].slice(2), ["--pipe-name", name]);
+  child.stdout.write(frame(protocol.hostToParent.ready, 0, Buffer.from(name, "utf8")));
+  assert.equal(await starting, name);
+  await transport.close();
+
+  const other = fakeHost();
+  const mismatched = new WindowsPipeHostTransport({
+    platform: "win32",
+    hostPath: join(process.cwd(), "package.json"),
+    pipeName: name,
+    spawnHost: () => other
+  });
+  mismatched.on("fatal", () => undefined);
+  let otherSpawned = false;
+  other.stdout.once("resume", () => { otherSpawned = true; });
+  const failing = mismatched.start(() => undefined);
+  while (!otherSpawned) await new Promise((resolve) => setTimeout(resolve, 1));
+  other.stdout.write(frame(protocol.hostToParent.ready, 0, Buffer.from(`\\\\.\\pipe\\canvastty-agent-${"1".repeat(32)}`)));
+  await assert.rejects(failing, /different endpoint/u);
+});

@@ -713,12 +713,33 @@ bool SelfTest() {
   return server_ok && client_ok.load();
 }
 
-bool ParseParentPid(int argc, wchar_t** argv, DWORD* parent_pid) {
-  if (argc != 3 || std::wcscmp(argv[1], L"--parent-pid") != 0) return false;
+// A restarted host may reuse the name its failed predecessor published, so clients that already hold it
+// (and their reconnect tokens) can come back. Only names this host itself would generate are accepted.
+bool IsGeneratedPipeName(const wchar_t* value) {
+  constexpr wchar_t kPrefix[] = L"\\\\.\\pipe\\canvastty-agent-";
+  const std::size_t prefix_length = std::wcslen(kPrefix);
+  if (std::wcsncmp(value, kPrefix, prefix_length) != 0) return false;
+  const wchar_t* suffix = value + prefix_length;
+  if (std::wcslen(suffix) != 32) return false;
+  for (const wchar_t* cursor = suffix; *cursor != L'\0'; ++cursor) {
+    const bool digit = *cursor >= L'0' && *cursor <= L'9';
+    const bool lower_hex = *cursor >= L'a' && *cursor <= L'f';
+    if (!digit && !lower_hex) return false;
+  }
+  return true;
+}
+
+bool ParseArguments(int argc, wchar_t** argv, DWORD* parent_pid, std::wstring* pipe_name) {
+  if ((argc != 3 && argc != 5) || std::wcscmp(argv[1], L"--parent-pid") != 0) return false;
   wchar_t* end = nullptr;
   const unsigned long value = std::wcstoul(argv[2], &end, 10);
   if (end == argv[2] || *end != L'\0' || value == 0 || value > MAXDWORD) return false;
   *parent_pid = static_cast<DWORD>(value);
+  pipe_name->clear();
+  if (argc == 5) {
+    if (std::wcscmp(argv[3], L"--pipe-name") != 0 || !IsGeneratedPipeName(argv[4])) return false;
+    pipe_name->assign(argv[4]);
+  }
   return true;
 }
 
@@ -743,8 +764,9 @@ int wmain(int argc, wchar_t** argv) {
   }
 
   DWORD parent_pid = 0;
-  if (!ParseParentPid(argc, argv, &parent_pid)) {
-    SendTextFrame(FrameType::kFatal, "Expected --parent-pid <pid>.");
+  std::wstring requested_pipe_name;
+  if (!ParseArguments(argc, argv, &parent_pid, &requested_pipe_name)) {
+    SendTextFrame(FrameType::kFatal, "Expected --parent-pid <pid> [--pipe-name <name>].");
     return 13;
   }
   HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, parent_pid);
@@ -758,7 +780,7 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(parent);
     return 15;
   }
-  const std::wstring pipe_name = RandomPipeName();
+  const std::wstring pipe_name = requested_pipe_name.empty() ? RandomPipeName() : requested_pipe_name;
   if (pipe_name.empty()) {
     SendTextFrame(FrameType::kFatal, "Secure pipe-name generation failed.");
     CloseHandle(parent);
