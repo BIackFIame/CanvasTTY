@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import * as terminalShortcuts from "../src/renderer/src/features/terminal/terminalShortcuts.ts";
 
 const terminalCardPath = new URL(
   "../src/renderer/src/features/terminal/TerminalCard.tsx",
@@ -9,6 +10,136 @@ const terminalCardPath = new URL(
 const appStylesPath = new URL("../src/renderer/src/styles/app.css", import.meta.url);
 const terminalManagerPath = new URL("../src/main/services/TerminalManager.ts", import.meta.url);
 const contractsPath = new URL("../src/shared/contracts.ts", import.meta.url);
+
+test("Command+A dispatches native Codex selection and leaves other providers and CLI keys alone", async () => {
+  const source = await readFile(terminalCardPath, "utf8");
+  const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
+  assert.ok(body, "the terminal's actual keyboard handler must be located");
+  const calls = [];
+  const terminal = { clearSelection: () => calls.push("clear") };
+  const window = { canvasTTY: {
+    window: { isMacOS: true },
+    terminal: { input: (id, sequence) => calls.push([id, sequence]) }
+  } };
+  const createHandler = new Function("window", "session", "terminal", ...Object.keys(terminalShortcuts),
+    `return (event) => {${body}}`);
+  const event = {
+    type: "keydown", key: "ф", code: "KeyA", metaKey: true,
+    ctrlKey: false, shiftKey: false, altKey: false,
+    preventDefault: () => calls.push("prevent"),
+    stopPropagation: () => calls.push("stop")
+  };
+  const codex = createHandler(window, { id: "codex-qa", provider: "codex" }, terminal, ...Object.values(terminalShortcuts));
+  assert.equal(codex(event), false);
+  assert.deepEqual(calls, ["prevent", "stop", "clear", ["codex-qa", "\u001b[97;9u"]]);
+  calls.length = 0;
+  for (const provider of ["terminal", "claude", "gemini"]) {
+    const handler = createHandler(window, { id: provider, provider }, terminal, ...Object.values(terminalShortcuts));
+    assert.equal(handler(event), true);
+  }
+  for (const change of [
+    { type: "keyup" }, { ctrlKey: true }, { shiftKey: true }, { altKey: true },
+    { key: "F2", code: "F2", metaKey: false },
+    { key: "Home", code: "Home", metaKey: false }
+  ]) assert.equal(codex({ ...event, ...change }), true);
+  assert.deepEqual(calls, []);
+});
+
+test("clipboard replies cannot paste into a restarted or exited session while normal text and image paste stay intact", async () => {
+  const source = await readFile(terminalCardPath, "utf8");
+  const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
+  assert.ok(body, "exercise the terminal's actual keyboard handler");
+  const createHandler = new Function("window", "session", "terminal", "terminalRef", "sessionExited", "sessionStartedAt", ...Object.keys(terminalShortcuts),
+    `return (event) => {${body}}`);
+  const event = {
+    type: "keydown", key: "м", code: "KeyV", metaKey: true,
+    ctrlKey: false, shiftKey: false, altKey: false,
+    preventDefault() {}, stopPropagation() {}
+  };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const fixture = () => {
+    const image = deferred();
+    const text = deferred();
+    const calls = [];
+    const reads = { image: 0, text: 0 };
+    const terminal = { hasSelection: () => false, paste: (value) => calls.push(["text", value]) };
+    const terminalRef = { current: terminal };
+    const sessionExited = { current: false };
+    const sessionStartedAt = { current: 1 };
+    const window = { canvasTTY: {
+      window: { isMacOS: true },
+      clipboard: {
+        hasImage: () => { reads.image++; return image.promise; },
+        readText: () => { reads.text++; return text.promise; }
+      },
+      terminal: { input: (id, sequence) => calls.push([id, sequence]) }
+    } };
+    const handler = createHandler(window, { id: "same-card", provider: "codex" }, terminal,
+      terminalRef, sessionExited, sessionStartedAt, ...Object.values(terminalShortcuts));
+    return { handler, image, text, calls, reads, terminalRef, sessionExited, sessionStartedAt };
+  };
+  const normalText = fixture();
+  assert.equal(normalText.handler(event), false);
+  normalText.image.resolve(false);
+  await tick();
+  normalText.text.resolve("ordinary clipboard text");
+  await tick();
+  assert.deepEqual(normalText.calls, [["text", "ordinary clipboard text"]]);
+  const normalImage = fixture();
+  assert.equal(normalImage.handler(event), false);
+  normalImage.image.resolve(true);
+  await tick();
+  assert.deepEqual(normalImage.calls, [["same-card", "\u0016"]]);
+  assert.equal(normalImage.reads.text, 0);
+
+  for (const imageValue of [false, true]) {
+    const restarted = fixture();
+    restarted.handler(event);
+    restarted.sessionExited.current = true;
+    restarted.sessionStartedAt.current = 2;
+    restarted.sessionExited.current = false;
+    restarted.image.resolve(imageValue);
+    await tick();
+    assert.deepEqual(restarted.calls, [], "first clipboard reply must not reach a later launch");
+    assert.equal(restarted.reads.text, 0);
+  }
+  const restartedDuringText = fixture();
+  restartedDuringText.handler(event);
+  restartedDuringText.image.resolve(false);
+  await tick();
+  assert.equal(restartedDuringText.reads.text, 1);
+  restartedDuringText.sessionExited.current = true;
+  restartedDuringText.sessionStartedAt.current = 2;
+  restartedDuringText.sessionExited.current = false;
+  restartedDuringText.text.resolve("stale clipboard text");
+  await tick();
+  assert.deepEqual(restartedDuringText.calls, [], "second clipboard reply must not reach a later launch");
+
+  for (const invalidate of [(run) => { run.sessionExited.current = true; }, (run) => { run.terminalRef.current = null; }]) {
+    const run = fixture();
+    run.handler(event);
+    invalidate(run);
+    run.image.resolve(true);
+    await tick();
+    assert.deepEqual(run.calls, [], "an exited or unmounted session rejects pending paste");
+  }
+  const alreadyExited = fixture();
+  alreadyExited.sessionExited.current = true;
+  assert.equal(alreadyExited.handler(event), false);
+  assert.equal(alreadyExited.reads.image, 0);
+  const nativeKeys = fixture();
+  for (const change of [
+    { metaKey: false, ctrlKey: true }, { altKey: true }, { shiftKey: true },
+    { metaKey: false, key: "F2", code: "F2" }, { metaKey: false, key: "Home", code: "Home" }
+  ]) assert.equal(nativeKeys.handler({ ...event, ...change }), true);
+  assert.deepEqual(nativeKeys.reads, { image: 0, text: 0 });
+  assert.deepEqual(nativeKeys.calls, []);
+});
 
 test("palette changes retheme the live xterm without recreating it", async () => {
   const source = await readFile(terminalCardPath, "utf8");
@@ -27,11 +158,19 @@ test("terminal copy shortcuts write the xterm selection without reaching the PTY
   assert.match(source, /return false;/);
 });
 
+test("Command copy reaches a CLI-owned selection without sending Control-C", async () => {
+  const source = await readFile(terminalCardPath, "utf8");
+  assert.match(source, /shouldCopyTerminalSelection\(event, terminal\.hasSelection\(\) \|\| window\.canvasTTY\.window\.isMacOS\)/);
+  assert.match(source, /if \(terminal\.hasSelection\(\)\)[\s\S]*?writeText\(terminal\.getSelection\(\)\)[\s\S]*?else if \(session\.provider === "codex"\) window\.canvasTTY\.terminal\.input\(session\.id, "\\u001b\[99;9u"\)/);
+});
+
 test("terminal paste reads the trusted clipboard bridge and uses xterm paste semantics", async () => {
   const source = await readFile(terminalCardPath, "utf8");
 
   assert.match(source, /window\.canvasTTY\.clipboard\.readText\(\)/);
   assert.match(source, /terminal\.paste\(text\)/);
+  assert.match(source, /window\.canvasTTY\.clipboard\.hasImage\(\)/);
+  assert.match(source, /window\.canvasTTY\.terminal\.input\(session\.id, "\\u0016"\)/);
 });
 
 test("terminal mouse coordinates are adapted for a transformed canvas", async () => {

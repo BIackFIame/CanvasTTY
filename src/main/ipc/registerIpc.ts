@@ -122,6 +122,7 @@ export function registerIpc({
   };
 
   ipcMain.handle(IPC.clipboardRead, () => clipboard.readText());
+  ipcMain.handle(IPC.clipboardHasImage, () => !clipboard.readImage().isEmpty());
   ipcMain.on(IPC.clipboardWrite, (_event, text: string) => {
     if (typeof text === "string" && text.length > 0) clipboard.writeText(text);
   });

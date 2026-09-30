@@ -1302,6 +1302,7 @@ export interface CanvasTTYApi {
   appVersion(): Promise<string>;
   clipboard: {
     readText(): Promise<string>;
+    hasImage(): Promise<boolean>;
     writeText(text: string): void;
   };
   external: {
@@ -1470,6 +1471,7 @@ export interface CanvasTTYApi {
 
 export const IPC = {
   clipboardRead: "clipboard:read",
+  clipboardHasImage: "clipboard:has-image",
   clipboardWrite: "clipboard:write",
   externalOpenUrl: "external:open-url",
   terminalSetVisible: "terminal:set-visible",

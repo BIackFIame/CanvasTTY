@@ -66,10 +66,12 @@ import {
   upsertSnapshot
 } from "./lib/sessionReconciliation";
 import {
+  handleMacNativeSelectAll,
   isRenameInputTarget,
   isShortcutCaptureTarget,
   matchesPointerShortcut,
-  matchesShortcut
+  matchesShortcut,
+  shouldKeepNativeKeyboardInput
 } from "./lib/shortcuts";
 import { homeGridPixelSize, homeLayoutFitsGrid, placeHomeWidget } from "./features/home/homeLayout";
 import { boundsInsideRegion, translateBounds } from "./features/workspace/canvasRegions";
@@ -1125,6 +1127,8 @@ export function App(): React.JSX.Element {
       setRenamingSessionId(activeSessionId);
     };
     const handleShortcut = (event: KeyboardEvent): void => {
+      if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS)) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();

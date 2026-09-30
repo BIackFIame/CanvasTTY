@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { win32 } from "node:path";
+import { isAbsolute, posix, win32 } from "node:path";
 import type { ProviderId } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
@@ -20,6 +20,7 @@ interface LaunchResolutionOptions {
   platform?: NodeJS.Platform;
   environment?: Readonly<NodeJS.ProcessEnv>;
   fileExists?: (path: string) => boolean;
+  resourcesPath?: string;
   providerCli?: ProviderCliResolution;
   resumePrevious?: boolean;
   resumeThreadId?: string;
@@ -58,6 +59,7 @@ export function resolveTerminalLaunch(
     : undefined;
   const auto = profile === "auto";
   const providerArgs = [
+    ...(provider === "codex" && agentBrowserArgs.includes("-c") ? ["--no-daemon"] : []),
     ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
     ...(auto ? autoModeArguments(provider, options.thirdPartyModel === true) : []),
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
@@ -71,6 +73,27 @@ export function resolveTerminalLaunch(
     ...providerCli.environment,
     ...launchEnvironment
   };
+  const resourcesPath = options.resourcesPath ?? process.resourcesPath;
+  const bundledDirectory = provider === "codex" && platform === "darwin" && resourcesPath
+    ? posix.join(resourcesPath, "codex-native-tui") : undefined;
+  const bundledFrontend = bundledDirectory ? posix.join(bundledDirectory, "canvastty-codex-tui") : undefined;
+  const bundledLauncher = bundledDirectory ? posix.join(bundledDirectory, "codex-tui-launch.mjs") : undefined;
+  const qaFrontend = environment.CANVASTTY_CODEX_TUI_QA;
+  const frontend = qaFrontend || (bundledFrontend && bundledLauncher
+    && (fileExists(bundledFrontend) || fileExists(bundledLauncher)) ? bundledFrontend : undefined);
+  if (provider === "codex" && frontend) {
+    const launcher = qaFrontend ? environment.CANVASTTY_CODEX_TUI_LAUNCHER_QA : bundledLauncher;
+    if (platform !== "darwin" || providerCli.launcher !== "native"
+      || !isAbsolute(frontend) || !fileExists(frontend)
+      || !launcher || !isAbsolute(launcher) || !fileExists(launcher)) {
+      throw new Error("Codex native TUI requires existing absolute frontend and launcher paths on macOS.");
+    }
+    return {
+      command: process.execPath,
+      args: [launcher, "--backend", providerCli.executable, "--frontend", frontend, "--", ...providerArgs],
+      environment: { ...combinedEnvironment, ELECTRON_RUN_AS_NODE: "1" }
+    };
+  }
   if (providerCli.launcher === "native") {
     return {
       command: providerCli.executable,

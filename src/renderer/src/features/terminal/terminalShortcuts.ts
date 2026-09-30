@@ -12,6 +12,20 @@ interface TerminalKeyEvent {
 }
 
 export const SHIFT_ENTER_SEQUENCE = "\u001b[13;2u";
+export const CODEX_SELECT_ALL_SEQUENCE = "\u001b[97;9u";
+
+export function shouldSelectCodexDraft(event: TerminalKeyEvent, isMacOS: boolean, provider: string): boolean {
+  return isMacOS && provider === "codex"
+    && event.type === "keydown"
+    && event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+    && matchesPhysicalOrLayoutKey(event, "KeyA", "a");
+}
+
+export function isMacTerminalClipboardShortcut(event: TerminalKeyEvent): boolean {
+  return event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey
+    && (matchesPhysicalOrLayoutKey(event, "KeyC", "c")
+      || matchesPhysicalOrLayoutKey(event, "KeyV", "v"));
+}
 
 export function shouldTogglePixelSkinMasterView(
   event: TerminalKeyEvent,

@@ -209,7 +209,10 @@ function createWindow(): { window: BrowserWindow; startupPage: StartupPageLoad }
     const currentUrl = window.webContents.getURL();
     if (currentUrl && url !== currentUrl) event.preventDefault();
   });
-  canvasNavigationInput?.attach(window.webContents, { preventMouseBindings: false });
+  canvasNavigationInput?.attach(window.webContents, {
+    preventMouseBindings: false,
+    captureMacEditShortcuts: process.platform === "darwin"
+  });
   // Crash recovery: a dead renderer must never leave the user staring at a
   // blank window. The application surface is reloaded in place — the same entry
   // startup loads — so services, sessions and their scrollback stay untouched
@@ -378,7 +381,10 @@ async function initializeServices(): Promise<void> {
     }
   );
   if (mainWindow && !mainWindow.isDestroyed()) {
-    canvasNavigationInput.attach(mainWindow.webContents, { preventMouseBindings: false });
+    canvasNavigationInput.attach(mainWindow.webContents, {
+      preventMouseBindings: false,
+      captureMacEditShortcuts: process.platform === "darwin"
+    });
   }
 
   browserService = new BrowserService(() => mainWindow, {

@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
+  isMacTerminalClipboardShortcut,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
   shouldScrollTerminalPage,
   shouldSendTerminalLineBreak,
+  shouldSelectCodexDraft,
   shouldTogglePixelSkinMasterView
 } from "../src/renderer/src/features/terminal/terminalShortcuts.ts";
 
@@ -19,6 +22,41 @@ const keydown = {
   metaKey: false,
   altKey: false
 };
+
+test("Command+A selects only a macOS Codex draft with the unmodified physical or layout chord", () => {
+  const select = { ...keydown, key: "a", code: "KeyA", metaKey: true };
+  assert.equal(shouldSelectCodexDraft(select, true, "codex"), true);
+  assert.equal(shouldSelectCodexDraft({ ...select, key: "ф" }, true, "codex"), true);
+  assert.equal(shouldSelectCodexDraft({ ...select, code: "", repeat: true }, true, "codex"), true);
+  assert.equal(CODEX_SELECT_ALL_SEQUENCE, "\u001b[97;9u");
+  assert.equal(shouldSelectCodexDraft(select, false, "codex"), false);
+  for (const provider of ["terminal", "claude", "gemini", "grok"]) {
+    assert.equal(shouldSelectCodexDraft(select, true, provider), false);
+  }
+  for (const event of [
+    { ...select, metaKey: false, ctrlKey: true },
+    { ...select, ctrlKey: true },
+    { ...select, shiftKey: true },
+    { ...select, altKey: true },
+    { ...select, type: "keyup" },
+    { ...select, key: "c", code: "KeyC" },
+    { ...select, key: "ф", code: "KeyF" }
+  ]) assert.equal(shouldSelectCodexDraft(event, true, "codex"), false);
+});
+
+test("macOS terminal adaptation handles only Command copy and paste", () => {
+  assert.equal(isMacTerminalClipboardShortcut({ ...keydown, metaKey: true }), true);
+  assert.equal(isMacTerminalClipboardShortcut({ ...keydown, key: "м", code: "KeyV", metaKey: true }), true);
+  for (const event of [
+    { ...keydown, ctrlKey: true },
+    { ...keydown, key: "F2", code: "F2" },
+    { ...keydown, key: "F4", code: "F4" },
+    { ...keydown, key: "Home", code: "Home" },
+    { ...keydown, key: "f", code: "KeyF", ctrlKey: true, shiftKey: true },
+    { ...keydown, key: "Enter", code: "Enter", shiftKey: true },
+    { ...keydown, key: "k", code: "KeyK", metaKey: true }
+  ]) assert.equal(isMacTerminalClipboardShortcut(event), false);
+});
 
 test("copies a terminal selection with platform copy shortcuts", () => {
   assert.equal(shouldCopyTerminalSelection({ ...keydown, ctrlKey: true }, true), true);

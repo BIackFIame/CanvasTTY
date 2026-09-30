@@ -61,6 +61,31 @@ export function isRenameInputTarget(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest('[data-terminal-rename="true"]'));
 }
 
+export function shouldKeepNativeKeyboardInput(target: EventTarget | null, isMacOS: boolean): boolean {
+  return isMacOS && target instanceof Element
+    && Boolean(target.closest('.terminal-card__surface, input, textarea, select, [contenteditable="true"]'));
+}
+
+// Terminal Command+A bypasses the Electron menu, so ordinary fields need their DOM selection here.
+export function handleMacNativeSelectAll(event: KeyboardEvent, isMacOS: boolean): boolean {
+  if (!isMacOS || !event.metaKey || event.ctrlKey || event.altKey || event.shiftKey
+    || !matchesPhysicalOrLayoutKey(event, "KeyA", "a") || !(event.target instanceof Element)) return false;
+  if (isShortcutCaptureTarget(event.target) || event.target.closest(".xterm")) return false;
+  const field = event.target.closest("input, textarea");
+  if (field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement) field.select();
+  else {
+    let editable = event.target.closest<HTMLElement>("[contenteditable]");
+    if (!editable?.isContentEditable) return false;
+    while (editable.parentElement?.isContentEditable) editable = editable.parentElement;
+    const selection = editable.ownerDocument.getSelection();
+    if (!selection) return false;
+    selection.selectAllChildren(editable);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
 export function displayCanvasNavigationBinding(binding: string, isMacOS: boolean): string {
   if (!isMacOS) return binding;
   return binding.split("+").map((part) => {

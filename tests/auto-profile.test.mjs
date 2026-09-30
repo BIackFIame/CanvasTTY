@@ -79,7 +79,7 @@ test("auto exists only where the CLI has a native auto mode; normal and YOLO are
   for (const provider of ["qwen", "opencode", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
   assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode; use the normal profile/u);
   // Normal adds no permission flag and no sandbox.
-  assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["-c", "x=1"]);
+  assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["--no-daemon", "-c", "x=1"]);
   assert.deepEqual(launch("claude", "normal"), []);
   assert.deepEqual(launch("codex", "yolo"), ["--dangerously-bypass-approvals-and-sandbox"]);
 });

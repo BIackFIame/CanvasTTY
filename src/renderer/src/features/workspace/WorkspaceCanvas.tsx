@@ -23,7 +23,7 @@ import type {
 import { UiIcon } from "../../components/UiIcon";
 import { ShortcutReference } from "../../components/ShortcutReference";
 import { t } from "../../lib/i18n";
-import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesPhysicalOrLayoutKey } from "../../lib/shortcuts";
+import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesPhysicalOrLayoutKey, shouldKeepNativeKeyboardInput } from "../../lib/shortcuts";
 import { BrowserCard } from "../browser/BrowserCard";
 import { attentionQueueRenderedAt, attentionSessions } from "../home/attentionQueue";
 import type { LimitsLoadState } from "../home/homeModel";
@@ -756,6 +756,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS)) return;
       if (activeSessionId !== null
         && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
         && shouldTogglePixelSkinMasterView(

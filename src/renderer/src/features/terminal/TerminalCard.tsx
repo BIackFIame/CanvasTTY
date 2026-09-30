@@ -28,12 +28,15 @@ import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
 import {
+  CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
+  isMacTerminalClipboardShortcut,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
   shouldScrollTerminalPage,
   shouldSearchTerminalOutput,
+  shouldSelectCodexDraft,
   shouldSendTerminalLineBreak
 } from "./terminalShortcuts";
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
@@ -174,6 +177,8 @@ function TerminalCardView({
   const suppressFocusReport = useRef(false);
   const sessionExited = useRef(session.exitCode !== null);
   sessionExited.current = session.exitCode !== null;
+  const sessionStartedAt = useRef(session.startedAt);
+  sessionStartedAt.current = session.startedAt;
   const restartAction = useRef<(resume?: boolean) => Promise<void>>(async () => undefined);
   const invertTerminalWheelRef = useRef(invertTerminalWheel);
   invertTerminalWheelRef.current = invertTerminalWheel;
@@ -332,6 +337,15 @@ function TerminalCardView({
     };
     fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
+      const selectCodexDraft = shouldSelectCodexDraft(event, window.canvasTTY.window.isMacOS, session.provider);
+      if (window.canvasTTY.window.isMacOS && !isMacTerminalClipboardShortcut(event) && !selectCodexDraft) return true;
+      if (selectCodexDraft) {
+        event.preventDefault();
+        event.stopPropagation();
+        terminal.clearSelection();
+        window.canvasTTY.terminal.input(session.id, CODEX_SELECT_ALL_SEQUENCE);
+        return false;
+      }
       if ((event.key === "F4" || event.code === "F4")
         && !event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey
         && terminalHost.current?.closest(".terminal-card")?.getAttribute("data-pixel-skin") === "true") {
@@ -370,19 +384,30 @@ function TerminalCardView({
         terminal.scrollPages(pageDirection);
         return false;
       }
-      if (shouldCopyTerminalSelection(event, terminal.hasSelection())) {
+      if (shouldCopyTerminalSelection(event, terminal.hasSelection() || window.canvasTTY.window.isMacOS)) {
         event.preventDefault();
         event.stopPropagation();
-        window.canvasTTY.clipboard.writeText(terminal.getSelection());
+        if (terminal.hasSelection()) window.canvasTTY.clipboard.writeText(terminal.getSelection());
+        else if (session.provider === "codex") window.canvasTTY.terminal.input(session.id, "\u001b[99;9u");
         return false;
       }
       if (!shouldPasteTerminalClipboard(event)) return true;
 
       event.preventDefault();
       event.stopPropagation();
-      void window.canvasTTY.clipboard.readText()
-        .then((text) => {
-          if (text && terminalRef.current === terminal) terminal.paste(text);
+      const pasteStartedAt = sessionStartedAt.current;
+      const acceptsPaste = () => terminalRef.current === terminal && !sessionExited.current
+        && sessionStartedAt.current === pasteStartedAt;
+      if (!acceptsPaste()) return false;
+      void (event.metaKey ? window.canvasTTY.clipboard.hasImage() : Promise.resolve(false))
+        .then(async (hasImage) => {
+          if (!acceptsPaste()) return;
+          if (hasImage) {
+            window.canvasTTY.terminal.input(session.id, "\u0016");
+            return;
+          }
+          const text = await window.canvasTTY.clipboard.readText();
+          if (text && acceptsPaste()) terminal.paste(text);
         })
         .catch(() => undefined);
       return false;
@@ -815,7 +840,7 @@ function TerminalCardView({
       onKeyDown={(event) => {
         // Fallback for focus parked on the card itself; the terminal textarea is
         // handled by attachCustomKeyEventHandler, which stops propagation first.
-        if (summaryMode || !shouldSearchTerminalOutput(event)) return;
+        if (window.canvasTTY.window.isMacOS || summaryMode || !shouldSearchTerminalOutput(event)) return;
         event.preventDefault();
         event.stopPropagation();
         toggleSearch();

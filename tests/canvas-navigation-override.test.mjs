@@ -230,6 +230,53 @@ test("modifier-only Meta full override does not swallow ordinary Command shortcu
   assert.equal(prevented, false);
 });
 
+test("macOS Select All, Copy and Paste reach the renderer without capturing other Command shortcuts", () => {
+  const contents = new EventEmitter();
+  const ignored = [];
+  contents.isDestroyed = () => false;
+  contents.setIgnoreMenuShortcuts = (active) => ignored.push(active);
+  const controller = new CanvasNavigationInputController({
+    wheelBinding: null,
+    navigationBinding: null
+  }, () => undefined);
+  controller.attach(contents, { captureMacEditShortcuts: true });
+
+  let prevented = false;
+  const event = { preventDefault: () => { prevented = true; } };
+  contents.emit("before-input-event", event, input("keyDown", "c", { code: "KeyC", meta: true }));
+  contents.emit("before-input-event", event, input("keyUp", "c", { code: "KeyC", meta: true }));
+  contents.emit("before-input-event", event, input("keyDown", "v", { code: "KeyV", meta: true }));
+  contents.emit("before-input-event", event, input("keyUp", "v", { code: "KeyV", meta: true }));
+  contents.emit("before-input-event", event, input("keyDown", "ф", { code: "KeyA", meta: true }));
+  contents.emit("before-input-event", event, input("keyUp", "ф", { code: "KeyA", meta: true }));
+  contents.emit("before-input-event", event, input("keyDown", "q", { code: "KeyQ", meta: true }));
+
+  assert.equal(prevented, false);
+  assert.deepEqual(ignored, [true, false, true, false, true, false]);
+});
+
+test("modified Command+A and non-macOS menu input keep their existing dispatch", () => {
+  for (const captureMacEditShortcuts of [true, false]) {
+    const contents = new EventEmitter();
+    const ignored = [];
+    contents.isDestroyed = () => false;
+    contents.setIgnoreMenuShortcuts = (active) => ignored.push(active);
+    const controller = new CanvasNavigationInputController({ wheelBinding: null, navigationBinding: null }, () => undefined);
+    controller.attach(contents, { captureMacEditShortcuts });
+    const event = { preventDefault: () => assert.fail("editing input must reach its focused native field") };
+    const chords = [
+      { meta: false, control: true }, { meta: true, control: true },
+      { meta: true, alt: true }, { meta: true, shift: true }
+    ];
+    if (!captureMacEditShortcuts) chords.push({ meta: true });
+    for (const modifiers of chords) {
+      contents.emit("before-input-event", event, input("keyDown", "a", { code: "KeyA", ...modifiers }));
+      contents.emit("before-input-event", event, input("keyUp", "a", { code: "KeyA", ...modifiers }));
+    }
+    assert.deepEqual(ignored, []);
+  }
+});
+
 test("full override remains independent when both bindings are held", () => {
   const contents = new EventEmitter();
   contents.isDestroyed = () => false;

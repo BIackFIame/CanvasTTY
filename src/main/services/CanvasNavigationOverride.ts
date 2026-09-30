@@ -43,6 +43,7 @@ export interface CanvasNavigationOverrideState {
 
 export interface CanvasNavigationInputAttachmentOptions {
   preventMouseBindings?: boolean;
+  captureMacEditShortcuts?: boolean;
 }
 
 export function shouldPreventCanvasNavigationInput(
@@ -220,7 +221,7 @@ export class CanvasNavigationInputController {
   attach(contents: WebContents, options: CanvasNavigationInputAttachmentOptions = {}): void {
     if (this.attachedContents.has(contents)) return;
     this.attachedContents.add(contents);
-    contents.on("before-input-event", (event, input) => this.handleInput(contents, event, input));
+    contents.on("before-input-event", (event, input) => this.handleInput(contents, event, input, options));
     contents.on("before-mouse-event", (event, input) => {
       const transition = this.handleMouseInput(input);
       if (options.preventMouseBindings !== false && transition.reserved) event.preventDefault();
@@ -278,7 +279,12 @@ export class CanvasNavigationInputController {
     );
   }
 
-  private handleInput(contents: WebContents, event: Event, input: Input): void {
+  private handleInput(
+    contents: WebContents,
+    event: Event,
+    input: Input,
+    options: CanvasNavigationInputAttachmentOptions
+  ): void {
     if (input.type !== "keyDown" && input.type !== "keyUp") return;
     const keyboardInput = {
       type: input.type,
@@ -292,8 +298,13 @@ export class CanvasNavigationInputController {
     const previous = this.state();
     const wheelTransition = this.wheelTracker.update(keyboardInput);
     const navigationTransition = this.navigationTracker.update(keyboardInput);
+    const macEditShortcut = options.captureMacEditShortcuts === true
+      && input.type === "keyDown"
+      && input.meta && !input.control && !input.alt && !input.shift
+      && (input.code === "KeyA" || input.code === "KeyC" || input.code === "KeyV");
     const shouldCaptureMenuShortcuts = this.wheelTracker.shouldCaptureMenuShortcuts
-      || this.navigationTracker.shouldCaptureMenuShortcuts;
+      || this.navigationTracker.shouldCaptureMenuShortcuts
+      || macEditShortcut;
     this.setMenuShortcutCapture(contents, shouldCaptureMenuShortcuts);
     const shouldPrevent = shouldPreventCanvasNavigationInput(input, {
       active: wheelTransition.active || navigationTransition.active,

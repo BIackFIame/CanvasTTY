@@ -14,6 +14,65 @@ function available(provider, executable, options = {}) {
   };
 }
 
+test("Codex QA changes only the interactive launch and keeps the registry backend", () => {
+  const environment = {
+    CANVASTTY_CODEX_TUI_QA: "/qa/codex-tui",
+    CANVASTTY_CODEX_TUI_LAUNCHER_QA: "/qa/launch.mjs"
+  };
+  const providerCli = available("codex", "/official/codex");
+  const overrides = ["-c", "hooks.Stop=[]"];
+  assert.deepEqual(resolveTerminalLaunch("codex", "auto", overrides, {
+    platform: "darwin", environment, providerCli, fileExists: () => true, resumePrevious: true
+  }), {
+    command: process.execPath,
+    args: ["/qa/launch.mjs", "--backend", "/official/codex", "--frontend", "/qa/codex-tui", "--",
+      "--no-daemon", "--approve-for-me", ...overrides, "resume"],
+    environment: { PATH: "/resolved/bin:/usr/bin", ELECTRON_RUN_AS_NODE: "1" }
+  });
+  assert.equal(providerCli.executable, "/official/codex");
+  assert.equal(resolveTerminalLaunch("claude", "normal", [], {
+    platform: "darwin", environment, providerCli: available("claude", "/official/claude")
+  }).command, "/official/claude");
+});
+
+test("Codex QA refuses invalid paths rather than silently using another launch", () => {
+  for (const environment of [
+    { CANVASTTY_CODEX_TUI_QA: "relative" },
+    { CANVASTTY_CODEX_TUI_QA: "/qa/codex-tui" },
+    { CANVASTTY_CODEX_TUI_QA: "/qa/codex-tui", CANVASTTY_CODEX_TUI_LAUNCHER_QA: "relative" }
+  ]) {
+    assert.throws(() => resolveTerminalLaunch("codex", "normal", [], {
+      platform: "darwin", environment, providerCli: available("codex", "/official/codex"), fileExists: () => true
+    }), /existing absolute frontend and launcher paths/);
+  }
+});
+
+test("packaged macOS Codex uses its bundled TUI and preserves the official backend", () => {
+  const resourcesPath = "/moved app/Contents/Resources";
+  const frontend = `${resourcesPath}/codex-native-tui/canvastty-codex-tui`;
+  const launcher = `${resourcesPath}/codex-native-tui/codex-tui-launch.mjs`;
+  const options = { platform: "darwin", environment: {}, resourcesPath,
+    providerCli: available("codex", "/official/codex"), fileExists: (path) => [frontend, launcher].includes(path) };
+  assert.deepEqual(resolveTerminalLaunch("codex", "normal", [], options), {
+    command: process.execPath,
+    args: [launcher, "--backend", "/official/codex", "--frontend", frontend, "--"],
+    environment: { PATH: "/resolved/bin:/usr/bin", ELECTRON_RUN_AS_NODE: "1" }
+  });
+  assert.equal(resolveTerminalLaunch("codex", "normal", [], { ...options, platform: "linux" }).command, "/official/codex");
+  assert.equal(resolveTerminalLaunch("codex", "normal", [], { ...options, fileExists: () => false }).command, "/official/codex");
+  assert.equal(resolveTerminalLaunch("claude", "normal", [], { ...options,
+    providerCli: available("claude", "/official/claude") }).command, "/official/claude");
+});
+
+test("a partial packaged TUI fails explicitly instead of reverting to the stock editor", () => {
+  for (const asset of ["canvastty-codex-tui", "codex-tui-launch.mjs"]) {
+    assert.throws(() => resolveTerminalLaunch("codex", "normal", [], {
+      platform: "darwin", environment: {}, resourcesPath: "/app/Contents/Resources",
+      providerCli: available("codex", "/official/codex"), fileExists: (path) => path.endsWith(`/${asset}`)
+    }), /existing absolute frontend and launcher paths/);
+  }
+});
+
 test("Windows terminal selects built-in PowerShell", () => {
   const powershell = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
   const launch = resolveTerminalLaunch("terminal", "normal", [], {
@@ -52,6 +111,23 @@ test("Qwen uses its native YOLO flag and keeps per-launch browser arguments", ()
   const providerCli = available("qwen", "/resolved/qwen");
   const launch = resolveTerminalLaunch("qwen", "yolo", ["--mcp-config", "{}"], { providerCli });
   assert.deepEqual(launch.args, ["--yolo", "--mcp-config", "{}"]);
+});
+
+test("Codex uses embedded mode only for scoped config and keeps native resume arguments", () => {
+  const providerCli = available("codex", "/resolved/codex");
+  const scopedConfig = ["-c", "hooks.Stop=[]"];
+  const threadId = "12345678-1234-4234-8234-123456789abc";
+  assert.deepEqual(resolveTerminalLaunch("codex", "normal", [], { providerCli }).args, []);
+  assert.deepEqual(
+    resolveTerminalLaunch("codex", "normal", scopedConfig, { providerCli, resumePrevious: true }).args,
+    ["--no-daemon", ...scopedConfig, "resume"]
+  );
+  assert.deepEqual(
+    resolveTerminalLaunch("codex", "normal", scopedConfig, {
+      providerCli, resumePrevious: true, resumeThreadId: threadId
+    }).args,
+    ["--no-daemon", ...scopedConfig, "resume", threadId]
+  );
 });
 
 test("Claude keeps launch-scoped adapter arguments in their supplied order", () => {

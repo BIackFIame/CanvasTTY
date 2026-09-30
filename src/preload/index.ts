@@ -67,6 +67,7 @@ const api: CanvasTTYApi = {
   appVersion: () => ipcRenderer.invoke(IPC.appVersion),
   clipboard: {
     readText: () => ipcRenderer.invoke(IPC.clipboardRead),
+    hasImage: () => ipcRenderer.invoke(IPC.clipboardHasImage),
     writeText: (text: string) => ipcRenderer.send(IPC.clipboardWrite, text)
   },
   external: {
