@@ -48,7 +48,8 @@ import {
   DEFAULT_HOME_GRID_SIZE,
   DEFAULT_HOME_LAYOUT,
   DEFAULT_RADIAL_LAUNCHER_ITEMS,
-  DEFAULT_SHORTCUTS,
+  keyboardPresetShortcuts,
+  shortcutsShareContext,
   DEFAULT_UI_SCALE,
   HOME_GRID_MAX_COLUMNS,
   HOME_GRID_MAX_ROWS,
@@ -123,7 +124,7 @@ export class SettingsStore {
     this.availableProviders = new Set(availability
       ? AGENT_PROVIDERS.filter((provider) => availability[provider])
       : AGENT_PROVIDERS);
-    this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
+    this.value = filterUnavailableProviders(createDefaults(systemLocale, platform), this.availableProviders);
   }
 
   async load(): Promise<AppSettings> {
@@ -155,6 +156,7 @@ export class SettingsStore {
         && ADDED_AGENT_PROVIDERS.some((provider) => !persistedLauncherProviders.includes(provider));
       this.hasPersistedLegacyWheelCapture = Object.hasOwn(source, "zoomOverApplications");
       const needsMigration = !("useScrollWheelToZoom" in source)
+        || !("keyboardPreset" in source)
         || !("canvasNavigationOverride" in source)
         || !("canvasWheelOverride" in source)
         || !("canvasWheelCaptureMode" in source)
@@ -339,7 +341,7 @@ function isPreQwenDefaultSelection<T extends string>(candidate: unknown[] | null
     && providers.every((provider) => candidate.includes(provider));
 }
 
-function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform): AppSettings {
+function createDefaults(systemLocale: string, platform: string): AppSettings {
   return {
     locale: systemLocale.toLowerCase().startsWith("ru") ? "ru" : "en",
     sessionRestoreMode: "off",
@@ -372,7 +374,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     zoomSensitivity: "normal",
     useScrollWheelToZoom: false,
     canvasWheelCaptureMode: "key",
-    canvasWheelOverride: defaultCanvasWheelBinding(platform),
+    canvasWheelOverride: defaultCanvasWheelBinding(canvasNavigationPlatform(platform)),
     canvasNavigationOverride: "Alt",
     focusActivation: "off",
     hoverFocus: false,
@@ -382,7 +384,8 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     minimapInteractionMode: "click",
     shortcutHintsPlacement: "bottom-right",
     canvasControlsPlacement: "bottom-left",
-    shortcuts: { ...DEFAULT_SHORTCUTS },
+    keyboardPreset: platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux",
+    shortcuts: keyboardPresetShortcuts(platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux"),
     mediaPath: null,
     mediaFit: "cover",
     lastDirectory: homedir(),
@@ -622,6 +625,9 @@ export function normalizeSettings(
       fallback.canvasControlsPlacement
     ),
     shortcuts,
+    keyboardPreset: ["macos", "windows", "linux", "custom"].includes(String(source.keyboardPreset))
+      ? source.keyboardPreset as AppSettings["keyboardPreset"]
+      : source.shortcuts ? "custom" : fallback.keyboardPreset,
     mediaPath,
     mediaFit: MEDIA_FITS.has(source.mediaFit as MediaFit) ? source.mediaFit as MediaFit : fallback.mediaFit,
     lastDirectory: typeof source.lastDirectory === "string" && source.lastDirectory.length > 0
@@ -965,15 +971,24 @@ function normalizeShortcuts(candidate: unknown, fallback: ShortcutBindings): Sho
   const source = candidate && typeof candidate === "object"
     ? candidate as Partial<ShortcutBindings>
     : {};
-  const shortcuts = {
-    home: isValidShortcut(source.home) ? source.home : fallback.home,
-    renameWindow: isValidShortcut(source.renameWindow) ? source.renameWindow : fallback.renameWindow,
-    toggleFullscreen: isValidShortcut(source.toggleFullscreen) ? source.toggleFullscreen : fallback.toggleFullscreen
-  };
+  const shortcuts = { ...fallback };
+  for (const action of Object.keys(fallback) as Array<keyof ShortcutBindings>) {
+    const binding = source[action];
+    const keyboardOnly = !["home", "renameWindow", "toggleFullscreen"].includes(action);
+    if (isValidShortcut(binding) && !(keyboardOnly && binding.includes("Mouse"))) shortcuts[action] = binding;
+    else if (binding === "" && !["codexSubmit", "codexNewline", "codexSelectAll"].includes(action)) shortcuts[action] = "";
+  }
 
-  const bindings = Object.values(shortcuts).map((binding) => binding.toLowerCase());
-  if (new Set(bindings).size !== bindings.length) {
-    return { ...fallback };
+  const accepted: Array<keyof ShortcutBindings> = [];
+  for (const action of Object.keys(shortcuts) as Array<keyof ShortcutBindings>) {
+    if (!shortcuts[action]) continue;
+    const conflict = accepted.some((other) => shortcutsShareContext(action, other)
+      && shortcuts[action].toLowerCase() === shortcuts[other].toLowerCase());
+    if (conflict) {
+      // Preserve old customized actions; newly added defaults can be rebound in Settings.
+      if (source[action] === undefined && !action.startsWith("codex")) shortcuts[action] = "";
+      else return { ...fallback };
+    } else accepted.push(action);
   }
   return shortcuts;
 }
@@ -989,7 +1004,7 @@ function isValidShortcut(value: unknown): value is string {
     || /^Mouse[345]$/.test(key)
     || new Set([
       "Home", "End", "PageUp", "PageDown", "Space", "Enter", "Escape", "Tab",
-      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Insert", "Backspace"
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Insert", "Backspace", "Comma"
     ]).has(key);
 }
 

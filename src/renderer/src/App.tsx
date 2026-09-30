@@ -26,7 +26,6 @@ import type {
   ProviderId,
   SessionBounds,
   SessionSnapshot,
-  ShortcutAction,
   StickyNote,
   WindowState
 } from "../../shared/contracts";
@@ -37,7 +36,7 @@ import {
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_RADIAL_LAUNCHER_ITEMS,
   DEFAULT_UI_SCALE,
-  DEFAULT_SHORTCUTS
+  keyboardPresetShortcuts
 } from "../../shared/contracts";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import {
@@ -125,7 +124,8 @@ const FALLBACK_SETTINGS: AppSettings = {
   minimapInteractionMode: "click",
   shortcutHintsPlacement: "bottom-right",
   canvasControlsPlacement: "bottom-left",
-  shortcuts: { ...DEFAULT_SHORTCUTS },
+  keyboardPreset: window.canvasTTY.window.isMacOS ? "macos" : "linux",
+  shortcuts: keyboardPresetShortcuts(window.canvasTTY.window.isMacOS ? "macos" : "linux"),
   mediaPath: null,
   mediaFit: "cover",
   lastDirectory: "/",
@@ -1109,7 +1109,7 @@ export function App(): React.JSX.Element {
   }, [homeEditDraft, settings.locale, showToast]);
 
   useEffect(() => {
-    const performShortcut = (shortcut: ShortcutAction): void => {
+    const performShortcut = (shortcut: "home" | "renameWindow" | "toggleFullscreen"): void => {
       if (shortcut === "toggleFullscreen") {
         if (settingsOpen || launchProvider !== null || pendingTerminalUrl !== null || homeEditDraft) return;
         const id = fullscreenSessionId ?? activeSessionId;

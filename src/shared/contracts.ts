@@ -69,7 +69,8 @@ export type CanvasOverlayPlacement = "top-left" | "top-right" | "bottom-left" | 
 export type MinimapInteractionMode = "click" | "drag";
 export type BrowserViewportSurface = "native" | "placeholder" | "hidden";
 export type FocusActivation = "off" | "single" | "double";
-export type ShortcutAction = "home" | "renameWindow" | "toggleFullscreen";
+export type ShortcutAction = keyof ShortcutBindings;
+export type KeyboardPreset = "macos" | "windows" | "linux" | "custom";
 export type RadialLauncherActionId = "note" | "browser" | "settings";
 export type RadialLauncherItemId = ProviderId | RadialLauncherActionId;
 
@@ -169,13 +170,66 @@ export interface ShortcutBindings {
   home: string;
   renameWindow: string;
   toggleFullscreen: string;
+  commandPalette: string;
+  openSettings: string;
+  focusUp: string;
+  focusDown: string;
+  focusLeft: string;
+  focusRight: string;
+  toggleDetail: string;
+  terminalCopy: string;
+  terminalPaste: string;
+  terminalSearch: string;
+  terminalRestart: string;
+  terminalPageUp: string;
+  terminalPageDown: string;
+  codexSubmit: string;
+  codexSubmitAlternate: string;
+  codexSubmitSuper: string;
+  codexNewline: string;
+  codexSelectAll: string;
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   home: "Home",
   renameWindow: "F2",
-  toggleFullscreen: "Meta+F"
+  toggleFullscreen: "Meta+F",
+  commandPalette: "Ctrl+K",
+  openSettings: "Ctrl+Comma",
+  focusUp: "Alt+ArrowUp",
+  focusDown: "Alt+ArrowDown",
+  focusLeft: "Alt+ArrowLeft",
+  focusRight: "Alt+ArrowRight",
+  toggleDetail: "F4",
+  terminalCopy: "Ctrl+C",
+  terminalPaste: "Ctrl+Shift+V",
+  terminalSearch: "Ctrl+Shift+F",
+  terminalRestart: "Ctrl+D",
+  terminalPageUp: "PageUp",
+  terminalPageDown: "PageDown",
+  codexSubmit: "Enter",
+  codexSubmitAlternate: "Ctrl+Enter",
+  codexSubmitSuper: "Meta+Enter",
+  codexNewline: "Shift+Enter",
+  codexSelectAll: "Ctrl+A"
 };
+
+export function keyboardPresetShortcuts(preset: Exclude<KeyboardPreset, "custom">): ShortcutBindings {
+  return {
+    ...DEFAULT_SHORTCUTS,
+    toggleFullscreen: preset === "macos" ? "Meta+F" : "F11",
+    ...(preset === "windows" ? { terminalCopy: "Ctrl+Shift+C" } : {}),
+    ...(preset === "macos" ? {
+      commandPalette: "Meta+K", openSettings: "Meta+Comma",
+      terminalCopy: "Meta+C", terminalPaste: "Meta+V", codexSelectAll: "Meta+A"
+    } : {})
+  };
+}
+
+export function shortcutsShareContext(left: ShortcutAction, right: ShortcutAction): boolean {
+  const terminal = (action: ShortcutAction) => action.startsWith("terminal") || action.startsWith("codex");
+  return left === "toggleDetail" || right === "toggleDetail" || terminal(left) === terminal(right);
+}
 
 export const INITIAL_TERMINAL_COLS = 80;
 export const INITIAL_TERMINAL_ROWS = 24;
@@ -252,6 +306,7 @@ export interface AppSettings {
   shortcutHintsPlacement: CanvasOverlayPlacement;
   canvasControlsPlacement: CanvasOverlayPlacement;
   shortcuts: ShortcutBindings;
+  keyboardPreset: KeyboardPreset;
   mediaPath: string | null;
   mediaFit: MediaFit;
   lastDirectory: string;
@@ -304,6 +359,8 @@ export interface SessionMetadata {
   id: string;
   revision: number;
   provider: ProviderId;
+  /** Bindings actually consumed by this separately launched Codex editor. */
+  nativeEditor?: { submit: string; submitAlternate: string; submitSuper: string; newline: string; selectAll: string };
   profile: LaunchProfileId;
   title: string;
   titleCustomized: boolean;

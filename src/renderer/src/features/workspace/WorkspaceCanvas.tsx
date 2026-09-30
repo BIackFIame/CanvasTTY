@@ -23,7 +23,7 @@ import type {
 import { UiIcon } from "../../components/UiIcon";
 import { ShortcutReference } from "../../components/ShortcutReference";
 import { t } from "../../lib/i18n";
-import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesPhysicalOrLayoutKey, shouldKeepNativeKeyboardInput } from "../../lib/shortcuts";
+import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesShortcut, shouldKeepNativeKeyboardInput } from "../../lib/shortcuts";
 import { BrowserCard } from "../browser/BrowserCard";
 import { attentionQueueRenderedAt, attentionSessions } from "../home/attentionQueue";
 import type { LimitsLoadState } from "../home/homeModel";
@@ -97,12 +97,12 @@ const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
   "bottom-right"
 ];
 
-/** Alt+arrow moves canvas focus; never a canvas-navigation binding (those are modifier+mouse or wheel). */
+/** Focus commands use the shared keyboard settings. */
 const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
-  ArrowUp: "up",
-  ArrowDown: "down",
-  ArrowLeft: "left",
-  ArrowRight: "right"
+  focusUp: "up",
+  focusDown: "down",
+  focusLeft: "left",
+  focusRight: "right"
 };
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
@@ -756,13 +756,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
-      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (activeSessionId !== null
         && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
         && shouldTogglePixelSkinMasterView(
           event,
           sessionsRef.current.some((session) => session.id === activeSessionId),
-          [settings.shortcuts.home, settings.shortcuts.renameWindow]
+          [settings.shortcuts.home, settings.shortcuts.renameWindow], settings.shortcuts.toggleDetail
         )
         && !isShortcutCaptureTarget(event.target)
         && !isRenameInputTarget(event.target)) {
@@ -776,10 +775,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         });
         return;
       }
-      // Focused terminals and editable fields own Alt+arrow on every platform.
-      const direction = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
-        ? CANVAS_FOCUS_ARROWS[event.key]
-        : undefined;
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
+      const focusAction = (Object.keys(CANVAS_FOCUS_ARROWS) as Array<"focusUp" | "focusDown" | "focusLeft" | "focusRight">)
+        .find((action) => matchesShortcut(event, settings.shortcuts[action]));
+      const direction = focusAction ? CANVAS_FOCUS_ARROWS[focusAction] : undefined;
       if (direction && !event.repeat
         && !isShortcutCaptureTarget(event.target) && !isRenameInputTarget(event.target)) {
         event.preventDefault();
@@ -787,15 +786,13 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         focusDirectionRef.current(direction);
         return;
       }
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      // Matched on the physical key: these chords must work on a non-Latin layout, where
-      // the K key reports `key: "л"` and `event.key` alone would never match.
-      if (matchesPhysicalOrLayoutKey(event, "KeyK", "k")) {
+      if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target) || event.repeat) return;
+      if (matchesShortcut(event, settings.shortcuts.commandPalette)) {
         event.preventDefault();
         setContextMenu(null);
         setRegionEditor(null);
         setCommandPaletteOpen((current) => !current);
-      } else if (matchesPhysicalOrLayoutKey(event, "Comma", ",")) {
+      } else if (matchesShortcut(event, settings.shortcuts.openSettings)) {
         event.preventDefault();
         setContextMenu(null);
         setRegionEditor(null);
@@ -806,7 +803,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     window.addEventListener("keydown", handleShortcut, true);
     return () => window.removeEventListener("keydown", handleShortcut, true);
   }, [activeSessionId, browserViewVisible, homeEditing, onOpenSettings,
-    settings.shortcuts.home, settings.shortcuts.renameWindow, settings.terminalBorderSkin]);
+    settings.shortcuts, settings.terminalBorderSkin]);
 
   const themeBackground = (BUNDLED_CANVAS_BACKGROUND_IDS as readonly string[]).includes(settings.canvasBackground)
     ? settings.canvasBackground : undefined;
@@ -941,6 +938,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             <TerminalCard
               key={session.id}
               session={withGroupNudge(terminalLayerId(session.id), session)}
+              shortcuts={settings.shortcuts}
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
@@ -1087,6 +1085,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             <TerminalCard
               key={session.id}
               session={withGroupNudge(terminalLayerId(session.id), session)}
+              shortcuts={settings.shortcuts}
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
@@ -1299,7 +1298,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 <div><kbd>{settings.shortcuts.home}</kbd><span>{t(settings.locale, "homeShortcut")}</span></div>
                 <div><kbd>{settings.shortcuts.renameWindow}</kbd><span>{t(settings.locale, "renameWindow")}</span></div>
                 <div><kbd>{settings.shortcuts.toggleFullscreen.replace("Meta", window.canvasTTY.window.isMacOS ? "Command" : "Super")}</kbd><span>{t(settings.locale, "toggleFullscreen")}</span></div>
-                <div><kbd>{window.canvasTTY.window.isMacOS ? "Option+↑↓←→" : "Alt+↑↓←→"}</kbd><span>{t(settings.locale, "focusWindowHint")}</span></div>
+                <div><kbd>{settings.shortcuts.focusUp}</kbd><span>{t(settings.locale, "keyboardFocusUp")}</span></div>
                 <div><kbd>Shift + drag</kbd><span>{t(settings.locale, "marqueeSelectionHint")}</span></div>
                 {settings.canvasWheelCaptureMode === "key" && settings.canvasWheelOverride !== null && (
                   <div><kbd>{displayCanvasNavigationBinding(settings.canvasWheelOverride, window.canvasTTY.window.isMacOS)}</kbd>
@@ -1311,7 +1310,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 )}
                 <details className="shortcut-hints__more" data-interactive="true" data-canvas-wheel-priority="local">
                   <summary>{t(settings.locale, "keyboardShortcuts")}</summary>
-                  <ShortcutReference locale={settings.locale} />
+                  <ShortcutReference locale={settings.locale} bindings={settings.shortcuts} />
                 </details>
               </aside>
             )}

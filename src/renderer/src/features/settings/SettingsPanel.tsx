@@ -25,6 +25,7 @@ import type {
   InstalledPlugin,
   LimitProviderId,
   LocaleId,
+  KeyboardPreset,
   MinimapInteractionMode,
   PaletteId,
   PluginContribution,
@@ -48,6 +49,8 @@ import type {
 } from "../../../../shared/contracts";
 import {
   BROWSER_PROVIDER_COLORS,
+  keyboardPresetShortcuts,
+  shortcutsShareContext,
   BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
@@ -109,6 +112,16 @@ import type { SkinDetailLevel } from "../skins/SkinLayout";
 import { PixelSkinPackCreator } from "./PixelSkinPackCreator";
 
 type SettingsSection = "general" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "updates" | "about";
+
+const SHORTCUT_LABELS = {
+  home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
+  commandPalette: "keyboardPalette", openSettings: "settings", toggleDetail: "keyboardDetail",
+  focusUp: "keyboardFocusUp", focusDown: "keyboardFocusDown", focusLeft: "keyboardFocusLeft", focusRight: "keyboardFocusRight",
+  terminalCopy: "shortcutCopySelection", terminalPaste: "shortcutPaste", terminalSearch: "terminalSearch",
+  terminalRestart: "shortcutRestartExited", terminalPageUp: "keyboardPageUp", terminalPageDown: "keyboardPageDown",
+  codexSubmit: "keyboardSubmit", codexSubmitAlternate: "keyboardSubmitAlternate", codexSubmitSuper: "keyboardSubmitSuper",
+  codexNewline: "shortcutLineBreak", codexSelectAll: "keyboardSelectAll"
+} as const;
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
@@ -330,8 +343,14 @@ export function SettingsPanel({
   };
 
   const saveShortcut = async (action: ShortcutAction, shortcut: string): Promise<void> => {
+    if (!["home", "renameWindow", "toggleFullscreen"].includes(action) && shortcut.includes("Mouse")) {
+      setShortcutError(t(locale, "shortcutKeyboardOnly"));
+      return;
+    }
     const conflict = Object.entries(settings.shortcuts).find(
-      ([candidateAction, value]) => candidateAction !== action && value.toLowerCase() === shortcut.toLowerCase()
+      ([candidateAction, value]) => candidateAction !== action
+        && shortcutsShareContext(action, candidateAction as ShortcutAction)
+        && value.toLowerCase() === shortcut.toLowerCase()
     );
     const conflictsWithNavigation = settings.canvasNavigationOverride !== null
       && canvasOverrideBindingConflicts(settings.canvasNavigationOverride, shortcut);
@@ -344,7 +363,7 @@ export function SettingsPanel({
     }
 
     setShortcutError(null);
-    await onChange({ shortcuts: { ...settings.shortcuts, [action]: shortcut } });
+    await onChange({ keyboardPreset: "custom", shortcuts: { ...settings.shortcuts, [action]: shortcut } });
     setCapturing(null);
   };
 
@@ -458,6 +477,74 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ locale: value as LocaleId })}
                 />
               </SettingGroup>
+              <SettingGroup label={t(locale, "keyboardPreset")} description={t(locale, "keyboardPresetDescription")}>
+                <Segmented
+                  value={settings.keyboardPreset}
+                  options={[["macos", "macOS"], ["windows", "Windows"], ["linux", "Linux"], ["custom", t(locale, "keyboardCustom")]]}
+                  onChange={(value) => {
+                    const keyboardPreset = value as KeyboardPreset;
+                    setCapturing(null);
+                    setShortcutError(null);
+                    void onChange({ keyboardPreset, ...(keyboardPreset === "custom" ? {} : {
+                      shortcuts: keyboardPresetShortcuts(keyboardPreset),
+                      canvasWheelOverride: keyboardPreset === "macos" ? "Meta" : "Ctrl",
+                      canvasNavigationOverride: "Alt"
+                    }) });
+                  }}
+                />
+              </SettingGroup>
+              <details className="keyboard-shortcuts">
+                <summary>{t(locale, "keyboardShortcuts")}</summary>
+                <p>{t(locale, "keyboardCaptureHint")}</p>
+                {([
+                  ["keyboardCanvas", ["home", "renameWindow", "toggleFullscreen", "commandPalette", "openSettings", "focusUp", "focusDown", "focusLeft", "focusRight", "toggleDetail"]],
+                  ["keyboardTerminal", ["terminalCopy", "terminalPaste", "terminalSearch", "terminalRestart", "terminalPageUp", "terminalPageDown"]],
+                  ["keyboardCodex", ["codexSubmit", "codexSubmitAlternate", "codexSubmitSuper", "codexNewline", "codexSelectAll"]]
+                ] as const).map(([group, actions]) => (
+                  <div key={group}>
+                    <h3>{t(locale, group)}</h3>
+                    {actions.map((action) => (
+                      <ShortcutRow
+                        key={action}
+                        label={t(locale, SHORTCUT_LABELS[action])}
+                        value={settings.shortcuts[action].replace("Meta", window.canvasTTY.window.isMacOS ? "Command" : "Super") || t(locale, "disabled")}
+                        capturing={capturing === action}
+                        onStart={() => { setShortcutError(null); setCapturing(action); }}
+                        onKeyDown={(event) => captureShortcut(action, event)}
+                        onPointerDown={(event) => capturePointerShortcut(action, event)}
+                        disableLabel={t(locale, "disabled")}
+                        onDisable={["codexSubmit", "codexNewline", "codexSelectAll"].includes(action) ? undefined : () => {
+                          setCapturing(null);
+                          setShortcutError(null);
+                          void onChange({ keyboardPreset: "custom", shortcuts: { ...settings.shortcuts, [action]: "" } });
+                        }}
+                      />
+                    ))}
+                  </div>
+                ))}
+                <SettingGroup label={t(locale, "canvasWheelCapture")} description={t(locale, "canvasWheelCaptureDescription")}>
+                  <Segmented value={settings.canvasWheelCaptureMode}
+                    options={[["off", "Off"], ["always", "On"], ["key", "Key"]]}
+                    onChange={(value) => changeCanvasWheelCaptureMode(value as CanvasWheelCaptureMode)} />
+                  {settings.canvasWheelCaptureMode === "key" && (
+                    <CanvasNavigationShortcutEditor open={open} locale={locale}
+                      label={t(locale, "canvasWheelOverride")} binding={settings.canvasWheelOverride}
+                      actionShortcuts={Object.values(settings.shortcuts)} allowDisable={false}
+                      onCaptureStart={() => { setCapturing(null); setShortcutError(null); }}
+                      onChange={(canvasWheelOverride) => onChange({ keyboardPreset: "custom", canvasWheelOverride })} />
+                  )}
+                  {canvasOverrideBindingsMatch && <p className="shortcut-editor__warning">{t(locale, "canvasOverrideBindingsMatch")}</p>}
+                </SettingGroup>
+                <SettingGroup label={t(locale, "canvasNavigationOverride")} description={t(locale, "canvasNavigationOverrideDescription")}>
+                  <CanvasNavigationShortcutEditor open={open} locale={locale}
+                    label={t(locale, "canvasNavigationOverride")} binding={settings.canvasNavigationOverride}
+                    actionShortcuts={Object.values(settings.shortcuts)} allowDisable
+                    onCaptureStart={() => { setCapturing(null); setShortcutError(null); }}
+                    onChange={(canvasNavigationOverride) => onChange({ keyboardPreset: "custom", canvasNavigationOverride })} />
+                </SettingGroup>
+                {shortcutError && <p className="shortcut-editor__error" role="alert">{shortcutError}</p>}
+                <p>{t(locale, "keyboardCodexDescription")}</p>
+              </details>
               <SettingGroup
                 label={t(locale, "attentionNotifications")}
                 description={t(locale, "attentionNotificationsDescription")}
@@ -977,52 +1064,6 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ useScrollWheelToZoom: value === "on" })}
                 />
               </SettingGroup>
-              <SettingGroup
-                label={t(locale, "canvasWheelCapture")}
-                description={t(locale, "canvasWheelCaptureDescription")}
-              >
-                <Segmented
-                  value={settings.canvasWheelCaptureMode}
-                  options={[["off", "Off"], ["always", "On"], ["key", "Key"]]}
-                  onChange={(value) => changeCanvasWheelCaptureMode(value as CanvasWheelCaptureMode)}
-                />
-                {settings.canvasWheelCaptureMode === "key" && (
-                  <CanvasNavigationShortcutEditor
-                    open={open}
-                    locale={locale}
-                    label={t(locale, "canvasWheelOverride")}
-                    binding={settings.canvasWheelOverride}
-                    actionShortcuts={Object.values(settings.shortcuts)}
-                    allowDisable={false}
-                    onCaptureStart={() => {
-                      setCapturing(null);
-                      setShortcutError(null);
-                    }}
-                    onChange={(canvasWheelOverride) => onChange({ canvasWheelOverride })}
-                  />
-                )}
-                {canvasOverrideBindingsMatch && (
-                  <p className="shortcut-editor__warning">{t(locale, "canvasOverrideBindingsMatch")}</p>
-                )}
-              </SettingGroup>
-              <SettingGroup
-                label={t(locale, "canvasNavigationOverride")}
-                description={t(locale, "canvasNavigationOverrideDescription")}
-              >
-                <CanvasNavigationShortcutEditor
-                  open={open}
-                  locale={locale}
-                  label={t(locale, "canvasNavigationOverride")}
-                  binding={settings.canvasNavigationOverride}
-                  actionShortcuts={Object.values(settings.shortcuts)}
-                  allowDisable
-                  onCaptureStart={() => {
-                    setCapturing(null);
-                    setShortcutError(null);
-                  }}
-                  onChange={(canvasNavigationOverride) => onChange({ canvasNavigationOverride })}
-                />
-              </SettingGroup>
               <SettingGroup label={t(locale, "terminalWheelDirection")}>
                 <Segmented
                   value={settings.invertTerminalWheel ? "inverted" : "normal"}
@@ -1036,54 +1077,6 @@ export function SettingsPanel({
                   options={[["normal", t(locale, "wheelNormal")], ["inverted", t(locale, "wheelInverted")]]}
                   onChange={(value) => void onChange({ invertCanvasWheel: value === "inverted" })}
                 />
-              </SettingGroup>
-              <SettingGroup label={t(locale, "homeShortcut")} description={t(locale, "homeShortcutDescription")}>
-                <ShortcutRow
-                  label={t(locale, "shortcutBinding")}
-                  value={settings.shortcuts.home}
-                  capturing={capturing === "home"}
-                  onStart={() => {
-                    setShortcutError(null);
-                    setCapturing("home");
-                  }}
-                  onKeyDown={(event) => captureShortcut("home", event)}
-                  onPointerDown={(event) => capturePointerShortcut("home", event)}
-                />
-                {shortcutError && capturing === "home" && (
-                  <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
-                )}
-              </SettingGroup>
-              <SettingGroup label={t(locale, "toggleFullscreen")} description={t(locale, "toggleFullscreenDescription")}>
-                <ShortcutRow
-                  label={t(locale, "shortcutBinding")}
-                  value={settings.shortcuts.toggleFullscreen.replace("Meta", window.canvasTTY.window.isMacOS ? "Command" : "Super")}
-                  capturing={capturing === "toggleFullscreen"}
-                  onStart={() => {
-                    setShortcutError(null);
-                    setCapturing("toggleFullscreen");
-                  }}
-                  onKeyDown={(event) => captureShortcut("toggleFullscreen", event)}
-                  onPointerDown={(event) => capturePointerShortcut("toggleFullscreen", event)}
-                />
-                {shortcutError && capturing === "toggleFullscreen" && (
-                  <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
-                )}
-              </SettingGroup>
-              <SettingGroup label={t(locale, "renameWindow")} description={t(locale, "renameWindowDescription")}>
-                <ShortcutRow
-                  label={t(locale, "shortcutBinding")}
-                  value={settings.shortcuts.renameWindow}
-                  capturing={capturing === "renameWindow"}
-                  onStart={() => {
-                    setShortcutError(null);
-                    setCapturing("renameWindow");
-                  }}
-                  onKeyDown={(event) => captureShortcut("renameWindow", event)}
-                  onPointerDown={(event) => capturePointerShortcut("renameWindow", event)}
-                />
-                {shortcutError && capturing === "renameWindow" && (
-                  <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
-                )}
               </SettingGroup>
             </>
           )}
@@ -1341,7 +1334,9 @@ function ShortcutRow({
   capturing,
   onStart,
   onKeyDown,
-  onPointerDown
+  onPointerDown,
+  onDisable,
+  disableLabel
 }: {
   label: string;
   value: string;
@@ -1349,9 +1344,11 @@ function ShortcutRow({
   onStart(): void;
   onKeyDown(event: React.KeyboardEvent<HTMLButtonElement>): void;
   onPointerDown(event: React.PointerEvent<HTMLButtonElement>): void;
+  onDisable?(): void;
+  disableLabel?: string;
 }): React.JSX.Element {
   return (
-    <div className="shortcut-editor__row">
+    <div className={onDisable ? "shortcut-editor__row shortcut-editor__row--disable" : "shortcut-editor__row"}>
       <span>{label}</span>
       <button
         className={capturing ? "shortcut-editor__key shortcut-editor__key--capturing" : "shortcut-editor__key"}
@@ -1365,6 +1362,10 @@ function ShortcutRow({
           if (capturing) onKeyDown(event);
         }}
       >{capturing ? "…" : value}</button>
+      {onDisable && <button className="shortcut-editor__key shortcut-editor__disable" type="button"
+        aria-label={`${disableLabel}: ${label}`} title={disableLabel} onClick={onDisable}>
+        <UiIcon name="close" size="1em" />
+      </button>}
     </div>
   );
 }

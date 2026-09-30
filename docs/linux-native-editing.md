@@ -19,8 +19,9 @@ using the official CLI.
   `../codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui`.
 - CanvasTTY dependencies were installed with `npm ci`; `npm run build`, including
   its TypeScript checks, completed successfully. Application output is in `out/`.
-- No test suite, separate lint or application launch was performed. Keyboard
-  behavior remains for manual checking.
+- The application was launched for the user's manual check before the keyboard
+  preset changes. No test suite, separate lint or automated UI check was run.
+  The new preset controls remain for manual checking after relaunch.
 
 ## Build and start for manual checking
 
@@ -57,7 +58,33 @@ must fit the Unix socket path limit.
 After changing CanvasTTY sources, run `npm run build` again before launching.
 For live development, use the same environment with `npm run dev` instead.
 
+## Keyboard presets
+
+Open **Settings → General → Keyboard preset** and select macOS, Windows or Linux.
+The initial preset follows the host OS; existing customized shortcuts are kept
+as Custom. Selecting a named preset replaces the bindings, while recording an
+individual shortcut switches to Custom. All presets use Enter to submit and
+Shift+Enter for a newline.
+
+Expand **Keyboard shortcuts** directly below the preset to edit canvas, terminal
+and Codex editor actions, including alternate submit keys. Optional actions can
+be disabled. Duplicate bindings are rejected within the context that handles
+them. Canvas focus shortcuts yield to focused terminal and text inputs.
+
+Canvas and terminal shortcuts update immediately. Codex editor shortcuts apply
+only to new or restarted cards using the optional native frontend: each running
+card retains the editor bindings with which its process started. Other CLIs
+retain their own editor keymaps. The Windows preset configures CanvasTTY actions,
+but this optional POSIX frontend has not been ported to Windows.
+
 ## Manual behavior to check
+
+Select the Linux preset before checking the defaults below. Also record a custom
+submit, newline and whole-draft selection binding, restart the Codex card, and
+check that both the startup and initialized composer use the new submit/newline
+bindings. Whole-draft selection is available in the initialized composer only.
+Include a binding such as Ctrl+L, which would otherwise invoke a global Codex
+command, to check editor priority without changing dialog confirmation behavior.
 
 1. With two canvas windows present and Codex input focused, Alt+Up reaches the
    CLI instead of switching canvas focus. Alt+arrow still navigates windows when

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { isAbsolute, posix, win32 } from "node:path";
-import type { ProviderId } from "../../shared/contracts.ts";
+import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
@@ -17,6 +17,7 @@ export interface TerminalLaunch {
 }
 
 interface LaunchResolutionOptions {
+  shortcuts?: ShortcutBindings;
   platform?: NodeJS.Platform;
   environment?: Readonly<NodeJS.ProcessEnv>;
   fileExists?: (path: string) => boolean;
@@ -91,7 +92,16 @@ export function resolveTerminalLaunch(
     return {
       command: process.execPath,
       args: [launcher, "--backend", providerCli.executable, "--frontend", frontend, "--", ...providerArgs],
-      environment: { ...combinedEnvironment, ELECTRON_RUN_AS_NODE: "1" }
+      environment: {
+        ...combinedEnvironment, ELECTRON_RUN_AS_NODE: "1",
+        ...(options.shortcuts ? { CANVASTTY_CODEX_KEYBOARD: JSON.stringify({
+          submit: options.shortcuts.codexSubmit,
+          submitAlternate: options.shortcuts.codexSubmitAlternate,
+          submitSuper: options.shortcuts.codexSubmitSuper,
+          newline: options.shortcuts.codexNewline,
+          selectAll: options.shortcuts.codexSelectAll
+        }) } : {})
+      }
     };
   }
   if (providerCli.launcher === "native") {

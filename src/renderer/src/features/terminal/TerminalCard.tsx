@@ -18,12 +18,14 @@ import type {
   SessionBounds,
   SessionSnapshot,
   PixelSkinPreferredDetail,
+  ShortcutBindings,
   TerminalBorderSkinId
 } from "../../../../shared/contracts";
 import { usePluginCardDecorations } from "../plugins/cardDecorations";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
+import { matchesShortcut } from "../../lib/shortcuts";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
@@ -31,6 +33,7 @@ import {
   CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
   codexEnterSequence,
+  codexShortcutSequence,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
@@ -59,6 +62,7 @@ import { pixelSkinControlLayout, pixelSkinSurfaceBounds, skinDetailLevel } from 
 
 interface TerminalCardProps {
   session: SessionSnapshot;
+  shortcuts: ShortcutBindings;
   locale: LocaleId;
   palette: PaletteId;
   borderSkin: TerminalBorderSkinId;
@@ -130,6 +134,7 @@ function TerminalCardView({
   session,
   locale,
   palette,
+  shortcuts,
   borderSkin: selectedBorderSkin,
   skinDetail,
   zoom,
@@ -164,6 +169,10 @@ function TerminalCardView({
   const pixelArtState = pixelSkinStateForSession(session.status, session.turnCompleted);
   const terminalHost = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
+  const shortcutsRef = useRef(shortcuts);
+  shortcutsRef.current = shortcuts;
+  const nativeEditorRef = useRef(session.nativeEditor);
+  nativeEditorRef.current = session.nativeEditor;
   const onOpenUrlRef = useRef(onOpenUrl);
   onOpenUrlRef.current = onOpenUrl;
   const renameInput = useRef<HTMLInputElement>(null);
@@ -337,6 +346,17 @@ function TerminalCardView({
     };
     fitRef.current = fit;
     terminal.attachCustomKeyEventHandler((event) => {
+      const editor = nativeEditorRef.current;
+      if (editor && Object.values(editor).some((binding) => matchesShortcut(event, binding))) {
+        const sequence = codexShortcutSequence(event);
+        if (sequence !== null) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (matchesShortcut(event, editor.selectAll)) terminal.clearSelection();
+          window.canvasTTY.terminal.input(session.id, sequence);
+          return false;
+        }
+      }
       const codexEnter = codexEnterSequence(event, session.provider);
       if (codexEnter !== null) {
         event.preventDefault();
@@ -344,7 +364,8 @@ function TerminalCardView({
         window.canvasTTY.terminal.input(session.id, codexEnter);
         return false;
       }
-      const selectCodexDraft = shouldSelectCodexDraft(event, window.canvasTTY.window.isMacOS, session.provider);
+      const selectCodexDraft = nativeEditorRef.current ? false
+        : shouldSelectCodexDraft(event, window.canvasTTY.window.isMacOS, session.provider);
       if (selectCodexDraft) {
         event.preventDefault();
         event.stopPropagation();
@@ -352,13 +373,12 @@ function TerminalCardView({
         window.canvasTTY.terminal.input(session.id, CODEX_SELECT_ALL_SEQUENCE);
         return false;
       }
-      if ((event.key === "F4" || event.code === "F4")
-        && !event.ctrlKey && !event.shiftKey && !event.metaKey && !event.altKey
+      if (matchesShortcut(event, shortcutsRef.current.toggleDetail)
         && terminalHost.current?.closest(".terminal-card")?.getAttribute("data-pixel-skin") === "true") {
         return false;
       }
-      if (shouldSearchTerminalOutput(event)) {
-        // Ctrl+Shift+F belongs to the card's scrollback search, never the shell.
+      if (shouldSearchTerminalOutput(event, shortcutsRef.current)) {
+        // The configured search shortcut belongs to scrollback, never the shell.
         event.preventDefault();
         event.stopPropagation();
         if (searchOpenRef.current) {
@@ -369,19 +389,19 @@ function TerminalCardView({
         }
         return false;
       }
-      if (shouldRestartExitedTerminal(event, sessionExited.current)) {
+      if (shouldRestartExitedTerminal(event, sessionExited.current, shortcutsRef.current)) {
         event.preventDefault();
         event.stopPropagation();
         void restartAction.current();
         return false;
       }
-      if (shouldSendTerminalLineBreak(event)) {
+      if (!nativeEditorRef.current && shouldSendTerminalLineBreak(event)) {
         event.preventDefault();
         event.stopPropagation();
         window.canvasTTY.terminal.input(session.id, SHIFT_ENTER_SEQUENCE);
         return false;
       }
-      const pageDirection = shouldScrollTerminalPage(event);
+      const pageDirection = shouldScrollTerminalPage(event, shortcutsRef.current);
       if (pageDirection !== 0 && terminal.buffer.active.type === "normal") {
         // In the normal buffer PgUp/PgDn page the scrollback; in the alternate
         // buffer they fall through to the application (vim, less, agent TUI).
@@ -390,14 +410,16 @@ function TerminalCardView({
         terminal.scrollPages(pageDirection);
         return false;
       }
-      if (shouldCopyTerminalSelection(event, terminal.hasSelection() || window.canvasTTY.window.isMacOS)) {
+      if (shouldCopyTerminalSelection(event, terminal.hasSelection() || session.provider === "codex", shortcutsRef.current)) {
         event.preventDefault();
         event.stopPropagation();
         if (terminal.hasSelection()) window.canvasTTY.clipboard.writeText(terminal.getSelection());
-        else if (session.provider === "codex") window.canvasTTY.terminal.input(session.id, "\u001b[99;9u");
+        else if (session.provider === "codex") window.canvasTTY.terminal.input(session.id,
+          event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey && event.code === "KeyC"
+            ? "\u0003" : "\u001b[99;9u");
         return false;
       }
-      if (!shouldPasteTerminalClipboard(event)) return true;
+      if (!shouldPasteTerminalClipboard(event, shortcutsRef.current)) return true;
 
       event.preventDefault();
       event.stopPropagation();
@@ -792,7 +814,7 @@ function TerminalCardView({
           type="button"
           disabled={restarting}
           onClick={() => void restartAction.current()}
-          title={`${t(locale, "restartSession")} · Ctrl+D`}
+          title={`${t(locale, "restartSession")} · ${shortcuts.terminalRestart}`}
           aria-label={t(locale, "restartSession")}
         >
           <UiIcon name={restarting ? "working" : "reload"} size="1.23em" />

@@ -550,6 +550,7 @@ async function initializeServices(): Promise<void> {
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureRedaction(redaction);
+  terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
 
@@ -726,6 +727,7 @@ async function initializeServices(): Promise<void> {
     launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {
+      terminalManager?.setKeyboardShortcuts(next.shortcuts);
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
       terminalManager?.setLifecycleHooksEnabled(next.agentLifecycleHooksEnabled);
       // Awaited so the renderer's settings.update resolves with the endpoint live

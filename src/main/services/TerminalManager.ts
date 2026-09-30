@@ -16,6 +16,7 @@ import type {
   SessionRemovedEvent,
   SessionRestoreMode,
   SessionSnapshot,
+  ShortcutBindings,
   TerminalBufferSnapshot,
   TerminalDataEvent
 } from "../../shared/contracts.ts";
@@ -25,6 +26,7 @@ import {
   INITIAL_TERMINAL_ROWS,
   IPC
 } from "../../shared/contracts.ts";
+import { DEFAULT_SHORTCUTS } from "../../shared/contracts.ts";
 import type {
   AgentBrowserLaunchCoordinator,
   PreparedAgentBrowserPtyLaunch
@@ -179,6 +181,7 @@ type Emit = (
 ) => void;
 
 export class TerminalManager {
+  private keyboardShortcuts: ShortcutBindings = { ...DEFAULT_SHORTCUTS };
   private readonly sessions = new Map<string, ManagedSession>();
   private readonly emit: Emit;
   private readonly providerClis: ProviderCliRegistry;
@@ -239,6 +242,10 @@ export class TerminalManager {
 
   configureOrchestration(coordinator: OrchestrationLaunchCoordinator | null): void {
     this.agentOrchestration = coordinator;
+  }
+
+  setKeyboardShortcuts(shortcuts: ShortcutBindings): void {
+    this.keyboardShortcuts = { ...shortcuts };
   }
 
   /** Plugin agent tools: a session any of them applies to gets the canvastty_agents bridge. */
@@ -1295,6 +1302,7 @@ export class TerminalManager {
       // Plugin arguments follow the core's own and precede the resume selection.
       if (contribution) providerArgs.push(...contribution.args);
       const launch = resolveTerminalLaunch(provider, profile, providerArgs, {
+        shortcuts: this.keyboardShortcuts,
         environment: { ...baseEnvironment, ...providerEnvironment },
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
@@ -1551,6 +1559,11 @@ export class TerminalManager {
       return "failed";
     }
     session.process = process;
+    if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
+      metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
+    } else {
+      delete metadata.nativeEditor;
+    }
     this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
     session.agentBrowser = planned.agentBrowser;
     session.agentRuntime = planned.agentRuntime;

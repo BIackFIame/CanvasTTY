@@ -30,7 +30,8 @@ export function matchesPhysicalOrLayoutKey(
 
 export function shortcutFromKeyboardEvent(event: ShortcutEvent): string | null {
   if (canvasNavigationModifierFromKey(event.key) !== null) return null;
-  const key = normalizeCanvasNavigationInputKey(event.key, event.code);
+  const key = event.code === "Comma" || event.key === ","
+    ? "Comma" : normalizeCanvasNavigationInputKey(event.key, event.code);
   if (!key) return null;
 
   return [...activeCanvasNavigationModifiers(event), key].join("+");
@@ -63,12 +64,10 @@ export function isRenameInputTarget(target: EventTarget | null): boolean {
 
 export function shouldKeepNativeKeyboardInput(
   target: EventTarget | null,
-  isMacOS: boolean,
-  event?: ShortcutEvent
+  _isMacOS: boolean,
+  _event?: ShortcutEvent
 ): boolean {
-  const altArrow = event?.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
-    && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key);
-  return (isMacOS || Boolean(altArrow)) && target instanceof Element
+  return target instanceof Element
     && Boolean(target.closest('.terminal-card__surface, input, textarea, select, [contenteditable="true"]'));
 }
 
