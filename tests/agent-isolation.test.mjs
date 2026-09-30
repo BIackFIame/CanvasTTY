@@ -168,14 +168,22 @@ test("bubblewrap: a granted private folder is read-only, the CLI's own moved hom
   const accountHome = join(w.userData, "account-homes", "a1");
   const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, CODEX_HOME: accountHome },
     userDataPath: w.userData, sessionId: "s", grantedPrivate: [own] });
+  // Its config.toml exists: the person's, or the placeholder LinuxHostPaths puts there before a launch.
+  const accountConfig = join(accountHome, "config.toml");
   const kinds = new Map([[w.project, "directory"], [own, "directory"], [accountHome, "directory"], [join(w.userData, "agent-control"), "directory"],
-    [join(w.userData, "account-homes"), "directory"]]);
+    [join(w.userData, "account-homes"), "directory"], [accountConfig, "file"]]);
   const args = bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null);
   const text = args.join(" ");
   assert.ok(text.includes(`--ro-bind ${own} ${own}`), "the control grant is readable, not writable");
   assert.ok(!text.includes(`--bind ${own} ${own}`));
   const afterHidden = text.slice(text.indexOf(`--tmpfs ${join(w.userData, "account-homes")}`));
   assert.ok(afterHidden.includes(`--bind ${accountHome} ${accountHome}`), "its own account home is bound back writable over the hidden folder");
+  const afterRebind = afterHidden.slice(afterHidden.indexOf(`--bind ${accountHome} ${accountHome}`));
+  assert.ok(afterRebind.includes(`--ro-bind ${accountConfig} ${accountConfig}`), "and its permission settings read-only again over that");
+  // Without the file (nothing prepared the host) the launch is refused, never run with the settings writable.
+  kinds.delete(accountConfig);
+  assert.throws(() => bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null),
+    /config\.toml would be writable for the agent/u);
 });
 
 test("bubblewrap: git hooks the agent could create later never reach the real project", async (t) => {
