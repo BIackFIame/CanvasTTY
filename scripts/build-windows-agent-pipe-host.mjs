@@ -62,6 +62,7 @@ async function relaySelfTest(hostPath) {
     env: { SystemRoot: process.env.SystemRoot, WINDIR: process.env.WINDIR }
   });
   const frames = frameReader(relay.stdout);
+  const sockets = new Set();
   let stderr = "";
   relay.stderr.on("data", (chunk) => {
     stderr = (stderr + chunk.toString("utf8")).slice(0, 8 * 1024);
@@ -74,20 +75,32 @@ async function relaySelfTest(hostPath) {
     if (!endpoint.startsWith("\\\\.\\pipe\\canvastty-agent-")) {
       throw new Error("The relay self-test received an invalid READY endpoint.");
     }
-    const socket = createConnection(endpoint);
-    socket.on("error", () => undefined);
-    await bounded(once(socket, "connect"));
-    const connected = await bounded(frames.next(2));
-    if (connected.connectionId === 0) throw new Error("The relay self-test received connection id zero.");
-
+    const connectClient = async (paused = false) => {
+      const socket = createConnection(endpoint);
+      // Pause before connect, so Node does not start its first native pipe read. Pausing after a data
+      // event would only delay JavaScript delivery while an outstanding native read could consume it.
+      if (paused) socket.pause();
+      sockets.add(socket);
+      socket.on("error", () => undefined);
+      socket.once("close", () => sockets.delete(socket));
+      await bounded(once(socket, "connect"));
+      const connected = await bounded(frames.next(2));
+      if (connected.connectionId === 0) throw new Error("The relay self-test received connection id zero.");
+      return { socket, connectionId: connected.connectionId };
+    };
+    const expectClosed = async (connectionId, timeoutMs = 5_000) => {
+      const closed = await bounded(frames.next(4), timeoutMs);
+      if (closed.connectionId !== connectionId) throw new Error("The relay self-test closed the wrong connection.");
+    };
+    const { socket, connectionId } = await connectClient();
     socket.write(Buffer.from("client-to-host"));
     const inbound = await bounded(frames.next(3));
-    if (inbound.connectionId !== connected.connectionId || inbound.payload.toString("utf8") !== "client-to-host") {
+    if (inbound.connectionId !== connectionId || inbound.payload.toString("utf8") !== "client-to-host") {
       throw new Error("The relay self-test client-to-host payload was corrupted.");
     }
 
     const response = once(socket, "data");
-    relay.stdin.write(encodeFrame(16, connected.connectionId, Buffer.from("host-to-client")));
+    relay.stdin.write(encodeFrame(16, connectionId, Buffer.from("host-to-client")));
     if ((await bounded(response))[0].toString("utf8") !== "host-to-client") {
       throw new Error("The relay self-test host-to-client payload was corrupted.");
     }
@@ -98,20 +111,78 @@ async function relaySelfTest(hostPath) {
     socket.on("data", (chunk) => received.push(chunk));
     const closed = waitForServerClose(socket);
     relay.stdin.write(Buffer.concat([
-      encodeFrame(16, connected.connectionId, Buffer.from("last-words")),
-      encodeFrame(17, connected.connectionId, Buffer.alloc(0))
+      encodeFrame(16, connectionId, Buffer.from("last-words")),
+      encodeFrame(17, connectionId, Buffer.alloc(0))
     ]));
-    await bounded(Promise.all([closed, frames.next(4)]));
+    await bounded(Promise.all([closed, expectClosed(connectionId)]));
     if (Buffer.concat(received).toString("utf8") !== "last-words") {
       throw new Error("The relay self-test lost the message written just before the close.");
     }
+
+    // Repeat real write/destroy exchanges with native reads delayed. Both writes fit in the Windows pipe
+    // buffer: draining only the C++ queue then disconnecting used to discard these unread bytes.
+    for (let cycle = 0; cycle < 8; cycle += 1) {
+      const client = await connectClient(true);
+      const chunks = [];
+      client.socket.on("data", (chunk) => chunks.push(chunk));
+      const clientClosed = waitForServerClose(client.socket);
+      const first = Buffer.from(`before-close-${cycle}`);
+      const last = Buffer.from(`last-words-${cycle}`);
+      relay.stdin.write(Buffer.concat([
+        encodeFrame(16, client.connectionId, first),
+        encodeFrame(16, client.connectionId, last),
+        encodeFrame(17, client.connectionId, Buffer.alloc(0)),
+        encodeFrame(17, client.connectionId, Buffer.alloc(0)),
+        // Neither duplicate destroy nor a rejected late write may abort the accepted writes' drain.
+        encodeFrame(16, client.connectionId, Buffer.from("after-close-must-be-ignored"))
+      ]));
+      await delay(125);
+      client.socket.resume();
+      await bounded(Promise.all([clientClosed, expectClosed(client.connectionId)]));
+      if (!Buffer.concat(chunks).equals(Buffer.concat([first, last]))) {
+        throw new Error(`The relay self-test lost or added data during delayed close cycle ${cycle}.`);
+      }
+    }
+
+    // A client that never starts reading cannot keep the flush blocked indefinitely. CLOSE is emitted by
+    // the reader before both workers finish, so probe writes also verify the server really disconnected.
+    const stalled = await connectClient(true);
+    const stalledClosed = waitForServerClose(stalled.socket);
+    const drainStarted = performance.now();
+    relay.stdin.write(Buffer.concat([
+      encodeFrame(16, stalled.connectionId, Buffer.from("unread-final-message")),
+      encodeFrame(17, stalled.connectionId, Buffer.alloc(0)),
+      encodeFrame(17, stalled.connectionId, Buffer.alloc(0))
+    ]));
+    // A later duplicate must not restart the original deadline.
+    await delay(1_250);
+    relay.stdin.write(encodeFrame(17, stalled.connectionId, Buffer.alloc(0)));
+    await expectClosed(stalled.connectionId, 2_000);
+    await bounded(Promise.all([expectServerDisconnect(stalled.socket), stalledClosed]), 750);
+    const drainElapsed = performance.now() - drainStarted;
+    if (drainElapsed < 1_800 || drainElapsed > 3_000) {
+      throw new Error(`The relay self-test drain deadline was not bounded near two seconds (${Math.round(drainElapsed)} ms).`);
+    }
+
+    // Shutdown interrupts both a synchronous flush (small buffered write) and an overlapped write blocked
+    // on a full pipe. It must finish before the per-connection two-second drain timers would fire.
+    const flushing = await connectClient(true);
+    const writing = await connectClient(true);
+    relay.stdin.write(Buffer.concat([
+      encodeFrame(16, flushing.connectionId, Buffer.from("shutdown-during-flush")),
+      encodeFrame(17, flushing.connectionId, Buffer.alloc(0)),
+      encodeFrame(16, writing.connectionId, Buffer.alloc(256 * 1024, 0x78)),
+      encodeFrame(17, writing.connectionId, Buffer.alloc(0))
+    ]));
+    await delay(125);
     const exited = once(relay, "exit");
     relay.stdin.write(encodeFrame(18, 0, Buffer.alloc(0)));
     relay.stdin.end();
-    const [code] = await bounded(exited);
+    const [code] = await bounded(exited, 1_500);
     if (code !== 0) throw new Error(`The relay self-test host exited with ${code}: ${stderr.trim()}`);
   } finally {
     clearTimeout(timeout);
+    for (const socket of sockets) socket.destroy();
     if (relay.exitCode === null && relay.signalCode === null) relay.kill();
   }
 }
@@ -208,6 +279,24 @@ function encodeFrame(type, connectionId, payload) {
   frame.writeUInt32LE(payload.length, 12);
   payload.copy(frame, 16);
   return frame;
+}
+
+async function expectServerDisconnect(socket) {
+  // Keep reads paused. Resuming would unblock a forgotten flush and hide a missing cancellation.
+  const deadline = performance.now() + 500;
+  while (performance.now() < deadline) {
+    const error = await bounded(new Promise((resolve) => socket.write(Buffer.from("close-probe"), resolve)), 500);
+    if (error) {
+      if (error.code === "EPIPE" || error.code === "ECONNRESET") return;
+      throw error;
+    }
+    await delay(10);
+  }
+  throw new Error("The relay self-test server remained connected after its drain deadline.");
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function bounded(promise, timeoutMs = 5_000) {
