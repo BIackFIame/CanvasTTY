@@ -76,7 +76,7 @@ test("displays platform-neutral canvas navigation bindings with macOS key names"
   assert.equal(displayCanvasNavigationBinding("Ctrl+Alt", false), "Ctrl+Alt");
 });
 
-test("macOS native input keeps CLI keys while canvas and other platforms keep canvas shortcuts", (t) => {
+test("native input keeps CLI keys on every platform while canvas keeps its shortcuts", (t) => {
   const previousElement = globalThis.Element;
   class ElementTarget extends EventTarget {
     constructor(nativeInput) {
@@ -98,7 +98,8 @@ test("macOS native input keeps CLI keys while canvas and other platforms keep ca
   ]) {
     assert.equal(shouldKeepNativeKeyboardInput(nativeInput, true), true, event.key);
     assert.equal(shouldKeepNativeKeyboardInput(canvas, true), false, event.key);
-    assert.equal(shouldKeepNativeKeyboardInput(nativeInput, false), false, event.key);
+    assert.equal(shouldKeepNativeKeyboardInput(nativeInput, false), true, event.key);
+    assert.equal(shouldKeepNativeKeyboardInput(canvas, false), false, event.key);
   }
   assert.equal(shouldKeepNativeKeyboardInput(null, true), false);
   assert.equal(shouldKeepNativeKeyboardInput(new EventTarget(), true), false);

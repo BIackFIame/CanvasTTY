@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { keyboardPresetShortcuts } from "../src/shared/contracts.ts";
 import {
   normalizeHomeGridSize,
   normalizeHomeLayout,
@@ -669,7 +670,9 @@ test("fresh installs default to scroll pan and key-gated widget wheel input", as
     assert.equal(store.get().browserRestoreTabs, true);
     assert.equal(store.get().persistCanvasRegions, true);
     assert.equal(store.get().persistStickyNotes, true);
-    assert.deepEqual(store.get().shortcuts, { home: "Home", renameWindow: "F2", toggleFullscreen: "Meta+F" });
+    const preset = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
+    assert.equal(store.get().keyboardPreset, preset);
+    assert.deepEqual(store.get().shortcuts, keyboardPresetShortcuts(preset));
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
     assert.equal(Object.hasOwn(persisted, "zoomOverApplications"), false);
   } finally {

@@ -142,13 +142,13 @@ test("Hooks stays concise while detailed safety copy is available in About", asy
   assert.match(styles, /\.agent-hooks__empty \{[^}]*padding: 0;[^}]*background: transparent;[^}]*text-align: left;/);
 });
 
-test("HOME and rename are independent shortcut settings with mouse capture", async () => {
+test("keyboard settings have their own section with independent HOME and rename mouse capture", async () => {
   const settings = await readFile(settingsPanelPath, "utf8");
   assert.doesNotMatch(settings, /<SettingGroup label=\{t\(locale, "keyboardShortcuts"\)\}>/);
-  assert.match(settings, /label=\{t\(locale, "homeShortcut"\)\} description=\{t\(locale, "homeShortcutDescription"\)\}/);
-  assert.match(settings, /label=\{t\(locale, "renameWindow"\)\} description=\{t\(locale, "renameWindowDescription"\)\}/);
-  assert.match(settings, /capturePointerShortcut\("home", event\)/);
-  assert.match(settings, /capturePointerShortcut\("renameWindow", event\)/);
+  assert.match(settings, /section === "keyboardShortcuts"/);
+  assert.match(settings, /home: "homeShortcut", renameWindow: "renameWindow"/);
+  assert.match(settings, /\["keyboardCanvas", \["home", "renameWindow"/);
+  assert.match(settings, /capturePointerShortcut\(action, event\)/);
 });
 
 test("canvas overlays share configurable collision-safe corner slots", async () => {

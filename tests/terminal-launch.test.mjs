@@ -47,7 +47,7 @@ test("Codex QA refuses invalid paths rather than silently using another launch",
   }
 });
 
-test("packaged macOS Codex uses its bundled TUI and preserves the official backend", () => {
+test("packaged POSIX Codex uses its bundled TUI and preserves the official backend", () => {
   const resourcesPath = "/moved app/Contents/Resources";
   const frontend = `${resourcesPath}/codex-native-tui/canvastty-codex-tui`;
   const launcher = `${resourcesPath}/codex-native-tui/codex-tui-launch.mjs`;
@@ -58,7 +58,9 @@ test("packaged macOS Codex uses its bundled TUI and preserves the official backe
     args: [launcher, "--backend", "/official/codex", "--frontend", frontend, "--"],
     environment: { PATH: "/resolved/bin:/usr/bin", ELECTRON_RUN_AS_NODE: "1" }
   });
-  assert.equal(resolveTerminalLaunch("codex", "normal", [], { ...options, platform: "linux" }).command, "/official/codex");
+  assert.deepEqual(resolveTerminalLaunch("codex", "normal", [], { ...options, platform: "linux" }),
+    resolveTerminalLaunch("codex", "normal", [], options));
+  assert.equal(resolveTerminalLaunch("codex", "normal", [], { ...options, platform: "win32" }).command, "/official/codex");
   assert.equal(resolveTerminalLaunch("codex", "normal", [], { ...options, fileExists: () => false }).command, "/official/codex");
   assert.equal(resolveTerminalLaunch("claude", "normal", [], { ...options,
     providerCli: available("claude", "/official/claude") }).command, "/official/claude");

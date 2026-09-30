@@ -28,7 +28,7 @@ using the official CLI.
 From the adapted frontend checkout:
 
 ```sh
-cd /home/kosya/vibecoding/codex-macos-tui/codex-rs
+cd ../codex-macos-tui/codex-rs
 rustup toolchain install 1.95.0 --profile minimal
 CARGO_PROFILE_DEV_DEBUG=0 rustup run 1.95.0 cargo build --locked -j 6 -p codex-tui --bin canvastty-codex-tui
 ```
@@ -37,12 +37,12 @@ The frontend and CanvasTTY are already built in this workspace. Start the built
 app with the optional frontend and a separate CanvasTTY profile:
 
 ```sh
-cd /home/kosya/vibecoding/canvastty-pr103-keyboard
-mkdir -p /home/kosya/vibecoding/ctty-qa
+cd ../../canvastty
+mkdir -p ../ctty-qa
 PATH="$PWD/artifacts/codex-native-backend:$PATH" \
-CANVASTTY_USER_DATA_DIR=/home/kosya/vibecoding/ctty-qa \
-CANVASTTY_CODEX_TUI_QA=/home/kosya/vibecoding/codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui \
-CANVASTTY_CODEX_TUI_LAUNCHER_QA=/home/kosya/vibecoding/codex-macos-tui/macos/codex-tui-launch.mjs \
+CANVASTTY_USER_DATA_DIR="$PWD/../ctty-qa" \
+CANVASTTY_CODEX_TUI_QA="$PWD/../codex-macos-tui/codex-rs/target/debug/canvastty-codex-tui" \
+CANVASTTY_CODEX_TUI_LAUNCHER_QA="$PWD/../codex-macos-tui/macos/codex-tui-launch.mjs" \
 node_modules/.bin/electron .
 ```
 
@@ -60,13 +60,13 @@ For live development, use the same environment with `npm run dev` instead.
 
 ## Keyboard presets
 
-Open **Settings → General → Keyboard preset** and select macOS, Windows or Linux.
+Open **Settings → Keyboard shortcuts → Keyboard preset** and select macOS, Windows or Linux.
 The initial preset follows the host OS; existing customized shortcuts are kept
 as Custom. Selecting a named preset replaces the bindings, while recording an
 individual shortcut switches to Custom. All presets use Enter to submit and
 Shift+Enter for a newline.
 
-Expand **Keyboard shortcuts** directly below the preset to edit canvas, terminal
+Use the controls directly below the preset to edit canvas, terminal
 and Codex editor actions, including alternate submit keys. Optional actions can
 be disabled. Duplicate bindings are rejected within the context that handles
 them. Canvas focus shortcuts yield to focused terminal and text inputs.

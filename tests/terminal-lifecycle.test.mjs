@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import * as terminalShortcuts from "../src/renderer/src/features/terminal/terminalShortcuts.ts";
+import { keyboardPresetShortcuts } from "../src/shared/contracts.ts";
+import { matchesShortcut } from "../src/renderer/src/lib/shortcuts.ts";
 
 const terminalCardPath = new URL(
   "../src/renderer/src/features/terminal/TerminalCard.tsx",
@@ -11,7 +13,20 @@ const appStylesPath = new URL("../src/renderer/src/styles/app.css", import.meta.
 const terminalManagerPath = new URL("../src/main/services/TerminalManager.ts", import.meta.url);
 const contractsPath = new URL("../src/shared/contracts.ts", import.meta.url);
 
-test("actual macOS Codex handler preserves all three Enter chords before xterm can collapse them", async () => {
+function terminalKeyHandler(body, scope) {
+  const values = {
+    ...terminalShortcuts, matchesShortcut,
+    nativeEditorRef: { current: null },
+    shortcutsRef: { current: keyboardPresetShortcuts("macos") },
+    sessionExited: { current: false },
+    terminalHost: { current: null },
+    terminal: { hasSelection: () => false },
+    ...scope
+  };
+  return new Function(...Object.keys(values), `return (event) => {${body}}`)(...Object.values(values));
+}
+
+test("actual Codex handler preserves Enter modifiers before xterm can collapse them", async () => {
   const source = await readFile(terminalCardPath, "utf8");
   const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
   assert.ok(body);
@@ -20,11 +35,12 @@ test("actual macOS Codex handler preserves all three Enter chords before xterm c
     window: { isMacOS: true },
     terminal: { input: (id, sequence) => writes.push([id, sequence]) }
   } };
-  const handler = new Function("window", "session", ...Object.keys(terminalShortcuts),
-    `return (event) => {${body}}`)(window, { id: "draft", provider: "codex" }, ...Object.values(terminalShortcuts));
+  const handler = terminalKeyHandler(body, { window, session: { id: "draft", provider: "codex" } });
   for (const code of ["Enter", "NumpadEnter"]) {
     for (const [modifiers, sequence] of [
-      [{}, "\r"], [{ shiftKey: true }, "\u001b[13;2u"], [{ metaKey: true }, "\u001b[13;9u"]
+      [{}, "\r"], [{ shiftKey: true }, "\u001b[13;2u"], [{ metaKey: true }, "\u001b[13;9u"],
+      [{ ctrlKey: true }, "\u001b[13;5u"], [{ altKey: true }, "\u001b[13;3u"],
+      [{ metaKey: true, shiftKey: true }, "\u001b[13;10u"]
     ]) {
       let prevented = false;
       let stopped = false;
@@ -35,7 +51,7 @@ test("actual macOS Codex handler preserves all three Enter chords before xterm c
       assert.deepEqual([prevented, stopped, writes.pop()], [true, true, ["draft", sequence]]);
     }
   }
-  for (const modifiers of [{ ctrlKey: true }, { altKey: true }, { metaKey: true, shiftKey: true }, { type: "keyup" }]) {
+  for (const modifiers of [{ type: "keyup" }, { isComposing: true }]) {
     assert.equal(handler({ type: "keydown", key: "Enter", code: "Enter", ctrlKey: false, altKey: false,
       shiftKey: false, metaKey: false, ...modifiers }), true);
   }
@@ -47,25 +63,23 @@ test("Command+A dispatches native Codex selection and leaves other providers and
   const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
   assert.ok(body, "the terminal's actual keyboard handler must be located");
   const calls = [];
-  const terminal = { clearSelection: () => calls.push("clear") };
+  const terminal = { clearSelection: () => calls.push("clear"), hasSelection: () => false };
   const window = { canvasTTY: {
     window: { isMacOS: true },
     terminal: { input: (id, sequence) => calls.push([id, sequence]) }
   } };
-  const createHandler = new Function("window", "session", "terminal", ...Object.keys(terminalShortcuts),
-    `return (event) => {${body}}`);
   const event = {
     type: "keydown", key: "ф", code: "KeyA", metaKey: true,
     ctrlKey: false, shiftKey: false, altKey: false,
     preventDefault: () => calls.push("prevent"),
     stopPropagation: () => calls.push("stop")
   };
-  const codex = createHandler(window, { id: "codex-qa", provider: "codex" }, terminal, ...Object.values(terminalShortcuts));
+  const codex = terminalKeyHandler(body, { window, session: { id: "codex-qa", provider: "codex" }, terminal });
   assert.equal(codex(event), false);
   assert.deepEqual(calls, ["prevent", "stop", "clear", ["codex-qa", "\u001b[97;9u"]]);
   calls.length = 0;
   for (const provider of ["terminal", "claude", "gemini"]) {
-    const handler = createHandler(window, { id: provider, provider }, terminal, ...Object.values(terminalShortcuts));
+    const handler = terminalKeyHandler(body, { window, session: { id: provider, provider }, terminal });
     assert.equal(handler(event), true);
   }
   for (const change of [
@@ -80,8 +94,6 @@ test("clipboard replies cannot paste into a restarted or exited session while no
   const source = await readFile(terminalCardPath, "utf8");
   const body = source.match(/terminal\.attachCustomKeyEventHandler\(\(event\) => \{([\s\S]*?)^    \}\);/m)?.[1];
   assert.ok(body, "exercise the terminal's actual keyboard handler");
-  const createHandler = new Function("window", "session", "terminal", "terminalRef", "sessionExited", "sessionStartedAt", ...Object.keys(terminalShortcuts),
-    `return (event) => {${body}}`);
   const event = {
     type: "keydown", key: "м", code: "KeyV", metaKey: true,
     ctrlKey: false, shiftKey: false, altKey: false,
@@ -110,8 +122,8 @@ test("clipboard replies cannot paste into a restarted or exited session while no
       },
       terminal: { input: (id, sequence) => calls.push([id, sequence]) }
     } };
-    const handler = createHandler(window, { id: "same-card", provider: "codex" }, terminal,
-      terminalRef, sessionExited, sessionStartedAt, ...Object.values(terminalShortcuts));
+    const handler = terminalKeyHandler(body, { window, session: { id: "same-card", provider: "codex" }, terminal,
+      terminalRef, sessionExited, sessionStartedAt });
     return { handler, image, text, calls, reads, terminalRef, sessionExited, sessionStartedAt };
   };
   const normalText = fixture();
@@ -191,8 +203,8 @@ test("terminal copy shortcuts write the xterm selection without reaching the PTY
 
 test("Command copy reaches a CLI-owned selection without sending Control-C", async () => {
   const source = await readFile(terminalCardPath, "utf8");
-  assert.match(source, /shouldCopyTerminalSelection\(event, terminal\.hasSelection\(\) \|\| window\.canvasTTY\.window\.isMacOS\)/);
-  assert.match(source, /if \(terminal\.hasSelection\(\)\)[\s\S]*?writeText\(terminal\.getSelection\(\)\)[\s\S]*?else if \(session\.provider === "codex"\) window\.canvasTTY\.terminal\.input\(session\.id, "\\u001b\[99;9u"\)/);
+  assert.match(source, /shouldCopyTerminalSelection\(event, terminal\.hasSelection\(\) \|\| session\.provider === "codex", shortcutsRef\.current\)/);
+  assert.match(source, /if \(terminal\.hasSelection\(\)\)[\s\S]*?writeText\(terminal\.getSelection\(\)\)[\s\S]*?else if \(session\.provider === "codex"\) window\.canvasTTY\.terminal\.input\(session\.id,[\s\S]*?"\\u0003" : "\\u001b\[99;9u"\)/);
 });
 
 test("terminal paste reads the trusted clipboard bridge and uses xterm paste semantics", async () => {
@@ -356,7 +368,7 @@ test("an exited PTY can restart in place without recreating its xterm card", asy
   assert.match(manager, /session\.metadata\.status = initialSessionStatus\(session\.metadata\.provider\)/);
   assert.match(manager, /session\.metadata\.failureDetails = null/);
   assert.match(manager, /if \(launched\.process\) this\.bindProcess\(id, session, launched\.process\)/);
-  assert.match(card, /shouldRestartExitedTerminal\(event, sessionExited\.current\)/);
+  assert.match(card, /shouldRestartExitedTerminal\(event, sessionExited\.current, shortcutsRef\.current\)/);
   assert.match(card, /onRestart\(session\.id, resume\)/);
 });
 

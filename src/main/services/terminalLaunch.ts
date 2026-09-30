@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { isAbsolute, posix, win32 } from "node:path";
+import { posix, win32 } from "node:path";
 import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
@@ -85,8 +85,8 @@ export function resolveTerminalLaunch(
   if (provider === "codex" && frontend) {
     const launcher = qaFrontend ? environment.CANVASTTY_CODEX_TUI_LAUNCHER_QA : bundledLauncher;
     if ((platform !== "darwin" && platform !== "linux") || providerCli.launcher !== "native"
-      || !isAbsolute(frontend) || !fileExists(frontend)
-      || !launcher || !isAbsolute(launcher) || !fileExists(launcher)) {
+      || !posix.isAbsolute(frontend) || !fileExists(frontend)
+      || !launcher || !posix.isAbsolute(launcher) || !fileExists(launcher)) {
       throw new Error("Codex native TUI requires existing absolute frontend and launcher paths on macOS or Linux.");
     }
     return {
