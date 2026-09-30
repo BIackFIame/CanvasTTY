@@ -1,6 +1,7 @@
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: #20222c; user-select: none; }
+/* The native window background (main/index.ts), seen only before React's first commit: no dark frame at startup. */
+body { background: #aaa7a2; user-select: none; }
 button, select, input { font: inherit; }
 button { border: 0; }
 
@@ -1124,7 +1125,12 @@ button { border: 0; }
 .settings-panel .canvas-launcher-settings-menu .canvas-menu__row--muted .canvas-menu__grow { color: var(--text-muted-on-dark); }
 .toast { position: fixed; z-index: 9999; left: 50%; bottom: 24px; max-width: min(540px, calc(100% - 40px)); padding: 12px 17px; border-radius: 11px; color: white; background: rgba(37,38,48,.94); box-shadow: var(--shadow-md); opacity: 0; transform: translate(-50%, 18px); pointer-events: none; transition: all .2s ease; }
 .toast--visible { opacity: 1; transform: translate(-50%, 0); }
-.loading-screen { position: absolute; inset: 0; z-index: 5000; display: grid; place-items: center; color: var(--text); background: var(--surface); font-size: 14px; font-weight: 900; letter-spacing: .05em; }
+/* Shown until the critical snapshot is in, usually for a few frames only. It keeps the window's own native
+   background (main/index.ts backgroundColor) so startup does not flash a dark panel between the empty window and
+   the canvas; the label appears only when startup is slow enough to need one. */
+.loading-screen { position: absolute; inset: 0; z-index: 5000; display: grid; place-items: center; color: #2f3038; background: #aaa7a2; font-size: 14px; font-weight: 900; letter-spacing: .05em; }
+.loading-screen > span { animation: loading-label-in 160ms ease-out 600ms both; }
+@keyframes loading-label-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 1000px) {
   .titlebar__subtitle { display: none; }

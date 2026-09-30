@@ -59,6 +59,7 @@ import { isPixelSkinPackId } from "./features/skins/SkinAssets";
 import { expandedPixelSkinCardBounds, PIXEL_SKIN_CARD_SIZE } from "./features/skins/pixelSkinCardGeometry";
 import type { LimitsLoadState } from "./features/home/homeModel";
 import { markBootOnce } from "./lib/bootMarks";
+import { afterNextPaint, loadCriticalSnapshot } from "./lib/bootSequence";
 import { t } from "./lib/i18n";
 import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
 import {
@@ -283,7 +284,12 @@ export function App(): React.JSX.Element {
   const [toast, setToast] = useState<string | null>(null);
   /** Git risk reports about cards that were closed (GitRiskNotice): shown until the person answers them. */
   const [closedGitRisks, setClosedGitRisks] = useState<GitRiskReport[]>([]);
+  // Boot phases (bootSequence.ts): `ready` once the critical snapshot (settings, CLI availability, session
+  // metadata, installed plugins) is in and the canvas may mount; `surfacesMounted` once that first stable frame
+  // was painted, when restored terminals, plugin and browser cards mount and deferred work (browser runtime,
+  // HOME media, limits) starts.
   const [ready, setReady] = useState(false);
+  const [surfacesMounted, setSurfacesMounted] = useState(false);
   const [windowState, setWindowState] = useState<WindowState>({
     isMacOS: window.canvasTTY.window.isMacOS,
     maximized: false,
@@ -303,10 +309,11 @@ export function App(): React.JSX.Element {
     // that same frame when it is on screen: its data (settings, availability, sessions) is loaded and
     // the main process answered, so a launcher click reaches a live service.
     if (!ready) return;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    return afterNextPaint(() => {
       markBootOnce("firstStableFrame");
       if (document.querySelector(".home-zone") && !document.querySelector(".loading-screen")) markBootOnce("homeActionable");
-    }));
+      setSurfacesMounted(true);
+    });
   }, [ready]);
 
   useEffect(() => {
@@ -323,7 +330,6 @@ export function App(): React.JSX.Element {
 
   useEffect(() => {
     let active = true;
-    const browserApi = window.canvasTTY.browser;
     const unsubscribeSession = window.canvasTTY.terminal.onSession(({ session }) => {
       if (active) setSessions((current) => upsertSession(current, session));
     });
@@ -337,32 +343,17 @@ export function App(): React.JSX.Element {
       setRenamingSessionId((current) => current === id ? null : current);
     });
 
-    const settingsRequest = window.canvasTTY.settings.get();
     const unsubscribeSettings = window.canvasTTY.settings.onChanged((next) => {
       if (active) setSettings(next);
     });
-    const availabilityRequest = window.canvasTTY.agents.availability();
-    const sessionsRequest = window.canvasTTY.terminal.list().then((loadedSessions) => {
-      if (active) setSessions((current) => mergeSessionSnapshots(current, loadedSessions));
-      return loadedSessions;
-    });
-    const pluginsRequest = window.canvasTTY.plugins.list();
-
-    void Promise.all([settingsRequest, availabilityRequest, sessionsRequest, pluginsRequest])
-      .then(async ([loadedSettings, availability, _loadedSessions, loadedPlugins]) => {
+    void loadCriticalSnapshot(window.canvasTTY)
+      .then((snapshot) => {
         if (!active) return;
-        setSettings(loadedSettings);
-        setAgentAvailability(availability);
-        setPlugins(loadedPlugins);
-        if (loadedSettings.browserCanvas && browserApi) {
-          const browserState = await browserApi.open();
-          if (active) setBrowser(browserState);
-        }
-        if (isHomeCamera.current) setCamera(homeCamera(loadedSettings.homeGridSize));
-        if (loadedSettings.mediaPath) {
-          const data = await window.canvasTTY.media.read(loadedSettings.mediaPath);
-          if (active) setMediaData(data);
-        }
+        setSettings(snapshot.settings);
+        setAgentAvailability(snapshot.availability);
+        setSessions((current) => mergeSessionSnapshots(current, snapshot.sessions));
+        setPlugins(snapshot.plugins);
+        if (isHomeCamera.current) setCamera(homeCamera(snapshot.settings.homeGridSize));
       })
       .catch((error) => showToast(error instanceof Error ? error.message : "CanvasTTY initialization failed"))
       .finally(() => active && setReady(true));
@@ -377,6 +368,24 @@ export function App(): React.JSX.Element {
   }, [showToast]);
 
   useEffect(() => {
+    // Deferred until the first stable frame is on screen: the browser card's runtime (its WebContents and page
+    // load) and the HOME media file are not part of that frame, and both cost main-process and IPC time.
+    if (!surfacesMounted) return;
+    let active = true;
+    const current = settingsRef.current;
+    const browserApi = window.canvasTTY.browser;
+    if (current.browserCanvas && browserApi) {
+      void browserApi.open().then((state) => { if (active) setBrowser(state); })
+        .catch((error: unknown) => showToast(error instanceof Error ? error.message : t(current.locale, "browserActionFailed")));
+    }
+    if (current.mediaPath) {
+      void window.canvasTTY.media.read(current.mediaPath).then((data) => { if (active) setMediaData(data); })
+        .catch(() => undefined);
+    }
+    return () => { active = false; };
+  }, [showToast, surfacesMounted]);
+
+  useEffect(() => {
     const browserApi = window.canvasTTY.browser;
     if (!browserApi) return;
     const unsubscribe = browserApi.onState(({ snapshot }) => setBrowser(snapshot));
@@ -385,6 +394,9 @@ export function App(): React.JSX.Element {
   }, []);
 
   useEffect(() => {
+    // Limits are not part of the first frame (HOME shows them as loading) and a read can start provider CLIs in
+    // the main process: they wait for the first stable frame.
+    if (!surfacesMounted) return;
     let active = true;
     let requestRunning = false;
     let timer: number | null = null;
@@ -428,7 +440,7 @@ export function App(): React.JSX.Element {
       document.removeEventListener("visibilitychange", resumeWhenVisible);
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [limitsRevision]);
+  }, [limitsRevision, surfacesMounted]);
 
   useEffect(() => {
     const recenterHome = (): void => {
@@ -1268,8 +1280,9 @@ export function App(): React.JSX.Element {
       <TerminalBorderSkinStyleHost skinId={settings.terminalBorderSkin} />
       <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
       <main className="app__content">
-        {!ready && <div className="loading-screen">{t(settings.locale, "loading")}</div>}
-        <WorkspaceCanvas
+        {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
+        {ready && <WorkspaceCanvas
+          surfacesMounted={surfacesMounted}
           settings={workspaceSettings}
           mediaData={mediaData}
           sessions={sessions}
@@ -1338,7 +1351,7 @@ export function App(): React.JSX.Element {
           onStickyNoteBoundsChange={changeStickyNoteBounds}
           onStickyNoteTextChange={changeStickyNoteText}
           onDeleteStickyNote={deleteStickyNote}
-        />
+        />}
       </main>
 
       <Suspense fallback={null}>

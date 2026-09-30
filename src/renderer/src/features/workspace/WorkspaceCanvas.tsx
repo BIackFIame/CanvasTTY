@@ -169,6 +169,12 @@ type RegionMovePreview = {
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
+  /**
+   * False for the first frame after startup: restored terminals (xterm), plugin canvas iframes and the browser card
+   * mount right after that frame was painted, so HOME and the canvas show without waiting for them. Their layout
+   * (layers, snap targets, the HOME session list) is known from the start. Defaults to true.
+   */
+  surfacesMounted?: boolean;
   mediaData: string | null;
   sessions: SessionSnapshot[];
   limits: LimitsSnapshot | null;
@@ -237,7 +243,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     onRestartSession, onDisposeSession, onBrowserBoundsChange, onFocusBrowser,
     onCloseBrowser, onCreateCanvasRegion, onChangeCanvasRegion,
     onCanvasRegionBoundsChange, onDeleteCanvasRegion, onCreateStickyNote,
-    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote
+    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote, surfacesMounted = true
   } = props;
   const viewport = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<CanvasMenuState | null>(null);
@@ -975,7 +981,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           onPluginCanvasWheel={wheelNavigation.applyCanvasWheel}
         />
         <div className={`workspace__windows ${homeEditing ? "workspace__windows--hidden" : ""}`} aria-hidden={homeEditing}>
-          {renderedSessions.filter((session) => fullscreenSessionId !== session.id).map((session) => (
+          {surfacesMounted && renderedSessions.filter((session) => fullscreenSessionId !== session.id).map((session) => (
             <TerminalCard
               key={session.id}
               session={withGroupNudge(terminalLayerId(session.id), session)}
@@ -1005,7 +1011,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               restoreEnabled={settings.sessionRestoreMode !== "off"}
             />
           ))}
-          {renderedPluginCanvas.map((instance) => {
+          {surfacesMounted && renderedPluginCanvas.map((instance) => {
             const plugin = plugins.find((candidate) => candidate.manifest.id === instance.pluginId && candidate.enabled);
             const contribution = plugin?.manifest.contributions.find((candidate) => candidate.id === instance.contributionId);
             if (!plugin || !contribution || contribution.kind !== "canvas-app") return null;
@@ -1047,7 +1053,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               />
             );
           })}
-          {renderedBrowserCanvas && (
+          {surfacesMounted && renderedBrowserCanvas && (
             <BrowserCard
               browser={browser}
               bounds={withGroupNudge(browserLayerId, renderedBrowserCanvas)}
@@ -1105,7 +1111,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
 
       {/* Fullscreen layer: rendered outside workspace__scene to avoid camera transformation */}
       <div className="workspace__fullscreen-layer">
-        {renderedSessions
+        {surfacesMounted && renderedSessions
           .filter((session) => fullscreenSessionId === session.id)
           .map((session) => (
             <TerminalCard
