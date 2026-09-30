@@ -1073,14 +1073,11 @@ export class TerminalManager {
     // suffix arrives — once — without resending the history before it. The
     // observers get no replay: they already received every chunk.
     //
-    // The window is bounded by MAX_SCROLLBACK_CHARS: when the hidden stretch
-    // was longer than the ring, the buffer no longer reaches back to
-    // hiddenSince and the head of that stretch is gone for good. There is no
-    // field on TerminalDataEvent to say so, so the consumer derives the hole
-    // from the offset arithmetic (the event starts after the offset it already
-    // wrote) and marks it in the card instead of stitching it as continuous
-    // output. Never widen the ring to hide this: the truncation must stay
-    // visible.
+    // The stretch fits the ring: keepHiddenCardWhole hands a hidden card what
+    // it missed before the ring could drop any of it, so this replay starts
+    // exactly where the card stopped and its terminal state stays the
+    // session's. Should a hole ever reach the renderer anyway, the consumer
+    // derives it from the offsets and marks it instead of stitching it.
     this.flushOutput(id, session);
     this.hiddenSinceOffset.delete(id);
     if (hiddenSince === undefined || session.outputOffset === hiddenSince) return;
@@ -2064,7 +2061,9 @@ export class TerminalManager {
       if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
         this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState }, "title");
       }
+      this.keepHiddenCardWhole(id, current, data);
       appendScrollback(current, data);
+      this.keepHiddenCardWhole(id, current, null, data);
       this.queueOutput(id, current, data);
     });
 
@@ -2104,6 +2103,32 @@ export class TerminalManager {
     this.emitSession(current.metadata);
     // Recorded at the moment of exit, so a finished agent is never relaunched.
     this.schedulePersistence();
+  }
+
+  /**
+   * A hidden card is not streamed, but its terminal must still see every byte: a replay that starts after the ring
+   * dropped part of the hidden stretch cannot restore what that part did to the terminal (an alternate screen entered,
+   * modes set, an escape sequence cut in half), and the card's parser would continue from a state the session never
+   * had. So just before the ring would drop output this card has not received, the card gets the stretch it missed
+   * as one renderer-only event, and the stretch starts again. The card parses it without painting (it is hidden), so
+   * a quiet hidden card still costs nothing and a flooding one costs its parsing in ring-sized pieces, never a gap.
+   * Called before the chunk joins the ring (`before`) and after it (`after`: a single chunk longer than the ring).
+   */
+  private keepHiddenCardWhole(id: string, session: ManagedSession, before: string | null, after?: string): void {
+    const since = this.hiddenSinceOffset.get(id);
+    if (since === undefined) return;
+    const missed = session.outputOffset - since;
+    if (before !== null) {
+      if (missed === 0 || missed + before.length <= MAX_SCROLLBACK_CHARS) return;
+      this.emit(IPC.terminalData, { id, data: scrollbackTail(session, missed), outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+      return;
+    }
+    // The chunk alone outgrew the ring: it is the whole stretch (the part before it was handed over just now).
+    if (after !== undefined && missed > MAX_SCROLLBACK_CHARS) {
+      this.emit(IPC.terminalData, { id, data: after, outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+    }
   }
 
   private queueOutput(id: string, session: ManagedSession, data: string): void {

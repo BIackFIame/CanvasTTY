@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import xterm from "@xterm/headless";
 import { TerminalManager, reachesObservers, reachesRenderer } from "../src/main/services/TerminalManager.ts";
 import { IPC } from "../src/shared/contracts.ts";
 import { attachTerminalOutput } from "../src/renderer/src/features/terminal/terminalOutput.ts";
@@ -197,11 +198,11 @@ test("an exit while hidden still hands the observers the last output", (t) => {
   assert.equal(manager.readBuffer(id).buffer, "last words\r\n");
 });
 
-test("a hidden stretch longer than the ring reaches the observers whole while the renderer replay stays marked as truncated", async (t) => {
+test("a hidden stretch longer than the ring reaches the observers and the card whole; the ring stays bounded", async (t) => {
   const { manager, id, observed, rendered, rendererApi, data, flush } = createManager(t);
   const written = [];
   const detach = attachTerminalOutput(rendererApi, id, (chunk) => written.push(chunk), assert.fail,
-    (missing) => `[CanvasTTY] ${missing} characters of output produced while this window was hidden are no longer available`);
+    (missing) => { throw new Error(`the card lost ${missing} characters`); });
   t.after(detach);
 
   const visible = "V".repeat(1_000);
@@ -211,28 +212,57 @@ test("a hidden stretch longer than the ring reaches the observers whole while th
   assert.deepEqual(written, [visible]);
 
   manager.setVisible(id, false);
-  // 300 011 code units while hidden: 60 011 more than the ring retains.
-  const dropped = "D".repeat(60_011);
-  const retained = "R".repeat(MAX_SCROLLBACK_CHARS);
-  data(dropped + retained);
+  // 300 011 code units while hidden, in ordinary PTY-sized chunks, then one chunk longer than the ring by itself.
+  const hidden = "D".repeat(300_011);
+  for (let at = 0; at < hidden.length; at += 4_096) data(hidden.slice(at, at + 4_096));
+  const huge = "H".repeat(MAX_SCROLLBACK_CHARS + 5);
+  data(huge);
   flush();
 
-  assert.equal(observerScreen(observed), visible + dropped + retained, "the observers received the full stream, including what the ring dropped");
-  assert.deepEqual(written, [visible], "hidden output is not streamed to the renderer");
-  assert.equal(manager.readBuffer(id).buffer, retained, "the ring holds the tail and only the tail");
+  assert.equal(observerScreen(observed), visible + hidden + huge, "the observers received the full stream");
+  assert.equal(manager.readBuffer(id).buffer, huge.slice(-MAX_SCROLLBACK_CHARS), "the ring holds the tail and only the tail");
+  const whileHidden = rendered.slice(1);
+  assert.ok(whileHidden.length >= 2 && whileHidden.every((event) => event.audience === "renderer"),
+    "before the ring would drop what the card missed, the card gets it (renderer only)");
+  assert.ok(whileHidden.every((event) => event.data.length <= MAX_SCROLLBACK_CHARS + 5), "in ring-sized pieces");
 
   manager.setVisible(id, true);
   await settle();
+  assert.equal(written.join(""), visible + hidden + huge, "the card wrote every byte once, in order, with no gap notice");
+  assert.equal(observerScreen(observed), visible + hidden + huge, "nothing reached the observers twice");
+});
 
-  assert.equal(rendered.length, 2, "one replay");
-  assert.equal(rendered[1].audience, "renderer");
-  assert.equal(rendered[1].data, retained);
-  assert.equal(written.length, 3, "the replay is one bounded notice plus the retained window");
-  const [notice, replay] = written.slice(1);
-  assert.equal(replay, retained);
-  assert.ok(notice.includes("60011"), "the notice states exactly how much output is missing");
-  assert.equal(written.join("").includes("D"), false, "the dropped head is never written as if it had arrived");
-  assert.equal(observerScreen(observed), visible + dropped + retained, "the replay added nothing to the observers");
+test("the reviewer's case: a TUI enters the alternate screen while hidden and floods; the card ends in the session's state", async (t) => {
+  const { manager, id, observed, rendererApi, data, flush } = createManager(t);
+  const size = { cols: 80, rows: 24, allowProposedApi: true };
+  const card = new xterm.Terminal(size);
+  const observer = new xterm.Terminal(size);
+  t.after(() => { card.dispose(); observer.dispose(); });
+  const write = (terminal, chunk) => new Promise((resolve) => terminal.write(chunk, resolve));
+  const cardWrites = [];
+  const detach = attachTerminalOutput(rendererApi, id, (chunk) => cardWrites.push(write(card, chunk)), assert.fail,
+    (missing) => `[CanvasTTY] ${missing} characters are missing`);
+  t.after(detach);
+  data("shell prompt $ ");
+  flush();
+  await settle();
+
+  manager.setVisible(id, false);
+  data("\x1b[?1049h");
+  for (let line = 0; line < 130_000; line += 1_000) data("\r\n".repeat(1_000));
+  data("\x1b[HCurrent approval");
+  flush();
+  manager.setVisible(id, true);
+  await settle();
+
+  await Promise.all(cardWrites);
+  for (const event of observed) await write(observer, event.data);
+  const screen = (terminal) => Array.from({ length: terminal.rows }, (_, row) =>
+    terminal.buffer.active.getLine(terminal.buffer.active.viewportY + row)?.translateToString(true) ?? "");
+  assert.equal(observer.buffer.active.type, "alternate", "the complete stream ends in the alternate screen");
+  assert.equal(card.buffer.active.type, "alternate", "so does the card");
+  assert.deepEqual(screen(card), screen(observer), "with the same screen");
+  assert.equal(screen(card)[0], "Current approval");
 });
 
 test("session and removal events reach both the observers and the renderer", () => {
