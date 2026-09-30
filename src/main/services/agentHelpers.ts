@@ -1,5 +1,5 @@
 import { accessSync, constants, statSync } from "node:fs";
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 
 /**
  * Which program runs the helpers CanvasTTY starts inside agent processes: the MCP servers (canvastty_browser,
@@ -43,6 +43,9 @@ export interface AgentHelperLocation {
 
 const OS_FOLDER: Partial<Record<NodeJS.Platform, string>> = { darwin: "mac", linux: "linux", win32: "win" };
 
+/** Paths are joined by the rules of the platform the location describes (the host's own in the app). */
+const pathRules = (platform: NodeJS.Platform): typeof posix => platform === "win32" ? win32 : posix;
+
 /** Where the native helper is for this app, or null when it is not there or not chosen. */
 export function nativeHelperPath(location: AgentHelperLocation): string | null {
   const platform = location.platform ?? process.platform;
@@ -53,6 +56,7 @@ export function nativeHelperPath(location: AgentHelperLocation): string | null {
   const os = OS_FOLDER[platform];
   if (!os) return null;
   const file = platform === "win32" ? `${NATIVE_HELPER_NAME}.exe` : NATIVE_HELPER_NAME;
+  const { join } = pathRules(platform);
   const path = location.packaged
     ? join(location.resourcesPath, "helpers", file)
     : join(location.appPath, "build", "native-helpers", `${os}-${arch}`, file);
@@ -81,6 +85,7 @@ export function agentHelperLaunches(location: AgentHelperLocation): AgentHelperL
       permissionGate: { command: native, args: ["permission-gate"] }
     };
   }
+  const { join } = pathRules(location.platform ?? process.platform);
   const script = (folder: string, name: string) => location.packaged
     ? join(location.resourcesPath, folder, name)
     : join(location.appPath, "src", folder, name);

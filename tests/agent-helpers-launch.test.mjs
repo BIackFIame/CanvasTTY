@@ -17,6 +17,7 @@ import { AgentIsolation } from "../src/main/services/isolation/AgentIsolation.ts
 import { DECISION_FAIL_CLOSED_ENV } from "../src/agent-runtime/runtime-protocol.mjs";
 import { NATIVE, SKIP_NATIVE } from "./native-helper-harness.mjs";
 
+// macOS locations (POSIX paths) unless a test describes another platform.
 const location = (overrides = {}) => ({
   packaged: false, resourcesPath: "/app/Resources", appPath: "/src/canvastty", execPath: "/app/CanvasTTY",
   platform: "darwin", arch: "arm64", environment: {}, isExecutable: () => true, ...overrides
@@ -26,8 +27,12 @@ test("the native helper is chosen on macOS and Linux when built; Windows, a miss
   assert.equal(nativeHelperPath(location()), "/src/canvastty/build/native-helpers/mac-arm64/canvastty-helper");
   assert.equal(nativeHelperPath(location({ platform: "linux", arch: "x64", packaged: true })), "/app/Resources/helpers/canvastty-helper");
   assert.equal(nativeHelperPath(location({ platform: "win32", arch: "x64" })), null);
-  assert.equal(nativeHelperPath(location({ platform: "win32", arch: "x64", packaged: true, environment: { [AGENT_HELPERS_ENV]: "native" } })),
-    "/app/Resources/helpers/canvastty-helper.exe");
+  // A Windows location has Windows paths; the helper path follows the rules of the platform it describes, whatever
+  // the host running this test is.
+  assert.equal(nativeHelperPath(location({ platform: "win32", arch: "x64", packaged: true, resourcesPath: "C:\\CanvasTTY\\resources",
+    environment: { [AGENT_HELPERS_ENV]: "native" } })), "C:\\CanvasTTY\\resources\\helpers\\canvastty-helper.exe");
+  assert.deepEqual(agentHelperLaunches(location({ platform: "win32", packaged: true, resourcesPath: "C:\\CanvasTTY\\resources", execPath: "C:\\CanvasTTY\\CanvasTTY.exe" })).hook,
+    { command: "C:\\CanvasTTY\\CanvasTTY.exe", args: ["C:\\CanvasTTY\\resources\\agent-runtime\\hook-helper.mjs"], env: { ELECTRON_RUN_AS_NODE: "1" } });
   assert.equal(nativeHelperPath(location({ environment: { [AGENT_HELPERS_ENV]: "node" } })), null);
   assert.equal(nativeHelperPath(location({ isExecutable: () => false })), null);
   assert.equal(nativeHelperPath(location({ platform: "freebsd" })), null);
