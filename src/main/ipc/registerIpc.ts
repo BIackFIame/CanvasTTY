@@ -177,15 +177,24 @@ export function registerCriticalIpc(ipcMain: IpcRegistrar, {
   });
   observeMainWindow(getMainWindow());
 
-  ipcMain.on(IPC.windowMinimize, (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
+  // Window controls come only from the app's own renderer; a foreign sender is dropped or refused.
+  ipcMain.on(IPC.windowMinimize, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
   ipcMain.handle(IPC.windowToggleMaximize, (event) => {
+    assertMainRenderer(event, getMainWindow);
     const window = BrowserWindow.fromWebContents(event.sender);
     if (!window) return readWindowState(null);
     window.isMaximized() ? window.unmaximize() : window.maximize();
     return readWindowState(window);
   });
-  ipcMain.on(IPC.windowClose, (event) => BrowserWindow.fromWebContents(event.sender)?.close());
-  ipcMain.handle(IPC.windowGetState, (event) => readWindowState(BrowserWindow.fromWebContents(event.sender)));
+  ipcMain.on(IPC.windowClose, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+  ipcMain.handle(IPC.windowGetState, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return readWindowState(BrowserWindow.fromWebContents(event.sender));
+  });
 
   return observeMainWindow;
 }

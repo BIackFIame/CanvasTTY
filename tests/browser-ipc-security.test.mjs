@@ -77,7 +77,12 @@ test("channels that change settings, plugins, secrets or terminals accept only t
     "terminalBounds",
     "terminalRename",
     "terminalSetRestore",
-    "terminalSetVisible"
+    "terminalSetVisible",
+    // The frameless window's own controls.
+    "windowMinimize",
+    "windowToggleMaximize",
+    "windowClose",
+    "windowGetState"
   ]) {
     const start = source.indexOf(`IPC.${channel},`);
     assert.notEqual(start, -1, `${channel} handler is registered`);
