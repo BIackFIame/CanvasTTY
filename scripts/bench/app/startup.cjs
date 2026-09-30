@@ -8,7 +8,7 @@
 // Writes one JSON report to BENCH_OUT.
 const bootEpoch = Date.now();
 const processStartEpoch = bootEpoch - process.uptime() * 1000;
-const { app } = require("electron");
+const { app, session } = require("electron");
 const Module = require("node:module");
 const { writeFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -50,7 +50,9 @@ app.on("browser-window-created", (_event, window) => {
     app.exit(7);
     return;
   }
-  if (!firstWindow) firstWindow = window;
+  if (!firstWindow) {
+    firstWindow = window;
+  }
   window.webContents.on("console-message", (event) => {
     if (event.level === "error") report.rendererErrors.push(String(event.message).slice(0, 300));
   });
@@ -87,7 +89,19 @@ async function measure(win) {
   marks = await js("window.__canvasTTYBootMarks ?? []").catch(() => marks);
   for (const mark of marks) report.renderer[mark.name] = Math.round(mark.epochMs - processStartEpoch);
   for (const mark of globalThis.__canvasTTYMainBootMarks ?? []) report.main[mark.name] = mark.atMs;
+  if (env.BENCH_FRAMES === "1") {
+    const frames = await js("window.__benchFrames ?? []").catch(() => []);
+    report.frames = frames.map((entry) => ({ ...entry, atMs: Math.round(entry.epochMs - processStartEpoch), epochMs: undefined }));
+  }
   report.visibility = await js("document.visibilityState").catch(() => null);
+  // The deferred browser runtime still comes up: its restored tab is back and loaded.
+  const browserDeadline = Date.now() + 10_000;
+  for (;;) {
+    report.browser = await js("window.canvasTTY.browser.getState().then((s) => ({ tabs: s.tabs.length, loading: s.tabs.some((tab) => tab.loading) }))").catch(() => null);
+    if ((report.browser?.tabs ?? 0) > 0 && !report.browser.loading) break;
+    if (Date.now() > browserDeadline) { report.errors.push(`browser runtime: ${JSON.stringify(report.browser)}`); break; }
+    await wait(50);
+  }
 }
 
 async function seed(win) {
@@ -113,6 +127,10 @@ async function seed(win) {
 }
 
 app.whenReady().then(() => {
+  // --frames: what each frame shows at the content centre (scripts/bench-runtime/app/frame-probe.cjs).
+  if (env.BENCH_FRAMES === "1") {
+    session.defaultSession.registerPreloadScript({ type: "frame", id: "bench-frame-probe", filePath: join(SHIMS, "frame-probe.cjs") });
+  }
   const start = async () => {
     const { BrowserWindow } = require("electron");
     for (let i = 0; i < 400 && !firstWindow; i++) await wait(10);

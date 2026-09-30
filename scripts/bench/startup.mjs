@@ -3,7 +3,7 @@
 // from 127.0.0.1 by this script) and one plugin canvas card (examples/plugins/studio-kit), session restore on.
 //
 //   npx electron-vite build
-//   node --experimental-strip-types scripts/bench/startup.mjs [--cold 5] [--warm 10] [--json report.json]
+//   node --experimental-strip-types scripts/bench/startup.mjs [--cold 5] [--warm 10] [--json report.json] [--frames]
 //
 // Cold: every launch gets a fresh copy of the seeded profile without Chromium's caches (code cache, GPU cache).
 // Warm: one copy is reused; a first, discarded launch fills its caches. Launches run one after another. Every launch
@@ -32,12 +32,13 @@ const CHROMIUM_CACHES = ["Cache", "Code Cache", "GPUCache", "DawnGraphiteCache",
   "blob_storage", "Session Storage", "Partitions"];
 
 function options(argv) {
-  const result = { cold: 5, warm: 10, json: null };
+  const result = { cold: 5, warm: 10, json: null, frames: false };
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (flag === "--cold") result.cold = Number(argv[++i]);
     else if (flag === "--warm") result.warm = Number(argv[++i]);
     else if (flag === "--json") result.json = resolve(argv[++i]);
+    else if (flag === "--frames") result.frames = true;
     else throw new Error(`Unknown option ${flag}`);
   }
   return result;
@@ -98,7 +99,8 @@ async function launch(bench, phase, userData) {
     XDG_CONFIG_HOME: join(home, ".config"), XDG_DATA_HOME: join(home, ".local/share"), XDG_STATE_HOME: join(home, ".local/state"),
     XDG_CACHE_HOME: join(home, ".cache"),
     BENCH_PHASE: phase, BENCH_ROOT: ROOT, BENCH_OUT: out, BENCH_USERDATA: userData, BENCH_WORK: bench.work,
-    BENCH_PAGE_URL: bench.pageUrl
+    BENCH_PAGE_URL: bench.pageUrl,
+    ...(bench.frames && phase === "measure" ? { BENCH_FRAMES: "1" } : {})
   };
   try {
     let exit = null;
@@ -153,7 +155,7 @@ async function main() {
     response.end("<!doctype html><title>bench</title><body style=\"font:16px sans-serif\"><h1>Bench page</h1></body>");
   });
   await new Promise((resolvePromise) => server.listen(0, "127.0.0.1", resolvePromise));
-  const bench = { app: join(root, "app"), work: join(root, "w"), pageUrl: `http://127.0.0.1:${server.address().port}/` };
+  const bench = { app: join(root, "app"), work: join(root, "w"), pageUrl: `http://127.0.0.1:${server.address().port}/`, frames: settings.frames };
   mkdirSync(bench.work, { recursive: true });
   appFolder(bench.app);
   const template = join(root, "t");
@@ -193,6 +195,7 @@ async function main() {
     cold: summarize(result.cold),
     warm: summarize(result.warm),
     errors: [...result.cold, ...result.warm].flatMap((report) => report.errors),
+    ...(settings.frames ? { frames: [...result.cold, ...result.warm].map((report) => report.frames ?? []) } : {}),
     rendererErrors: [...new Set([...result.cold, ...result.warm].flatMap((report) => report.rendererErrors))].slice(0, 10)
   };
   if (settings.json) writeFileSync(settings.json, JSON.stringify({ summary, runs: result }, null, 1));
