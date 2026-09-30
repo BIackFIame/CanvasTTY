@@ -1,5 +1,14 @@
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import type { IsolationPaths } from "./isolationPaths.ts";
+
+/** The project's own git hooks folder. */
+export function projectHooks(cwd: string): string {
+  return join(cwd, ".git", "hooks");
+}
+
+function within(path: string, folder: string): boolean {
+  return path === folder || path.startsWith(`${folder.replace(/\/+$/u, "")}/`);
+}
 
 /**
  * The bubblewrap arguments of one isolated agent on Linux: the whole file system read-only, the project, this
@@ -47,13 +56,22 @@ export function bubblewrapArguments(
       throw new Error(`${path} would be writable for the agent (it does not exist yet, so it cannot be mounted read-only).`);
     }
   }
+  // No hooks folder yet (no repository, or one without hooks): a mount cannot be added once the agent runs, so its
+  // `git init` gets a throwaway one. What it writes there never reaches the real folder the person's git runs hooks
+  // from (a hook runs outside the layer the next time the person commits). A `.git` file (a worktree) keeps its hooks
+  // in the main repository.
+  const hooks = projectHooks(launch.cwd);
+  const repository = exists(dirname(hooks));
+  if (!exists(hooks) && repository !== "file" && [...seen].some((folder) => within(hooks, folder))) args.push("--tmpfs", hooks);
   for (const path of paths.unreadable) {
     const kind = exists(path);
     if (kind === "directory") args.push("--tmpfs", path);
     else if (kind === "file") args.push("--ro-bind", "/dev/null", path);
   }
+  // What this launch was handed stays read-only (as in the macOS profile), except the CLI's own moved home, which is
+  // one of its writable folders.
   for (const path of paths.readableAgain) {
-    if (exists(path)) args.push("--bind", path, path);
+    if (exists(path)) args.push(seen.has(path) ? "--bind" : "--ro-bind", path, path);
   }
   if (launch.runtimeDir && exists(launch.runtimeDir) === "directory") args.push("--tmpfs", launch.runtimeDir);
   // CanvasTTY's gateway sockets may sit in the hidden runtime folder or in /tmp; bind their folders back.

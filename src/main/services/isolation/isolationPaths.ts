@@ -90,6 +90,25 @@ function providerFolders(provider: ProviderId, env: IsolationPathInput["env"], h
   }
 }
 
+/** The variables that move a CLI's home away from where providerFolders looks. */
+const HOME_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = {
+  codex: ["CODEX_HOME"],
+  claude: ["CLAUDE_CONFIG_DIR"],
+  grok: ["GROK_HOME"],
+  hermes: ["HERMES_HOME"],
+  kimi: ["KIMI_HOME"],
+  opencode: ["OPENCODE_CONFIG_DIR"],
+  qwen: ["QWEN_HOME"]
+};
+/** A CLI's configuration file named by a variable (it may hold keys): unreadable to other CLIs, never writable to its own. */
+const CONFIG_FILE_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = { opencode: ["OPENCODE_CONFIG"] };
+
+function movedProviderHomes(provider: ProviderId, env: IsolationPathInput["env"], variables = HOME_VARIABLES): string[] {
+  return (variables[provider] ?? [])
+    .map((name) => env[name])
+    .filter((value): value is string => typeof value === "string" && isAbsolute(value));
+}
+
 function xdgFolders(env: IsolationPathInput["env"], home: string): { config: string; data: string; state: string; cache: string } {
   const pick = (value: string | undefined, fallback: string): string => value && isAbsolute(value) ? value : fallback;
   return {
@@ -154,18 +173,22 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const xdg = xdgFolders(input.env, home);
   const own = providerFolders(input.provider, input.env, home);
   // A launch that moved its CLI home into CanvasTTY's account homes (an accounts plugin) or elsewhere: that folder is
-  // its own state too.
-  const movedHomes = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME", "HERMES_HOME", "KIMI_HOME", "OPENCODE_CONFIG_DIR", "QWEN_HOME"]
-    .map((name) => input.env[name])
-    .filter((value): value is string => typeof value === "string" && isAbsolute(value));
+  // its own state too. Only this CLI's own variables: another CLI's (inherited from the person's shell) is that CLI's.
+  const movedHomes = movedProviderHomes(input.provider, input.env);
   const ownFolders = [...own.folders, ...movedHomes];
+  // Other CLIs' credentials where they are by default and where the launch environment moved them (their own home
+  // variables, XDG_*): an exported GROK_HOME is where Grok's sign-in really is.
+  const hides = (folder: string): boolean => [home, input.cwd].some((kept) => kept === folder || kept.startsWith(`${folder.replace(/\/+$/u, "")}/`));
   const others = AGENT_PROVIDERS.filter((provider) => provider !== input.provider)
     .flatMap((provider) => {
-      const folders = providerFolders(provider, {}, home);
-      return [...folders.folders, ...folders.files];
+      const defaults = providerFolders(provider, {}, home);
+      const moved = providerFolders(provider, input.env, home);
+      return [...defaults.folders, ...defaults.files, ...moved.folders, ...moved.files,
+        ...movedProviderHomes(provider, input.env), ...movedProviderHomes(provider, input.env, CONFIG_FILE_VARIABLES)];
     })
-    // A folder another CLI shares with this one (~/.cache/<name> never overlaps; .gemini could) stays this CLI's.
-    .filter((folder) => !ownFolders.includes(folder));
+    // A folder another CLI shares with this one (~/.cache/<name> never overlaps; .gemini could) stays this CLI's; a
+    // variable pointing at HOME or above the project would hide them, so it is not followed.
+    .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
   const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
   const project = input.cwd;

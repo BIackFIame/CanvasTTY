@@ -136,6 +136,86 @@ test("bubblewrap: read-only root, writable project, tmpfs over what may not be r
   assert.deepEqual(args.slice(-5), ["--chdir", w.project, "--", "/usr/bin/claude", "--x"]);
 });
 
+test("the paths: another CLI's home moved by its own variable is unreadable, never this CLI's own", async (t) => {
+  const w = await world(t);
+  const custom = (name) => join(w.base, "creds", name);
+  const env = {
+    ...w.env, GROK_HOME: custom("grok"), CLAUDE_CONFIG_DIR: custom("claude"), HERMES_HOME: custom("hermes"), KIMI_HOME: custom("kimi"),
+    OPENCODE_CONFIG_DIR: custom("opencode"), OPENCODE_CONFIG: custom("opencode.json"), QWEN_HOME: custom("qwen"),
+    XDG_DATA_HOME: custom("xdg-data"), CODEX_HOME: join(w.userData, "account-homes", "a1")
+  };
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env, userDataPath: w.userData, sessionId: "s1" });
+  for (const moved of [custom("grok"), custom("claude"), custom("hermes"), custom("kimi"), custom("opencode"), custom("opencode.json"), custom("qwen"),
+    join(custom("xdg-data"), "opencode"), join(w.home, ".grok"), join(w.home, ".claude")]) {
+    assert.ok(paths.unreadable.includes(moved), `${moved} unreadable`);
+    assert.ok(!paths.writable.includes(moved) && !paths.readableAgain.includes(moved), `${moved} not handed back`);
+  }
+  assert.ok(paths.writable.includes(join(w.userData, "account-homes", "a1")) && paths.readableAgain.includes(join(w.userData, "account-homes", "a1")),
+    "this CLI's own moved home stays its own");
+  assert.ok(!paths.unreadable.includes(join(w.userData, "account-homes", "a1")));
+  const grok = isolationPaths({ provider: "grok", cwd: w.project, sessionTemp: join(w.temp, "s"), env, userDataPath: w.userData, sessionId: "s1" });
+  assert.ok(grok.writable.includes(custom("grok")) && !grok.unreadable.includes(custom("grok")), "Grok's own moved home is Grok's");
+  assert.ok(grok.unreadable.includes(join(w.userData, "account-homes", "a1")), "and Codex's account home is not");
+  // A variable that points at HOME or above the project would hide them: never listed.
+  const wide = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, GROK_HOME: w.home, KIMI_HOME: w.base },
+    userDataPath: w.userData, sessionId: "s1" });
+  assert.ok(!wide.unreadable.includes(w.home) && !wide.unreadable.includes(w.base));
+});
+
+test("bubblewrap: a granted private folder is read-only, the CLI's own moved home stays writable", async (t) => {
+  const w = await world(t);
+  const own = join(w.userData, "agent-control", "sessions", "own");
+  const accountHome = join(w.userData, "account-homes", "a1");
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, CODEX_HOME: accountHome },
+    userDataPath: w.userData, sessionId: "s", grantedPrivate: [own] });
+  const kinds = new Map([[w.project, "directory"], [own, "directory"], [accountHome, "directory"], [join(w.userData, "agent-control"), "directory"],
+    [join(w.userData, "account-homes"), "directory"]]);
+  const args = bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null);
+  const text = args.join(" ");
+  assert.ok(text.includes(`--ro-bind ${own} ${own}`), "the control grant is readable, not writable");
+  assert.ok(!text.includes(`--bind ${own} ${own}`));
+  const afterHidden = text.slice(text.indexOf(`--tmpfs ${join(w.userData, "account-homes")}`));
+  assert.ok(afterHidden.includes(`--bind ${accountHome} ${accountHome}`), "its own account home is bound back writable over the hidden folder");
+});
+
+test("bubblewrap: git hooks the agent could create later never reach the real project", async (t) => {
+  const w = await world(t);
+  const hooks = join(w.project, ".git", "hooks");
+  const argsFor = (kinds, options = {}) => {
+    const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: w.env, userDataPath: w.userData, sessionId: "s", ...options });
+    return bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null).join(" ");
+  };
+  // No repository yet: `git init` inside would create the hooks folder in the writable project.
+  const fresh = argsFor(new Map([[w.project, "directory"]]));
+  assert.ok(fresh.includes(`--tmpfs ${hooks}`), "a throwaway hooks folder the person's git never sees");
+  assert.ok(fresh.indexOf(`--tmpfs ${hooks}`) > fresh.indexOf(`--bind ${w.project} ${w.project}`), "mounted over the project");
+  // A repository without a hooks folder: the same.
+  assert.ok(argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "directory"]])).includes(`--tmpfs ${hooks}`));
+  // Existing hooks stay read-only.
+  const existing = argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "directory"], [hooks, "directory"]]));
+  assert.ok(existing.includes(`--ro-bind ${hooks} ${hooks}`) && !existing.includes(`--tmpfs ${hooks}`));
+  // A worktree's `.git` file (its hooks live in the main repository) and a read-only project need nothing.
+  assert.ok(!argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "file"]])).includes(hooks));
+  assert.ok(!argsFor(new Map([[w.project, "directory"]]), { readOnlyProject: true }).includes(hooks));
+});
+
+test("bubblewrap: the empty .git a throwaway hooks mount leaves behind is removed; a repository made inside stays", async (t) => {
+  const w = await world(t);
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const launch = { sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env };
+  let wrapped = layer.wrap(launch);
+  // What bwrap does for the mount point.
+  await mkdir(join(w.project, ".git", "hooks"), { recursive: true });
+  wrapped.cleanup();
+  assert.equal(existsSync(join(w.project, ".git")), false, "nothing left in the project");
+  wrapped = layer.wrap(launch);
+  await mkdir(join(w.project, ".git", "hooks"), { recursive: true });
+  await writeFile(join(w.project, ".git", "HEAD"), "ref: refs/heads/main\n");
+  wrapped.cleanup();
+  assert.equal(existsSync(join(w.project, ".git", "HEAD")), true, "the agent's repository is kept");
+  assert.equal(existsSync(join(w.project, ".git", "hooks")), true, "with its hooks folder");
+});
+
 test("the launch: wrapped when the layer applies, refused (never unwrapped) when it cannot start", async (t) => {
   const w = await world(t);
   const calls = [];

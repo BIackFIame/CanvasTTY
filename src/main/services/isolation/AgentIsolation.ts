@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts";
@@ -6,7 +6,7 @@ import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/auto
 import { LaunchRefusal } from "../launchRefusal.ts";
 import { isolationPaths } from "./isolationPaths.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
-import { bubblewrapArguments } from "./bubblewrap.ts";
+import { bubblewrapArguments, projectHooks } from "./bubblewrap.ts";
 import { LinuxHostPaths } from "./linuxHostPaths.ts";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
@@ -185,11 +185,19 @@ export class AgentIsolation {
       const kind = (path: string): "file" | "directory" | null => {
         try { const stat = statSync(path); return stat.isDirectory() ? "directory" : stat.isFile() ? "file" : null; } catch { return null; }
       };
+      const args = bubblewrapArguments(paths, { command: launch.command, args: launch.args, cwd, ...(launch.env.XDG_RUNTIME_DIR ? { runtimeDir: launch.env.XDG_RUNTIME_DIR } : {}) }, kind);
+      const hooks = projectHooks(cwd);
+      const mountPoint = args.includes(hooks) && kind(dirname(hooks)) === null;
       return {
         command: this.bubblewrap!,
-        args: bubblewrapArguments(paths, { command: launch.command, args: launch.args, cwd, ...(launch.env.XDG_RUNTIME_DIR ? { runtimeDir: launch.env.XDG_RUNTIME_DIR } : {}) }, kind),
+        args,
         env,
-        cleanup
+        cleanup: () => {
+          cleanup();
+          // bwrap created an empty `.git/hooks` as the throwaway hooks mount point in a folder that had no repository:
+          // unless the agent made one there, nothing is left behind.
+          if (mountPoint) removeMountPoint(hooks);
+        }
       };
     } catch (error) {
       cleanup();
@@ -201,6 +209,15 @@ export class AgentIsolation {
   private enabled(): boolean {
     try { return this.options.enabled() !== false; } catch { return true; }
   }
+}
+
+/** Removes `<project>/.git/hooks` and `.git` when that is all there is (both empty). */
+function removeMountPoint(hooks: string): void {
+  try {
+    if (readdirSync(dirname(hooks)).join("/") !== "hooks") return;
+    rmdirSync(hooks);
+    rmdirSync(dirname(hooks));
+  } catch { /* not empty, or already gone */ }
 }
 
 function findOnPath(name: string, exists: (path: string) => boolean): string | null {
