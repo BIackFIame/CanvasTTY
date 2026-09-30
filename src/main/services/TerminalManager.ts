@@ -711,6 +711,8 @@ export class TerminalManager {
     // Input queued for the launch that ended never reaches this one.
     session.launchEpoch += 1;
     this.wakeLaunchWaiters(session);
+    // What the ended process's hooks and title said is not about the new one: its title counts until its own hooks report.
+    resetLaunchSignals(session);
     let resume: ResumeRequest = null;
     if (options.resume === true && session.metadata.provider !== "terminal") {
       const peers = [...this.sessions.values()].filter((candidate) => (
@@ -2020,6 +2022,13 @@ function environmentBadge(environment: PersistedEnvironmentRef): NonNullable<Ses
  * card they alone end a turn; the title only reports one starting. Without them (hooks off, or a remote run without a
  * bridge) the title's idle stands.
  */
+function resetLaunchSignals(session: ManagedSession): void {
+  delete session.hookSignals;
+  delete session.titleState;
+  if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
+  session.answeredPromptTimer = undefined;
+}
+
 function titleDefersToHooks(session: ManagedSession, state: "idle" | "working" | "needs_approval"): boolean {
   return state !== "working" && session.metadata.provider === "claude" && session.hookSignals !== undefined;
 }

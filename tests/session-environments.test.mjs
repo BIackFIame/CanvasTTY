@@ -192,6 +192,38 @@ test("an environment prepared after its timeout is released, not left running", 
   assert.equal(refused.requests.some((request) => request.step === "release"), false);
 });
 
+test("an environment resumed after its timeout is released again, its data kept, unless a newer resume holds it", async () => {
+  const environment = { pluginId: PLUGIN, kind: "box", ref: { box: "b-1" }, label: "box" };
+  const finishes = [];
+  const { registry, requests } = registryFixture({
+    answers: { resume: () => new Promise((resolve) => { finishes.push(resolve); }), release: {} },
+    timeouts: { resume: 20 }
+  });
+  const result = await registry.resume(environment, "s1");
+  assert.equal(result.ok, false);
+  assert.match(result.reason, /did not answer resume within/u);
+  assert.ok(requests[0].budget > 20, "the plugin call itself may still answer after the launch gave up");
+  finishes[0]({ ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  const releases = () => requests.filter((request) => request.step === "release");
+  assert.deepEqual(releases().map((request) => request.params), [{ sessionId: "s1", kind: "box", ref: { box: "b-1" }, keepData: true, reason: "closed" }],
+    "stopped again, never deleted: the card still holds this environment");
+  // A late "stopped" holds nothing.
+  void registry.resume(environment, "s2").then(() => finishes[1]({ stopped: { reason: "gone" } }));
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases().length, 1);
+  // Timed out, then resumed again (the person restarted the card) and that one answered: the late first answer is not
+  // allowed to stop what the second launch uses.
+  await registry.resume(environment, "s3");
+  const again = registry.resume(environment, "s3");
+  finishes[3]({ ok: true });
+  assert.equal((await again).ok, true);
+  finishes[2]({ ok: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releases().length, 1);
+});
+
 test("wrap output is validated: program, no shell string, env rules, secrets, cwd", async () => {
   const environment = { pluginId: PLUGIN, kind: "box", ref: {}, label: "box" };
   const request = { sessionId: "s1", provider: "terminal", secretEnvNames: [], takenEnv: new Set(["CTTY_CONTRIBUTED"]),

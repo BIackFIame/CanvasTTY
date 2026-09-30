@@ -43,12 +43,17 @@ function registry() {
 function spawner(calls) {
   return (command, args, options) => {
     const data = [];
+    const exits = [];
     const written = [];
-    calls.push({ command, args, options, written, print: (text) => data.forEach((listener) => listener(text)) });
+    calls.push({
+      command, args, options, written,
+      print: (text) => data.forEach((listener) => listener(text)),
+      exit: (exitCode = 0) => exits.forEach((listener) => listener({ exitCode }))
+    });
     return {
       pid: 41_000 + calls.length, process: command, write(text) { written.push(text); }, resize() {}, kill() {}, pause() {}, resume() {},
       onData(listener) { data.push(listener); return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
+      onExit(listener) { exits.push(listener); return { dispose() {} }; }
     };
   };
 }
@@ -317,6 +322,22 @@ test("Claude's «✳» title is idle, and a hooked card's title defers to its ho
   terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "idle" });
   calls[0].print("\u001b]0;◐ Claude Code\u0007");
   assert.equal(status(), "working", "the title still reports a turn starting");
+});
+
+test("a restarted Claude card reads its new process's title until that process's own hooks report", async (t) => {
+  const { terminals, calls } = manager(t);
+  const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: at });
+  const status = () => terminals.list().find((session) => session.id === card.id).status;
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[0].exit(0);
+  await waitFor(() => terminals.list().find((session) => session.id === card.id).exitCode !== null);
+  terminals.restart(card.id);
+  assert.equal(calls.length, 2);
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "idle", "the previous process's hooks say nothing about this one");
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "needs_approval", "once this process's hooks report, the title defers to them again");
 });
 
 test("a declined Claude prompt ends idle; a hook after the answer keeps its state", async (t) => {
