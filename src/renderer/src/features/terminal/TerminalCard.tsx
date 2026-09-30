@@ -45,7 +45,8 @@ import {
   shouldSendTerminalLineBreak
 } from "./terminalShortcuts";
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
-import { attachTerminalOutput } from "./terminalOutput";
+import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutput";
+import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
 import {
   constrainResize,
   snapMove,
@@ -86,9 +87,8 @@ interface TerminalCardProps {
   /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
   groupSelected?: boolean;
   /**
-   * The card is CSS-hidden by an ancestor (HOME editing hides the whole window layer). Gates the
-   * same main-process output stream that summary mode gates: a hidden card has nothing to draw,
-   * so there is no reason to keep delivering terminalData to it or parsing it through xterm.
+   * The card is CSS-hidden by an ancestor (HOME editing hides the whole window layer). One of the
+   * inputs of the card's surface lifecycle (surfaceLifecycle.ts): a hidden card is suspended.
    */
   hidden?: boolean;
   renaming: boolean;
@@ -590,15 +590,25 @@ function TerminalCardView({
     webglContextPool().viewportChanged();
   }, [position, size]);
 
+  // The card's surface lifecycle: suspended while it draws no terminal (summary thumbnail, HOME editing).
+  // Off-screen and minimized cards stay live on purpose: the main process can replay only its scrollback
+  // ring (smaller than xterm's scrollback), so a long unattended stretch would cost the card real history.
+  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, focused });
+  const deliveryGate = useRef<SurfaceGate | null>(null);
   useEffect(() => {
-    // Gate the main-process output stream: in summary mode the card is a cheap
-    // thumbnail, and while `hidden` (HOME editing hides the whole window layer with
-    // CSS) the card draws nothing at all, so either way the renderer skips
-    // terminalData (scrollback stays authoritative and the missing suffix is
-    // replayed once the card is visible and out of summary mode again).
-    window.canvasTTY.terminal.setVisible(session.id, !summaryMode && !hidden);
-    return () => window.canvasTTY.terminal.setVisible(session.id, false);
-  }, [session.id, summaryMode, hidden]);
+    const gate = createTerminalDeliveryGate(window.canvasTTY.terminal, session.id);
+    deliveryGate.current = gate;
+    return () => {
+      gate.dispose();
+      if (deliveryGate.current === gate) deliveryGate.current = null;
+    };
+  }, [session.id]);
+  useEffect(() => {
+    deliveryGate.current?.set(lifecycle);
+    // A suspended card also stops its cursor blink timer; nothing else in xterm runs without output.
+    const terminal = terminalRef.current;
+    if (terminal) terminal.options.cursorBlink = surfaceIsLive(lifecycle);
+  }, [session.id, lifecycle]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
