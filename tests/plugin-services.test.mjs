@@ -331,10 +331,11 @@ test("message sizes are bounded in both directions", async (t) => {
 
 test("timeouts return errors, crashes restart with backoff, and repeated crashes stop restarts", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "canvastty-service-crash-"));
-  const { instance } = supervisor({ requestTimeoutMs: 200, maxRestarts: 2 });
+  const { instance } = supervisor({ maxRestarts: 2 });
   t.after(async () => { await instance.dispose(); await rm(root, { recursive: true, force: true }); });
   await instance.sync([await specFor(root, "com.example.a", "probe", PROBE)]);
-  await assert.rejects(instance.request("com.example.a", "probe", "never-answered", null), /timed out/);
+  assert.equal(await instance.request("com.example.a", "probe", "ping", null), "pong");
+  await assert.rejects(instance.hostCall("com.example.a", "probe", "canvastty.never-answered", null, 200), /timed out/);
 
   await assert.rejects(instance.request("com.example.a", "probe", "crash", null), /stopped/);
   assert.equal(instance.report("com.example.a").services[0].state, "backoff");
@@ -344,6 +345,7 @@ test("timeouts return errors, crashes restart with backoff, and repeated crashes
 
   await assert.rejects(instance.request("com.example.a", "probe", "crash", null), /stopped/);
   await waitFor(() => instance.report("com.example.a").services[0].state === "running");
+  assert.equal(await instance.request("com.example.a", "probe", "ping", null), "pong");
   await assert.rejects(instance.request("com.example.a", "probe", "crash", null), /stopped/);
   const failed = instance.report("com.example.a").services[0];
   assert.equal(failed.state, "failed");
