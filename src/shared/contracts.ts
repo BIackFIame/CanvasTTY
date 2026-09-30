@@ -323,6 +323,8 @@ export interface AppSettings {
   browserAgentAccess: boolean;
   browserShowAgentPresence: boolean;
   browserRestoreTabs: boolean;
+  /** Pause hidden browser tabs after a while, and put long-hidden ones to sleep (they reload when used). */
+  browserPauseHiddenTabs: boolean;
   /** Show an OS notification when a session needs approval or fails. */
   attentionNotifications: boolean;
   /**
@@ -1180,7 +1182,16 @@ export interface BrowserTabSnapshot {
   favicon: string | null;
   agents: AgentPresenceSnapshot[];
   crashState: string | null;
+  /**
+   * A hidden tab CanvasTTY paused to save power: "paused" is frozen (it resumes at once), "sleeping" is unloaded
+   * (it reloads when shown or used). Absent while the tab runs.
+   */
+  lifecycle?: BrowserTabLifecycleState;
+  /** The last picture of a sleeping tab, for the card; only on the active tab. Never sent to agents. */
+  preview?: string | null;
 }
+
+export type BrowserTabLifecycleState = "paused" | "sleeping";
 
 export interface BrowserSnapshot {
   tabs: BrowserTabSnapshot[];
@@ -1376,6 +1387,8 @@ export interface BrowserResult<T = unknown> {
   revisionAfter: number | null;
   data?: T;
   error?: BrowserError;
+  /** Set when the tab had been put to sleep while hidden and was reloaded to run this command. */
+  notice?: string;
 }
 
 export interface BrowserActivityEvent {

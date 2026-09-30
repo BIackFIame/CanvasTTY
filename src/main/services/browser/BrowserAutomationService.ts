@@ -28,6 +28,8 @@ const WAIT_POLL_MAX_MS = 1_000;
 const AUTOMATION_BUSY_GRACE_MS = 500;
 export const BROWSER_SCREENSHOT_MAX_BINARY_BYTES = 340 * 1024;
 const CDP_VERSION = "1.3";
+/** How long a lifecycle probe (beforeunload listeners, scroll position) may take before the answer is "unknown". */
+const LIFECYCLE_PROBE_TIMEOUT_MS = 2_000;
 const PRESENCE_WORLD = "canvastty-agent-presence";
 const INTERACTIVE_ROLES = new Set([
   "button", "checkbox", "combobox", "link", "listbox",
@@ -147,13 +149,65 @@ export interface BrowserPointerResult {
   y: number;
 }
 
+export interface BrowserAutomationOptions {
+  /**
+   * Runs before every automation command reaches the page, after the tab is marked busy: BrowserService resumes a
+   * paused (frozen) tab here, so no CDP command waits on a page whose tasks are stopped.
+   */
+  beforeCommand?(tabId: string): Promise<void>;
+}
+
 export class BrowserAutomationService {
   private readonly sessions = new Map<string, TabSession>();
   private readonly busyTimers = new Map<string, NodeJS.Timeout>();
   private readonly onBusyChange?: (tabId: string, busy: boolean) => void;
+  private readonly beforeCommand?: (tabId: string) => Promise<void>;
 
-  constructor(onBusyChange?: (tabId: string, busy: boolean) => void) {
+  constructor(onBusyChange?: (tabId: string, busy: boolean) => void, options: BrowserAutomationOptions = {}) {
     this.onBusyChange = onBusyChange;
+    this.beforeCommand = options.beforeCommand;
+  }
+
+  /**
+   * Freezes or resumes the page through the tab's own debugger attachment (CDP Page.setWebLifecycleState). This is
+   * not an automation command: it does not mark the tab busy. Chromium only keeps a page frozen while background
+   * throttling is allowed for it, which BrowserService guarantees for the hidden, undriven tabs it freezes.
+   */
+  async setLifecycleState(tabId: string, state: "frozen" | "active"): Promise<void> {
+    const session = this.sessions.get(tabId);
+    if (!session || session.contents.isDestroyed()) return;
+    await this.attach(session);
+    await session.contents.debugger.sendCommand("Page.setWebLifecycleState", { state });
+  }
+
+  /**
+   * Whether the top document has a beforeunload handler (listener or `onbeforeunload`): the page may hold input the
+   * person has not saved. Any failure or a slow answer counts as yes, so an unknown page is never discarded.
+   */
+  async hasBeforeUnload(tabId: string): Promise<boolean> {
+    const session = this.sessions.get(tabId);
+    if (!session || session.contents.isDestroyed()) return true;
+    const group = "canvastty-lifecycle";
+    const probe = async (): Promise<boolean> => {
+      await this.attach(session);
+      const debuggerApi = session.contents.debugger;
+      try {
+        const windowObject = await debuggerApi.sendCommand("Runtime.evaluate", {
+          expression: "window",
+          objectGroup: group,
+          silent: true
+        }) as { result?: { objectId?: string } };
+        const objectId = windowObject.result?.objectId;
+        if (!objectId) return true;
+        const listeners = await debuggerApi.sendCommand("DOMDebugger.getEventListeners", { objectId }) as {
+          listeners?: Array<{ type?: string }>;
+        };
+        return (listeners.listeners ?? []).some((listener) => listener.type === "beforeunload");
+      } finally {
+        await debuggerApi.sendCommand("Runtime.releaseObjectGroup", { objectGroup: group }).catch(() => undefined);
+      }
+    };
+    return await withTimeout(probe(), LIFECYCLE_PROBE_TIMEOUT_MS).catch(() => true);
   }
 
   /**
@@ -901,6 +955,19 @@ export class BrowserAutomationService {
     }
     if (session.revision !== revision) throw staleRef(session.revision);
     this.markBusy(tabId);
+    if (this.beforeCommand) {
+      try {
+        await this.beforeCommand(tabId);
+      } catch (error) {
+        throw new BrowserKernelError("BRIDGE_UNAVAILABLE", "Browser tab could not be resumed.", {
+          retryable: true,
+          cause: error
+        });
+      }
+      if (this.sessions.get(tabId) !== session || session.contents.isDestroyed()) {
+        throw new BrowserKernelError("TAB_CLOSED", "Browser tab is closed.");
+      }
+    }
     await this.attach(session);
     return session;
   }
@@ -1488,4 +1555,15 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
     if (signal.aborted) abort();
     else signal.addEventListener("abort", abort, { once: true });
   });
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Timed out.")), ms);
+      timer.unref?.();
+    })
+  ]).finally(() => clearTimeout(timer));
 }

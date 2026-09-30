@@ -127,6 +127,8 @@ export function BrowserCard({
   const freezeFrameDataUrl = freezeFrame && freezeFrame.tabId === activeTab?.id
     ? freezeFrame.dataUrl
     : null;
+  // A sleeping tab has no page behind the card: its last picture stands in until it reloads.
+  const sleepPreview = activeTab?.lifecycle === "sleeping" ? safeFavicon(activeTab.preview ?? null) : null;
 
   useEffect(() => {
     liveBounds.current = bounds;
@@ -456,6 +458,11 @@ export function BrowserCard({
               >
                 <TabFavicon tab={tab} />
                 <span className="browser-card__tab-title">{tab.title || t(locale, "newTab")}</span>
+                {tab.lifecycle && (
+                  <span className={`browser-card__tab-state browser-card__tab-state--${tab.lifecycle}`}>
+                    {t(locale, tab.lifecycle === "paused" ? "browserTabPaused" : "browserTabSleeping")}
+                  </span>
+                )}
                 {showAgentPresence && <AgentBadges agents={tab.agents} locale={locale} compact />}
               </button>
               <button
@@ -532,6 +539,15 @@ export function BrowserCard({
           <img
             className="browser-card__freeze-frame"
             src={freezeFrameDataUrl}
+            alt=""
+            aria-hidden="true"
+            draggable={false}
+          />
+        )}
+        {!freezeFrameDataUrl && sleepPreview && (
+          <img
+            className="browser-card__freeze-frame browser-card__sleep-preview"
+            src={sleepPreview}
             alt=""
             aria-hidden="true"
             draggable={false}

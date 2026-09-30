@@ -51,7 +51,7 @@ import { AgentControlService } from "./services/AgentControlService";
 import { AgentIsolation } from "./services/isolation/AgentIsolation";
 import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
-import { BrowserService } from "./services/BrowserService";
+import { BrowserService, type BrowserServiceOptions } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
 import { activeCanvasWheelBinding } from "../shared/canvasNavigation";
 import type { ProviderSmokeTarget } from "./services/browser/ProviderElectronSmoke";
@@ -402,6 +402,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   browserService = new BrowserService(() => mainWindow, {
     userDataPath,
     restoreTabs: settings.get().browserRestoreTabs,
+    pauseHiddenTabs: settings.get().browserPauseHiddenTabs,
+    ...browserLifecycleTimingOverride(process.env.CANVASTTY_BROWSER_LIFECYCLE_MS),
     canvasWheelCaptureMode: settings.get().canvasWheelCaptureMode,
     canvasNavigationInput,
     ...(process.env.CANVASTTY_BROWSER_SMOKE_URL
@@ -758,6 +760,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       browserService?.setRestoreTabs(next.browserRestoreTabs).catch((error: unknown) => {
         console.warn("CanvasTTY browser tab restore setting could not be applied.", error);
       });
+      browserService?.setPauseHiddenTabs(next.browserPauseHiddenTabs);
       browserService?.cancelCanvasNavigationGesture();
       browserService?.setCanvasWheelCaptureMode(next.canvasWheelCaptureMode);
       canvasNavigationInput?.setBindings({
@@ -1266,4 +1269,14 @@ function broadcastPluginServiceEvent(event: PluginServiceEvent): void {
 function securePluginStorageAvailable(): boolean {
   if (!safeStorage.isEncryptionAvailable()) return false;
   return process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text";
+}
+
+/**
+ * Shorter pause/sleep delays for measurements and smoke runs: "freezeMs,discardMs" (for example "3000,8000").
+ * Anything else is ignored and the defaults (30 s, 10 min) apply.
+ */
+function browserLifecycleTimingOverride(value: string | undefined): Pick<BrowserServiceOptions, "tabLifecycle"> {
+  const match = /^(\d{3,9}),(\d{3,9})$/u.exec(value ?? "");
+  if (!match) return {};
+  return { tabLifecycle: { freezeAfterMs: Number(match[1]), discardAfterMs: Number(match[2]) } };
 }

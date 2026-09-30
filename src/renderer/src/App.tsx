@@ -153,6 +153,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   browserAgentAccess: true,
   browserShowAgentPresence: true,
   browserRestoreTabs: true,
+  browserPauseHiddenTabs: true,
   attentionNotifications: true,
   attentionQueueVisible: true,
   attentionQueuePlacement: "bottom-right",

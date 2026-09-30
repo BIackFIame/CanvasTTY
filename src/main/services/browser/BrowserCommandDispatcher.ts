@@ -37,6 +37,7 @@ export interface BrowserAuditWriter {
 export interface BrowserDispatchExecution {
   data?: unknown;
   tabId?: string | null;
+  notice?: string;
 }
 
 export interface BrowserCommandDispatcherOptions {
@@ -277,7 +278,8 @@ export class BrowserCommandDispatcher {
         commandSequence,
         revisionBefore,
         revisionAfter,
-        ...(execution.data === undefined ? {} : { data: execution.data })
+        ...(execution.data === undefined ? {} : { data: execution.data }),
+        ...(execution.notice ? { notice: execution.notice } : {})
       };
     } catch (error) {
       const normalized = timed.timedOut

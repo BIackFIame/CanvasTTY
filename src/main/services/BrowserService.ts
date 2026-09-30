@@ -10,7 +10,7 @@ import {
   View,
   WebContentsView
 } from "electron";
-import type { DownloadItem, Session, WebContents, WebPreferences } from "electron";
+import type { DownloadItem, NavigationEntry, Session, WebContents, WebPreferences } from "electron";
 import type {
   AgentPresenceSnapshot,
   BrowserActivityEvent,
@@ -45,6 +45,11 @@ import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab } from "./browse
 import { BrowserKernelError } from "./browser/BrowserErrors.ts";
 import { NativeViewSync } from "./browser/NativeViewSync.ts";
 import {
+  BrowserTabLifecycle,
+  type TabLifecycleOptions,
+  type TabLifecycleState
+} from "./browser/BrowserTabLifecycle.ts";
+import {
   BrowserPolicyService,
   DEFAULT_BROWSER_URL,
   isSafeBrowserUrl,
@@ -61,6 +66,12 @@ const BROWSER_PARTITION = "persist:canvastty-browser";
 const MAX_DOWNLOAD_HISTORY = 100;
 const MAX_FAVICON_BYTES = 256 * 1024;
 const HUMAN_ACTOR: BrowserActor = { kind: "human", connectionId: "canvastty-renderer" };
+/** A sleeping tab's card picture: small enough to ride along in every browser state update. */
+const SLEEP_PREVIEW_MAX_WIDTH = 480;
+const SLEEP_PREVIEW_JPEG_QUALITY = 60;
+/** Waits bounded so a stuck page cannot hold a tab's lifecycle queue (and the commands behind it). */
+const SLEEP_CAPTURE_TIMEOUT_MS = 2_000;
+const WAKE_LOAD_TIMEOUT_MS = 10_000;
 
 // Mirrors the `.browser-card { border-radius: 17px }` declaration in src/renderer/src/styles/app.css: the
 // stylesheet owns this visual property, so the two have to stay in sync by hand.
@@ -87,6 +98,22 @@ interface BrowserTab {
   canvasSinkViewport: BrowserCanvasSinkViewportController;
   /** Mirrors `view.setVisible` so background throttling can be recomputed without an Electron getter. */
   visible: boolean;
+  /** Paused by the hidden-tab lifecycle (CDP Page.setWebLifecycleState frozen). */
+  frozen: boolean;
+  /** Between media-started-playing and media-paused: a playing tab is never paused. */
+  mediaPlaying: boolean;
+  /** Set while the tab sleeps: its WebContents is closed and this is what brings it back. */
+  sleeping: SleepingTab | null;
+}
+
+interface SleepingTab {
+  title: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  /** Back/forward history with each entry's page state (scroll position, form state), for navigationHistory.restore. */
+  entries: NavigationEntry[];
+  index: number;
+  preview: string | null;
 }
 
 interface DownloadWaiter {
@@ -107,6 +134,10 @@ export interface BrowserServiceOptions {
   canvasWheelCaptureMode?: CanvasWheelCaptureMode;
   now?: () => number;
   canvasNavigationInput?: CanvasNavigationInputController;
+  /** "Pause hidden browser tabs": freeze hidden tabs after a while and put long-hidden ones to sleep. */
+  pauseHiddenTabs?: boolean;
+  /** Timing overrides for the hidden-tab lifecycle (measurements and smoke runs). */
+  tabLifecycle?: Pick<TabLifecycleOptions, "freezeAfterMs" | "discardAfterMs" | "maxLiveHiddenTabs">;
 }
 
 export class BrowserService {
@@ -119,7 +150,13 @@ export class BrowserService {
   private readonly policy: BrowserPolicyService;
   private readonly audit: BrowserAuditStore;
   private readonly busyAutomationTabs = new Set<string>();
-  private readonly automation = new BrowserAutomationService((tabId, busy) => this.setTabAutomationBusy(tabId, busy));
+  private readonly lifecycle: BrowserTabLifecycle;
+  /** Sleeping tabs a show has already asked to wake, so a burst of view syncs asks once. */
+  private readonly wakingTabs = new Set<string>();
+  private readonly automation = new BrowserAutomationService(
+    (tabId, busy) => this.setTabAutomationBusy(tabId, busy),
+    { beforeCommand: async (tabId) => { await this.lifecycle.ensureLive(tabId); } }
+  );
   private readonly agents: AgentRegistry;
   private readonly canvasGestures: BrowserCanvasGestureController;
   private readonly canvasPointers: BrowserCanvasPointerRouter;
@@ -159,6 +196,18 @@ export class BrowserService {
     const userDataPath = options.userDataPath ?? app.getPath("userData");
     const downloadRoot = join(options.downloadRoot ?? join(app.getPath("downloads"), "CanvasTTY"), randomUUID());
     this.restoreTabsEnabled = options.restoreTabs ?? true;
+    this.lifecycle = new BrowserTabLifecycle({
+      freezeBlocker: (tabId) => this.freezeBlocker(tabId),
+      discardBlocker: (tabId) => this.discardBlocker(tabId),
+      freeze: (tabId) => this.freezeTab(tabId),
+      resume: (tabId) => this.resumeTab(tabId),
+      discard: (tabId) => this.sleepTab(tabId),
+      restore: (tabId) => this.wakeTab(tabId),
+      stateChanged: (tabId, state) => this.lifecycleChanged(tabId, state)
+    }, {
+      enabled: options.pauseHiddenTabs ?? true,
+      ...options.tabLifecycle
+    });
     this.store = new BrowserStore(userDataPath);
     this.policy = new BrowserPolicyService({
       downloadRoot,
@@ -230,7 +279,8 @@ export class BrowserService {
       waitForDownload: (tabId, timeoutMs, signal) => this.waitForDownload(tabId, timeoutMs, signal),
       touchActor: (actor, tabId, cursor) => this.touchActor(actor, tabId, cursor),
       heartbeatActor: (actor, timestamp) => this.heartbeatActor(actor, timestamp),
-      disconnectActor: (actor) => this.disconnectActor(actor)
+      disconnectActor: (actor) => this.disconnectActor(actor),
+      prepareTab: (tabId) => this.lifecycle.ensureLive(tabId)
     };
     this.core = new BrowserCore({
       host,
@@ -323,10 +373,15 @@ export class BrowserService {
     }
   }
 
+  setPauseHiddenTabs(enabled: boolean): void {
+    this.lifecycle.setEnabled(enabled);
+  }
+
   async dispose(): Promise<void> {
     if (this.disposed) return;
     await this.readyPromise.catch(() => undefined);
     this.disposed = true;
+    this.lifecycle.dispose();
     const draining = this.core.shutdown();
     await this.persistRuntime().catch(() => undefined);
     this.visible = false;
@@ -485,7 +540,7 @@ export class BrowserService {
     this.requireOwner();
     this.visible = true;
     for (const [id, tab] of this.tabs) {
-      if (!tab.view.webContents.isDestroyed()) continue;
+      if (tab.sleeping || !tab.view.webContents.isDestroyed()) continue;
       this.automation.unregister(id);
       this.tabs.delete(id);
     }
@@ -615,6 +670,12 @@ export class BrowserService {
 
   private async hostReload(tabId: string): Promise<BrowserSnapshot> {
     await this.ensureRuntime();
+    this.requireTab(tabId);
+    // A sleeping tab's wake is a load of its page already; a paused one resumes before it reloads.
+    if ((await this.lifecycle.ensureLive(tabId)).reloaded) {
+      this.emit();
+      return this.getState();
+    }
     let tab = this.requireTab(tabId);
     if (tab.view.webContents.isDestroyed()) {
       const url = tab.lastSafeUrl;
@@ -642,6 +703,9 @@ export class BrowserService {
     const view = existingContents
       ? new WebContentsView({ webContents: existingContents })
       : new WebContentsView({ webPreferences: remoteBrowserWebPreferences() });
+    // Electron's `view.webContents` getter returns undefined once the WebContents is closed (a sleeping or destroyed
+    // tab), and every `tab.view.webContents.isDestroyed()` check would throw. Pin the object: closed, it still answers.
+    Object.defineProperty(view, "webContents", { value: view.webContents, configurable: true, enumerable: true });
     const tab: BrowserTab = {
       id,
       view,
@@ -653,9 +717,13 @@ export class BrowserService {
       lastSafeUrl: url,
       canvasCursor: new BrowserCanvasCursorController(view.webContents),
       canvasSinkViewport: new BrowserCanvasSinkViewportController(view.webContents),
-      visible: false
+      visible: false,
+      frozen: false,
+      mediaPlaying: false,
+      sleeping: null
     };
     this.tabs.set(id, tab);
+    this.lifecycle.track(id, false);
     // A reused popup WebContents may already be running unthrottled; recompute from our own state.
     this.applyBackgroundThrottling(tab);
     tab.canvasCursor.set(browserCanvasNavigationCursor(this.canvasNavigationInput?.active ?? false, false));
@@ -774,6 +842,8 @@ export class BrowserService {
       this.emit();
     });
     contents.on("did-finish-load", () => tab.canvasCursor.refresh());
+    contents.on("media-started-playing", () => { tab.mediaPlaying = true; });
+    contents.on("media-paused", () => { tab.mediaPlaying = false; });
     contents.on("did-fail-load", (_event, errorCode, _errorDescription, _url, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
       tab.loading = false;
@@ -828,7 +898,8 @@ export class BrowserService {
       if (this.activeTabId === tab.id) {
         this.invalidateCanvasSequence(false);
       }
-      if (!this.tabs.has(tab.id)) return;
+      // A closed tab, or one put to sleep (or already woken into a new WebContents), did not crash.
+      if (this.tabs.get(tab.id) !== tab || tab.sleeping) return;
       tab.loading = false;
       tab.status = "crashed";
       tab.crashState = "destroyed";
@@ -868,7 +939,9 @@ export class BrowserService {
       event.preventDefault();
       return;
     }
-    const tabId = [...this.tabs.values()].find((tab) => tab.view.webContents.id === contents.id)?.id ?? null;
+    const tabId = [...this.tabs.values()].find((tab) => (
+      !tab.view.webContents.isDestroyed() && tab.view.webContents.id === contents.id
+    ))?.id ?? null;
     const download: BrowserDownloadSnapshot = {
       id,
       tabId,
@@ -1033,6 +1106,8 @@ export class BrowserService {
   }
 
   private destroyTab(tab: BrowserTab): void {
+    this.lifecycle.untrack(tab.id);
+    this.wakingTabs.delete(tab.id);
     this.canvasPointers.cancelTab(tab.id);
     if (this.activeTabId === tab.id) {
       this.invalidateCanvasSequence(false);
@@ -1062,6 +1137,9 @@ export class BrowserService {
     const right = left + (visibleRectangle?.width ?? 0);
     const bottom = top + (visibleRectangle?.height ?? 0);
     const active = this.activeTabId ? this.tabs.get(this.activeTabId) : undefined;
+    if (active?.sleeping && this.visible && this.viewport.surface === "native" && visibleRectangle !== null) {
+      this.wakeForShow(active.id);
+    }
     if (!active || active.view.webContents.isDestroyed()) {
       this.hideClipView();
       this.syncPresenceOverlay(null);
@@ -1150,9 +1228,16 @@ export class BrowserService {
 
   /** Mirrors `view.setVisible` into `tab.visible` and recomputes background throttling for it. */
   private setTabVisible(tab: BrowserTab, visible: boolean): void {
+    // A sleeping tab has no page to show; syncViews wakes it first.
+    if (tab.sleeping) {
+      tab.visible = false;
+      return;
+    }
     this.native.setVisible(tab.view, visible);
+    const changed = tab.visible !== visible;
     tab.visible = visible;
     this.applyBackgroundThrottling(tab);
+    if (changed && this.tabs.get(tab.id) === tab) this.lifecycle.setVisible(tab.id, visible);
   }
 
   private setTabAutomationBusy(tabId: string, busy: boolean): void {
@@ -1160,6 +1245,126 @@ export class BrowserService {
     else this.busyAutomationTabs.delete(tabId);
     const tab = this.tabs.get(tabId);
     if (tab) this.applyBackgroundThrottling(tab);
+    this.lifecycle.setBusy(tabId, busy);
+  }
+
+  private wakeForShow(tabId: string): void {
+    if (this.wakingTabs.has(tabId)) return;
+    this.wakingTabs.add(tabId);
+    void this.lifecycle.ensureLive(tabId).catch((error: unknown) => {
+      console.warn("CanvasTTY could not wake a sleeping browser tab.", error);
+    }).finally(() => {
+      this.wakingTabs.delete(tabId);
+      if (this.disposed) return;
+      this.syncViews();
+      this.emit();
+    });
+  }
+
+  /** Why a hidden tab must keep running now: anything the person or a page could lose by a pause. */
+  private freezeBlocker(tabId: string): string | null {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.sleeping || tab.view.webContents.isDestroyed()) return "closed";
+    const contents = tab.view.webContents;
+    if (tab.status === "crashed") return "crashed";
+    if (tab.loading) return "loading";
+    if (tab.mediaPlaying || contents.isCurrentlyAudible()) return "media";
+    if (this.pendingDialogs.has(tabId)) return "dialog";
+    if (this.downloads.some((download) => download.tabId === tabId && download.completedAt === null)) return "download";
+    if (contents.isBeingCaptured()) return "capture";
+    if (contents.isDevToolsOpened()) return "devtools";
+    return null;
+  }
+
+  /** Sleeping also loses what the page holds in memory: never with an agent on the tab or a beforeunload handler. */
+  private async discardBlocker(tabId: string): Promise<string | null> {
+    const blocker = this.freezeBlocker(tabId);
+    if (blocker) return blocker;
+    if (this.agents.forTab(tabId).length > 0) return "agent";
+    if (await this.automation.hasBeforeUnload(tabId)) return "beforeunload";
+    return this.freezeBlocker(tabId);
+  }
+
+  private async freezeTab(tabId: string): Promise<void> {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.sleeping || tab.view.webContents.isDestroyed()) return;
+    // Chromium keeps a page frozen only while it may be throttled; a hidden, undriven tab already is.
+    this.applyBackgroundThrottling(tab);
+    await this.automation.setLifecycleState(tabId, "frozen");
+  }
+
+  private async resumeTab(tabId: string): Promise<void> {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.sleeping || tab.view.webContents.isDestroyed()) return;
+    await this.automation.setLifecycleState(tabId, "active");
+  }
+
+  private lifecycleChanged(tabId: string, state: TabLifecycleState): void {
+    const tab = this.tabs.get(tabId);
+    if (tab) tab.frozen = state === "frozen";
+    this.emit();
+  }
+
+  /**
+   * Puts a hidden tab to sleep: its WebContents is closed, and the tab keeps its address, title, favicon, history
+   * (with each entry's scroll and form state) and a small picture for the card. False when the tab woke meanwhile.
+   */
+  private async sleepTab(tabId: string): Promise<boolean> {
+    const tab = this.tabs.get(tabId);
+    if (!tab || tab.sleeping || tab.view.webContents.isDestroyed()) return false;
+    const contents = tab.view.webContents;
+    const preview = await boundedWait(capturePreview(contents), SLEEP_CAPTURE_TIMEOUT_MS).catch(() => null);
+    if (this.tabs.get(tabId) !== tab || tab.visible || this.busyAutomationTabs.has(tabId) || contents.isDestroyed()) {
+      return false;
+    }
+    const history = contents.navigationHistory;
+    tab.lastSafeUrl = this.tabUrl(tab);
+    tab.sleeping = {
+      title: contents.getTitle(),
+      canGoBack: history.canGoBack(),
+      canGoForward: history.canGoForward(),
+      entries: history.getAllEntries(),
+      index: history.getActiveIndex(),
+      preview
+    };
+    this.canvasPointers.cancelTab(tab.id);
+    if (this.activeTabId === tab.id) this.invalidateCanvasSequence(false);
+    tab.canvasCursor.dispose();
+    tab.canvasSinkViewport.dispose();
+    this.automation.unregister(tab.id);
+    this.clipView.removeChildView(tab.view);
+    if (this.clipTabId === tab.id) this.clipTabId = null;
+    if (this.pointerTabId === tab.id) this.pointerTabId = null;
+    this.busyAutomationTabs.delete(tab.id);
+    this.pendingDialogs.delete(tab.id);
+    tab.frozen = false;
+    tab.loading = false;
+    tab.mediaPlaying = false;
+    contents.close({ waitForBeforeUnload: false });
+    this.emit();
+    return true;
+  }
+
+  /** Brings a sleeping tab back in a new WebContents, on the history entry it slept on. */
+  private async wakeTab(tabId: string): Promise<void> {
+    const asleep = this.tabs.get(tabId);
+    const saved = asleep?.sleeping;
+    if (!asleep || !saved || this.disposed) return;
+    const tab = this.createRuntimeTab(tabId, asleep.lastSafeUrl, asleep.documentRevision + 1);
+    tab.favicon = asleep.favicon;
+    const current = saved.entries[saved.index];
+    let loading: Promise<void>;
+    if (current && isSafeBrowserUrl(current.url)) {
+      loading = tab.view.webContents.navigationHistory.restore({ entries: saved.entries, index: saved.index })
+        .catch(() => this.loadTab(tab, asleep.lastSafeUrl));
+    } else {
+      loading = this.loadTab(tab, asleep.lastSafeUrl);
+    }
+    this.syncViews();
+    this.emit();
+    // A command after the wake finds the page loaded (or as far as it got): a slow page cannot hold the queue.
+    await boundedWait(loading, WAKE_LOAD_TIMEOUT_MS).catch(() => undefined);
+    if (this.tabs.get(tabId) === tab) void this.persistRuntime();
   }
 
   /**
@@ -1315,6 +1520,26 @@ export class BrowserService {
   private tabSnapshot(tab: BrowserTab, agents: readonly AgentPresenceSnapshot[]): BrowserTabSnapshot {
     const contents = tab.view.webContents;
     const url = this.tabUrl(tab);
+    const tabAgents = agents
+      .filter((presence) => presence.currentTabId === tab.id)
+      .map((presence) => structuredClone(presence));
+    if (tab.sleeping) {
+      return {
+        id: tab.id,
+        url,
+        title: tab.sleeping.title || displayUrl(url),
+        loading: false,
+        canGoBack: tab.sleeping.canGoBack,
+        canGoForward: tab.sleeping.canGoForward,
+        documentRevision: tab.documentRevision,
+        status: "ready",
+        favicon: tab.favicon,
+        agents: tabAgents,
+        crashState: null,
+        lifecycle: "sleeping",
+        ...(this.activeTabId === tab.id ? { preview: tab.sleeping.preview } : {})
+      };
+    }
     const title = contents.isDestroyed() ? "" : contents.getTitle();
     return {
       id: tab.id,
@@ -1326,8 +1551,9 @@ export class BrowserService {
       documentRevision: tab.documentRevision,
       status: tab.status,
       favicon: tab.favicon,
-      agents: agents.filter((presence) => presence.currentTabId === tab.id).map((presence) => structuredClone(presence)),
-      crashState: tab.crashState
+      agents: tabAgents,
+      crashState: tab.crashState,
+      ...(tab.frozen ? { lifecycle: "paused" as const } : {})
     };
   }
 
@@ -1454,4 +1680,27 @@ async function readBoundedResponse(response: Response, maxBytes: number): Promis
     await reader.cancel().catch(() => undefined);
   }
   return Buffer.concat(chunks, size);
+}
+
+/** A small JPEG of the page for a sleeping tab's card, or null when the page draws nothing. */
+async function capturePreview(contents: WebContents): Promise<string | null> {
+  let image = await contents.capturePage(undefined, { stayHidden: true, stayAwake: true });
+  if (image.isEmpty()) return null;
+  const size = image.getSize();
+  if (size.width <= 0 || size.height <= 0) return null;
+  if (size.width > SLEEP_PREVIEW_MAX_WIDTH) {
+    image = image.resize({ width: SLEEP_PREVIEW_MAX_WIDTH, quality: "good" });
+  }
+  return `data:image/jpeg;base64,${image.toJPEG(SLEEP_PREVIEW_JPEG_QUALITY).toString("base64")}`;
+}
+
+function boundedWait<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise,
+    new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("Timed out.")), ms);
+      timer.unref?.();
+    })
+  ]).finally(() => clearTimeout(timer));
 }

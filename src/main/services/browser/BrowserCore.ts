@@ -39,7 +39,15 @@ export interface BrowserCoreHost {
   touchActor(actor: BrowserActor, tabId: string | null, cursor?: BrowserPointerResult): void;
   heartbeatActor(actor: BrowserActor, timestamp: number): void;
   disconnectActor(actor: BrowserActor): void;
+  /**
+   * Wakes a tab CanvasTTY paused or put to sleep while it was hidden, before a command for it runs. `reloaded` means
+   * the tab's page was loaded again: its earlier element refs are stale.
+   */
+  prepareTab?(tabId: string): Promise<{ reloaded: boolean }>;
 }
+
+export const BROWSER_TAB_RELOADED_NOTICE =
+  "Browser tab was reloaded: CanvasTTY had put it to sleep while it was hidden. Element refs from before are stale; observe it again.";
 
 export interface BrowserCoreOptions {
   host: BrowserCoreHost;
@@ -116,7 +124,7 @@ export class BrowserCore {
     actor: BrowserActor,
     command: BrowserCommand,
     signal: AbortSignal
-  ): Promise<{ data?: unknown; tabId?: string | null }> {
+  ): Promise<{ data?: unknown; tabId?: string | null; notice?: string }> {
     throwIfAborted(signal);
     assertCommandArguments(command);
     const tabId = this.resolveTabId(command);
@@ -152,6 +160,30 @@ export class BrowserCore {
     const requiredTabId = tabId ?? (() => {
       throw new BrowserKernelError("TAB_NOT_FOUND", "Browser command requires a tab.");
     })();
+    // Closing needs no live page, and reload wakes a sleeping tab itself (that load is the reload).
+    const wake = command.type === "browser_close_tab" || command.type === "browser_reload" || !this.host.prepareTab
+      ? { reloaded: false }
+      : await this.host.prepareTab(requiredTabId);
+    throwIfAborted(signal);
+    if (!wake.reloaded) return await this.executeTabCommand(actor, command, requiredTabId, signal);
+    try {
+      return { ...await this.executeTabCommand(actor, command, requiredTabId, signal), notice: BROWSER_TAB_RELOADED_NOTICE };
+    } catch (error) {
+      if (!(error instanceof BrowserKernelError)) throw error;
+      throw new BrowserKernelError(error.code, error.message, {
+        retryable: error.retryable,
+        details: { ...(error.details ?? {}), tabReloaded: true },
+        cause: error
+      });
+    }
+  }
+
+  private async executeTabCommand(
+    actor: BrowserActor,
+    command: BrowserCommand,
+    requiredTabId: string,
+    signal: AbortSignal
+  ): Promise<{ data?: unknown; tabId?: string | null }> {
     const tab = this.host.getTab(requiredTabId);
     if (!tab) throw new BrowserKernelError("TAB_NOT_FOUND", "Browser tab is unavailable.");
     if (tab.status === "crashed" && command.type !== "browser_reload" && command.type !== "browser_close_tab") {
@@ -445,7 +477,8 @@ function sanitizeAgentValue(value: unknown, key = "", depth = 0): unknown {
   if (depth > 12) return "[REDACTED]";
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   const normalizedKey = key.toLowerCase();
-  if (normalizedKey === "favicon") return null;
+  // The favicon and a sleeping tab's preview are for the person's card: raw page pixels, never redacted for agents.
+  if (normalizedKey === "favicon" || normalizedKey === "preview") return null;
   if (isSensitiveName(normalizedKey)) {
     return "[REDACTED]";
   }
