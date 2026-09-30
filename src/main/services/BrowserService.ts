@@ -84,6 +84,8 @@ interface BrowserTab {
   lastSafeUrl: string;
   canvasCursor: BrowserCanvasCursorController;
   canvasSinkViewport: BrowserCanvasSinkViewportController;
+  /** Mirrors `view.setVisible` so background throttling can be recomputed without an Electron getter. */
+  visible: boolean;
 }
 
 interface DownloadWaiter {
@@ -115,7 +117,8 @@ export class BrowserService {
   private readonly store: BrowserStore;
   private readonly policy: BrowserPolicyService;
   private readonly audit: BrowserAuditStore;
-  private readonly automation = new BrowserAutomationService();
+  private readonly busyAutomationTabs = new Set<string>();
+  private readonly automation = new BrowserAutomationService((tabId, busy) => this.setTabAutomationBusy(tabId, busy));
   private readonly agents: AgentRegistry;
   private readonly canvasGestures: BrowserCanvasGestureController;
   private readonly canvasPointers: BrowserCanvasPointerRouter;
@@ -646,9 +649,12 @@ export class BrowserService {
       favicon: null,
       lastSafeUrl: url,
       canvasCursor: new BrowserCanvasCursorController(view.webContents),
-      canvasSinkViewport: new BrowserCanvasSinkViewportController(view.webContents)
+      canvasSinkViewport: new BrowserCanvasSinkViewportController(view.webContents),
+      visible: false
     };
     this.tabs.set(id, tab);
+    // A reused popup WebContents may already be running unthrottled; recompute from our own state.
+    this.applyBackgroundThrottling(tab);
     tab.canvasCursor.set(browserCanvasNavigationCursor(this.canvasNavigationInput?.active ?? false, false));
     this.bindTab(tab);
     void this.automation.register(id, view.webContents, tab.documentRevision, (dialog) => {
@@ -1034,7 +1040,8 @@ export class BrowserService {
     this.clipView.removeChildView(tab.view);
     if (this.clipTabId === tab.id) this.clipTabId = null;
     if (this.pointerTabId === tab.id) this.pointerTabId = null;
-    tab.view.setVisible(false);
+    this.busyAutomationTabs.delete(tab.id);
+    this.setTabVisible(tab, false);
     if (!tab.view.webContents.isDestroyed()) tab.view.webContents.close({ waitForBeforeUnload: false });
   }
 
@@ -1068,7 +1075,7 @@ export class BrowserService {
         // The sink is a 4 DIP wheel receiver; rounding it would be a visual regression and could
         // break the wheel-continuity invariant (docs/adr/ADR-20260808-native-browser-wheel-continuity.md).
         active.view.setBorderRadius(0);
-        active.view.setVisible(true);
+        this.setTabVisible(active, true);
         this.clipView.setVisible(true);
       } else {
         this.clipView.setVisible(false);
@@ -1093,7 +1100,7 @@ export class BrowserService {
       height: this.viewport.height
     });
     active.view.setBorderRadius(pageCornerRadius(this.viewport.canvasScale));
-    active.view.setVisible(true);
+    this.setTabVisible(active, true);
     this.clipView.setVisible(true);
     this.syncPresenceOverlay({ owner, tabId: active.id, left, top, right, bottom });
   }
@@ -1105,7 +1112,7 @@ export class BrowserService {
 
   private mountClipTab(owner: BrowserWindow, active: BrowserTab): void {
     for (const tab of this.tabs.values()) {
-      if (tab.id !== active.id) tab.view.setVisible(false);
+      if (tab.id !== active.id) this.setTabVisible(tab, false);
     }
     if (this.clipTabId !== active.id) {
       if (this.clipTabId) {
@@ -1131,11 +1138,36 @@ export class BrowserService {
   private hideClipView(): void {
     this.pointerTabId = null;
     for (const tab of this.tabs.values()) {
-      tab.view.setVisible(false);
+      this.setTabVisible(tab, false);
       // A hidden view must not carry stale corner geometry into its next show.
       tab.view.setBorderRadius(0);
     }
     this.clipView.setVisible(false);
+  }
+
+  /** Mirrors `view.setVisible` into `tab.visible` and recomputes background throttling for it. */
+  private setTabVisible(tab: BrowserTab, visible: boolean): void {
+    tab.view.setVisible(visible);
+    tab.visible = visible;
+    this.applyBackgroundThrottling(tab);
+  }
+
+  private setTabAutomationBusy(tabId: string, busy: boolean): void {
+    if (busy) this.busyAutomationTabs.add(tabId);
+    else this.busyAutomationTabs.delete(tabId);
+    const tab = this.tabs.get(tabId);
+    if (tab) this.applyBackgroundThrottling(tab);
+  }
+
+  /**
+   * Chromium background throttling is disabled only for a tab that is on screen or that an agent
+   * command/screenshot is currently driving; every other hidden/inactive tab runs throttled to save
+   * idle CPU. `sandbox/security` and the wheel-continuity sink surface are untouched by this.
+   */
+  private applyBackgroundThrottling(tab: BrowserTab): void {
+    if (tab.view.webContents.isDestroyed()) return;
+    const keepUnthrottled = tab.visible || this.busyAutomationTabs.has(tab.id);
+    tab.view.webContents.setBackgroundThrottling(!keepUnthrottled);
   }
 
   private observeOwner(owner: BrowserWindow): void {
@@ -1378,6 +1410,8 @@ function remoteBrowserWebPreferences(): WebPreferences {
     plugins: false,
     devTools: false,
     navigateOnDragDrop: false,
+    // Initial state only; BrowserService.applyBackgroundThrottling toggles this per tab at runtime
+    // based on visibility and in-flight automation, via WebContents.setBackgroundThrottling.
     backgroundThrottling: false,
     spellcheck: true
   };

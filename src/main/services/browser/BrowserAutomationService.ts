@@ -20,6 +20,12 @@ const MAX_SENSITIVE_NODES = 1_000;
 /** A text or element wait re-reads the page: every 100 ms at first, then less often, at most once a second. */
 const WAIT_POLL_MS = 100;
 const WAIT_POLL_MAX_MS = 1_000;
+/**
+ * How long a tab is kept "busy" (background throttling disabled) after the last CDP command or
+ * attach for it. Automation commands are a burst of several sequential CDP round-trips, not one;
+ * this bridges the gaps between them without requiring every call site to track begin/end explicitly.
+ */
+const AUTOMATION_BUSY_GRACE_MS = 500;
 export const BROWSER_SCREENSHOT_MAX_BINARY_BYTES = 340 * 1024;
 const CDP_VERSION = "1.3";
 const PRESENCE_WORLD = "canvastty-agent-presence";
@@ -80,6 +86,7 @@ interface RefEntry {
 }
 
 interface TabSession {
+  tabId: string;
   contents: WebContents;
   revision: number;
   refs: Map<string, RefEntry>;
@@ -142,6 +149,36 @@ export interface BrowserPointerResult {
 
 export class BrowserAutomationService {
   private readonly sessions = new Map<string, TabSession>();
+  private readonly busyTimers = new Map<string, NodeJS.Timeout>();
+  private readonly onBusyChange?: (tabId: string, busy: boolean) => void;
+
+  constructor(onBusyChange?: (tabId: string, busy: boolean) => void) {
+    this.onBusyChange = onBusyChange;
+  }
+
+  /**
+   * Marks a tab as actively driven by automation (background throttling must stay disabled) for
+   * a short grace window, refreshed by every CDP command. Idle tabs are left throttleable.
+   */
+  private markBusy(tabId: string): void {
+    const wasBusy = this.busyTimers.has(tabId);
+    const existing = this.busyTimers.get(tabId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.busyTimers.delete(tabId);
+      this.onBusyChange?.(tabId, false);
+    }, AUTOMATION_BUSY_GRACE_MS);
+    this.busyTimers.set(tabId, timer);
+    if (!wasBusy) this.onBusyChange?.(tabId, true);
+  }
+
+  private clearBusy(tabId: string): void {
+    const existing = this.busyTimers.get(tabId);
+    if (!existing) return;
+    clearTimeout(existing);
+    this.busyTimers.delete(tabId);
+    this.onBusyChange?.(tabId, false);
+  }
 
   async register(
     tabId: string,
@@ -159,6 +196,7 @@ export class BrowserAutomationService {
     if (current) this.unregister(tabId);
 
     const session: TabSession = {
+      tabId,
       contents,
       revision,
       refs: new Map(),
@@ -206,6 +244,7 @@ export class BrowserAutomationService {
     const session = this.sessions.get(tabId);
     if (!session) return;
     this.sessions.delete(tabId);
+    this.clearBusy(tabId);
     this.cancelElectronDialog(tabId, session);
     const dialogEvents = session.contents as unknown as EventEmitter;
     dialogEvents.removeListener(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
@@ -861,6 +900,7 @@ export class BrowserAutomationService {
       throw new BrowserKernelError("TAB_CLOSED", "Browser tab is closed.");
     }
     if (session.revision !== revision) throw staleRef(session.revision);
+    this.markBusy(tabId);
     await this.attach(session);
     return session;
   }
@@ -900,6 +940,7 @@ export class BrowserAutomationService {
     method: string,
     params?: Record<string, unknown>
   ): Promise<T> {
+    this.markBusy(session.tabId);
     try {
       return await session.contents.debugger.sendCommand(method, params) as T;
     } catch (error) {
