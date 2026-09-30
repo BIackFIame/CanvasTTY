@@ -43,6 +43,7 @@ import { browserPageWheelReply, type BrowserPageWheelReply } from "./browser/Bro
 import { clipBrowserViewportBounds, normalizeBrowserViewportBounds, sameBrowserViewport } from "./browser/BrowserViewport.ts";
 import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab } from "./browser/BrowserCore.ts";
 import { BrowserKernelError } from "./browser/BrowserErrors.ts";
+import { NativeViewSync } from "./browser/NativeViewSync.ts";
 import {
   BrowserPolicyService,
   DEFAULT_BROWSER_URL,
@@ -123,6 +124,8 @@ export class BrowserService {
   private readonly canvasGestures: BrowserCanvasGestureController;
   private readonly canvasPointers: BrowserCanvasPointerRouter;
   private readonly clipView = new View();
+  /** Every bounds, visibility, corner and throttling change of the native views goes through here. */
+  private readonly native = new NativeViewSync();
   private readonly readyPromise: Promise<void>;
   private readonly downloadWaiters = new Set<DownloadWaiter>();
   private readonly observedOwners = new WeakSet<BrowserWindow>();
@@ -1048,7 +1051,7 @@ export class BrowserService {
   private syncViews(): void {
     const owner = this.getOwner();
     if (!owner || owner.isDestroyed()) {
-      this.clipView.setVisible(false);
+      this.native.setVisible(this.clipView, false);
       return;
     }
     this.observeOwner(owner);
@@ -1070,15 +1073,15 @@ export class BrowserService {
       if (this.presenceWindow && !this.presenceWindow.isDestroyed()) this.presenceWindow.hide();
       if (canvasSurface.kind === "sink") {
         this.mountClipTab(owner, active);
-        this.clipView.setBounds(canvasSurface.layout.clip);
-        active.view.setBounds(canvasSurface.layout.view);
+        this.native.setBounds(this.clipView, canvasSurface.layout.clip);
+        this.native.setBounds(active.view, canvasSurface.layout.view);
         // The sink is a 4 DIP wheel receiver; rounding it would be a visual regression and could
         // break the wheel-continuity invariant (docs/adr/ADR-20260808-native-browser-wheel-continuity.md).
-        active.view.setBorderRadius(0);
+        this.native.setBorderRadius(active.view, 0);
         this.setTabVisible(active, true);
-        this.clipView.setVisible(true);
+        this.native.setVisible(this.clipView, true);
       } else {
-        this.clipView.setVisible(false);
+        this.native.setVisible(this.clipView, false);
       }
       return;
     }
@@ -1091,17 +1094,17 @@ export class BrowserService {
     }
 
     this.mountClipTab(owner, active);
-    this.clipView.setBounds({ x: left, y: top, width: right - left, height: bottom - top });
+    this.native.setBounds(this.clipView, { x: left, y: top, width: right - left, height: bottom - top });
     this.applyPageScale(active);
-    active.view.setBounds({
+    this.native.setBounds(active.view, {
       x: this.viewport.x - left,
       y: this.viewport.y - top,
       width: this.viewport.width,
       height: this.viewport.height
     });
-    active.view.setBorderRadius(pageCornerRadius(this.viewport.canvasScale));
+    this.native.setBorderRadius(active.view, pageCornerRadius(this.viewport.canvasScale));
     this.setTabVisible(active, true);
-    this.clipView.setVisible(true);
+    this.native.setVisible(this.clipView, true);
     this.syncPresenceOverlay({ owner, tabId: active.id, left, top, right, bottom });
   }
 
@@ -1140,14 +1143,14 @@ export class BrowserService {
     for (const tab of this.tabs.values()) {
       this.setTabVisible(tab, false);
       // A hidden view must not carry stale corner geometry into its next show.
-      tab.view.setBorderRadius(0);
+      this.native.setBorderRadius(tab.view, 0);
     }
-    this.clipView.setVisible(false);
+    this.native.setVisible(this.clipView, false);
   }
 
   /** Mirrors `view.setVisible` into `tab.visible` and recomputes background throttling for it. */
   private setTabVisible(tab: BrowserTab, visible: boolean): void {
-    tab.view.setVisible(visible);
+    this.native.setVisible(tab.view, visible);
     tab.visible = visible;
     this.applyBackgroundThrottling(tab);
   }
@@ -1167,7 +1170,7 @@ export class BrowserService {
   private applyBackgroundThrottling(tab: BrowserTab): void {
     if (tab.view.webContents.isDestroyed()) return;
     const keepUnthrottled = tab.visible || this.busyAutomationTabs.has(tab.id);
-    tab.view.webContents.setBackgroundThrottling(!keepUnthrottled);
+    this.native.setBackgroundThrottling(tab.view.webContents, !keepUnthrottled);
   }
 
   private observeOwner(owner: BrowserWindow): void {
