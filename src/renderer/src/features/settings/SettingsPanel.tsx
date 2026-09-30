@@ -111,7 +111,7 @@ import type { PixelSkinThemeId } from "../skins/skinCatalog";
 import type { SkinDetailLevel } from "../skins/SkinLayout";
 import { PixelSkinPackCreator } from "./PixelSkinPackCreator";
 
-type SettingsSection = "general" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "updates" | "about";
+type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "updates" | "about";
 
 const SHORTCUT_LABELS = {
   home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
@@ -128,6 +128,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   icon: UiIconName;
 }> = [
   { id: "general", icon: "app-window" },
+  { id: "keyboardShortcuts", icon: "sliders-horizontal" },
   { id: "appearance", icon: "palette" },
   { id: "agents", icon: "terminal" },
   { id: "controls", icon: "sliders-horizontal" },
@@ -438,7 +439,11 @@ export function SettingsPanel({
                 aria-controls={`settings-panel-${id}`}
                 aria-selected={section === id}
                 title={t(locale, id)}
-                onClick={() => setSection(id)}
+                onClick={() => {
+                  setCapturing(null);
+                  setShortcutError(null);
+                  setSection(id);
+                }}
               >
                 <span className="settings-tabs__icon"><UiIcon name={icon} size="1.05em" /></span>
                 <span>{t(locale, id)}</span>
@@ -477,6 +482,49 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ locale: value as LocaleId })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "attentionNotifications")}
+                description={t(locale, "attentionNotificationsDescription")}
+              >
+                <Segmented
+                  value={settings.attentionNotifications ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ attentionNotifications: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup
+                label={t(locale, "terminalSessionRestore")}
+                description={t(locale, "terminalSessionRestoreDescription")}
+              >
+                <Segmented
+                  value={settings.sessionRestoreMode}
+                  options={[
+                    ["off", t(locale, "doNotSave")],
+                    ["reopen", t(locale, "sessionRestoreReopen")],
+                    ["continue", t(locale, "sessionRestoreContinue")]
+                  ]}
+                  onChange={(value) => void onChange({ sessionRestoreMode: value as SessionRestoreMode })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "persistCanvasRegions")}>
+                <Segmented
+                  value={settings.persistCanvasRegions ? "save" : "discard"}
+                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
+                  onChange={(value) => void onChange({ persistCanvasRegions: value === "save" })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "persistStickyNotes")}>
+                <Segmented
+                  value={settings.persistStickyNotes ? "save" : "discard"}
+                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
+                  onChange={(value) => void onChange({ persistStickyNotes: value === "save" })}
+                />
+              </SettingGroup>
+            </>
+          )}
+
+          {section === "keyboardShortcuts" && (
+            <>
               <SettingGroup label={t(locale, "keyboardPreset")} description={t(locale, "keyboardPresetDescription")}>
                 <Segmented
                   value={settings.keyboardPreset}
@@ -493,8 +541,7 @@ export function SettingsPanel({
                   }}
                 />
               </SettingGroup>
-              <details className="keyboard-shortcuts">
-                <summary>{t(locale, "keyboardShortcuts")}</summary>
+              <div className="keyboard-shortcuts">
                 <p>{t(locale, "keyboardCaptureHint")}</p>
                 {([
                   ["keyboardCanvas", ["home", "renameWindow", "toggleFullscreen", "commandPalette", "openSettings", "focusUp", "focusDown", "focusLeft", "focusRight", "toggleDetail"]],
@@ -544,45 +591,7 @@ export function SettingsPanel({
                 </SettingGroup>
                 {shortcutError && <p className="shortcut-editor__error" role="alert">{shortcutError}</p>}
                 <p>{t(locale, "keyboardCodexDescription")}</p>
-              </details>
-              <SettingGroup
-                label={t(locale, "attentionNotifications")}
-                description={t(locale, "attentionNotificationsDescription")}
-              >
-                <Segmented
-                  value={settings.attentionNotifications ? "on" : "off"}
-                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
-                  onChange={(value) => void onChange({ attentionNotifications: value === "on" })}
-                />
-              </SettingGroup>
-              <SettingGroup
-                label={t(locale, "terminalSessionRestore")}
-                description={t(locale, "terminalSessionRestoreDescription")}
-              >
-                <Segmented
-                  value={settings.sessionRestoreMode}
-                  options={[
-                    ["off", t(locale, "doNotSave")],
-                    ["reopen", t(locale, "sessionRestoreReopen")],
-                    ["continue", t(locale, "sessionRestoreContinue")]
-                  ]}
-                  onChange={(value) => void onChange({ sessionRestoreMode: value as SessionRestoreMode })}
-                />
-              </SettingGroup>
-              <SettingGroup label={t(locale, "persistCanvasRegions")}>
-                <Segmented
-                  value={settings.persistCanvasRegions ? "save" : "discard"}
-                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
-                  onChange={(value) => void onChange({ persistCanvasRegions: value === "save" })}
-                />
-              </SettingGroup>
-              <SettingGroup label={t(locale, "persistStickyNotes")}>
-                <Segmented
-                  value={settings.persistStickyNotes ? "save" : "discard"}
-                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
-                  onChange={(value) => void onChange({ persistStickyNotes: value === "save" })}
-                />
-              </SettingGroup>
+              </div>
             </>
           )}
 

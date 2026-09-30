@@ -246,7 +246,6 @@ button { border: 0; }
 .usage-row > .ui-icon--working { animation: spin 1.7s linear infinite; }
 
 .keyboard-shortcuts { padding: 12px 0; }
-.keyboard-shortcuts > summary { cursor: pointer; font-weight: 700; }
 .keyboard-shortcuts h3 { margin: 18px 0 8px; font-size: 12px; }
 .keyboard-shortcuts p { font-size: 12px; color: var(--text-muted); }
 .keyboard-shortcuts .shortcut-editor__row { margin: 6px 0; }
