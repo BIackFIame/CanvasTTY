@@ -38,6 +38,10 @@ canvas has focus. This focus rule applies on macOS only.
 
 ## Optional Codex frontend
 
+The local Linux adaptation and manual launch instructions are documented in
+[linux-native-editing.md](linux-native-editing.md). It uses the same POSIX launcher
+with a Linux-enabled frontend and Ctrl-based draft editing keys.
+
 **Stock Codex 0.159.2 does not implement whole-draft selection.** The renderer
 bridge alone cannot provide it. The demonstrated implementation is a separate
 [Codex TUI frontend](https://github.com/mrcertis/codex-macos-tui/tree/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos)
@@ -82,7 +86,7 @@ owns the editable draft, completion state, selection and submission decisions.
 Sending Super+A cannot create a select-all action that is missing in the CLI.
 
 Ordinary launches run the resolved official `codex` executable, which manages
-its own TUI/backend connection. The optional macOS bundle instead starts a Node
+its own TUI/backend connection. The optional native-TUI bundle instead starts a Node
 launcher inside the PTY. The launcher starts two child processes:
 
 ```mermaid

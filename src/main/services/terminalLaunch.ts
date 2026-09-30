@@ -74,7 +74,7 @@ export function resolveTerminalLaunch(
     ...launchEnvironment
   };
   const resourcesPath = options.resourcesPath ?? process.resourcesPath;
-  const bundledDirectory = provider === "codex" && platform === "darwin" && resourcesPath
+  const bundledDirectory = provider === "codex" && (platform === "darwin" || platform === "linux") && resourcesPath
     ? posix.join(resourcesPath, "codex-native-tui") : undefined;
   const bundledFrontend = bundledDirectory ? posix.join(bundledDirectory, "canvastty-codex-tui") : undefined;
   const bundledLauncher = bundledDirectory ? posix.join(bundledDirectory, "codex-tui-launch.mjs") : undefined;
@@ -83,10 +83,10 @@ export function resolveTerminalLaunch(
     && (fileExists(bundledFrontend) || fileExists(bundledLauncher)) ? bundledFrontend : undefined);
   if (provider === "codex" && frontend) {
     const launcher = qaFrontend ? environment.CANVASTTY_CODEX_TUI_LAUNCHER_QA : bundledLauncher;
-    if (platform !== "darwin" || providerCli.launcher !== "native"
+    if ((platform !== "darwin" && platform !== "linux") || providerCli.launcher !== "native"
       || !isAbsolute(frontend) || !fileExists(frontend)
       || !launcher || !isAbsolute(launcher) || !fileExists(launcher)) {
-      throw new Error("Codex native TUI requires existing absolute frontend and launcher paths on macOS.");
+      throw new Error("Codex native TUI requires existing absolute frontend and launcher paths on macOS or Linux.");
     }
     return {
       command: process.execPath,
