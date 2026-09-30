@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { renameCommit, visibleTerminalTitle } from "../src/renderer/src/features/terminal/terminalTitle.ts";
+import { compactPath, renameCommit, visibleTerminalTitle } from "../src/renderer/src/features/terminal/terminalTitle.ts";
 
 const CWD_LABEL = "~/projects/canvas";
 
@@ -215,4 +215,13 @@ test("scenario: summary view shows the same name as the expanded header in every
   c.commit();
   assert.equal(c.summary(), "renamed");
   assert.equal(c.summary(), c.header());
+});
+
+test("the working-folder label shortens a home folder on Linux, macOS and Windows", () => {
+  assert.equal(compactPath("/home/runner/projects/canvas"), "~/projects/canvas");
+  assert.equal(compactPath("/Users/runner/projects/canvas"), "~/projects/canvas");
+  assert.equal(compactPath("C:\\Users\\runner\\projects\\canvas"), "~\\projects\\canvas");
+  assert.equal(compactPath("/Users/runner"), "/Users/runner", "the home folder itself stays whole");
+  assert.equal(compactPath("/opt/work"), "/opt/work");
+  assert.equal(compactPath("/Users"), "/Users");
 });

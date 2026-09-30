@@ -88,11 +88,12 @@ export function CanvasRegionCard({
     onMovePreview(region.id, null);
   };
 
-  // Cancelling drops the local bounds and the shared preview; the committed region props
-  // then re-seed `liveBounds`, so the next gesture starts from the persisted position.
+  // Nothing was committed, so the region props do not change and cannot pull the local bounds back: restore them
+  // from the last persisted bounds explicitly (like cancelResize), and drop the shared preview.
   const cancelDrag = (event: React.PointerEvent<HTMLButtonElement>): void => {
     if (dragState.current?.pointerId !== event.pointerId) return;
     dragState.current = null;
+    applyBounds({ position: region.position, size: region.size });
     onMovePreview(region.id, null);
   };
 

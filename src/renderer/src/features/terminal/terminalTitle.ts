@@ -49,3 +49,12 @@ export function renameCommit({ previousVisible, submitted }: RenameCommitInput):
   if (!next || next === previousVisible.trim()) return { kind: "unchanged", title: previousVisible };
   return { kind: "rename", title: next };
 }
+
+/**
+ * The working-folder label: a folder inside a home folder as `~/…` (Linux /home/<name>, macOS /Users/<name>, Windows
+ * <drive>:\Users\<name>); anything else, and a home folder itself, as it is.
+ */
+export function compactPath(path: string): string {
+  const match = /^(?:\/home\/[^/]+|\/Users\/[^/]+)(\/.+)$/u.exec(path) ?? /^[A-Za-z]:\\Users\\[^\\]+(\\.+)$/u.exec(path);
+  return match ? `~${match[1]}` : path;
+}

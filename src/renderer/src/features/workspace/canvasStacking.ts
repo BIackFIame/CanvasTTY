@@ -27,6 +27,22 @@ export function pruneToLive(cache: Map<string, unknown>, live: ReadonlySet<strin
   }
 }
 
+/**
+ * Snap targets per window: the fixed targets and every other window. A list is built the first time a window asks
+ * and kept while this layout lasts (a pan or zoom renders every card again without changing any of them).
+ */
+export function snapTargetsOf(fixed: readonly SessionBounds[], windows: readonly SessionBounds[]): (window: SessionBounds) => SessionBounds[] {
+  const lists = new Map<SessionBounds, SessionBounds[]>();
+  return (window) => {
+    let list = lists.get(window);
+    if (!list) {
+      list = [...fixed, ...windows.filter((candidate) => candidate !== window)];
+      lists.set(window, list);
+    }
+    return list;
+  };
+}
+
 export function bringCanvasLayerToFront(current: readonly string[], id: string): string[] {
   if (!current.includes(id) || current.at(-1) === id) return [...current];
   return [...current.filter((candidate) => candidate !== id), id];
