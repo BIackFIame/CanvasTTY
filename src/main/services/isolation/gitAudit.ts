@@ -1,6 +1,6 @@
-import { lstat, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 
 /**
  * What an isolated agent may have left in a repository under its project that runs a program the next time the
@@ -14,14 +14,20 @@ export type GitRiskItem =
   | { kind: "attributes" };
 
 export interface GitRiskRepository {
-  /** The repository's .git folder. */
+  /** The working tree: the folder that holds the `.git` entry. */
+  worktree: string;
+  /** Its git directory: the `.git` folder, or where a `.git` file points (a worktree, --separate-git-dir). */
   gitDir: string;
+  /** Where its shared config, hooks and info live: `gitDir`, or the main repository of a linked worktree. */
+  commonDir: string;
   items: GitRiskItem[];
 }
 
 const MAX_DEPTH = 8;
 const MAX_FOLDERS = 5_000;
 const MAX_CONFIG_BYTES = 1024 * 1024;
+/** A `.git` file (`gitdir: …`) or a `commondir` file is one short path. */
+const MAX_POINTER_BYTES = 4096;
 const SKIPPED_FOLDERS = new Set(["node_modules", ".venv", "venv", "__pycache__", "target", "dist", "build"]);
 const DISABLED_SUFFIX = ".disabled-by-canvastty";
 const BOOLEAN = /^(?:true|false|yes|no|on|off|1|0|)$/iu;
@@ -152,9 +158,15 @@ async function changedSince(path: string, since: number): Promise<boolean> {
   }
 }
 
-/** The .git folders under `root` (bounded; symbolic links and dependency folders are not followed). */
-async function repositories(root: string): Promise<string[]> {
-  const found: string[] = [];
+/**
+ * The repositories under `root` (bounded; symbolic links and dependency folders are not followed while walking), found
+ * by their `.git` entry: a folder, or a file naming the git directory (`gitdir: <path>`, what `git worktree add` and
+ * `git init --separate-git-dir` write). A `.git` link is resolved to what it names. Each git directory's shared part
+ * (`commondir`, a linked worktree's main repository) is where its config, hooks and info are.
+ */
+async function repositories(root: string): Promise<Array<Omit<GitRiskRepository, "items">>> {
+  const found: Array<Omit<GitRiskRepository, "items">> = [];
+  const seen = new Set<string>();
   let queue: Array<{ folder: string; depth: number }> = [{ folder: root, depth: 0 }];
   let visited = 0;
   while (queue.length > 0 && visited < MAX_FOLDERS) {
@@ -164,9 +176,15 @@ async function repositories(root: string): Promise<string[]> {
       let entries;
       try { entries = await readdir(folder, { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name === ".git") found.push(join(folder, entry.name));
-        else if (depth < MAX_DEPTH && !SKIPPED_FOLDERS.has(entry.name)) next.push({ folder: join(folder, entry.name), depth: depth + 1 });
+        if (entry.name === ".git") {
+          const repository = await gitDirectories(folder, join(folder, entry.name));
+          if (repository && !seen.has(`${repository.gitDir}\0${repository.worktree}`)) {
+            seen.add(`${repository.gitDir}\0${repository.worktree}`);
+            found.push(repository);
+          }
+        } else if (entry.isDirectory() && depth < MAX_DEPTH && !SKIPPED_FOLDERS.has(entry.name)) {
+          next.push({ folder: join(folder, entry.name), depth: depth + 1 });
+        }
       }
     }
     queue = next;
@@ -174,17 +192,68 @@ async function repositories(root: string): Promise<string[]> {
   return found;
 }
 
+/** The git directory a `.git` entry stands for, as git resolves it, or null when it is none. */
+async function gitDirectories(worktree: string, entry: string): Promise<Omit<GitRiskRepository, "items"> | null> {
+  let info;
+  try { info = await stat(entry); } catch { return null; }
+  let gitDir: string;
+  if (info.isDirectory()) {
+    gitDir = entry;
+  } else if (info.isFile()) {
+    const text = await readPointer(entry);
+    const match = text === null ? null : /^gitdir:\s*(.+?)\s*$/mu.exec(text);
+    if (!match) return null;
+    gitDir = isAbsolute(match[1]!) ? match[1]! : resolve(worktree, match[1]!);
+  } else {
+    return null;
+  }
+  gitDir = await realpathOr(gitDir);
+  if (!await isDirectory(gitDir)) return null;
+  const common = await readPointer(join(gitDir, "commondir"));
+  let commonDir = gitDir;
+  if (common !== null && common.trim()) {
+    const target = common.trim();
+    const candidate = await realpathOr(isAbsolute(target) ? target : resolve(gitDir, target));
+    if (await isDirectory(candidate)) commonDir = candidate;
+  }
+  return { worktree, gitDir, commonDir };
+}
+
+async function readPointer(path: string): Promise<string | null> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size > MAX_POINTER_BYTES) return null;
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+async function realpathOr(path: string): Promise<string> {
+  try { return await realpath(path); } catch { return path; }
+}
+
+async function isDirectory(path: string): Promise<boolean> {
+  try { return (await stat(path)).isDirectory(); } catch { return false; }
+}
+
 /**
  * The repositories under `root` whose git folder was created or changed at or after `since`, with what in them
- * makes git run a program: dangerous config keys (all of them, when the config changed), hooks written since, and
- * info/attributes written since.
+ * makes git run a program: dangerous config keys (all of them, when a config changed: the shared `config`, and the
+ * worktree's own `config.worktree`), hooks written since, and info/attributes written since. Linked worktrees of one
+ * main repository share its config and hooks: those are reported once, with the first worktree found.
  */
 export async function auditRepositories(root: string, since: number): Promise<GitRiskRepository[]> {
   const report: GitRiskRepository[] = [];
-  for (const gitDir of await repositories(root)) {
+  const sharedDone = new Set<string>();
+  for (const repository of await repositories(root)) {
+    const { gitDir, commonDir } = repository;
+    const shared = !sharedDone.has(commonDir);
+    sharedDone.add(commonDir);
     const items: GitRiskItem[] = [];
-    for (const name of ["config", "config.worktree"]) {
-      const path = join(gitDir, name);
+    const configs = [...(shared ? [join(commonDir, "config")] : []), join(gitDir, "config.worktree"),
+      ...(shared && commonDir !== gitDir ? [join(commonDir, "config.worktree")] : [])];
+    for (const path of configs) {
       if (!await changedSince(path, since)) continue;
       const text = await readSmall(path);
       if (text === null) continue;
@@ -192,14 +261,16 @@ export async function auditRepositories(root: string, since: number): Promise<Gi
         if (!items.some((item) => item.kind === "config" && item.key === entry.key)) items.push({ kind: "config", ...entry });
       }
     }
-    let hooks: string[] = [];
-    try { hooks = (await readdir(join(gitDir, "hooks"))).sort(); } catch { /* none */ }
-    for (const name of hooks) {
-      if (name.endsWith(".sample") || name.endsWith(DISABLED_SUFFIX)) continue;
-      if (await changedSince(join(gitDir, "hooks", name), since)) items.push({ kind: "hook", name });
+    if (shared) {
+      let hooks: string[] = [];
+      try { hooks = (await readdir(join(commonDir, "hooks"))).sort(); } catch { /* none */ }
+      for (const name of hooks) {
+        if (name.endsWith(".sample") || name.endsWith(DISABLED_SUFFIX)) continue;
+        if (await changedSince(join(commonDir, "hooks", name), since)) items.push({ kind: "hook", name });
+      }
+      if (await changedSince(join(commonDir, "info", "attributes"), since)) items.push({ kind: "attributes" });
     }
-    if (await changedSince(join(gitDir, "info", "attributes"), since)) items.push({ kind: "attributes" });
-    if (items.length > 0) report.push({ gitDir, items });
+    if (items.length > 0) report.push({ ...repository, items });
   }
   return report;
 }
@@ -219,11 +290,10 @@ async function readSmall(path: string): Promise<string | null> {
  * was), and hooks and info/attributes renamed to `<name>.disabled-by-canvastty` (git never runs or reads them there).
  */
 export async function neutralizeRepositories(report: readonly GitRiskRepository[]): Promise<void> {
-  for (const { gitDir, items } of report) {
+  for (const { gitDir, commonDir = gitDir, items } of report) {
     const keys = items.flatMap((item) => item.kind === "config" ? [item.key] : []);
     if (keys.length > 0) {
-      for (const name of ["config", "config.worktree"]) {
-        const path = join(gitDir, name);
+      for (const path of new Set([join(commonDir, "config"), join(commonDir, "config.worktree"), join(gitDir, "config.worktree")])) {
         const text = await readSmall(path);
         if (text === null) continue;
         const cleaned = removeConfigEntries(text, keys);
@@ -231,8 +301,8 @@ export async function neutralizeRepositories(report: readonly GitRiskRepository[
       }
     }
     for (const item of items) {
-      if (item.kind === "hook") await disable(join(gitDir, "hooks", item.name));
-      else if (item.kind === "attributes") await disable(join(gitDir, "info", "attributes"));
+      if (item.kind === "hook") await disable(join(commonDir, "hooks", item.name));
+      else if (item.kind === "attributes") await disable(join(commonDir, "info", "attributes"));
     }
   }
 }

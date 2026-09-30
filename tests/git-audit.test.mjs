@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -73,6 +75,85 @@ test("only repositories changed since the session started are reported, with eac
   assert.deepEqual(await readdir(join(nested, "info")), ["attributes.disabled-by-canvastty"]);
   assert.match(await readFile(join(old, "config"), "utf8"), /hooksPath/u, "the person's own repository is untouched");
   assert.deepEqual(await auditRepositories(root, since), []);
+});
+
+/** Real git, with no configuration of the machine or the person. */
+function git(cwd, ...args) {
+  const empty = join(cwd, "..", ".empty-gitconfig");
+  return execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: empty,
+    GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" } });
+}
+
+test("a repository whose .git is a file (--separate-git-dir) is audited where git keeps it (the reviewer's case)", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-separate-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  await mkdir(project);
+  await writeFile(join(root, ".empty-gitconfig"), "");
+  // Both the working tree and its git directory inside the agent's writable project.
+  git(project, "init", "-q", "--separate-git-dir", join(project, "repo-data"), join(project, "repo"));
+  assert.match(await readFile(join(project, "repo", ".git"), "utf8"), /^gitdir: /u);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const program = join(root, "prog");
+  git(join(project, "repo"), "config", "core.fsmonitor", program);
+  assert.equal(git(join(project, "repo"), "rev-parse", "--is-inside-work-tree").trim(), "true", "git recognizes the repository");
+
+  const found = await auditRepositories(project, 0);
+  const repo = found.find((entry) => entry.worktree === join(project, "repo"));
+  assert.ok(repo, "the repository behind the .git file is reported");
+  assert.equal(repo.gitDir, join(project, "repo-data"));
+  assert.deepEqual(repo.items, [{ kind: "config", key: "core.fsmonitor", value: program }]);
+  assert.equal(found.length, 1, "its git directory is not reported a second time as a folder");
+  await neutralizeRepositories(found);
+  assert.doesNotMatch(await readFile(join(project, "repo-data", "config"), "utf8"), /fsmonitor/u);
+  assert.equal(git(join(project, "repo"), "config", "--get", "core.bare").trim(), "false", "the rest of the config stays");
+});
+
+test("a linked worktree's hooks and shared config are audited in its main repository, its own config.worktree too", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-worktree-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const main = join(project, "main");
+  await mkdir(main, { recursive: true });
+  await writeFile(join(root, ".empty-gitconfig"), "");
+  git(main, "init", "-q");
+  git(main, "commit", "-q", "--allow-empty", "-m", "first");
+  git(main, "worktree", "add", "-q", join(project, "wt"));
+  git(main, "config", "extensions.worktreeConfig", "true");
+  const since = Date.now();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  // From inside the linked worktree: a hook (git runs it from the main repository) and a per-worktree setting.
+  const hooksDir = git(join(project, "wt"), "rev-parse", "--path-format=absolute", "--git-path", "hooks").trim();
+  assert.equal(await realpath(hooksDir), join(main, ".git", "hooks"), "git runs the worktree's hooks from the main repository");
+  const hook = join(main, ".git", "hooks", "post-checkout");
+  await writeFile(hook, "#!/bin/sh\nevil\n", { mode: 0o755 });
+  git(join(project, "wt"), "config", "--worktree", "core.sshCommand", "evil-ssh");
+
+  const found = await auditRepositories(project, since);
+  const worktree = found.find((entry) => entry.worktree === join(project, "wt"));
+  assert.ok(worktree, "the linked worktree is reported");
+  assert.equal(worktree.commonDir, join(main, ".git"));
+  const all = found.flatMap((entry) => entry.items);
+  assert.deepEqual(all.filter((item) => item.kind === "hook"), [{ kind: "hook", name: "post-checkout" }], "the shared hook once, not per worktree");
+  assert.deepEqual(worktree.items.filter((item) => item.kind === "config"), [{ kind: "config", key: "core.sshcommand", value: "evil-ssh" }]);
+  await neutralizeRepositories(found);
+  assert.deepEqual(await auditRepositories(project, since), []);
+  assert.equal(existsSync(hook), false);
+  assert.equal(existsSync(`${hook}.disabled-by-canvastty`), true);
+});
+
+test("the .git entries the audit does not trust: a pointer to nothing, an oversized pointer, a linked folder it does not walk into", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-pointers-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "a"));
+  await writeFile(join(root, "a", ".git"), "gitdir: ../missing\n");
+  await mkdir(join(root, "b"));
+  await writeFile(join(root, "b", ".git"), `gitdir: ${"x".repeat(5000)}\n`);
+  const outside = await realpath(await mkdtemp(join(tmpdir(), "canvastty-git-outside-")));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await repo(outside, "r", "[core]\n\thooksPath = /x\n");
+  await symlink(outside, join(root, "link"), "dir").catch(() => undefined);
+  assert.deepEqual(await auditRepositories(root, 0), []);
 });
 
 // ---- the card: audited when an isolated session ends, is closed, or is restored ----

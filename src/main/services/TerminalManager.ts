@@ -1339,7 +1339,7 @@ export class TerminalManager {
       id: randomUUID(),
       cwd: session.metadata.cwd,
       repositories: repositories.map((repository) => ({
-        path: dirname(repository.gitDir),
+        path: repository.worktree,
         items: repository.items.map((item) => item.kind === "config"
           ? { ...item, value: this.redactSecrets(item.value).slice(0, 160) }
           : item)
