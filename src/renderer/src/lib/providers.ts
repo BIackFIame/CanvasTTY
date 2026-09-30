@@ -1,4 +1,4 @@
-import { PROVIDER_LABELS } from "../../../shared/contracts.ts";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS, PROVIDER_LABELS } from "../../../shared/contracts.ts";
 import type { AgentProviderId, AppSettings, LimitProviderId, ProviderId } from "../../../shared/contracts";
 import type { TranslationKey } from "./i18n";
 
@@ -27,8 +27,7 @@ export const PROVIDERS: Record<ProviderId, ProviderDefinition> = {
   antigravity: { id: "antigravity", label: PROVIDER_LABELS.antigravity, dangerKey: "dangerAntigravity", installUrl: "https://antigravity.google/docs/cli/install/" }
 };
 
-export const AGENT_PROVIDERS: AgentProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"];
-export const LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
+export { AGENT_PROVIDERS, LIMIT_PROVIDERS };
 
 export function resolveHomeLauncherProviders(
   settings: Pick<Partial<AppSettings>, "homeLauncherProviders">

@@ -1,16 +1,19 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isHomeMediaPath } from "./homeMedia.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
   ApiProfile,
   ApiProfileProtocol,
   AppSettings,
+  AppSkinId,
   BrowserCanvasState,
   CanvasLauncherItemId,
   CanvasRegion,
   CanvasColorId,
+  CanvasBackgroundId,
   CanvasOverlayPlacement,
   CanvasWheelCaptureMode,
   CanvasPatternId,
@@ -26,16 +29,19 @@ import type {
   MinimapInteractionMode,
   PaletteId,
   PluginCanvasInstance,
+  PixelSkinPreferredDetail,
   ProviderSecretId,
   RadialLauncherItemId,
   SessionRestoreMode,
   SessionRowColorMode,
   ShortcutBindings,
   StickyNote,
+  TerminalBorderSkinId,
   ZoomSensitivity
 } from "../../shared/contracts";
 import {
   API_PROFILE_PROTOCOLS,
+  BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_HOME_ACCENT_COLORS,
@@ -56,12 +62,14 @@ import {
   UI_SCALE_MIN,
   UI_SCALE_STEP
 } from "../../shared/contracts.ts";
+import { isTerminalBorderSkinId } from "./SkinRegistry.ts";
 import {
   canvasNavigationPlatform,
   defaultCanvasWheelBinding,
   normalizeCanvasOverrideBinding,
   type CanvasNavigationPlatform
 } from "../../shared/canvasNavigation.ts";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "../../shared/contracts.ts";
 
 const LOCALES = new Set<LocaleId>(["ru", "en"]);
 const SESSION_RESTORE_MODES = new Set<SessionRestoreMode>(["off", "reopen", "continue"]);
@@ -70,6 +78,7 @@ const HOME_ACCENT_PRESETS = new Set<HomeAccentPresetId>(["classic", "warm", "coo
 const SESSION_ROW_COLOR_MODES = new Set<SessionRowColorMode>(["monochrome", "status"]);
 const CANVAS_COLORS = new Set<CanvasColorId>(["sage", "lilac", "night", "sand", "mist", "rose", "slate"]);
 const PATTERNS = new Set<CanvasPatternId>(["dots", "grid", "waves", "diagonal", "rings", "none"]);
+const APP_SKINS = new Set<AppSkinId>(["classic", "atelier", "signal", "greenhouse", "midnight"]);
 const MEDIA_FITS = new Set<MediaFit>(["cover", "contain"]);
 // 21: the on/off "restoreTerminalSessions" became sessionRestoreMode (off / reopen / continue).
 const SETTINGS_VERSION = 21;
@@ -81,10 +90,9 @@ const PROVIDER_ADDITIONS_SETTINGS_VERSION = 19;
 const ADDED_AGENT_PROVIDERS: AgentProviderId[] = ["omp", "pi", "cursor", "minimax", "devin", "antigravity"];
 const LEGACY_AGENT_PROVIDERS: AgentProviderId[] = ["codex", "claude", "kimi", "opencode", "hermes"];
 const PRE_QWEN_AGENT_PROVIDERS: AgentProviderId[] = [...LEGACY_AGENT_PROVIDERS, "grok"];
-const AGENT_PROVIDERS = new Set<AgentProviderId>(["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const LEGACY_LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "kimi"];
 const PRE_QWEN_LIMIT_PROVIDERS: LimitProviderId[] = [...LEGACY_LIMIT_PROVIDERS, "opencode", "grok"];
-const LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 const LIMIT_PROVIDER_SET = new Set<LimitProviderId>(LIMIT_PROVIDERS);
 const CANVAS_LAUNCHER_ITEM_SET = new Set<CanvasLauncherItemId>(CANVAS_LAUNCHER_ITEMS);
 const RADIAL_LAUNCHER_ITEM_SET = new Set<RadialLauncherItemId>(RADIAL_LAUNCHER_ITEMS);
@@ -113,7 +121,7 @@ export class SettingsStore {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
     this.availableProviders = new Set(availability
-      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
+      ? AGENT_PROVIDERS.filter((provider) => availability[provider])
       : AGENT_PROVIDERS);
     this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
   }
@@ -162,6 +170,7 @@ export class SettingsStore {
         || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
         || !("canvasColor" in source)
+        || !("canvasBackground" in source)
         || !("minimapPlacement" in source)
         || !("minimapInteractionMode" in source)
         || !("shortcutHintsPlacement" in source)
@@ -233,12 +242,18 @@ export class SettingsStore {
   }
 
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
-    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
+    this.availableProviders = new Set(AGENT_PROVIDERS.filter((provider) => availability[provider]));
+    // Filter in queue order: a snapshot taken while an update() is still
+    // writing lacks that update, and persisting it afterwards dropped the
+    // update from the file (it stayed only in memory).
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (!providerSelectionsChanged(this.value, filtered)) return;
+      await this.persist(filtered);
       this.value = filtered;
-      await this.queuePersist();
-    }
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 
@@ -343,7 +358,12 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
+    canvasBackground: "none",
     pattern: "dots",
+    terminalBorderSkin: "classic",
+    terminalSkinDetail: "detailed",
+    terminalSkinAnimationEnabled: true,
+    appSkin: "classic",
     snapToGrid: true,
     invertTerminalWheel: true,
     invertCanvasWheel: false,
@@ -436,12 +456,14 @@ export function normalizeSettings(
   }
 
   const source = candidate as Partial<AppSettings> & { zoomOverApplications?: unknown };
-  const mediaPath = source.mediaPath === null || typeof source.mediaPath === "string"
+  // Only an absolute path to a supported image is kept; anything else keeps the
+  // previous choice. The main process reads this file for the Home screen.
+  const mediaPath = source.mediaPath === null || isHomeMediaPath(source.mediaPath)
     ? source.mediaPath
-    : fallback.mediaPath;
+    : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
-      (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)
+      (provider): provider is AgentProviderId => AGENT_PROVIDER_SET.has(provider as AgentProviderId)
     )
     : fallback.acknowledgedDangerousProfiles;
   const shortcuts = normalizeShortcuts(source.shortcuts, fallback.shortcuts);
@@ -495,6 +517,16 @@ export function normalizeSettings(
     : CANVAS_COLORS.has(canvasColorCandidate as CanvasColorId)
       ? canvasColorCandidate as CanvasColorId
       : fallback.canvasColor;
+  // Preserve the visible background once when loading a profile from before independent backgrounds.
+  const canvasBackgroundCandidate = source.canvasBackground === undefined
+    ? source.terminalBorderSkin
+    : source.canvasBackground;
+  const canvasBackground: CanvasBackgroundId = canvasBackgroundCandidate === "none"
+    || (BUNDLED_CANVAS_BACKGROUND_IDS as readonly unknown[]).includes(canvasBackgroundCandidate)
+    || (typeof canvasBackgroundCandidate === "string" && canvasBackgroundCandidate.startsWith("pixel:")
+      && isTerminalBorderSkinId(canvasBackgroundCandidate))
+    ? canvasBackgroundCandidate as CanvasBackgroundId
+    : fallback.canvasBackground ?? "none";
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
@@ -529,9 +561,22 @@ export function normalizeSettings(
       : fallback.baseProtectionEnabled ?? true,
     uiScale: normalizeUiScale(source.uiScale, fallback.uiScale ?? DEFAULT_UI_SCALE),
     canvasColor,
+    canvasBackground,
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)
       ? source.pattern as CanvasPatternId
       : fallback.pattern,
+    terminalBorderSkin: isTerminalBorderSkinId(source.terminalBorderSkin)
+      ? source.terminalBorderSkin as TerminalBorderSkinId
+      : fallback.terminalBorderSkin,
+    terminalSkinDetail: source.terminalSkinDetail === "minimal" || source.terminalSkinDetail === "detailed"
+      ? source.terminalSkinDetail as PixelSkinPreferredDetail
+      : fallback.terminalSkinDetail,
+    terminalSkinAnimationEnabled: typeof source.terminalSkinAnimationEnabled === "boolean"
+      ? source.terminalSkinAnimationEnabled
+      : fallback.terminalSkinAnimationEnabled,
+    appSkin: APP_SKINS.has(source.appSkin as AppSkinId)
+      ? source.appSkin as AppSkinId
+      : fallback.appSkin,
     snapToGrid: typeof source.snapToGrid === "boolean" ? source.snapToGrid : fallback.snapToGrid,
     invertTerminalWheel: typeof source.invertTerminalWheel === "boolean"
       ? source.invertTerminalWheel
@@ -677,9 +722,9 @@ function normalizeAgentProviderSelection(
 ): AgentProviderId[] {
   if (!Array.isArray(candidate)) return [...fallback];
   const selected = new Set(candidate.filter((provider): provider is AgentProviderId => (
-    typeof provider === "string" && AGENT_PROVIDERS.has(provider as AgentProviderId)
+    typeof provider === "string" && AGENT_PROVIDER_SET.has(provider as AgentProviderId)
   )));
-  return [...AGENT_PROVIDERS].filter((provider) => selected.has(provider));
+  return AGENT_PROVIDERS.filter((provider) => selected.has(provider));
 }
 
 function filterUnavailableProviders(settings: AppSettings, available: ReadonlySet<AgentProviderId>): AppSettings {
@@ -841,7 +886,7 @@ function normalizePluginCanvas(candidate: unknown, fallback: readonly PluginCanv
   return instances;
 }
 
-export function normalizeCanvasRegions(
+function normalizeCanvasRegions(
   candidate: unknown,
   fallback: readonly CanvasRegion[] = []
 ): CanvasRegion[] {

@@ -36,18 +36,18 @@ export interface AgentToolCall {
   input: Record<string, unknown>;
 }
 
-export const AGENT_TOOL_TIMEOUT_MS = 15_000;
+const AGENT_TOOL_TIMEOUT_MS = 15_000;
 /** The answer an agent gets back, after redaction; the bridge caps a whole response at 128 KB. */
-export const MAX_AGENT_TOOL_RESULT_CHARS = 32 * 1024;
+const MAX_AGENT_TOOL_RESULT_CHARS = 32 * 1024;
 const MAX_AGENT_TOOL_RESULT_JSON_BYTES = 96 * 1024;
 /**
  * Agents whose launch lists canvastty_agents tools per session. Kimi and Hermes share one configuration file
  * between cards, so they keep the core tools only.
  */
-export const PLUGIN_TOOL_PROVIDERS: ReadonlySet<ProviderId> = new Set<AgentProviderId>(["claude", "codex", "qwen", "opencode"]);
+const PLUGIN_TOOL_PROVIDERS: ReadonlySet<ProviderId> = new Set<AgentProviderId>(["claude", "codex", "qwen", "opencode"]);
 
 /** `<pluginId>__<name>` with the id's dots as `_`: the shape Anthropic and OpenAI accept for tool names. */
-export const isPluginToolName = isPluginOrchestrationTool;
+const isPluginToolName = isPluginOrchestrationTool;
 
 /**
  * The name agents see for a plugin tool: `<pluginId>__<name>`, dots in the id written as `_` (ids never contain

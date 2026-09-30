@@ -6,6 +6,7 @@ import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
 import {
   providerTerminalBatchCommandLine,
+  windowsCommandPromptPath,
   type ProviderCliResolution
 } from "./providerCliRegistry.ts";
 
@@ -207,13 +208,9 @@ function resolveWindowsCommandPrompt(
   environment: Readonly<NodeJS.ProcessEnv>,
   fileExists: (path: string) => boolean
 ): string {
-  const configured = environment.ComSpec || environment.COMSPEC;
-  if (configured && fileExists(configured)) return configured;
-  const fromPath = findWindowsNativeCommand("cmd", environment, fileExists);
-  if (fromPath) return fromPath;
-  const systemRoot = environment.SystemRoot || environment.WINDIR;
-  const systemCommandPrompt = systemRoot ? win32.join(systemRoot, "System32", "cmd.exe") : null;
-  if (systemCommandPrompt && fileExists(systemCommandPrompt)) return systemCommandPrompt;
+  // The same lookup as batch provider launches: no PATH search for cmd.exe.
+  const commandPrompt = windowsCommandPromptPath(environment, fileExists);
+  if (commandPrompt) return commandPrompt;
   throw new Error("No supported Windows shell was found (PowerShell, pwsh, or cmd.exe).");
 }
 
@@ -313,7 +310,9 @@ const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
 };
 
 /** Claude settings keys that decide approvals, the hooks or the sandbox; a plugin's settings may carry e.g. `env` only. */
-const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper"];
+// `allowedHttpHookUrls` and `httpHookAllowedEnvVars` would silently switch off CanvasTTY's HTTP lifecycle hooks.
+const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper",
+  "allowedHttpHookUrls", "httpHookAllowedEnvVars"];
 // Claude 2.1.281 --help: `--bare` and `--safe-mode` skip hooks; `--allowedTools` approves tools without asking;
 // `--permission-prompt-tool` / `--permission-prompts` decide who answers permission prompts.
 const CLAUDE_CORE_OWNED_FLAGS = new Set(["--bare", "--safe-mode", "--allowedTools", "--allowed-tools", "--permission-prompt-tool", "--permission-prompts"]);

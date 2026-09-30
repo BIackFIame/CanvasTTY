@@ -55,6 +55,9 @@ export const OPENCODE_DECISIONS_ENV = "CANVASTTY_RUNTIME_DECISIONS";
 // local model. The session's hook, helper and gateway deadlines are set at launch from the longest such budget and
 // passed to the helper in this variable; without it the defaults above hold.
 export const DECISION_BUDGET_ENV = "CANVASTTY_RUNTIME_DECISION_MS";
+// Set to "1" in the decision hook's own command when the session was launched with it (base protection on, or a
+// decision plugin applies). The gate then fails closed: a call it could not check is denied instead of left to run.
+export const DECISION_FAIL_CLOSED_ENV = "CANVASTTY_RUNTIME_FAIL_CLOSED";
 export const DEFAULT_DECIDE_TIMEOUT_MS = 3_000;
 export const MIN_DECIDE_TIMEOUT_MS = 1_000;
 export const MAX_DECIDE_TIMEOUT_MS = 60_000;
@@ -74,3 +77,15 @@ export function helperDeadlineMs(env) {
   const raw = env?.[DECISION_BUDGET_ENV];
   return permissionGateTimings(typeof raw === "string" && /^\d{1,6}$/.test(raw) ? Number(raw) : undefined).helperMs;
 }
+
+// Claude Code's own HTTP hooks (`type: "http"`, measured with 2.1.281) carry the lifecycle events straight to the
+// gateway's loopback listener: no process per event. Claude fills both headers from the session's environment
+// (`allowedEnvVars`), so the capability never appears in its argv or in a file. Decision hooks (PreToolUse) stay on
+// permission-gate.mjs and the 0600 socket: every failure of an HTTP hook lets the tool run (fail open).
+export const CLAUDE_HTTP_HOOK = Object.freeze({
+  pathPrefix: "/claude/v1/",
+  sessionHeader: "x-canvastty-session",
+  capabilityHeader: "x-canvastty-capability",
+  // The oldest Claude Code whose HTTP hooks, header interpolation and loopback rule were checked end to end.
+  minimumVersion: "2.1.281"
+});

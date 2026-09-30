@@ -2,7 +2,7 @@ import { ORCHESTRATION_MCP_SERVER_NAME } from "../../agent-browser/orchestration
 import { MCP_SERVER_NAME } from "../../agent-browser/tool-catalog.mjs";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 
-export const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
+const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
 
 interface OpenCodeStdioHelper {
   command: string;

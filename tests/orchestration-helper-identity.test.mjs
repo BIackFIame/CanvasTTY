@@ -48,6 +48,7 @@ test("the orchestration helper authenticates with the card's own capability and 
   const calls = [];
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(runtimeDirectory, "runtime"),
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe"),
     handler: {
       async execute(sessionId, request) {
         calls.push({ sessionId, tool: request.tool });

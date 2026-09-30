@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
   AgentProviderId,
   AppSettings,
@@ -36,6 +37,9 @@ import { StickyNoteCard } from "../notes/StickyNoteCard";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
 import { TerminalCard } from "../terminal/TerminalCard";
+import { shouldTogglePixelSkinMasterView } from "../terminal/terminalShortcuts";
+import { isPixelSkinThemeId } from "../skins/skinCatalog";
+import { isPixelSkinPackId, usePixelSkinPackAssets } from "../skins/SkinAssets";
 import { CanvasCommandPalette } from "./CanvasCommandPalette";
 import { CanvasContextMenu } from "./CanvasContextMenu";
 import { CanvasMinimap } from "./CanvasMinimap";
@@ -84,8 +88,9 @@ import { snapMove } from "./snap";
 import { useCanvasPointerNavigation } from "./useCanvasPointerNavigation";
 import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
+import { webglContextPool } from "../terminal/webglContextPool";
 
-const CANVAS_OVERLAY_PLACEMENTS: CanvasOverlayPlacement[] = [
+const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
   "top-left",
   "top-right",
   "bottom-left",
@@ -101,6 +106,20 @@ const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefi
 };
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
+const NO_SNAP_TARGETS: readonly SessionBounds[] = [];
+
+/** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
+interface TerminalCardHandlers {
+  activate(selectedSession: SessionSnapshot, fullscreen: boolean): void;
+  select(id: string, fullscreen: boolean): void;
+  toggleFullscreen(id: string): void;
+  rename(id: string, title: string): Promise<void>;
+  renameEnd(): void;
+  boundsChange(id: string, bounds: SessionBounds): void;
+  restart(id: string, resume?: boolean): Promise<void>;
+  dispose(id: string, keepEnvironmentData?: boolean): void;
+  openUrl(url: string): void;
+}
 
 /** A group drag's commit basis, frozen once when the press activates: the pressed layer's start
  * bounds plus every member's, so nothing the gesture itself previews can feed back into it. */
@@ -224,14 +243,22 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const [noteEditRequest, setNoteEditRequest] = useState<{ id: string; version: number } | null>(null);
   const [regionMovePreview, setRegionMovePreview] = useState<RegionMovePreview | null>(null);
   const [marqueeSelection, setMarqueeSelection] = useState<ReadonlySet<string>>(EMPTY_MARQUEE_SELECTION);
+  const [masterPixelSkinSessionIds, setMasterPixelSkinSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const overlays = useRef<HTMLDivElement>(null);
   const [overlayRects, setOverlayRects] = useState<SessionBounds[]>([]);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const cameraRef = useRef(camera);
   cameraRef.current = camera;
   const commitCamera = useCallback((next: CameraState): void => {
     cameraRef.current = next;
     onCameraChange(next);
   }, [onCameraChange]);
+  useEffect(() => {
+    // What each terminal card covers on screen decides which ones draw with WebGL. The pool waits for the
+    // camera to settle, so a pan only restarts its timer.
+    webglContextPool().viewportChanged();
+  }, [camera.x, camera.y, camera.zoom, homeEditing, fullscreenSessionId]);
 
   const updateRegionMovePreview = useCallback((regionId: string, bounds: SessionBounds | null): void => {
     setRegionMovePreview((current) => {
@@ -510,6 +537,62 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   );
   const widgetFocus = focusController.state;
   const routeWidgetWheelToCanvas = wheelNavigation.routeWidgetWheelToCanvas;
+  // TerminalCard is memoized: its callbacks are the same functions on every render and call the latest
+  // handlers through this ref, so a pan (a workspace render per pointer move) renders no card.
+  const terminalCardHandlers = useRef<TerminalCardHandlers | null>(null);
+  terminalCardHandlers.current = {
+    activate(selectedSession, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(selectedSession.id));
+      focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
+      onFocusSession(selectedSession);
+    },
+    select(id, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(id));
+      focusController.cancelHover();
+      focusController.focus(terminalCanvasWidgetId(id), "explicit");
+      onSelectSession(id);
+    },
+    toggleFullscreen: onToggleFullscreen,
+    rename: onRenameSession,
+    renameEnd: onRenameEnd,
+    boundsChange: onSessionBoundsChange,
+    restart: onRestartSession,
+    dispose: onDisposeSession,
+    openUrl: onOpenTerminalUrl
+  };
+  const terminalCardCallbacks = useMemo(() => {
+    const latest = terminalCardHandlers;
+    const shared = {
+      onRename: (id: string, title: string) => latest.current!.rename(id, title),
+      onRenameEnd: () => latest.current!.renameEnd(),
+      onRestart: (id: string, resume?: boolean) => latest.current!.restart(id, resume),
+      onDispose: (id: string, keepEnvironmentData?: boolean) => latest.current!.dispose(id, keepEnvironmentData),
+      onOpenUrl: (url: string) => latest.current!.openUrl(url)
+    };
+    return {
+      canvas: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, false),
+        onSelect: (id: string) => latest.current!.select(id, false),
+        onBoundsChange: (id: string, bounds: SessionBounds) => latest.current!.boundsChange(id, bounds)
+      },
+      fullscreen: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, true),
+        onSelect: (id: string) => latest.current!.select(id, true),
+        onBoundsChange: () => {}
+      }
+    };
+  }, []);
+  const fullscreenToggles = useRef(new Map<string, () => void>());
+  const toggleFullscreenFor = (id: string): (() => void) => {
+    let toggle = fullscreenToggles.current.get(id);
+    if (!toggle) {
+      toggle = () => terminalCardHandlers.current!.toggleFullscreen(id);
+      fullscreenToggles.current.set(id, toggle);
+    }
+    return toggle;
+  };
   const canvasOverrideActive = wheelNavigation.canvasOverrideActive;
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
   const editedRegion = regionEditor?.mode === "edit"
@@ -673,6 +756,25 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
+      if (activeSessionId !== null
+        && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
+        && shouldTogglePixelSkinMasterView(
+          event,
+          sessionsRef.current.some((session) => session.id === activeSessionId),
+          [settings.shortcuts.home, settings.shortcuts.renameWindow]
+        )
+        && !isShortcutCaptureTarget(event.target)
+        && !isRenameInputTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMasterPixelSkinSessionIds((current) => {
+          const next = new Set(current);
+          if (next.has(activeSessionId)) next.delete(activeSessionId);
+          else next.add(activeSessionId);
+          return next;
+        });
+        return;
+      }
       // Alt+arrow is a canvas gesture of its own; the Ctrl/Cmd chords below stay untouched.
       const direction = event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey
         ? CANVAS_FOCUS_ARROWS[event.key]
@@ -702,12 +804,21 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     };
     window.addEventListener("keydown", handleShortcut, true);
     return () => window.removeEventListener("keydown", handleShortcut, true);
-  }, [browserViewVisible, homeEditing, onOpenSettings]);
+  }, [activeSessionId, browserViewVisible, homeEditing, onOpenSettings,
+    settings.shortcuts.home, settings.shortcuts.renameWindow, settings.terminalBorderSkin]);
+
+  const themeBackground = (BUNDLED_CANVAS_BACKGROUND_IDS as readonly string[]).includes(settings.canvasBackground)
+    ? settings.canvasBackground : undefined;
+  const packBackground = usePixelSkinPackAssets(
+    isPixelSkinPackId(settings.canvasBackground) ? settings.canvasBackground : null
+  )?.background;
 
   return (
     <div
       ref={viewport}
-      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
+      data-theme-background={themeBackground ?? (packBackground ? "custom" : undefined)}
+      style={packBackground ? { backgroundImage: `url("${packBackground}")` } : undefined}
+      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${wheelNavigation.wheelPanning ? "workspace--wheel-panning" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
       onPointerDownCapture={(event) => {
         if (openRadialLauncher(event)) return;
         const element = event.target as HTMLElement;
@@ -831,6 +942,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               session={withGroupNudge(terminalLayerId(session.id), session)}
               locale={settings.locale}
               palette={settings.palette}
+              borderSkin={settings.terminalBorderSkin}
+              skinDetail={settings.terminalSkinDetail}
               zoom={camera.zoom}
               stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
               snapEnabled={settings.snapToGrid}
@@ -840,33 +953,18 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
               selected={activeSessionId === session.id}
+              forceMasterDetail={masterPixelSkinSessionIds.has(session.id)}
               groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
               renaming={renamingSessionId === session.id}
               fullscreen={fullscreenSessionId === session.id}
-              onToggleFullscreen={() => onToggleFullscreen(session.id)}
+              onToggleFullscreen={toggleFullscreenFor(session.id)}
               snapTargets={[
                 homeBounds,
                 ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
                 ...allWindowBounds.filter((candidate) => candidate !== session)
               ]}
-              onActivate={(selectedSession) => {
-                raiseLayer(terminalLayerId(selectedSession.id));
-                focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
-                onFocusSession(selectedSession);
-              }}
-              onSelect={(id) => {
-                raiseLayer(terminalLayerId(id));
-                focusController.cancelHover();
-                focusController.focus(terminalCanvasWidgetId(id), "explicit");
-                onSelectSession(id);
-              }}
-              onRename={onRenameSession}
-              onRenameEnd={onRenameEnd}
-              onBoundsChange={onSessionBoundsChange}
-              onRestart={onRestartSession}
-              onDispose={onDisposeSession}
+              {...terminalCardCallbacks.canvas}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
-              onOpenUrl={onOpenTerminalUrl}
             />
           ))}
           {renderedPluginCanvas.map((instance) => {
@@ -990,6 +1088,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               session={withGroupNudge(terminalLayerId(session.id), session)}
               locale={settings.locale}
               palette={settings.palette}
+              borderSkin={settings.terminalBorderSkin}
+              skinDetail={settings.terminalSkinDetail}
               zoom={1}
               stackIndex={9999}
               snapEnabled={false}
@@ -999,27 +1099,14 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
               focusChangeSource={widgetFocus.source}
               selected={activeSessionId === session.id}
+              forceMasterDetail={true}
               groupSelected={false}
               renaming={renamingSessionId === session.id}
               fullscreen={true}
-              onToggleFullscreen={() => onToggleFullscreen(session.id)}
-              snapTargets={[]}
-              onActivate={(selectedSession) => {
-                focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
-                onFocusSession(selectedSession);
-              }}
-              onSelect={(id) => {
-                focusController.cancelHover();
-                focusController.focus(terminalCanvasWidgetId(id), "explicit");
-                onSelectSession(id);
-              }}
-              onRename={onRenameSession}
-              onRenameEnd={onRenameEnd}
-              onBoundsChange={() => {}}
-              onRestart={onRestartSession}
-              onDispose={onDisposeSession}
+              onToggleFullscreen={toggleFullscreenFor(session.id)}
+              snapTargets={NO_SNAP_TARGETS}
+              {...terminalCardCallbacks.fullscreen}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
-              onOpenUrl={onOpenTerminalUrl}
             />
           ))}
       </div>

@@ -13,7 +13,7 @@ test("core semantic summaries reserve width before applying counter-scale", asyn
     readFile(stylesPath, "utf8")
   ]);
 
-  assert.match(terminalSource, /\(size\.width - 72\) \/ summaryScale/);
+  assert.match(terminalSource, /\(\(pixelSurfaceBounds \? pixelSurfaceBounds\.right - pixelSurfaceBounds\.left : size\.width\) - 72\) \/ summaryScale/);
   assert.match(browserSource, /\(size\.width - 48\) \/ summaryScale/);
   assert.match(styles, /\.terminal-card__summary-content\s*\{[^}]*width:\s*var\(--summary-content-width\)/);
   assert.match(styles, /\.terminal-card__summary-content\s*\{[^}]*justify-content:\s*center/);

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { basename, isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
+import { isPathInside } from "../../../agent-runtime/path-inside.mjs";
 import { chmod, mkdir, open, realpath, rm, stat, unlink } from "node:fs/promises";
 import { BrowserKernelError } from "./BrowserErrors.ts";
 
@@ -88,7 +89,7 @@ export class BrowserPolicyService {
     const safeId = downloadId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 40) || "download";
     const fileName = sanitizeFilename(suggestedFilename);
     const target = resolve(this.downloadRoot, `${safeId}-${fileName}`);
-    if (!isInside(this.downloadRoot, target)) {
+    if (!isPathInside(this.downloadRoot, target)) {
       throw new BrowserKernelError("PATH_DENIED", "Download path escaped the managed directory.");
     }
     return target;
@@ -127,7 +128,7 @@ export class BrowserPolicyService {
       } catch {
         throw new BrowserKernelError("PATH_DENIED", "Upload file does not exist.");
       }
-      if (!allowedRoots.some((root) => isInside(root, canonical))) {
+      if (!allowedRoots.some((root) => isPathInside(root, canonical))) {
         throw new BrowserKernelError("PATH_DENIED", "Upload file is outside authorized directories.");
       }
       const metadata = await stat(canonical);
@@ -146,7 +147,7 @@ export class BrowserPolicyService {
   private async stageUploadFile(canonical: string): Promise<string> {
     const targetDirectory = resolve(this.uploadStagingRoot, randomUUID());
     const target = resolve(targetDirectory, sanitizeFilename(basename(canonical)));
-    if (!isInside(this.uploadStagingRoot, target)) {
+    if (!isPathInside(this.uploadStagingRoot, target)) {
       throw new BrowserKernelError("PATH_DENIED", "Upload staging path escaped its managed directory.");
     }
 
@@ -216,11 +217,6 @@ function sanitizeFilename(value: string): string {
   const raw = basename(value || "download").replace(/[\u0000-\u001f\u007f]/g, "");
   const safe = raw.replace(/[\\/:*?"<>|]/g, "_").replace(/^\.+/, "").trim().slice(0, 180);
   return safe || "download";
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const segment = relative(root, candidate);
-  return segment === "" || (!segment.startsWith("..") && !isAbsolute(segment));
 }
 
 function isLocalHostInput(value: string): boolean {

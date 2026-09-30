@@ -12,6 +12,7 @@ import type {
   CanvasNavigationOverrideStateEvent,
   CanvasNavigationPointerBindingInput,
   CanvasTTYApi,
+  CustomTerminalBorderSkinId,
   CreateSessionRequest,
   PluginBrowserOpenRequest,
   PluginBrowserOpenResponse,
@@ -22,6 +23,10 @@ import type {
   PluginStorageChangeEvent,
   PluginUpdateStatus,
   ProviderId,
+  PixelSkinPackInstallRequest,
+  PixelSkinZipInstallRequest,
+  PixelSkinSlot,
+  PixelTerminalBorderSkinId,
   SessionBounds,
   SessionEvent,
   SessionRemovedEvent,
@@ -31,12 +36,19 @@ import type {
 } from "../shared/contracts";
 import { IPC } from "../shared/contracts";
 import { terminalFileDropText } from "../shared/terminalFileDrop";
+import { TerminalDataRouter } from "../shared/terminalDataRouter";
 
 function subscribe<T>(channel: string, listener: (event: T) => void): () => void {
   const wrapped = (_event: Electron.IpcRendererEvent, payload: T): void => listener(payload);
   ipcRenderer.on(channel, wrapped);
   return () => ipcRenderer.removeListener(channel, wrapped);
 }
+
+// One IPC listener for all terminal output; each card subscribes for its own session id.
+const terminalData = new TerminalDataRouter();
+ipcRenderer.on(IPC.terminalDataBatch, (_event: Electron.IpcRendererEvent, batch: TerminalDataEvent[]) => {
+  for (const payload of batch) terminalData.dispatch(payload);
+});
 
 // Main pushes the updater state on every transition and on each renderer load,
 // so `state()` can answer from this cache instead of asking over IPC.
@@ -62,7 +74,20 @@ const api: CanvasTTYApi = {
   },
   settings: {
     get: () => ipcRenderer.invoke(IPC.settingsGet),
-    update: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsUpdate, patch)
+    update: (patch: Partial<AppSettings>) => ipcRenderer.invoke(IPC.settingsUpdate, patch),
+    onChanged: (listener: (settings: AppSettings) => void) => subscribe(IPC.settingsChanged, listener)
+  },
+  skins: {
+    list: () => ipcRenderer.invoke(IPC.terminalBorderSkinsList),
+    get: (id: CustomTerminalBorderSkinId) => ipcRenderer.invoke(IPC.terminalBorderSkinsGet, id),
+    onChanged: (listener: () => void) => subscribe<void>(IPC.terminalBorderSkinsChanged, listener)
+  },
+  pixelSkins: {
+    list: () => ipcRenderer.invoke(IPC.pixelSkinsList),
+    install: (request: PixelSkinPackInstallRequest) => ipcRenderer.invoke(IPC.pixelSkinsInstall, request),
+    installZip: (request: PixelSkinZipInstallRequest) => ipcRenderer.invoke(IPC.pixelSkinsInstallZip, request),
+    readAsset: (id: PixelTerminalBorderSkinId, slot: PixelSkinSlot) => ipcRenderer.invoke(IPC.pixelSkinsReadAsset, id, slot),
+    onChanged: (listener: () => void) => subscribe<void>(IPC.pixelSkinsChanged, listener)
   },
   agents: {
     availability: () => ipcRenderer.invoke(IPC.agentsAvailability),
@@ -220,7 +245,7 @@ const api: CanvasTTYApi = {
     setRestore: (id: string, restore: boolean) => ipcRenderer.invoke(IPC.terminalSetRestore, id, restore),
     dispose: (id: string, options?: { keepEnvironmentData?: boolean }) => ipcRenderer.invoke(IPC.terminalDispose, id, options),
     setVisible: (id: string, visible: boolean) => ipcRenderer.send(IPC.terminalSetVisible, id, visible),
-    onData: (listener: (event: TerminalDataEvent) => void) => subscribe(IPC.terminalData, listener),
+    onData: (listener: (event: TerminalDataEvent) => void, id?: string) => terminalData.subscribe(listener, id),
     onSession: (listener: (event: SessionEvent) => void) => subscribe(IPC.terminalSession, listener),
     onRemoved: (listener: (event: SessionRemovedEvent) => void) => subscribe(IPC.terminalRemoved, listener)
   },

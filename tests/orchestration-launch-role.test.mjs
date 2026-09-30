@@ -8,36 +8,7 @@ import { AgentControlService } from "../src/main/services/AgentControlService.ts
 import { OrchestrationGateway } from "../src/main/services/agent-browser/OrchestrationGateway.ts";
 import { OrchestrationBridge } from "../src/main/services/agent-browser/OrchestrationBridge.ts";
 import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/OrchestrationTools.ts";
-
-function fakeSpawner(calls) {
-  return (command, args, options) => ({
-    pid: 20_000 + calls.length,
-    write() {},
-    resize() {},
-    kill() {},
-    pause() {},
-    resume() {},
-    onData() { return { dispose() {} }; },
-    onExit() { return { dispose() {} }; },
-    ...calls.push({ command, args, options }) && {}
-  });
-}
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 async function fixture(t) {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-orch-role-"));
@@ -53,6 +24,7 @@ async function fixture(t) {
   const terminals = new TerminalManager(() => undefined, availableRegistry(), agentBrowser, undefined, true, fakeSpawner(calls));
   const gateway = new OrchestrationGateway({
     runtimeDirectory: join(directory, "runtime"),
+    windowsHostPath: join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe"),
     handler: new ScopedOrchestrationHandler(new AgentControlService(terminals))
   });
   await gateway.start();

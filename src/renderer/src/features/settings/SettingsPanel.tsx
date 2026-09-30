@@ -3,6 +3,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import appManifest from "../../../../../package.json";
 import type {
   AppSettings,
+  AppSkinId,
   AgentCliAvailability,
   AgentProviderId,
   BrowserActivityEvent,
@@ -11,9 +12,11 @@ import type {
   BrowserSnapshot,
   CanvasLauncherItemId,
   CanvasColorId,
+  CanvasBackgroundId,
   CanvasOverlayPlacement,
   CanvasPatternId,
   CanvasWheelCaptureMode,
+  CustomTerminalBorderSkinId,
   EdgePanSpeed,
   FocusActivation,
   GithubPluginSearchResult,
@@ -29,15 +32,23 @@ import type {
   PluginManifest,
   PluginInstallPreview,
   PluginUpdateStatus,
+  PixelSkinPackSummary,
+  PixelSkinPreferredDetail,
+  PixelSkinSlot,
+  PixelTerminalBorderSkinId,
   RadialLauncherItemId,
   SessionRestoreMode,
   SessionRowColorMode,
+  SessionStatus,
   ShortcutAction,
+  TerminalBorderSkinListItem,
+  TerminalBorderSkinId,
   UpdaterState,
   ZoomSensitivity
 } from "../../../../shared/contracts";
 import {
   BROWSER_PROVIDER_COLORS,
+  BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_RADIAL_LAUNCHER_ITEMS,
@@ -51,7 +62,6 @@ import {
   defaultCanvasWheelBinding
 } from "../../../../shared/canvasNavigation";
 import { ProviderIcon } from "../../components/ProviderIcon";
-import { ShortcutReference } from "../../components/ShortcutReference";
 import { UiIcon, type UiIconName } from "../../components/UiIcon";
 import {
   CanvasMenuDivider,
@@ -69,6 +79,11 @@ import {
 } from "../../lib/providers";
 import { shortcutFromKeyboardEvent, shortcutFromPointerEvent } from "../../lib/shortcuts";
 import { t } from "../../lib/i18n";
+import {
+  createTerminalBorderSkinPreviewStyleController,
+  isCustomTerminalBorderSkinId,
+  normalizeTerminalBorderSkinList
+} from "../../lib/skinStyles";
 import { PluginSettingsSection } from "../plugins/PluginSettingsSection";
 import { HomeAppearanceSettings } from "../home/HomeAppearanceSettings";
 import {
@@ -86,6 +101,12 @@ import { UpdatesSettings } from "./UpdatesSettings";
 import { setCanvasLauncherItemEnabled } from "../launcher/canvasLauncher";
 import { itemLabel } from "../launcher/QuickRadialMenu";
 import { setRadialLauncherItemEnabled } from "../launcher/radialLauncher";
+import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
+import { isPixelSkinPackId, PILOT_SKIN_ASSETS } from "../skins/SkinAssets";
+import { isPixelSkinThemeId, pixelSkinAssetFilename } from "../skins/skinCatalog";
+import type { PixelSkinThemeId } from "../skins/skinCatalog";
+import type { SkinDetailLevel } from "../skins/SkinLayout";
+import { PixelSkinPackCreator } from "./PixelSkinPackCreator";
 
 type SettingsSection = "general" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "updates" | "about";
 
@@ -186,6 +207,27 @@ export function SettingsPanel({
   const [clearingBrowserData, setClearingBrowserData] = useState(false);
   const [browserDataMessage, setBrowserDataMessage] = useState<string | null>(null);
   const [updaterState, setUpdaterState] = useState<UpdaterState>({ status: "idle" });
+  const [pixelPacks, setPixelPacks] = useState<PixelSkinPackSummary[]>([]);
+  const [pixelPacksState, setPixelPacksState] = useState<"loading" | "ready" | "error">("loading");
+
+  useEffect(() => {
+    let active = true;
+    let revision = 0;
+    const refresh = async (): Promise<void> => {
+      const request = ++revision;
+      try {
+        const packs = await window.canvasTTY.pixelSkins.list();
+        if (!active || request !== revision) return;
+        setPixelPacks(packs);
+        setPixelPacksState("ready");
+      } catch {
+        if (active && request === revision) setPixelPacksState("error");
+      }
+    };
+    const unsubscribe = window.canvasTTY.pixelSkins.onChanged(() => void refresh());
+    void refresh();
+    return () => { active = false; unsubscribe(); };
+  }, []);
 
   useEffect(() => {
     const unsubscribe = window.canvasTTY.updater.onState(({ state }) => setUpdaterState(state));
@@ -514,9 +556,20 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ sessionRowColorMode: value as SessionRowColorMode })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "canvasPattern")}
+                description={locale === "ru" ? "Если выбран фон-картинка, рисунок канваса не применяется." : "The canvas pattern is not applied when a background image is selected."}
+              >
+                <Segmented
+                  value={settings.pattern}
+                  options={(["dots", "grid", "waves", "diagonal", "rings", "none"] as CanvasPatternId[]).map((value) => [value, t(locale, value)])}
+                  wrap
+                  onChange={(value) => void onChange({ pattern: value as CanvasPatternId })}
+                />
+              </SettingGroup>
               <SettingGroup label={t(locale, "canvasColor")}>
                 <SwatchChoices
-                  value={appearance.canvasColor}
+                  value={settings.canvasBackground === "none" ? appearance.canvasColor : ""}
                   columns={4}
                   options={([
                     ["sage", t(locale, "sage")],
@@ -529,15 +582,45 @@ export function SettingsPanel({
                   ] as [CanvasColorId, string][]).map(([value, label]) => (
                     [value, label, [CANVAS_COLOR_PREVIEWS[value]]]
                   ))}
-                  onChange={(value) => void onChange(canvasColorPatch(value as CanvasColorId))}
+                  onChange={(value) => void onChange({ ...canvasColorPatch(value as CanvasColorId), canvasBackground: "none" })}
                 />
               </SettingGroup>
-              <SettingGroup label={t(locale, "canvasPattern")}>
+              <SettingGroup
+                label={locale === "ru" ? "Пиксельные фоны" : "Pixel backgrounds"}
+                description={locale === "ru" ? "Только фон Canvas. Рамки терминалов выбираются отдельно ниже." : "Canvas background only. Choose terminal borders separately below."}
+                layout="stacked"
+              >
+                <CanvasBackgroundChoices locale={locale} value={settings.canvasBackground} pixelPacks={pixelPacks}
+                  onChange={(canvasBackground) => void onChange({ canvasBackground })} />
+                {pixelPacksState !== "ready" && <small role="status">{pixelPacksState === "loading"
+                  ? (locale === "ru" ? "Загрузка пользовательских фонов…" : "Loading custom backgrounds…")
+                  : (locale === "ru" ? "Не удалось загрузить пользовательские фоны." : "Custom backgrounds could not be loaded.")}</small>}
+              </SettingGroup>
+              <SettingGroup label={t(locale, "terminalBorderSkin")} layout="stacked"
+                description={locale === "ru" ? "Только оформление окон. Выбранный фон Canvas сохранится." : "Window appearance only. Your Canvas background stays selected."}>
+                <BorderSkinChoices
+                  locale={locale}
+                  value={settings.terminalBorderSkin}
+                  pixelPacks={pixelPacks}
+                  onPackCreated={(pack) => setPixelPacks((current) => current.some((item) => item.id === pack.id) ? current : [...current, pack])}
+                  onChange={(terminalBorderSkin) => void onChange({ terminalBorderSkin })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "terminalSkinDetail")}>
                 <Segmented
-                  value={settings.pattern}
-                  options={(["dots", "grid", "waves", "diagonal", "rings", "none"] as CanvasPatternId[]).map((value) => [value, t(locale, value)])}
-                  wrap
-                  onChange={(value) => void onChange({ pattern: value as CanvasPatternId })}
+                  value={settings.terminalSkinDetail}
+                  options={[
+                    ["minimal", t(locale, "terminalSkinDetailMinimal")],
+                    ["detailed", t(locale, "terminalSkinDetailDetailed")]
+                  ]}
+                  onChange={(terminalSkinDetail) => void onChange({ terminalSkinDetail: terminalSkinDetail as PixelSkinPreferredDetail })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "appSkin")} layout="stacked">
+                <AppSkinChoices
+                  locale={locale}
+                  value={settings.appSkin}
+                  onChange={(appSkin) => void onChange({ appSkin })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "uiScale")} description={t(locale, "uiScaleDescription")}>
@@ -1002,9 +1085,6 @@ export function SettingsPanel({
                   <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
                 )}
               </SettingGroup>
-              <SettingGroup label={t(locale, "keyboardShortcuts")} layout="stacked">
-                <ShortcutReference locale={locale} />
-              </SettingGroup>
             </>
           )}
 
@@ -1360,6 +1440,414 @@ function Segmented({
           key={optionValue}
           onClick={() => onChange(optionValue)}
         >{label}</button>
+      ))}
+    </div>
+  );
+}
+
+const BACKGROUND_ASSETS = import.meta.glob<string>("../../assets/theme-backgrounds/*.png", {
+  eager: true, query: "?url", import: "default"
+});
+
+function CanvasBackgroundChoices({ locale, value, pixelPacks, onChange }: {
+  locale: LocaleId;
+  value: CanvasBackgroundId;
+  pixelPacks: PixelSkinPackSummary[];
+  onChange(value: CanvasBackgroundId): void;
+}): React.JSX.Element {
+  const labelKeys = {
+    sakura: "borderSkinSakura", matrix: "borderSkinMatrix", "forest-cabin": "borderSkinForestCabin",
+    "gold-black": "borderSkinGoldBlack", cat: "borderSkinCat", "gothic-eclipse": "borderSkinGothicEclipse"
+  } as const;
+  return <div className="border-skin-choices" role="group" aria-label={locale === "ru" ? "Пиксельные фоны" : "Pixel backgrounds"}>
+    <button type="button" className="pixel-pack-create" aria-pressed={value === "none"} onClick={() => onChange("none")}>
+      {locale === "ru" ? "Без картинки — выбранный цвет и узор" : "No image — selected color and pattern"}
+    </button>
+    {BUNDLED_CANVAS_BACKGROUND_IDS.map((id) => <button key={id} type="button" className="border-skin-choice"
+      aria-pressed={value === id} onClick={() => onChange(id)}>
+      <span className="border-skin-preview border-skin-preview--pixel canvas-background-preview" aria-hidden="true">
+        <img src={BACKGROUND_ASSETS[`../../assets/theme-backgrounds/${id}.png`]} alt="" loading="lazy" />
+      </span>
+      <span className="border-skin-choice__label">{t(locale, labelKeys[id])}</span>
+    </button>)}
+    {pixelPacks.map((pack) => <button key={pack.id} type="button" className="border-skin-choice"
+      aria-pressed={value === pack.id} onClick={() => onChange(pack.id)}>
+      <span className="border-skin-preview border-skin-preview--pixel canvas-background-preview" aria-hidden="true">
+        <PixelSkinPackThumbnail id={pack.id} slot="background" />
+      </span>
+      <span className="border-skin-choice__label">{pack.name}</span>
+    </button>)}
+    {isPixelSkinPackId(value) && !pixelPacks.some((pack) => pack.id === value) && <small role="status">
+      {locale === "ru" ? "Выбранный пользовательский фон недоступен." : "The selected custom background is unavailable."}
+    </small>}
+  </div>;
+}
+
+function BorderSkinChoices({
+  locale,
+  value,
+  pixelPacks,
+  onPackCreated,
+  onChange
+}: {
+  locale: LocaleId;
+  value: TerminalBorderSkinId;
+  pixelPacks: PixelSkinPackSummary[];
+  onPackCreated(pack: PixelSkinPackSummary): void;
+  onChange(value: TerminalBorderSkinId): void;
+}): React.JSX.Element {
+  const [customSkins, setCustomSkins] = useState<TerminalBorderSkinListItem[]>([]);
+  const [customSkinsLoadState, setCustomSkinsLoadState] = useState<"loading" | "ready" | "error">("loading");
+  useEffect(() => {
+    let active = true;
+    let requestRevision = 0;
+    const refresh = async (): Promise<void> => {
+      const revision = ++requestRevision;
+      try {
+        const response: unknown = await window.canvasTTY.skins.list();
+        if (!Array.isArray(response) || response.some((item) => item && typeof item === "object"
+          && (item as Record<string, unknown>).id === "custom:skin-registry"
+          && (item as Record<string, unknown>).status === "error")) throw new Error("Skin registry unavailable.");
+        const items = normalizeTerminalBorderSkinList(response);
+        if (!active || revision !== requestRevision) return;
+        setCustomSkins(items);
+        setCustomSkinsLoadState("ready");
+      } catch {
+        if (!active || revision !== requestRevision) return;
+        setCustomSkins([]);
+        setCustomSkinsLoadState("error");
+      }
+    };
+
+    let unsubscribe = (): void => undefined;
+    try {
+      unsubscribe = window.canvasTTY.skins.onChanged(() => void refresh());
+    } catch {
+      setCustomSkinsLoadState("error");
+    }
+    void refresh();
+    return () => {
+      active = false;
+      requestRevision += 1;
+      unsubscribe();
+    };
+  }, []);
+
+  const choices: readonly [TerminalBorderSkinId, Parameters<typeof t>[1]][] = [
+    ["classic", "borderSkinClassic"],
+    ["minimal", "borderSkinMinimal"],
+    ["glass", "borderSkinGlass"],
+    ["cyber", "borderSkinCyber"],
+    ["nord", "borderSkinNord"],
+    ["gradient", "borderSkinGradient"],
+    ["cybercore", "borderSkinCybercore"],
+    ["titanium", "borderSkinTitanium"],
+    ["retro", "borderSkinRetro"],
+    ["sakura", "borderSkinSakura"],
+    ["matrix", "borderSkinMatrix"],
+    ["forest-cabin", "borderSkinForestCabin"],
+    ["gold-black", "borderSkinGoldBlack"],
+    ["cat", "borderSkinCat"],
+    ["gothic-eclipse", "borderSkinGothicEclipse"]
+  ];
+  const selectedCustomSkinId = isCustomTerminalBorderSkinId(value) ? value : null;
+  const selectedCustomSkin = customSkins.find((skin) => skin.id === selectedCustomSkinId);
+  const previewStyleController = useRef<ReturnType<typeof createTerminalBorderSkinPreviewStyleController> | null>(null);
+  useEffect(() => {
+    const controller = createTerminalBorderSkinPreviewStyleController(window.canvasTTY.skins, document);
+    previewStyleController.current = controller;
+    return () => {
+      controller.dispose();
+      previewStyleController.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const previewIds = customSkins.map((skin) => skin.id);
+    if (selectedCustomSkinId && !previewIds.includes(selectedCustomSkinId)) previewIds.push(selectedCustomSkinId);
+    previewStyleController.current?.setActive(previewIds);
+  }, [customSkins, selectedCustomSkinId]);
+  const customSkinStatus = (skin: TerminalBorderSkinListItem): string => skin.status === "ready"
+    ? t(locale, "borderSkinReady")
+    : t(locale, "borderSkinError");
+
+  return (
+    <div className="border-skin-choices" role="group" aria-label={t(locale, "terminalBorderSkin")}>
+      {choices.map(([skin, labelKey]) => {
+        const pixelTheme = isPixelSkinThemeId(skin) ? skin : null;
+        return (
+          <button
+            key={skin}
+            type="button"
+            className="border-skin-choice"
+            aria-pressed={value === skin}
+            onClick={() => onChange(skin)}
+          >
+            <span className={`border-skin-preview${pixelTheme ? " border-skin-preview--pixel" : ""}`} data-border-skin={skin} aria-hidden="true">
+              {pixelTheme
+                ? <PixelBorderSkinThumbnail theme={pixelTheme} />
+                : <>
+                    <span className="border-skin-preview__header"><i /><i /><i /></span>
+                    <span className="border-skin-preview__body"><i /><i /></span>
+                  </>}
+            </span>
+            <span className="border-skin-choice__label">{t(locale, labelKey)}</span>
+          </button>
+        );
+      })}
+      {customSkins.map((skin) => {
+        const label = skin.status === "ready" ? skin.name : (skin.name || skin.id.slice("custom:".length));
+        const status = customSkinStatus(skin);
+        return (
+          <button
+            key={skin.id}
+            type="button"
+            className="border-skin-choice border-skin-choice--custom"
+            aria-label={`${label}, ${status}`}
+            aria-pressed={value === skin.id}
+            disabled={skin.status === "error"}
+            onClick={() => skin.status === "ready" && onChange(skin.id)}
+          >
+            <CustomTerminalBorderSkinPreview skinId={skin.id} selected={value === skin.id} />
+            <span className="border-skin-choice__label">{label}</span>
+            <small role="status">{skin.status === "ready" ? status : `${status}: ${skin.error}`}</small>
+          </button>
+        );
+      })}
+      {pixelPacks.map((pack) => (
+        <button
+          key={pack.id}
+          type="button"
+          className="border-skin-choice"
+          aria-pressed={value === pack.id}
+          onClick={() => onChange(pack.id)}
+        >
+          <span className="border-skin-preview border-skin-preview--pixel" aria-hidden="true">
+            <PixelSkinPackThumbnail id={pack.id} />
+          </span>
+          <span className="border-skin-choice__label">{pack.name}</span>
+        </button>
+      ))}
+      <PixelSkinPackCreator locale={locale} onCreated={(pack) => {
+        onPackCreated(pack);
+        onChange(pack.id);
+      }} />
+      {selectedCustomSkinId && !selectedCustomSkin && (
+        <button
+          type="button"
+          className="border-skin-choice border-skin-choice--custom"
+          aria-label={`${selectedCustomSkinId}, ${t(locale, "borderSkinUnavailable")}`}
+          aria-pressed="true"
+          disabled
+        >
+          <CustomTerminalBorderSkinPreview skinId={selectedCustomSkinId} selected />
+          <span className="border-skin-choice__label">{selectedCustomSkinId.slice("custom:".length)}</span>
+          <small role="status">
+            {customSkinsLoadState === "loading"
+              ? t(locale, "borderSkinLoading")
+              : customSkinsLoadState === "error"
+                ? t(locale, "borderSkinListError")
+                : t(locale, "borderSkinUnavailable")}
+          </small>
+        </button>
+      )}
+      {(isPixelSkinThemeId(value) || isPixelSkinPackId(value)) && (
+        <PixelBorderSkinPreview
+          key={value}
+          locale={locale}
+          theme={value}
+        />
+      )}
+    </div>
+  );
+}
+
+function PixelSkinPackThumbnail({ id, slot = "detailed_idle" }: { id: PixelTerminalBorderSkinId; slot?: PixelSkinSlot }): React.JSX.Element {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    void window.canvasTTY.pixelSkins.readAsset(id, slot).then((bytes) => {
+      if (!active || !bytes) return;
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+      setUrl(objectUrl);
+    }).catch(() => { if (active) setUrl(null); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [id, slot]);
+  return url ? <img src={url} alt="" /> : <span className="border-skin-preview__fallback" />;
+}
+
+function PixelBorderSkinThumbnail({ theme }: { theme: PixelSkinThemeId }): React.JSX.Element {
+  const filename = pixelSkinAssetFilename(theme, "detailed", "idle");
+  const url = filename ? PILOT_SKIN_ASSETS[filename] : undefined;
+  return url
+    ? <img src={url} alt="" loading="lazy" />
+    : <span className="border-skin-preview__fallback"><i /><i /></span>;
+}
+
+function PixelBorderSkinPreview({
+  locale,
+  theme,
+}: {
+  locale: LocaleId;
+  theme: PixelSkinThemeId | PixelTerminalBorderSkinId;
+}): React.JSX.Element {
+  const previewRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [detail, setDetail] = useState<Exclude<SkinDetailLevel, "overview">>("detailed");
+  const [status, setStatus] = useState<Extract<SessionStatus, "idle" | "working" | "done">>("idle");
+  const isRussian = locale === "ru";
+  const details: readonly [Exclude<SkinDetailLevel, "overview">, string, string][] = [
+    ["minimal", isRussian ? "Минимал" : "Minimal", isRussian ? "Минимал" : "Minimal"],
+    ["detailed", isRussian ? "Детальная" : "Detailed", isRussian ? "Детальная" : "Detailed"],
+    ["master", "Master", isRussian ? "Master — оформление оркестратора" : "Master — orchestrator appearance"]
+  ];
+  const states: readonly [Extract<SessionStatus, "idle" | "working" | "done">, string, string][] = [
+    ["idle", isRussian ? "Ожидание" : "Idle", isRussian ? "Ожидание" : "Idle"],
+    ["working", isRussian ? "Работа" : "Working", isRussian ? "Работа" : "Working"],
+    ["done", isRussian ? "Готово" : "Done", isRussian ? "Готово" : "Done"]
+  ];
+
+  useLayoutEffect(() => {
+    const element = previewRef.current;
+    if (!element) return;
+    const measure = (): void => {
+      const bounds = element.getBoundingClientRect();
+      setSize({ width: Math.round(bounds.width), height: Math.round(bounds.height) });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="pixel-skin-preview-tools">
+      <div className="pixel-skin-preview-tools__heading">
+        <strong>{isRussian ? "Режим предпросмотра" : "Preview mode"}</strong>
+        <p>{isRussian ? "Переключатели ниже меняют только пример. Детализация рабочих окон задаётся в настройке «Детализация терминалов»." : "The controls below change only this example. Set live window detail in “Terminal detail”."}</p>
+        <p>{isRussian ? "Minimal — простая рамка, Detailed — детальная, Master — вариант для оформления оркестратора." : "Minimal is a simple border, Detailed adds decoration, and Master is the variant for an orchestrator window."}</p>
+      </div>
+      <div className="pixel-skin-preview-tools__groups">
+        <div className="pixel-skin-preview-tools__group" role="group" aria-label={isRussian ? "Детализация рамки" : "Border detail"}>
+          {details.map(([value, label, accessibleLabel]) => (
+            <button
+              key={value}
+              type="button"
+              aria-label={accessibleLabel}
+              aria-pressed={detail === value}
+              className={detail === value ? "pixel-skin-preview-tools__button pixel-skin-preview-tools__button--active" : "pixel-skin-preview-tools__button"}
+              onClick={() => setDetail(value)}
+            >{label}</button>
+          ))}
+        </div>
+        <div className="pixel-skin-preview-tools__group" role="group" aria-label={isRussian ? "Состояние предпросмотра" : "Preview state"}>
+          {states.map(([value, label, accessibleLabel]) => (
+            <button
+              key={value}
+              type="button"
+              aria-label={accessibleLabel}
+              aria-pressed={status === value}
+              className={status === value ? "pixel-skin-preview-tools__button pixel-skin-preview-tools__button--active" : "pixel-skin-preview-tools__button"}
+              onClick={() => setStatus(value)}
+            >{label}</button>
+          ))}
+        </div>
+      </div>
+      <div
+        ref={previewRef}
+        className="pixel-skin-preview-stage"
+        data-border-skin={theme}
+        data-detail={detail}
+        data-preview-state={status}
+        aria-label={`${theme}, ${details.find(([value]) => value === detail)?.[2]}, ${states.find(([value]) => value === status)?.[2]}`}
+      >
+        <div className="pixel-skin-preview-stage__screen" aria-hidden="true">
+          <span>user@canvas:~$</span><i />
+          {status === "working" && <span className="pixel-skin-preview-stage__activity">&gt; {isRussian ? "Работает…" : "Working…"}</span>}
+        </div>
+        {size.width > 0 && size.height > 0 && (
+          <Canvas2DSkinView
+            theme={theme}
+            status={status}
+            width={size.width}
+            height={size.height}
+            detail={detail}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CustomTerminalBorderSkinPreview({
+  skinId,
+  selected = false
+}: {
+  skinId: CustomTerminalBorderSkinId;
+  selected?: boolean;
+}): React.JSX.Element {
+  return (
+    <span
+      className={`border-skin-preview border-skin-preview--custom${selected ? " border-skin-preview--selected" : ""}`}
+      data-border-skin="classic"
+      data-custom-border-skin={skinId}
+      aria-hidden="true"
+    >
+      <span className="border-skin-preview__header">
+        <span className="border-skin-preview__controls"><i /><i /><i /></span>
+        <span className="border-skin-preview__actions" style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: ".2em" }}>
+          <i className="border-skin-preview__action" />
+          <i className="border-skin-preview__action" />
+        </span>
+      </span>
+      <span className="border-skin-preview__body border-skin-preview__surface"><i /><i /><i /></span>
+    </span>
+  );
+}
+
+function AppSkinChoices({
+  locale,
+  value,
+  onChange
+}: {
+  locale: LocaleId;
+  value: AppSkinId;
+  onChange(value: AppSkinId): void;
+}): React.JSX.Element {
+  const choices: readonly [AppSkinId, Parameters<typeof t>[1]][] = [
+    ["classic", "appSkinClassic"],
+    ["atelier", "appSkinAtelier"],
+    ["signal", "appSkinSignal"],
+    ["greenhouse", "appSkinGreenhouse"],
+    ["midnight", "appSkinMidnight"]
+  ];
+
+  return (
+    <div className="app-skin-choices">
+      {choices.map(([skin, labelKey]) => (
+        <button
+          key={skin}
+          type="button"
+          className="app-skin-choice"
+          aria-pressed={value === skin}
+          onClick={() => onChange(skin)}
+        >
+          <span className="app-skin-preview" data-preview-skin={skin} aria-hidden="true">
+            <span className="app-skin-preview__chrome"><i className="app-skin-preview__dot" /></span>
+            <span className="app-skin-preview__body">
+              <i className="app-skin-preview__sidebar" />
+              <span className="app-skin-preview__content">
+                <i className="app-skin-preview__line app-skin-preview__line--accent" />
+                <i className="app-skin-preview__line" />
+              </span>
+            </span>
+          </span>
+          <span className="app-skin-choice__label">{t(locale, labelKey)}</span>
+        </button>
       ))}
     </div>
   );

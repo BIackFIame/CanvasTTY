@@ -143,7 +143,7 @@ test("the vault hands every value it reads or writes to the registry; agent-read
   const manager = new TerminalManager(() => undefined, { get: () => ({ state: "unavailable" }), snapshot: () => ({}) });
   manager.configureRedaction(registry);
   const control = new AgentControlService({
-    list: () => [{ id: "s1", provider: "claude", status: "working", exitCode: null }],
+    getMetadata: (id) => (id === "s1" ? { id: "s1", provider: "claude", status: "working", exitCode: null } : null),
     readBuffer: () => ({ buffer: `env OPENAI=${value}\n${secrets.github}\n` }),
     redactSecrets: (text) => manager.redactSecrets(text)
   });
@@ -222,4 +222,255 @@ test("plugin screen text and failure details mask the whole buffer before cuttin
   assert.equal(failed.status, "failed");
   assert.ok(failed.failureDetails.length <= 8_000);
   assert.deepEqual(fragments(failed.failureDetails), []);
+});
+
+// Ordinary agent output around the secrets below: colour, paths, numbers, box sides.
+function scrollback(chars) {
+  let text = "";
+  for (let i = 0; text.length < chars; i++) {
+    text += `\x1b[32m✓\x1b[0m step ${i} src/main/Example.ts:${i} took ${i % 97} ms\r\n`;
+    if (i % 9 === 0) text += `│ ${"─".repeat(40)} │\r\n`;
+  }
+  return text.slice(0, chars);
+}
+
+test("redactTail returns exactly what masking the whole text and cutting it returns, wherever the secrets fall", () => {
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.custom", [PLAIN_SECRET]);
+  const wrapped = `${PLAIN_SECRET.slice(0, 15)}\r\n${PLAIN_SECRET.slice(15)}`;
+  const pem = (body) => `-----${"BEGIN"} RSA ${"PRIVATE"} KEY-----\n${body}\n-----${"END"} RSA ${"PRIVATE"} KEY-----`;
+  const samples = [
+    PLAIN_SECRET, wrapped, secrets.openai, secrets.github, secrets.jwt, secrets.google, mixed,
+    `\r\n${sk(run("q", 18))}\r\n${run("7", 12)}x${run("R", 8)}\r\n`, `"apiKey": "${run("k", 30)}"`,
+    `export OPENAI_API_KEY=${run("v", 24)}`, `Authorization: Bearer ${run("t", 24)}`,
+    `https://deploy:${run("p", 12)}@example.test/repo`, pem(run("M", 64)), pem(`${run("N", 64)}\n`.repeat(400))
+  ];
+  const base = scrollback(240_000);
+  let compared = 0;
+  for (const tail of [300, 4_000, 8_192]) {
+    const tailCut = base.length - tail;
+    const windowCut = base.length - tail - 16_384;
+    for (const cut of [tailCut, windowCut]) {
+      for (const offset of [-3_000, -400, -20, -5, 0, 3, 17, 300]) {
+        for (const sample of samples) {
+          const at = cut + offset - Math.floor(sample.length / 2);
+          const text = `${base.slice(0, at)}${sample}${base.slice(at)}`;
+          assert.equal(registry.redactTail(text, tail), registry.redact(text).slice(-tail), `${tail} ${cut === tailCut ? "tail" : "window"} ${offset} ${sample.slice(0, 12)}`);
+          compared++;
+        }
+      }
+    }
+  }
+  // A private key opened long before the window and never closed masks everything after it, as before.
+  const open = `${base.slice(0, 1_000)}-----${"BEGIN"} ${"PRIVATE"} KEY-----\n${base.slice(1_000)}`;
+  assert.equal(registry.redactTail(open, 4_000), registry.redact(open).slice(-4_000));
+  assert.ok(compared > 600);
+  assert.equal(registry.redactTail("", 10), "");
+  assert.equal(registry.redactTail(`x ${PLAIN_SECRET}`, 0), "");
+});
+
+test("redactTail masks a window around the tail, not the whole scrollback", () => {
+  class Measured extends SecretRedactionRegistry {
+    lengths = [];
+    redact(text) { this.lengths.push(text.length); return super.redact(text); }
+  }
+  const registry = new Measured();
+  registry.add("plugin:p.custom", [PLAIN_SECRET]);
+  const text = `${scrollback(240_000)}${PLAIN_SECRET}${"z".repeat(100)}`;
+  const masked = registry.redactTail(text, 8_192);
+  assert.deepEqual(fragments(masked), []);
+  assert.ok(Math.max(...registry.lengths) <= 8_192 + 16_384 + 4_096, `masked ${registry.lengths} characters`);
+  // A held value that could wrap over the margin widens the window with it (each gap may hold 64 characters);
+  // one that could span the whole scrollback means masking the whole text.
+  registry.lengths.length = 0;
+  registry.add("plugin:p.long", [run("L", 400)]);
+  assert.deepEqual(fragments(registry.redactTail(text, 8_192)), []);
+  const widened = Math.max(...registry.lengths);
+  assert.ok(widened > 8_192 + 2 * 400 * 65 && widened < text.length, `masked ${widened} characters`);
+  registry.lengths.length = 0;
+  registry.add("plugin:p.longer", [run("K", 2_000)]);
+  registry.redactTail(text, 8_192);
+  assert.equal(Math.max(...registry.lengths), text.length);
+});
+
+test("observe_agent, get_agent_result and the plugin screen mask a bounded window of a full scrollback", async (t) => {
+  const f = cutFixture(t);
+  const masked = [];
+  const registry = f.terminals.redaction;
+  const redact = registry.redact.bind(registry);
+  registry.redact = (text) => { masked.push(text.length); return redact(text); };
+  f.print(scrollback(250_000));
+  f.print(`${PLAIN_SECRET}${"g".repeat(200)}`);
+  const control = new AgentControlService(f.terminals);
+  assert.deepEqual(fragments(control.observe(f.card.id).output), []);
+  assert.deepEqual(fragments(control.result(f.card.id).output), []);
+  const { PluginSessions } = await import("../src/main/services/PluginSessions.ts");
+  const screens = [];
+  const sessions = new PluginSessions({ terminals: f.terminals, notify: (_p, _s, _m, event) => { if (event.screen !== undefined) screens.push(event.screen); return true; } });
+  f.attach(sessions);
+  sessions.handle("p.reader", "svc", "sessions.subscribe", {}, ["sessions:events", "sessions:read-screen"]);
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "working" });
+  f.terminals.applyProviderSignal(f.card.id, { kind: "lifecycle", state: "idle" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(screens.length > 0);
+  assert.deepEqual(fragments(screens.join("\n")), []);
+  assert.ok(masked.length >= 3 && Math.max(...masked) < 40_000, `masked ${masked} characters per call`);
+});
+
+/**
+ * A held value of `length` characters that no generic rule would catch (short lower-case runs between `.`, `/`
+ * and `:`), so only the registry can mask it; `quoted` adds a quote and a backslash (its JSON form differs).
+ */
+function longSecret(length, seed = 7, quoted = false) {
+  let state = seed;
+  const next = () => { state = (state * 1_103_515_245 + 12_345) % 2_147_483_648; return Math.floor(state / 65_536); };
+  const letters = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let value = quoted ? 'q"\\' : "";
+  while (value.length < length) {
+    for (let i = 3 + (next() % 5); i > 0; i--) value += letters[next() % letters.length];
+    value += ".:/"[next() % 3];
+  }
+  return value.slice(0, length);
+}
+
+/** Slices of the value that must not survive masking: a 24-character piece every 997 characters, and its end. */
+function longFragments(text, value) {
+  const found = [];
+  for (let at = 0; at + 24 <= value.length; at += 997) if (text.includes(value.slice(at, at + 24))) found.push(at);
+  if (text.includes(value.slice(-24))) found.push(value.length - 24);
+  return found;
+}
+
+/** What a terminal of `columns` columns shows: the text cut into lines, each after a box side. */
+function wrapped(text, columns = 80) {
+  const lines = [];
+  for (let at = 0; at < text.length; at += columns) lines.push(text.slice(at, at + columns));
+  return lines.join("\r\n│ ");
+}
+
+test("registry: held values of 4k, 16k and 64k characters are masked whole, also wrapped and JSON-escaped", () => {
+  for (const length of [3_800, 4_096, 16_384, 65_536]) {
+    const registry = new SecretRedactionRegistry();
+    const value = longSecret(length, length, true);
+    registry.add("vault", [value, PLAIN_SECRET]);
+    const plain = registry.redact(`before ${value} after ${PLAIN_SECRET}`);
+    assert.equal(plain, "before <redacted:secret> after <redacted:secret>", `${length} plain`);
+    const screen = registry.redact(`$ cat key\r\n${wrapped(value)}\r\n$ `);
+    assert.equal(screen, "$ cat key\r\n<redacted:secret>\r\n$ ", `${length} wrapped`);
+    const json = registry.redact(JSON.stringify({ value, note: "kept" }));
+    assert.deepEqual(longFragments(json, JSON.stringify(value).slice(1, -1)), [], `${length} JSON-escaped`);
+    assert.match(json, /"note":"kept"/u);
+    // Two halves further apart than a wrap gap are two unrelated texts, not the value.
+    const apart = `${value.slice(0, length / 2)}${" ".repeat(65)}${value.slice(length / 2)}`;
+    assert.equal(registry.redact(apart), apart, `${length} split by more than a wrap gap`);
+  }
+});
+
+test("registry: a long held value never breaks masking of anything else", () => {
+  const registry = new SecretRedactionRegistry();
+  registry.add("plugin:p.big", [longSecret(4_000)]);
+  registry.add("session:a", [PLAIN_SECRET]);
+  assert.doesNotThrow(() => registry.redact("nothing to see"));
+  assert.equal(registry.redact(`x ${PLAIN_SECRET} ${secrets.openai}`), "x <redacted:secret> <redacted:openai>");
+  assert.equal(registry.redactTail(`x ${PLAIN_SECRET}`, 100), "x <redacted:secret>");
+  // Longer than any key the registry holds: ignored, as a value shorter than a key is.
+  const oversized = longSecret(65_537);
+  registry.add("plugin:p.huge", [oversized]);
+  assert.equal(registry.redact(`y ${PLAIN_SECRET}`), "y <redacted:secret>");
+});
+
+test("registry: masking held values stays linear, even for values that overlap themselves", () => {
+  const registry = new SecretRedactionRegistry();
+  // Every position of the text starts a near-match: a naive search would compare ~4 000 characters at each.
+  registry.add("vault", [`${"a".repeat(4_000)}b`, `${"a".repeat(64_000)}c`, "a".repeat(9), longSecret(16_384)]);
+  for (const text of ["a".repeat(240_000), `${"a ".repeat(120_000)}`, `${"a\r\n│ ".repeat(60_000)}`]) {
+    const started = performance.now();
+    const masked = registry.redact(text);
+    assert.ok(performance.now() - started < 1_500, `${JSON.stringify(text.slice(0, 6))} took ${Math.round(performance.now() - started)} ms`);
+    assert.ok(!/a{9}/u.test(masked.replace(/<redacted:[a-z-]+>/gu, "")), "the short held value is masked where it stands");
+  }
+});
+
+test("redactTail with long held values equals masking the whole text and cutting it, wherever the value falls", () => {
+  const base = scrollback(240_000);
+  for (const length of [4_096, 16_384]) {
+    const registry = new SecretRedactionRegistry();
+    const value = longSecret(length, length + 1);
+    registry.add("plugin:p.long", [value]);
+    for (const sample of [value, wrapped(value)]) {
+      for (const tail of [4_000, 8_192]) {
+        for (const at of [base.length - tail - Math.floor(sample.length / 2), base.length - tail - 16_384 - Math.floor(sample.length / 2), base.length - 10]) {
+          const text = `${base.slice(0, at)}${sample}${base.slice(at)}`;
+          const cut = registry.redactTail(text, tail);
+          assert.equal(cut, registry.redact(text).slice(-tail), `${length} ${tail} ${at}`);
+          assert.deepEqual(longFragments(cut, value), [], `${length} ${tail} ${at}: no fragment of the value survives the cut`);
+        }
+      }
+    }
+  }
+});
+
+test("registry: an accepted value is masked where it stands even when its wrap characters leave fewer than eight others", () => {
+  const registry = new SecretRedactionRegistry();
+  const spaced = ["abc", "defg"].join(" ");
+  const tabbed = ["abc", "defg"].join("\t");
+  const broken = ["abc", "defg"].join("\n");
+  const sparse = ["a", "b"].join(" ".repeat(7));
+  // Two halves further apart than a wrap gap, but that is how the value itself is written.
+  const gapped = ["abcd", "efgh"].join(" ".repeat(70));
+  registry.add("test", [spaced, tabbed, broken, sparse, gapped]);
+  for (const value of [spaced, tabbed, broken, sparse, gapped]) {
+    assert.equal(registry.redact(`x ${value} y`), "x <redacted:secret> y", JSON.stringify(value));
+    assert.equal(registry.redact(`{"v":"${JSON.stringify(value).slice(1, -1)}"}`), `{"v":"<redacted:secret>"}`, `${JSON.stringify(value)} JSON-escaped`);
+  }
+  // Only the value as written: its characters alone, or with other gaps, are ordinary text.
+  for (const text of ["a b", "ab", "a  b", "abcdefg"]) assert.equal(registry.redact(`x ${text} y`), `x ${text} y`, text);
+  const base = scrollback(60_000);
+  for (const at of [base.length - 8_192 - 3, base.length - 8_192 - 16_384 - 4]) {
+    const text = `${base.slice(0, at)}${spaced}${base.slice(at)}`;
+    assert.equal(registry.redactTail(text, 8_192), registry.redact(text).slice(-8_192), `tail at ${at}`);
+  }
+});
+
+test("redactTail equals masking the whole text when a match with no length bound starts before the window", () => {
+  const registry = new SecretRedactionRegistry();
+  const pem = (body) => `-----${"BEGIN"} RSA ${"PRIVATE"} KEY-----\n${body}\n-----${"END"} RSA ${"PRIVATE"} KEY-----`;
+  const wrappedToken = `${sk(run("w", 22))}${`\n${run("1", 3)}${run("x", 76)}`.repeat(500)}`;
+  const long = {
+    "quoted assignment": `password="${"a ".repeat(20_000)}"`,
+    "single-quoted assignment": `api_key='${"b ".repeat(20_000)}'`,
+    "unquoted assignment": `export GITHUB_TOKEN=${"c".repeat(40_000)}`,
+    "assignment over blank lines": `SECRET_KEY =${"\n".repeat(30_000)}${run("d", 12)}`,
+    "authorization over spaces": `Authorization:${" ".repeat(30_000)}${run("e", 12)}`,
+    "bearer over lines": `Bearer${"\r\n".repeat(15_000)}${run("f", 12)}`,
+    "url query": `https://example.test/?token=${"g".repeat(40_000)}`,
+    "url userinfo": `https://${"h".repeat(40_000)}:pw@example.test/`,
+    "json key over lines": `"apiKey":${"\n".repeat(30_000)}"${run("i", 30)}"`,
+    "wrapped token": wrappedToken,
+    "nested private-key header": pem(`${run("N", 64)}\n`.repeat(200) + pem(run("M", 64)).split("\n-----END")[0])
+  };
+  const base = scrollback(40_000);
+  for (const [name, sample] of Object.entries(long)) {
+    for (const maxChars of [300, 8_192]) {
+      // The match ends just inside the tail, a little before it, and far before it.
+      for (const after of [maxChars - 40, maxChars + 200, maxChars + 12_000]) {
+        const at = base.length - after;
+        const text = `${base.slice(0, at)}\n${sample}\n${base.slice(at)}`;
+        assert.equal(registry.redactTail(text, maxChars), registry.redact(text).slice(-maxChars), `${name} ${maxChars} ${after}`);
+      }
+    }
+  }
+  // A held value that holds a private key: masking it decides where the PEM rule sees a block.
+  const armoured = new SecretRedactionRegistry();
+  const keyValue = `{"private_key": "${pem(run("K", 64)).replace(/\n/gu, "\\n")}", "id": "${run("j", 12)}"}`;
+  armoured.add("plugin:p.sa", [pem(`${run("P", 64)}\n`.repeat(3)), keyValue]);
+  for (const after of [8_192 - 40, 8_192 + 200, 8_192 + 16_384 + 100]) {
+    const at = base.length - after;
+    const text = `${base.slice(0, at)}\n${pem(`${run("P", 64)}\n`.repeat(3))}\n${pem(run("Q", 64))}\n${base.slice(at)}`;
+    assert.equal(armoured.redactTail(text, 8_192), armoured.redact(text).slice(-8_192), `held private key ${after}`);
+  }
+  // The case from review: an otherwise empty registry and one long quoted value.
+  const text = `start\n${long["quoted assignment"]}\nend`;
+  assert.equal(registry.redactTail(text, 8_192), registry.redact(text).slice(-8_192));
+  assert.equal(registry.redactTail(text, 8_192).includes("a a a"), false);
 });

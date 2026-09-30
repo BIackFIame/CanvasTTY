@@ -7,7 +7,8 @@ import {
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
 import { readFile, writeFile, mkdir, rename, stat, rm } from "node:fs/promises";
 import { readFileSync, existsSync, realpathSync, statSync } from "node:fs";
-import { join, resolve, sep, extname } from "node:path";
+import { join, resolve, extname } from "node:path";
+import { isPathInside } from "../../../agent-runtime/path-inside.mjs";
 import { hostname } from "node:os";
 import type { TerminalManager } from "../TerminalManager.ts";
 import type { LimitsSnapshot, ProviderId } from "../../../shared/contracts.ts";
@@ -836,10 +837,10 @@ export class EvenG2Controller {
         return this.json(res, 404, { error: "not-found" });
       const root = realpathSync(this.mobileRoot);
       const file = resolve(root, url.pathname.slice("/mobile/".length) || "index.html");
-      if (!file.startsWith(root + sep) || !existsSync(file))
+      if (!isPathInside(root, file, { allowRoot: false }) || !existsSync(file))
         return this.json(res, 404, { error: "not-found" });
       const path = realpathSync(file);
-      if (!path.startsWith(root + sep) || !statSync(path).isFile())
+      if (!isPathInside(root, path, { allowRoot: false }) || !statSync(path).isFile())
         return this.json(res, 404, { error: "not-found" });
       const types: Record<string, string> = {
         ".html": "text/html; charset=utf-8",
@@ -866,7 +867,7 @@ export class EvenG2Controller {
     ) {
       const root = resolve(this.webRoot),
         path = resolve(root, url.pathname.slice(4) || "index.html");
-      if (!path.startsWith(root + sep) || !existsSync(path))
+      if (!isPathInside(root, path, { allowRoot: false }) || !existsSync(path))
         return this.json(res, 404, { error: "not-found" });
       const types: Record<string, string> = {
         ".html": "text/html; charset=utf-8",

@@ -26,6 +26,35 @@ test("privileged browser IPC validates the trusted main renderer", async () => {
     "browserSetViewport"
   ]) {
     const handler = source.slice(source.indexOf(`IPC.${channel}`), source.indexOf(`IPC.${channel}`) + 320);
-    assert.match(handler, /assertMainRenderer\(event, getMainWindow\)/, `${channel} must validate its sender`);
+    assert.match(handler, /(assertMainRenderer|isMainRenderer)\(event, getMainWindow\)/, `${channel} must validate its sender`);
+  }
+});
+
+test("channels that change settings, plugins, secrets or terminals accept only the main renderer", async () => {
+  const source = await readFile(ipcPath, "utf8");
+  for (const channel of [
+    "settingsUpdate",
+    "mediaRead",
+    "pluginsPreviewInstall",
+    "pluginsInstall",
+    "pluginsSetModules",
+    "pluginsSetEnabled",
+    "pluginsUninstall",
+    "pluginsOpenExternal",
+    "pluginsSecretsGet",
+    "pluginsSecretsSet",
+    "pluginsSecretsDelete",
+    "providerSecretsStatus",
+    "providerSecretsSet",
+    "providerSecretsClear",
+    "terminalCreate",
+    "terminalRestart",
+    "terminalInput",
+    "terminalDispose"
+  ]) {
+    const start = source.indexOf(`IPC.${channel},`);
+    assert.notEqual(start, -1, `${channel} handler is registered`);
+    const handler = source.slice(start, source.indexOf("ipcMain.", start));
+    assert.match(handler, /(assertMainRenderer|isMainRenderer)\(event, getMainWindow\)/, `${channel} must validate its sender`);
   }
 });

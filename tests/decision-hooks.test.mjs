@@ -134,7 +134,11 @@ test("the gate prints only what each CLI takes: deny for all; ask and allow for 
     assert.equal(hookOutput("codex", { behavior, message: "" }), null);
     assert.equal(hookOutput("qwen", { behavior, message: "" }), null);
   }
-  assert.equal(parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "none" }, "x"), null);
+  // "none" is a real answer (no verdict), told apart from an unreadable one (null), and prints nothing.
+  const none = parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "none" }, "x");
+  assert.deepEqual(none, { behavior: "none", message: "", unavailable: false });
+  for (const provider of ["claude", "codex", "qwen"]) assert.equal(hookOutput(provider, none), null);
+  assert.equal(parseDecision({ v: RUNTIME_PROTOCOL_VERSION, type: "permission_decision", requestId: "x", behavior: "maybe" }, "x"), null);
   const identity = { terminalSessionId: "t", provider: "claude", capabilityToken: "c" };
   const big = buildRequest({ tool_name: "Write", tool_input: { file_path: "/x", content: "x".repeat(50_000) } }, identity);
   assert.equal(big.truncated, true);
@@ -262,7 +266,7 @@ test("launch: the decision hook is added only when wanted, per provider, with or
   const claude = JSON.parse(adapters.prepare("claude", "t1", false, true).args[1]);
   assert.deepEqual(Object.keys(claude.hooks), ["PreToolUse"]);
   assert.equal(claude.hooks.PreToolUse[0].matcher, "Bash|Write|Edit|MultiEdit|NotebookEdit");
-  assert.match(claude.hooks.PreToolUse[0].hooks[0].command, /permission-gate\.mjs' 'pretool'$/u);
+  assert.match(claude.hooks.PreToolUse[0].hooks[0].command, /permission-gate\.mjs['"] ['"]pretool['"]$/u);
   assert.ok(JSON.parse(adapters.prepare("claude", "t1", true, true).args[1]).hooks.Stop, "status hooks stay alongside");
   const codex = adapters.prepare("codex", "t2", false, true).args.join(" ");
   assert.match(codex, /hooks\.PreToolUse=\[\{matcher="Bash\|apply_patch\|Edit\|Write"/u);

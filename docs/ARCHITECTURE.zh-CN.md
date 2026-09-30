@@ -30,6 +30,7 @@ Electron main process
 - `src/preload/index.ts` 只暴露 renderer 需要的类型化能力。Node integration 保持关闭，context isolation 与 sandbox 保持开启。
 - `src/main/ipc/registerIpc.ts` 负责原生 side effect，并校验对持久化媒体的访问。
 - `src/main/services/TerminalManager.ts` 是实时会话状态与 PTY buffer 的事实来源。它保存有界 scrollback，并将 PTY data 合并为 16ms IPC batch。普通终端从 `idle` 开始；智能体在收到首个机器可读 provider lifecycle signal 前保持 `unavailable`。之后 Codex、Claude Code、Qwen Code、Kimi Code、OpenCode、Hermes 与 Grok Build 通过 provider hook 在 `idle`、`working` 和 `needs_approval` 之间切换；Claude/Qwen 的精确 OSC 0/2 marker 保留为兼容 fallback。不会根据 PTY 是否存在或人类可读终端文字推断活动。进程退出只产生 `done` 或 `failed`。
+- `src/renderer/src/features/terminal/webglContextPool.ts` 决定哪些终端卡片使用 xterm 的 WebGL renderer。Chromium 每个 renderer 进程最多保留 16 个 WebGL context，因此池只分配 10 个：先给聚焦的卡片，再按屏幕可见面积（持有 context 且仍活跃的卡片，面对面积不足其 1.25 倍的卡片时保留 context），最后按最近输出。镜头与布局变化需静止 200 ms 后才会移动 context；离开屏幕、缩放超过 1× 或进入摘要模式的卡片立即释放（并显式丢弃）context。其余卡片使用 DOM renderer。context 丢失时卡片回到 DOM，buffer 不变，并在 30 s 内（重复丢失时翻倍）不再使用 WebGL；回到 DOM 时重新 fit 网格，因为 WebGL 的 cell 宽度向下取整到整数设备像素。
 - `src/main/services/LimitsService.ts` 通过已安装 CLI 的 app-server protocol 读取 Codex，并通过服务商 usage/billing endpoint 读取 Claude、Kimi、OpenCode Go 与 Grok Build。Qwen Code 是多服务商 CLI，没有 provider-neutral quota-read protocol，因此其 adapter 明确返回 `cli-not-found` 或 `unsupported-protocol`，不会伪造百分比。凭据只在可信主进程读取，只通过 HTTPS 发往匹配的服务商，不记录也不通过 IPC 暴露。该服务负责 timeout、structural normalization、cache、stale fallback 与子进程 cleanup；原始服务商响应不会跨越 IPC。
 - `src/main/services/SettingsStore.ts` 会规范化每次更新，并通过串行原子写入持久化。
 - `src/main/services/PluginManager.ts` 安装已构建的静态仓库，不执行 package script；拒绝 symlink 与超大包；持久化启用 registry；只提供包内文件，并执行每插件 permissions/storage quota。
@@ -81,7 +82,7 @@ App
 
 一个实时 `TerminalCard` 在对应 session ID 的整个生命周期内拥有同一个 xterm instance。切换 palette 时就地更新 `terminal.options.theme`；title/settings 变化不得销毁 terminal 或 renderer scrollback。窗口标题通过 `terminal:rename` 作为 session metadata 更新。与进程退出竞态的 PTY input/resize event 在主进程边界内处理，不会形成未捕获 Electron error。
 
-输出 batching 是 IPC/rendering 边界，而不是历史边界：每个 PTY chunk 都立即追加到有界 scrollback；待发送的 renderer 输出在 16ms timer、exit 前和 dispose 前 flush。Scrollback trimming 通过推进 chunk 完成，不会每次写入都重建整个 buffer；snapshot 只 join 保留的后缀。
+输出 batching 是 IPC/rendering 边界，而不是历史边界：每个 PTY chunk 都立即追加到有界 scrollback；待发送的 renderer 输出在 16ms timer、exit 前和 dispose 前 flush。所有会话共用一个 timer：同一次 flush 的 renderer 输出由 `TerminalRendererOutbox` 作为一条 `terminal:data-batch` 消息发送（session/removed 事件会先 flush 之前收集的输出，保持顺序）；preload 只把事件交给对应会话的卡片（`TerminalDataRouter`）。Scrollback trimming 通过推进 chunk 完成，不会每次写入都重建整个 buffer；snapshot 只 join 保留的后缀。
 
 终端指针坐标在 selection/wheel handling 前，从画布视觉变换后的矩形转换回 xterm layout 坐标。终端与画布滚轮方向从持久化设置中独立规范化。选中文字通过类型化 clipboard bridge 使用 `Ctrl+C`、`Ctrl+Shift+C` 或 `Cmd+C` 复制；使用 `Ctrl+Shift+V`、`Cmd+V` 或 `Shift+Insert` 粘贴，并通过 `Terminal.paste` 而非 synthetic keystroke 进入 xterm。`Shift+Enter` 直接向 PTY 发送 CSI-u modified Enter。
 

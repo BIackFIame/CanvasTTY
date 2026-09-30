@@ -1,3 +1,5 @@
+import { canonicalStringify } from "./tool-catalog.mjs";
+
 export const ORCHESTRATION_MCP_SERVER_NAME = "canvastty_agents";
 export const MAX_ORCHESTRATION_PAYLOAD_BYTES = 128 * 1024;
 
@@ -91,14 +93,9 @@ export function isPluginOrchestrationTool(value) {
     && !ORCHESTRATION_TOOL_SET.has(value) && PLUGIN_TOOL_NAME.test(value);
 }
 
-// Mirrors the browser catalog's canonical serializer so bridge digests and
-// payload checks behave identically.
-export function canonicalStringify(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalStringify(item)).join(",")}]`;
-  const keys = Object.keys(value).sort();
-  return `{${keys.map((key) => `${JSON.stringify(key)}:${canonicalStringify(value[key])}`).join(",")}}`;
-}
+// The browser catalog's canonical serializer, so bridge digests and payload
+// checks behave identically on both bridges.
+export { canonicalStringify };
 
 export function validateOrchestrationArguments(toolName, args) {
   const definition = ORCHESTRATION_TOOL_DEFINITIONS.find((entry) => entry.name === toolName);

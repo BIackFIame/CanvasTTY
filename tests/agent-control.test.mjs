@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,7 +10,9 @@ import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
 import xterm from "@xterm/headless";
-import { AgentControlGateway, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { AgentControlGateway, CONTROL_REFUSAL_MESSAGE, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { PixelSkinPackRegistry } from "../src/main/services/PixelSkinPackRegistry.ts";
+import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
@@ -23,6 +26,7 @@ import {
   MAX_RESULT_CHARS,
   MAX_RUNTIME_MESSAGE_BYTES
 } from "../src/agent-runtime/runtime-protocol.mjs";
+import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const localSocket = { skip: process.platform === "win32" ? "Unix socket tests; native Windows pipe relay has its own suite." : false };
 const PROMPT = "\x1b[2J\x1b[H>_ OpenAI Codex\r\nmodel: test\r\npermissions: YOLO mode\r\n\r\n› Ask Codex to do anything";
@@ -32,7 +36,7 @@ function registry() {
     environment: {}, checked: [] }), snapshot: () => ({}) };
 }
 
-async function fixture(t) {
+async function fixture(t, gatewayOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-test-")));
   const calls = [];
   let gateway;
@@ -47,7 +51,13 @@ async function fixture(t) {
       return pty;
     });
   let lifecycleEnabled = true;
-  gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => lifecycleEnabled });
+  const pixelSkinPacks = new PixelSkinPackRegistry(root);
+  await pixelSkinPacks.initialize();
+  const settings = new SettingsStore(root, "en");
+  await settings.load();
+  let notifiedSettings = null;
+  gateway = new AgentControlGateway({ userDataPath: root, terminals, pixelSkinPacks, settings,
+    onSettingsChanged: (next) => { notifiedSettings = next; }, lifecycleEnabled: () => lifecycleEnabled, ...gatewayOptions });
   const connectionPath = await gateway.start();
   const clientPath = join(root, "client-a.json");
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
@@ -67,9 +77,49 @@ async function fixture(t) {
     }
     assert.fail("fixture composer not ready");
   };
-  return { root, gateway, terminals, calls, connectionPath, clientPath, request, create, signal, ready,
+  return { root, gateway, terminals, calls, connectionPath, clientPath, pixelSkinPacks, settings,
+    get notifiedSettings() { return notifiedSettings; }, request, create, signal, ready,
     disableLifecycle() { lifecycleEnabled = false; } };
 }
+
+test("agent skin API lists and activates persistent themes", localSocket, async (t) => {
+  const f = await fixture(t);
+  assert.ok((await f.request("skin-list")).builtIn.includes("matrix"));
+  assert.ok((await f.request("skin-list")).builtIn.includes("gothic-eclipse"));
+  assert.equal((await f.request("skin-select", { skinId: "gothic-eclipse" })).activeId, "gothic-eclipse");
+  const selected = await f.request("skin-select", { skinId: "matrix", detail: "minimal" });
+  assert.equal(selected.activeId, "matrix");
+  assert.equal(selected.detail, "minimal");
+  assert.equal(f.notifiedSettings.terminalBorderSkin, "matrix");
+  assert.equal((await f.request("skin-list")).activeId, "matrix");
+  assert.equal((await new SettingsStore(f.root, "en").load()).terminalBorderSkin, "matrix");
+  await assert.rejects(f.request("skin-select", { skinId: "pixel:missing" }), (error) => error.code === "INVALID_PARAMS");
+});
+
+test("agent ZIP import accepts per-level terminal openings from a JSON file", localSocket, async (t) => {
+  const f = await fixture(t);
+  const archivePath = join(f.root, "theme.zip");
+  const aperturesPath = join(f.root, "apertures.json");
+  const apertures = {
+    minimal: { left: 10, right: 10, top: 16, bottom: 16 },
+    detailed: { left: 14, right: 14, top: 18, bottom: 19 },
+    master: { left: 15, right: 15, top: 21, bottom: 22 }
+  };
+  await writeFile(archivePath, "test ZIP placeholder");
+  await writeFile(aperturesPath, JSON.stringify(apertures));
+  let received;
+  f.pixelSkinPacks.installZip = async (archive, name, openings) => {
+    received = { archive: archive.toString(), name, apertures: openings };
+    return { id: `pixel:${randomUUID()}`, name, aperture: apertures.detailed, apertures: openings };
+  };
+  const response = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath,
+    "skin-install", "--archive", archivePath, "--name", "Agent theme", "--apertures", aperturesPath,
+    "--activate", "--detail", "detailed"]);
+  assert.deepEqual(received, { archive: "test ZIP placeholder", name: "Agent theme", apertures });
+  assert.equal(response.result.pack.name, "Agent theme");
+  assert.equal(f.notifiedSettings.terminalBorderSkin, response.result.pack.id);
+  assert.equal(f.notifiedSettings.terminalSkinDetail, "detailed");
+});
 
 test("CLI creates native YOLO with requested directory/title, including concurrent replay", localSocket, async (t) => {
   const f = await fixture(t);
@@ -91,6 +141,71 @@ test("CLI creates native YOLO with requested directory/title, including concurre
   await assert.rejects(runCli([...args.slice(0, 6), "create", "--cwd", f.root, "--title", "Different"]),
     (e) => e.code === "REQUEST_CONFLICT");
   assert.equal(f.calls.length, 1);
+});
+
+test("request receipts are bounded without locking the gateway, and a refused request can be retried", localSocket, async (t) => {
+  const f = await fixture(t, { maxReceipts: 3 });
+  for (let index = 0; index < 5; index += 1) {
+    await assert.rejects(f.request("interrupt", { sessionId: `missing-${index}` }, `missing-${index}`), (e) => e.code === "SESSION_NOT_FOUND");
+  }
+  // Before: the fourth mutating request (successful or not) got LIMIT_REACHED until restart.
+  const { session } = await f.create("create-after-limit");
+  assert.equal((await f.create("create-after-limit")).session.id, session.id, "a recent receipt still replays");
+  await f.ready(session.id);
+  await f.request("send", { sessionId: session.id, text: "first" }, "send-first");
+  f.signal(session.id, "working", "turn-one");
+  await assert.rejects(f.request("send", { sessionId: session.id, text: "second" }, "send-second"), (e) => e.code === "BUSY");
+  f.signal(session.id, "idle", "turn-one", { text: "done", truncated: false });
+  // BUSY wrote nothing, so the same request id is performed on retry instead of replaying BUSY.
+  const retried = await f.request("send", { sessionId: session.id, text: "second" }, "send-second");
+  assert.equal(retried.sessionId, session.id);
+  assert.equal(f.calls[0].pty.writes.length, 2);
+});
+
+test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-start-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const userDataPath = join(root, "user-data");
+  await writeFile(userDataPath, "a file where the folder should be");
+  const gateway = new AgentControlGateway({ userDataPath, terminals: {}, lifecycleEnabled: () => true });
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.start());
+  await rm(userDataPath);
+  const connection = await gateway.start();
+  const descriptor = JSON.parse(await readFile(connection, "utf8"));
+  assert.equal((await stat(descriptor.endpoint)).isSocket(), true);
+});
+
+test("agent control brings the Windows pipe host back after it fails and republishes the endpoint", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-win-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const transports = [];
+  let restarted;
+  const republished = new Promise((resolve) => { restarted = resolve; });
+  const gateway = new AgentControlGateway({
+    userDataPath: root, terminals: {}, lifecycleEnabled: () => true, platform: "win32", windowsHostPath: "C:\\fake\\host.exe",
+    onTransportRestarted: (path) => restarted(path),
+    windowsPipeHostFactory: () => {
+      const transport = new EventEmitter();
+      const index = transports.length;
+      transport.start = async () => `\\\\.\\pipe\\canvastty-agent-${index}`;
+      transport.close = async () => undefined;
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+  const connection = await gateway.start();
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-0$/);
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  assert.equal(await republished, connection);
+  assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-1$/);
+  await gateway.close();
+  transports[1].emit("fatal", new Error("late"));
+  t.mock.timers.tick(10_000);
+  assert.equal(transports.length, 2);
 });
 
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {
@@ -217,7 +332,61 @@ test("invalid socket credentials cannot launch a native session", localSocket, a
   });
   assert.equal(reply.ok, false);
   assert.equal(reply.error.code, "INVALID_REQUEST");
+  assert.equal(reply.error.message, CONTROL_REFUSAL_MESSAGE);
   assert.equal(f.calls.length, 0);
+});
+
+/** Sends raw bytes to the control socket and collects everything until the gateway closes the connection. */
+function rawExchange(endpoint, bytes) {
+  return new Promise((resolveReply, reject) => {
+    const socket = createConnection(endpoint);
+    const chunks = [];
+    socket.on("error", reject);
+    socket.setTimeout(3000, () => { socket.destroy(); reject(new Error("the gateway did not close the refused connection")); });
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.on("end", () => { socket.destroy(); resolveReply(Buffer.concat(chunks).toString("utf8")); });
+    socket.on("connect", () => socket.write(bytes));
+  });
+}
+
+test("unauthenticated, garbage and HTTP requests get the same guidance and a closed connection", localSocket, async (t) => {
+  const f = await fixture(t);
+  const descriptor = JSON.parse(await readFile(f.connectionPath, "utf8"));
+  const guessed = await rawExchange(descriptor.endpoint, JSON.stringify({ method: "list", params: {} }) + "\n");
+  const garbage = await rawExchange(descriptor.endpoint, "hello?\n");
+  for (const text of [guessed, garbage]) {
+    const reply = JSON.parse(text.trim());
+    assert.deepEqual(reply, { v: 1, ok: false, error: { code: "INVALID_REQUEST", message: CONTROL_REFUSAL_MESSAGE } });
+  }
+  const http = await rawExchange(descriptor.endpoint, "GET / HTTP/1.1\r\nHost: localhost\r\nUser-Agent: curl/8\r\nAccept: */*\r\n\r\n");
+  const [head, body] = http.split("\r\n\r\n");
+  assert.match(head, /^HTTP\/1\.1 403 Forbidden\r\n/u);
+  assert.match(head, /\r\nConnection: close/u);
+  assert.equal(Number(/Content-Length: (\d+)/u.exec(head)[1]), Buffer.byteLength(body));
+  assert.equal(body, `${CONTROL_REFUSAL_MESSAGE}\n`);
+  // The guidance names the way in and nothing about the protocol, the token or where anything lives.
+  assert.match(CONTROL_REFUSAL_MESSAGE, /Orchestrator role/u);
+  assert.match(CONTROL_REFUSAL_MESSAGE, /canvastty_agents tools/u);
+  assert.doesNotMatch(CONTROL_REFUSAL_MESSAGE, /token|instanceId|controller|\.sock|connection\.json|agent-control|ndjson|json/iu);
+  assert.equal(f.calls.length, 0);
+});
+
+test("the token file is private (0600) in a private folder (0700), even under a loose umask or a loose folder", localSocket, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "canvastty-control-hygiene-")));
+  await mkdir(join(root, "agent-control"), { mode: 0o777 });
+  await chmod(join(root, "agent-control"), 0o777);
+  const previous = process.umask(0);
+  const terminals = { create() { throw new Error("unused"); }, listMetadata: () => [], readBuffer() { throw new Error("unused"); },
+    inputChecked: () => false, geometry: () => ({ cols: 80, rows: 24 }) };
+  const gateway = new AgentControlGateway({ userDataPath: root, terminals, lifecycleEnabled: () => false });
+  t.after(async () => { process.umask(previous); await gateway.close(); await rm(root, { recursive: true, force: true }); });
+  let connectionPath;
+  try { connectionPath = await gateway.start(); } finally { process.umask(previous); }
+  const descriptor = JSON.parse(await readFile(connectionPath, "utf8"));
+  assert.equal((await stat(join(root, "agent-control"))).mode & 0o777, 0o700);
+  assert.equal((await stat(descriptor.tokenFile)).mode & 0o777, 0o600);
+  assert.equal((await stat(connectionPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(join(descriptor.endpoint, ".."))).mode & 0o777, 0o700);
 });
 
 test("a control write waiting on terminal replay cannot reach a restarted session", localSocket, async (t) => {
@@ -371,44 +540,9 @@ test("opt-in hook result capture is authenticated, bounded and absent for ordina
 
 const writes = new Map();
 
-function fakeSpawner(calls) {
-  return (command, args, options) => {
-    const process = {
-      pid: 20_000 + calls.length,
-      write(data) {
-        writes.set(options?.name ?? calls.length, [...(writes.get(options?.name ?? calls.length) ?? []), data]);
-      },
-      resize() {},
-      kill() {},
-      pause() {},
-      resume() {},
-      onData() { return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
-    };
-    calls.push({ command, args, options });
-    return process;
-  };
-}
-
-function availableRegistry() {
-  return {
-    get(provider) {
-      return {
-        state: "available",
-        provider,
-        executable: `/resolved/${provider}`,
-        launcher: "native",
-        environment: { PATH: "/resolved:/usr/bin" },
-        checked: [{ path: `/resolved/${provider}`, result: "selected" }]
-      };
-    },
-    snapshot() { return {}; }
-  };
-}
-
 function serviceFixture() {
   const calls = [];
-  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls, { onWrite: (data, options) => writes.set(options?.name ?? calls.length, [...(writes.get(options?.name ?? calls.length) ?? []), data]) }));
   const control = new AgentControlService(terminals);
   return { calls, terminals, control };
 }
@@ -561,4 +695,28 @@ test("the control CLI screen masks a custom secret the viewport's top edge cuts"
   assert.equal(text.includes(secret.slice(10)), false, "the tail on the top row is masked");
   assert.equal(/marmalade|loudly/u.test(text), false);
   assert.match(text, /<redacted:secret>/u, "masked where it stood, as one value");
+});
+
+test("an orchestrator tool call looks its sessions up by id: no other card's scrollback is copied", async () => {
+  const { terminals, control } = serviceFixture();
+  const parent = terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  const child = await control.spawn({ parentSessionId: parent.id, provider: "codex", cwd: process.cwd() });
+  const bystanders = Array.from({ length: 5 }, () => terminals.create({ provider: "claude", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } }));
+  assert.equal(bystanders.length, 5);
+  const copied = [];
+  const list = terminals.list.bind(terminals);
+  const readBuffer = terminals.readBuffer.bind(terminals);
+  terminals.list = () => { copied.push("list"); return list(); };
+  terminals.readBuffer = (id) => { copied.push(id); return readBuffer(id); };
+
+  // What observe_agent, get_agent_result, list_agents and the ownership check do.
+  assert.equal(control.status(child.id).id, child.id);
+  assert.equal(control.isInSubtree(parent.id, child.id), true);
+  assert.deepEqual(control.children(parent.id).map((session) => session.id), [child.id]);
+  control.observe(child.id);
+  control.result(child.id);
+  assert.throws(() => control.status("missing"), /does not exist/u);
+
+  assert.deepEqual(copied, [child.id, child.id], "only the observed card's own scrollback is read, and no list() snapshot of every card");
+  terminals.disposeAll();
 });

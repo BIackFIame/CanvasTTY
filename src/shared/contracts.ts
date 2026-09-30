@@ -1,5 +1,5 @@
-import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
-export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS };
+import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
+export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId };
 export type { CanvasLauncherItemId, ProviderId };
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
@@ -27,6 +27,38 @@ export type HomeAccentPresetId = "classic" | "warm" | "cool" | "mono" | "custom"
 export type SessionRowColorMode = "monochrome" | "status";
 export type CanvasColorId = "sage" | "lilac" | "night" | "sand" | "mist" | "rose" | "slate";
 export type CanvasPatternId = "dots" | "grid" | "waves" | "diagonal" | "rings" | "none";
+export type CustomTerminalBorderSkinId = `custom:${string}`;
+export type PixelTerminalBorderSkinId = `pixel:${string}`;
+export const BUNDLED_CANVAS_BACKGROUND_IDS = ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"] as const;
+export type CanvasBackgroundId = "none" | typeof BUNDLED_CANVAS_BACKGROUND_IDS[number] | PixelTerminalBorderSkinId;
+export type PixelSkinPreferredDetail = "minimal" | "detailed";
+export type PixelSkinSlot = `${"minimal" | "detailed" | "master"}_${"idle" | "working" | "completed"}` | "background";
+export interface PixelSkinAperture { left: number; right: number; top: number; bottom: number }
+export type PixelSkinApertures = Record<PixelSkinPreferredDetail | "master", PixelSkinAperture>;
+export const DEFAULT_PIXEL_SKIN_APERTURES: PixelSkinApertures = {
+  minimal: { left: 10, right: 10, top: 16, bottom: 16 },
+  detailed: { left: 14, right: 14, top: 18, bottom: 19 },
+  master: { left: 15, right: 15, top: 21, bottom: 22 }
+};
+export interface PixelSkinPackSummary { id: PixelTerminalBorderSkinId; name: string; aperture: PixelSkinAperture; apertures: PixelSkinApertures }
+export interface PixelSkinPackInstallRequest { name: string; files: Record<PixelSkinSlot, Uint8Array>; aperture?: PixelSkinAperture; apertures?: PixelSkinApertures }
+export interface PixelSkinZipInstallRequest { name: string; archive: Uint8Array; apertures?: PixelSkinApertures }
+export type TerminalBorderSkinId = "classic" | "minimal" | "glass" | "cyber" | "nord" | "gradient" | "cybercore" | "titanium" | "retro" | "sakura" | "matrix" | "forest-cabin" | "gold-black" | "cat" | "gothic-eclipse" | CustomTerminalBorderSkinId | PixelTerminalBorderSkinId;
+/** v1 manifest uses an unprefixed plain slug; files live at the fixed skin.css path. */
+export interface TerminalBorderSkinManifest {
+  schemaVersion: 1;
+  id: string;
+  name: string;
+  kind: "terminal-border";
+}
+/** Metadata only; the CSS is returned by get(). */
+export type TerminalBorderSkinListItem =
+  | { id: CustomTerminalBorderSkinId; name: string; revision: string; status: "ready" }
+  | { id: CustomTerminalBorderSkinId; name?: string; revision?: string; status: "error"; error: string };
+export type TerminalBorderSkinReadResult =
+  | { id: CustomTerminalBorderSkinId; name: string; revision: string; status: "ready"; css: string }
+  | { id: CustomTerminalBorderSkinId; status: "error"; error: string };
+export type AppSkinId = "classic" | "atelier" | "signal" | "greenhouse" | "midnight";
 export type LocaleId = "ru" | "en";
 export type MediaFit = "cover" | "contain";
 export type EdgePanSpeed = "slow" | "normal" | "fast";
@@ -44,6 +76,8 @@ export type RadialLauncherItemId = ProviderId | RadialLauncherActionId;
 /** Every agent provider (the launcher list without the plain terminal). */
 export const AGENT_PROVIDERS: readonly AgentProviderId[] = CANVAS_LAUNCHER_ITEMS
   .filter((item): item is AgentProviderId => item !== "terminal");
+/** The providers whose usage limits CanvasTTY reads, in display order. */
+export const LIMIT_PROVIDERS: readonly LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 // Keeps the safe provider subset proposed by @TroopJostle in PR #23 while
 // region, note, Browser, and Settings remain fixed top-level menu actions.
 export const DEFAULT_CANVAS_LAUNCHER_ITEMS: readonly CanvasLauncherItemId[] = [
@@ -54,25 +88,7 @@ export const DEFAULT_CANVAS_LAUNCHER_ITEMS: readonly CanvasLauncherItemId[] = [
   "terminal"
 ];
 
-export const RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [
-  "codex",
-  "claude",
-  "qwen",
-  "kimi",
-  "opencode",
-  "hermes",
-  "grok",
-  "omp",
-  "pi",
-  "cursor",
-  "minimax",
-  "devin",
-  "antigravity",
-  "terminal",
-  "note",
-  "browser",
-  "settings"
-];
+export const RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [...CANVAS_LAUNCHER_ITEMS, "note", "browser", "settings"];
 
 export const DEFAULT_RADIAL_LAUNCHER_ITEMS: readonly RadialLauncherItemId[] = [
   "codex",
@@ -211,7 +227,12 @@ export interface AppSettings {
   baseProtectionEnabled: boolean;
   uiScale: number;
   canvasColor: CanvasColorId;
+  canvasBackground: CanvasBackgroundId;
   pattern: CanvasPatternId;
+  terminalBorderSkin: TerminalBorderSkinId;
+  terminalSkinDetail: PixelSkinPreferredDetail;
+  terminalSkinAnimationEnabled: boolean;
+  appSkin: AppSkinId;
   snapToGrid: boolean;
   invertTerminalWheel: boolean;
   invertCanvasWheel: boolean;
@@ -292,6 +313,8 @@ export interface SessionMetadata {
   role: SessionRole;
   parentSessionId?: string;
   status: SessionStatus;
+  /** True only after an explicit provider turn-stop signal; cleared by the next working turn. */
+  turnCompleted?: boolean;
   startedAt: number;
   exitCode: number | null;
   failureDetails: string | null;
@@ -1287,6 +1310,19 @@ export interface CanvasTTYApi {
   settings: {
     get(): Promise<AppSettings>;
     update(patch: Partial<AppSettings>): Promise<AppSettings>;
+    onChanged(listener: (settings: AppSettings) => void): () => void;
+  };
+  skins: {
+    list(): Promise<TerminalBorderSkinListItem[]>;
+    get(id: CustomTerminalBorderSkinId): Promise<TerminalBorderSkinReadResult>;
+    onChanged(listener: () => void): () => void;
+  };
+  pixelSkins: {
+    list(): Promise<PixelSkinPackSummary[]>;
+    install(request: PixelSkinPackInstallRequest): Promise<PixelSkinPackSummary>;
+    installZip(request: PixelSkinZipInstallRequest): Promise<PixelSkinPackSummary>;
+    readAsset(id: PixelTerminalBorderSkinId, slot: PixelSkinSlot): Promise<Uint8Array | null>;
+    onChanged(listener: () => void): () => void;
   };
   agents: {
     availability(): Promise<AgentCliAvailability>;
@@ -1411,7 +1447,8 @@ export interface CanvasTTYApi {
     dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
     setVisible(id: string, visible: boolean): void;
-    onData(listener: (event: TerminalDataEvent) => void): () => void;
+    /** With `id`, only that session's output (one context-bridge call per batch instead of one per card). */
+    onData(listener: (event: TerminalDataEvent) => void, id?: string): () => void;
     onSession(listener: (event: SessionEvent) => void): () => void;
     onRemoved(listener: (event: SessionRemovedEvent) => void): () => void;
   };
@@ -1441,6 +1478,15 @@ export const IPC = {
   updaterInstall: "updater:install",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
+  settingsChanged: "settings:changed",
+  terminalBorderSkinsList: "terminal-border-skins:list",
+  terminalBorderSkinsGet: "terminal-border-skins:get",
+  terminalBorderSkinsChanged: "terminal-border-skins:changed",
+  pixelSkinsList: "pixel-skins:list",
+  pixelSkinsInstall: "pixel-skins:install",
+  pixelSkinsInstallZip: "pixel-skins:install-zip",
+  pixelSkinsReadAsset: "pixel-skins:read-asset",
+  pixelSkinsChanged: "pixel-skins:changed",
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",
@@ -1548,6 +1594,8 @@ export const IPC = {
   terminalSetRestore: "terminal:set-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
+  /** Main -> renderer: the TerminalDataEvents of one output flush, in order (see TerminalRendererOutbox). */
+  terminalDataBatch: "terminal:data-batch",
   terminalSession: "terminal:session",
   terminalRemoved: "terminal:removed",
   windowMinimize: "window:minimize",

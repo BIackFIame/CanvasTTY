@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
+import { NdjsonLineReader } from "../agent-runtime/ndjson.mjs";
 import {
   MAX_ORCHESTRATION_PAYLOAD_BYTES,
   ORCHESTRATION_MCP_SERVER_NAME,
@@ -37,13 +38,15 @@ class BridgeError extends Error {
   }
 }
 
+const responseLines = () => new NdjsonLineReader({ maxLineBytes: MAX_ORCHESTRATION_PAYLOAD_BYTES });
+
 export class OrchestrationClient {
   constructor(identity, options = {}) {
     this.identity = identity;
     this.connectTimeoutMs = options.connectTimeoutMs ?? 10_000;
     this.createConnection = options.createConnection ?? createConnection;
     this.socket = null;
-    this.buffer = Buffer.alloc(0);
+    this.lines = responseLines();
     this.pending = new Map();
     this.authenticated = null;
     this.authenticatedState = false;
@@ -74,7 +77,7 @@ export class OrchestrationClient {
       return;
     }
     this.socket = socket;
-    this.buffer = Buffer.alloc(0);
+    this.lines = responseLines();
     const timeout = setTimeout(() => this.handleDisconnect(socket, unavailable()), this.connectTimeoutMs);
     timeout.unref?.();
     socket.on("connect", () => {
@@ -94,11 +97,15 @@ export class OrchestrationClient {
 
   handleData(socket, chunk) {
     if (socket !== this.socket) return;
-    this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk]);
-    let newline;
-    while ((newline = this.buffer.indexOf(0x0a)) !== -1) {
-      const line = this.buffer.subarray(0, newline);
-      this.buffer = this.buffer.subarray(newline + 1);
+    let lines;
+    try {
+      lines = this.lines.push(chunk);
+    } catch {
+      // The gateway never sends a line over the limit: this peer is broken.
+      this.handleDisconnect(socket, unavailable());
+      return;
+    }
+    for (const line of lines) {
       if (line.length === 0) continue;
       let message;
       try {
@@ -293,18 +300,13 @@ async function run() {
   for (const key of Object.values(ENV)) delete process.env[key];
   const client = new OrchestrationClient(identity);
   const dispatch = createOrchestrationDispatcher(client);
-  let buffer = Buffer.alloc(0);
+  const requests = new NdjsonLineReader({
+    maxLineBytes: MAX_ORCHESTRATION_PAYLOAD_BYTES,
+    onOversize: () => writeMcp(errorResponse(null, new JsonRpcError(-32600, "Request exceeds 128KB")))
+  });
   process.stdin.on("data", (chunk) => {
-    buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
-    let newline;
-    while ((newline = buffer.indexOf(0x0a)) !== -1) {
-      const line = buffer.subarray(0, newline);
-      buffer = buffer.subarray(newline + 1);
+    for (const line of requests.push(chunk)) {
       if (line.length === 0) continue;
-      if (line.length > MAX_ORCHESTRATION_PAYLOAD_BYTES) {
-        writeMcp(errorResponse(null, new JsonRpcError(-32600, "Request exceeds 128KB")));
-        continue;
-      }
       let request;
       try {
         request = JSON.parse(line.toString("utf8"));

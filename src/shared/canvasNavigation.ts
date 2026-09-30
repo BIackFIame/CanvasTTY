@@ -281,7 +281,7 @@ export function isCanvasNavigationModifierActive(
   return state.metaKey;
 }
 
-export function normalizeCanvasNavigationKey(key: string): string | null {
+function normalizeCanvasNavigationKey(key: string): string | null {
   if (isCanvasNavigationMouseButton(key)) return key;
   if (key === " ") return "Space";
   if (key.length === 1 && /[A-Za-z0-9]/.test(key)) return key.toUpperCase();

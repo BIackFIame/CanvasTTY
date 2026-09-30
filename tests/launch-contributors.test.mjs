@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -325,7 +326,6 @@ test("options persist with the session, restart reuses them, and restore asks th
 test("Reopen with a launch plugin starts fresh and forgets the old conversation", async (t) => {
   const conversation = "5f1c2a90-aa11-4b22-9c33-0d44e55f6677";
   const directory = await mkdtemp(join(tmpdir(), "canvastty-launch-reopen-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
   await new TerminalSessionStore(directory).replace([{
     id: "reopened", provider: "claude", profile: "normal", role: "agent", title: "Agent", titleCustomized: false,
     cwd, position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true,
@@ -333,6 +333,7 @@ test("Reopen with a launch plugin starts fresh and forgets the old conversation"
   }]);
   const { pipeline } = await pipelineFixture(t, { contributors: [contributor("p.one")], answers: { "p.one": {} } });
   const { manager, calls } = await managerFixture(t, pipeline, { mode: "reopen", directory });
+  t.after(() => rm(directory, { recursive: true, force: true }));
   await waitFor(() => calls.length === 1);
   assert.equal(calls[0].args.includes(conversation), false);
   await manager.setSessionRestoreMode("continue");
@@ -368,7 +369,7 @@ test("restore without the plugin holds the card stopped with its reason and keep
 });
 
 test("end to end: the example service prepares a launch over JSON-RPC", async (t) => {
-  const root = new URL(".", example).pathname;
+  const root = fileURLToPath(new URL(".", example));
   const entryPath = join(root, "services", "launcher.mjs");
   const dataDir = await mkdtemp(join(tmpdir(), "canvastty-launch-e2e-"));
   t.after(() => rm(dataDir, { recursive: true, force: true }));

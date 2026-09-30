@@ -84,7 +84,12 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
                 spellCheck={false}
                 placeholder={secretId}
                 aria-label={`${SECRET_LABELS[secretId]} ${secretId}`}
-                onChange={(event) => setDrafts((current) => ({ ...current, [secretId]: event.currentTarget.value }))}
+                onChange={(event) => {
+                  // Read the value while the event is dispatching: React may run the updater
+                  // later (a paste over a pending edit), when currentTarget is already null.
+                  const value = event.currentTarget.value;
+                  setDrafts((current) => ({ ...current, [secretId]: value }));
+                }}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void save(secretId);
                 }}

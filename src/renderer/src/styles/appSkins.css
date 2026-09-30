@@ -1,0 +1,819 @@
+/**
+ * CanvasTTY Application Skins
+ *
+ * Data-attribute keyed application skins:
+ * - atelier: Warm studio, drafting clay, parchment and terracotta accents
+ * - signal: High-clarity technical avionics and amber telemetry
+ * - greenhouse: Deep botanical moss, evergreen, and sage/mint accents
+ * - midnight: Astronomical obsidian navy and crystalline starlight cyan
+ *
+ * Preserves terminal contrast, text legibility, and existing classic default.
+ */
+
+/* ==========================================================================
+   1. Atelier Skin
+   Warm tactile studio, terracotta accents, balanced drafting paper tones
+   ========================================================================== */
+
+:root[data-app-skin="atelier"],
+[data-app-skin="atelier"] {
+  --skin-bg-canvas: #191816;
+  --skin-bg-chrome: #141312;
+  --skin-bg-sidebar: #171614;
+  --skin-bg-surface: #211f1c;
+  --skin-bg-surface-elevated: #292723;
+  --skin-bg-surface-soft: #2f2c27;
+  --skin-bg-surface-hover: #37332e;
+
+  --skin-border-subtle: rgba(198, 180, 156, 0.14);
+  --skin-border-base: rgba(198, 180, 156, 0.24);
+  --skin-border-strong: rgba(198, 180, 156, 0.42);
+  --skin-border-focus: #d97746;
+
+  --skin-text-primary: #f2eee8;
+  --skin-text-secondary: #cec5b8;
+  --skin-text-muted: #9c9384;
+
+  --skin-accent: #d97746;
+  --skin-accent-hover: #e58756;
+  --skin-accent-active: #c56534;
+  --skin-accent-soft: rgba(217, 119, 70, 0.16);
+  --skin-accent-contrast: #181512;
+
+  --skin-status-ok: #78a87b;
+  --skin-status-warn: #e09f4e;
+  --skin-status-err: #d6645a;
+  --skin-status-info: #79a6ba;
+
+  --skin-shadow-sm: 0 1px 3px rgba(12, 11, 10, 0.35);
+  --skin-shadow-md: 0 4px 14px rgba(12, 11, 10, 0.42);
+  --skin-shadow-lg: 0 10px 28px rgba(12, 11, 10, 0.52);
+
+  /* Standard variable bridging */
+  --primary: var(--skin-accent);
+  --secondary: #c99a5e;
+  --surface-soft: var(--skin-bg-surface-soft);
+  --text: var(--skin-text-primary);
+  --text-muted-on-dark: var(--skin-text-muted);
+  --background: var(--skin-bg-canvas);
+  --border: var(--skin-border-base);
+}
+
+/* ==========================================================================
+   2. Signal Skin
+   Technical telemetry, tactical graphite, high-visibility amber & cyan
+   ========================================================================== */
+
+:root[data-app-skin="signal"],
+[data-app-skin="signal"] {
+  --skin-bg-canvas: #0f1216;
+  --skin-bg-chrome: #0b0d10;
+  --skin-bg-sidebar: #0d1014;
+  --skin-bg-surface: #151920;
+  --skin-bg-surface-elevated: #1b212b;
+  --skin-bg-surface-soft: #222a36;
+  --skin-bg-surface-hover: #2a3443;
+
+  --skin-border-subtle: rgba(100, 130, 165, 0.16);
+  --skin-border-base: rgba(100, 130, 165, 0.28);
+  --skin-border-strong: rgba(100, 130, 165, 0.46);
+  --skin-border-focus: #f59e0b;
+
+  --skin-text-primary: #f8fafc;
+  --skin-text-secondary: #cbd5e1;
+  --skin-text-muted: #8494a8;
+
+  --skin-accent: #f59e0b;
+  --skin-accent-hover: #fbbf24;
+  --skin-accent-active: #d97706;
+  --skin-accent-soft: rgba(245, 158, 11, 0.16);
+  --skin-accent-contrast: #0f1216;
+
+  --skin-status-ok: #34d399;
+  --skin-status-warn: #fbbf24;
+  --skin-status-err: #f87171;
+  --skin-status-info: #38bdf8;
+
+  --skin-shadow-sm: 0 1px 3px rgba(5, 7, 9, 0.45);
+  --skin-shadow-md: 0 4px 14px rgba(5, 7, 9, 0.55);
+  --skin-shadow-lg: 0 10px 30px rgba(5, 7, 9, 0.65);
+
+  /* Standard variable bridging */
+  --primary: var(--skin-accent);
+  --secondary: #38bdf8;
+  --surface-soft: var(--skin-bg-surface-soft);
+  --text: var(--skin-text-primary);
+  --text-muted-on-dark: var(--skin-text-muted);
+  --background: var(--skin-bg-canvas);
+  --border: var(--skin-border-base);
+}
+
+/* ==========================================================================
+   3. Greenhouse Skin
+   Deep botanical forest, evergreen tones, soothing sage & mint accents
+   ========================================================================== */
+
+:root[data-app-skin="greenhouse"],
+[data-app-skin="greenhouse"] {
+  --skin-bg-canvas: #0e1511;
+  --skin-bg-chrome: #090e0b;
+  --skin-bg-sidebar: #0c130f;
+  --skin-bg-surface: #131f18;
+  --skin-bg-surface-elevated: #192a20;
+  --skin-bg-surface-soft: #203529;
+  --skin-bg-surface-hover: #294234;
+
+  --skin-border-subtle: rgba(110, 175, 135, 0.16);
+  --skin-border-base: rgba(110, 175, 135, 0.26);
+  --skin-border-strong: rgba(110, 175, 135, 0.44);
+  --skin-border-focus: #34d399;
+
+  --skin-text-primary: #f0fdf4;
+  --skin-text-secondary: #c3e6cb;
+  --skin-text-muted: #7ca387;
+
+  --skin-accent: #34d399;
+  --skin-accent-hover: #4ade80;
+  --skin-accent-active: #10b981;
+  --skin-accent-soft: rgba(52, 211, 153, 0.16);
+  --skin-accent-contrast: #08110b;
+
+  --skin-status-ok: #34d399;
+  --skin-status-warn: #fbbf24;
+  --skin-status-err: #f87171;
+  --skin-status-info: #5eead4;
+
+  --skin-shadow-sm: 0 1px 3px rgba(4, 8, 6, 0.45);
+  --skin-shadow-md: 0 4px 14px rgba(4, 8, 6, 0.55);
+  --skin-shadow-lg: 0 10px 28px rgba(4, 8, 6, 0.65);
+
+  /* Standard variable bridging */
+  --primary: var(--skin-accent);
+  --secondary: #6ee7b7;
+  --surface-soft: var(--skin-bg-surface-soft);
+  --text: var(--skin-text-primary);
+  --text-muted-on-dark: var(--skin-text-muted);
+  --background: var(--skin-bg-canvas);
+  --border: var(--skin-border-base);
+}
+
+/* ==========================================================================
+   4. Midnight Skin
+   Astronomical dark navy, deep obsidian, celestial starlight cyan & indigo
+   ========================================================================== */
+
+:root[data-app-skin="midnight"],
+[data-app-skin="midnight"] {
+  --skin-bg-canvas: #090c13;
+  --skin-bg-chrome: #05080d;
+  --skin-bg-sidebar: #070a10;
+  --skin-bg-surface: #0f1624;
+  --skin-bg-surface-elevated: #151f33;
+  --skin-bg-surface-soft: #1d2b45;
+  --skin-bg-surface-hover: #253657;
+
+  --skin-border-subtle: rgba(105, 145, 220, 0.16);
+  --skin-border-base: rgba(105, 145, 220, 0.26);
+  --skin-border-strong: rgba(105, 145, 220, 0.45);
+  --skin-border-focus: #38bdf8;
+
+  --skin-text-primary: #f8fafc;
+  --skin-text-secondary: #c8d5e8;
+  --skin-text-muted: #788ba8;
+
+  --skin-accent: #38bdf8;
+  --skin-accent-hover: #67e8f9;
+  --skin-accent-active: #0284c7;
+  --skin-accent-soft: rgba(56, 189, 248, 0.16);
+  --skin-accent-contrast: #040810;
+
+  --skin-status-ok: #34d399;
+  --skin-status-warn: #fbbf24;
+  --skin-status-err: #f87171;
+  --skin-status-info: #38bdf8;
+
+  --skin-shadow-sm: 0 1px 3px rgba(3, 5, 8, 0.5);
+  --skin-shadow-md: 0 4px 14px rgba(3, 5, 8, 0.6);
+  --skin-shadow-lg: 0 10px 30px rgba(3, 5, 8, 0.72);
+
+  /* Standard variable bridging */
+  --primary: var(--skin-accent);
+  --secondary: #818cf8;
+  --surface-soft: var(--skin-bg-surface-soft);
+  --text: var(--skin-text-primary);
+  --text-muted-on-dark: var(--skin-text-muted);
+  --background: var(--skin-bg-canvas);
+  --border: var(--skin-border-base);
+}
+
+/* ==========================================================================
+   5. Comprehensive Component & Surface Selectors for Active Skins
+   Applies cleanly when any of the 4 skins is active
+   ========================================================================== */
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) {
+  color-scheme: dark;
+  background-color: var(--skin-bg-canvas);
+  color: var(--skin-text-primary);
+  --canvas-bg: var(--skin-bg-canvas);
+  --surface: var(--skin-bg-surface);
+  --primary-hover: var(--skin-accent-hover);
+  --text-dark: var(--skin-accent-contrast);
+  --shadow-lg: var(--skin-shadow-lg);
+}
+
+/* App chrome, root layout, and window frames */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.app, .app-shell, .app-container, .window-frame) {
+  background-color: var(--skin-bg-canvas);
+  color: var(--skin-text-primary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.app-chrome, .titlebar, .title-bar, .app-header, .top-bar) {
+  background-color: var(--skin-bg-chrome);
+  border-bottom: 1px solid var(--skin-border-subtle);
+  color: var(--skin-text-secondary);
+}
+
+/* Sidebar and navigation surfaces */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.sidebar, .sidebar__nav, .sidebar-nav, .app-sidebar) {
+  background-color: var(--skin-bg-sidebar);
+  border-right: 1px solid var(--skin-border-subtle);
+  color: var(--skin-text-secondary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.sidebar__item, .sidebar-item, .nav-item, .nav-button, .sidebar-button) {
+  color: var(--skin-text-muted);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.sidebar__item, .sidebar-item, .nav-item, .nav-button, .sidebar-button):hover {
+  background-color: var(--skin-bg-surface);
+  color: var(--skin-text-primary);
+  border-color: var(--skin-border-subtle);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.sidebar__item, .sidebar-item, .nav-item, .nav-button, .sidebar-button):is(.active, [aria-selected="true"], [aria-current="page"]) {
+  background-color: var(--skin-accent-soft);
+  color: var(--skin-accent);
+  border-color: var(--skin-border-base);
+  font-weight: 600;
+}
+
+/* Panels, sections, and cards */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.panel, .side-panel, .settings-panel, .theme-panel, .card, .settings-section) {
+  background-color: var(--skin-bg-surface);
+  border: 1px solid var(--skin-border-subtle);
+  border-radius: 8px;
+  color: var(--skin-text-primary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.panel__header, .panel-header, .card__header, .section-header) {
+  background-color: var(--skin-bg-surface-elevated);
+  border-bottom: 1px solid var(--skin-border-subtle);
+  color: var(--skin-text-primary);
+}
+
+/* Tabs and tab bars */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.tabs, .tab-bar, .tab-list, .tabs-container) {
+  background-color: var(--skin-bg-chrome);
+  border-bottom: 1px solid var(--skin-border-subtle);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.tab, .tab-item) {
+  background-color: transparent;
+  color: var(--skin-text-muted);
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.tab, .tab-item):hover {
+  background-color: var(--skin-bg-surface-elevated);
+  color: var(--skin-text-primary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.tab, .tab-item):is(.tab--active, .active, [aria-selected="true"]) {
+  background-color: var(--skin-bg-surface);
+  color: var(--skin-text-primary);
+  border-color: var(--skin-border-base);
+  border-top: 2px solid var(--skin-accent);
+  font-weight: 600;
+}
+
+/* Command surfaces, search bars, inputs, and selectors */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.command-palette, .command-bar, .command-box, .omni-palette) {
+  background-color: var(--skin-bg-surface-elevated);
+  border: 1px solid var(--skin-border-strong);
+  box-shadow: var(--skin-shadow-lg);
+  border-radius: 8px;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  select,
+  textarea,
+  .command-input,
+  .search-input,
+  .input,
+  .form-control
+) {
+  background-color: var(--skin-bg-surface-soft);
+  border: 1px solid var(--skin-border-base);
+  color: var(--skin-text-primary);
+  border-radius: 6px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(
+  input[type="text"],
+  input[type="search"],
+  input[type="number"],
+  select,
+  textarea,
+  .command-input,
+  .search-input,
+  .input,
+  .form-control
+):focus-visible {
+  border-color: var(--skin-border-focus);
+  box-shadow: 0 0 0 2px var(--skin-accent-soft);
+}
+
+/* Buttons and action elements */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.btn, .button, .icon-btn, .icon-button, .action-btn) {
+  background-color: var(--skin-bg-surface-soft);
+  border: 1px solid var(--skin-border-subtle);
+  color: var(--skin-text-secondary);
+  border-radius: 6px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.btn, .button, .icon-btn, .icon-button, .action-btn):hover {
+  background-color: var(--skin-bg-surface-hover);
+  border-color: var(--skin-border-base);
+  color: var(--skin-text-primary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.btn, .button):is(.btn-primary, .btn--primary, [data-variant="primary"]) {
+  background-color: var(--skin-accent);
+  border-color: var(--skin-accent);
+  color: var(--skin-accent-contrast);
+  font-weight: 600;
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.btn, .button):is(.btn-primary, .btn--primary, [data-variant="primary"]):hover {
+  background-color: var(--skin-accent-hover);
+  border-color: var(--skin-accent-hover);
+}
+
+/* Status bars, indicators, and badges */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.status-bar, .statusbar, .status-footer) {
+  background-color: var(--skin-bg-chrome);
+  border-top: 1px solid var(--skin-border-subtle);
+  color: var(--skin-text-muted);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.badge, .status-badge, .tag, .pill) {
+  border-radius: 4px;
+  border: 1px solid var(--skin-border-subtle);
+  background-color: var(--skin-bg-surface-soft);
+  color: var(--skin-text-secondary);
+}
+
+/* Modal and dialog surfaces */
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.modal-backdrop, .modal-overlay) {
+  background-color: rgba(0, 0, 0, 0.72);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.modal, .modal-content, .modal-card, .dialog, dialog) {
+  background-color: var(--skin-bg-surface-elevated);
+  border: 1px solid var(--skin-border-strong);
+  box-shadow: var(--skin-shadow-lg);
+  border-radius: 8px;
+  color: var(--skin-text-primary);
+}
+
+:is(
+  [data-app-skin="atelier"],
+  [data-app-skin="signal"],
+  [data-app-skin="greenhouse"],
+  [data-app-skin="midnight"]
+) :is(.modal-header, .dialog-header) {
+  border-bottom: 1px solid var(--skin-border-subtle);
+}
+
+/* ==========================================================================
+   6. Terminal Card Harmonization
+   Preserves terminal contrast, layout, and text legibility while tuning chrome
+   ========================================================================== */
+
+[data-app-skin="atelier"] .terminal-card[data-border-skin="classic"] {
+  border-color: rgba(198, 180, 156, 0.28);
+  box-shadow: 0 6px 20px rgba(18, 16, 14, 0.38);
+}
+[data-app-skin="atelier"] .terminal-card[data-border-skin="classic"] .terminal-card__header {
+  background: #252320;
+  border-bottom: 1px solid rgba(198, 180, 156, 0.16);
+}
+[data-app-skin="atelier"] .terminal-card[data-border-skin="classic"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 2px #d97746, 0 8px 24px rgba(18, 16, 14, 0.44);
+}
+
+[data-app-skin="signal"] .terminal-card[data-border-skin="classic"] {
+  border-color: rgba(100, 130, 165, 0.32);
+  box-shadow: 0 6px 22px rgba(8, 10, 14, 0.45);
+}
+[data-app-skin="signal"] .terminal-card[data-border-skin="classic"] .terminal-card__header {
+  background: #181d26;
+  border-bottom: 1px solid rgba(100, 130, 165, 0.2);
+}
+[data-app-skin="signal"] .terminal-card[data-border-skin="classic"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 2px #f59e0b, 0 8px 26px rgba(8, 10, 14, 0.52);
+}
+
+[data-app-skin="greenhouse"] .terminal-card[data-border-skin="classic"] {
+  border-color: rgba(110, 175, 135, 0.3);
+  box-shadow: 0 6px 20px rgba(7, 12, 9, 0.45);
+}
+[data-app-skin="greenhouse"] .terminal-card[data-border-skin="classic"] .terminal-card__header {
+  background: #16241c;
+  border-bottom: 1px solid rgba(110, 175, 135, 0.18);
+}
+[data-app-skin="greenhouse"] .terminal-card[data-border-skin="classic"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 2px #34d399, 0 8px 24px rgba(7, 12, 9, 0.52);
+}
+
+[data-app-skin="midnight"] .terminal-card[data-border-skin="classic"] {
+  border-color: rgba(105, 145, 220, 0.32);
+  box-shadow: 0 6px 22px rgba(4, 7, 12, 0.5);
+}
+[data-app-skin="midnight"] .terminal-card[data-border-skin="classic"] .terminal-card__header {
+  background: #121a2c;
+  border-bottom: 1px solid rgba(105, 145, 220, 0.2);
+}
+[data-app-skin="midnight"] .terminal-card[data-border-skin="classic"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 2px #38bdf8, 0 8px 26px rgba(4, 7, 12, 0.6);
+}
+
+/* The terminal viewport keeps its own renderer-controlled colors. */
+
+[data-app-skin]:not([data-app-skin="classic"]) .settings-panel__sidebar { background: var(--skin-bg-sidebar); }
+[data-app-skin]:not([data-app-skin="classic"]) .settings-tabs__button--active { background: var(--skin-bg-surface-elevated); }
+[data-app-skin]:not([data-app-skin="classic"]) .settings-panel__main { background: var(--skin-bg-surface); }
+[data-app-skin]:not([data-app-skin="classic"]) .canvas-command-palette,
+[data-app-skin]:not([data-app-skin="classic"]) .canvas-menu,
+[data-app-skin]:not([data-app-skin="classic"]) .terminal-link-dialog { border: 1px solid var(--skin-border-base); }
+[data-app-skin]:not([data-app-skin="classic"]) .canvas-command-palette__search input { background: transparent; border: 0; box-shadow: none; }
+
+/* ==========================================================================
+   7. App Skin Switcher Component
+   Responsive grid and preview cards for theme settings
+   ========================================================================== */
+
+.app-skin-choices {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.app-skin-choice {
+  min-width: 0;
+  padding: 0.65rem;
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  color: var(--text-muted-on-dark, #8b949e);
+  background: var(--surface-soft, rgba(255, 255, 255, 0.05));
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+}
+
+.app-skin-choice:hover {
+  color: var(--text, #e6edf3);
+  background: color-mix(in srgb, var(--surface-soft, rgba(255, 255, 255, 0.05)) 78%, var(--secondary, #38bdf8));
+}
+
+.app-skin-choice:focus-visible {
+  outline: 2px solid var(--skin-border-focus, #38bdf8);
+  outline-offset: 2px;
+}
+
+.app-skin-choice[aria-pressed="true"] {
+  border-color: var(--primary, #38bdf8);
+  color: var(--text, #e6edf3);
+  box-shadow: inset 0 0 0 1px var(--primary, #38bdf8);
+}
+
+.app-skin-choice__label {
+  min-width: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.app-skin-choice__description {
+  font-size: 0.72rem;
+  line-height: 1.3;
+  color: var(--text-muted-on-dark, #8b949e);
+}
+
+/* Preview mini-representation */
+.app-skin-preview {
+  height: 4.8rem;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 6px;
+  background: #121418;
+}
+
+.app-skin-preview__chrome {
+  height: 1.2rem;
+  padding: 0 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  background: #1d212a;
+}
+
+.app-skin-preview__dot {
+  width: 0.3rem;
+  height: 0.3rem;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.app-skin-preview__body {
+  flex: 1;
+  display: flex;
+}
+
+.app-skin-preview__sidebar {
+  width: 25%;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: #161a22;
+}
+
+.app-skin-preview__content {
+  flex: 1;
+  padding: 0.4rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.app-skin-preview__line {
+  height: 0.24rem;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22);
+  width: 70%;
+}
+
+.app-skin-preview__line--accent {
+  width: 40%;
+}
+
+/* Skin-specific preview swatches */
+.app-skin-preview[data-preview-skin="atelier"] {
+  background: #191816;
+  border-color: rgba(198, 180, 156, 0.28);
+}
+.app-skin-preview[data-preview-skin="classic"] .app-skin-preview__line--accent { background: #b8cf99; }
+.app-skin-preview[data-preview-skin="atelier"] .app-skin-preview__chrome {
+  background: #141312;
+}
+.app-skin-preview[data-preview-skin="atelier"] .app-skin-preview__sidebar {
+  background: #171614;
+}
+.app-skin-preview[data-preview-skin="atelier"] .app-skin-preview__line--accent {
+  background: #d97746;
+}
+
+.app-skin-preview[data-preview-skin="signal"] {
+  background: #0f1216;
+  border-color: rgba(100, 130, 165, 0.32);
+}
+.app-skin-preview[data-preview-skin="signal"] .app-skin-preview__chrome {
+  background: #0b0d10;
+}
+.app-skin-preview[data-preview-skin="signal"] .app-skin-preview__sidebar {
+  background: #0d1014;
+}
+.app-skin-preview[data-preview-skin="signal"] .app-skin-preview__line--accent {
+  background: #f59e0b;
+}
+
+.app-skin-preview[data-preview-skin="greenhouse"] {
+  background: #0e1511;
+  border-color: rgba(110, 175, 135, 0.3);
+}
+.app-skin-preview[data-preview-skin="greenhouse"] .app-skin-preview__chrome {
+  background: #090e0b;
+}
+.app-skin-preview[data-preview-skin="greenhouse"] .app-skin-preview__sidebar {
+  background: #0c130f;
+}
+.app-skin-preview[data-preview-skin="greenhouse"] .app-skin-preview__line--accent {
+  background: #34d399;
+}
+
+.app-skin-preview[data-preview-skin="midnight"] {
+  background: #090c13;
+  border-color: rgba(105, 145, 220, 0.32);
+}
+.app-skin-preview[data-preview-skin="midnight"] .app-skin-preview__chrome {
+  background: #05080d;
+}
+.app-skin-preview[data-preview-skin="midnight"] .app-skin-preview__sidebar {
+  background: #070a10;
+}
+.app-skin-preview[data-preview-skin="midnight"] .app-skin-preview__line--accent {
+  background: #38bdf8;
+}
+
+/* ==========================================================================
+   8. Responsive and Accessibility Rules
+   Scales neatly across desktop, tablet, and compact mobile views
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  .app-skin-choices {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .app-skin-choices {
+    grid-template-columns: 1fr;
+  }
+}
+
+
+/* ==========================================================================
+   9. Workspace Theme Backgrounds (CanvasTTY Pixel Themes)
+   Fixed viewport background for built-in pixel themes.
+   ========================================================================== */
+
+.workspace[data-theme-background] {
+  background-position: center center;
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+.workspace[data-theme-background]::before {
+  display: none !important;
+}
+
+.workspace[data-theme-background="sakura"] {
+  background-image: url("../assets/theme-backgrounds/sakura.png");
+}
+
+.workspace[data-theme-background="matrix"] {
+  background-image: url("../assets/theme-backgrounds/matrix.png");
+}
+
+.workspace[data-theme-background="forest-cabin"] {
+  background-image: url("../assets/theme-backgrounds/forest-cabin.png");
+}
+
+.workspace[data-theme-background="gold-black"] {
+  background-image: url("../assets/theme-backgrounds/gold-black.png");
+}
+
+.workspace[data-theme-background="cat"] {
+  background-image: url("../assets/theme-backgrounds/cat.png");
+}
+.workspace[data-theme-background="gothic-eclipse"] {
+  background-image: url("../assets/theme-backgrounds/gothic-eclipse.png");
+}

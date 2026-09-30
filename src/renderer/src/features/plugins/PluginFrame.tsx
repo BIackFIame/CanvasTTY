@@ -14,6 +14,7 @@ import {
   pluginCanvasWheelInput,
   type PluginCanvasWheelInput
 } from "./pluginInputBridge";
+import { isProviderId } from "../../../../shared/providerCatalog.ts";
 
 const storageListeners = new Map<string, Set<(key: string, value: unknown) => void>>();
 
@@ -276,7 +277,7 @@ async function handleRequest({
   if (method === "launcher.open") {
     requirePermission(plugin, "launcher:open");
     const provider = stringParam(params.provider, "provider");
-    if (!isProvider(provider)) throw new Error("Plugin requested an unknown launcher provider.");
+    if (!isProviderId(provider)) throw new Error("Plugin requested an unknown launcher provider.");
     onOpenLauncher(provider);
     return null;
   }
@@ -426,10 +427,6 @@ function secretValue(value: unknown): string {
     throw new Error("Plugin secret value is invalid or exceeds 16 KB.");
   }
   return value;
-}
-
-function isProvider(value: string): value is ProviderId {
-  return value === "terminal" || value === "codex" || value === "claude" || value === "qwen" || value === "kimi" || value === "opencode" || value === "hermes" || value === "grok" || value === "omp" || value === "pi" || value === "cursor" || value === "minimax" || value === "devin" || value === "antigravity";
 }
 
 function encodeAssetPath(value: string): string {

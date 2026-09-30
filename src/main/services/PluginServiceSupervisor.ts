@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
+import { pathToFileURL } from "node:url";
 import type {
   PluginPermission,
   PluginServiceLogEntry,
@@ -9,6 +10,7 @@ import type {
   PluginServiceStatus
 } from "../../shared/contracts";
 import { MAX_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
 
 /** One trusted service the supervisor should keep running. Built by PluginManager. */
 export interface PluginServiceSpec {
@@ -77,7 +79,7 @@ const DEFAULT_STOP_GRACE_MS = 2_000;
 const DEFAULT_RESTART_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const DEFAULT_MAX_RESTARTS = 5;
 const DEFAULT_RESTART_WINDOW_MS = 10 * 60_000;
-export const PLUGIN_SERVICE_MAX_FRAME_BYTES = 1024 * 1024;
+const PLUGIN_SERVICE_MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_PENDING_REQUESTS = 64;
 const MAX_LOG_ENTRIES = 300;
 const MAX_LOG_MESSAGE = 2_000;
@@ -94,6 +96,55 @@ const INHERITED_ENVIRONMENT = new Set([
   "SystemRoot", "SYSTEMROOT", "windir", "WINDIR", "ComSpec", "COMSPEC", "PATHEXT",
   "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramData", "HOMEDRIVE", "HOMEPATH"
 ]);
+
+/**
+ * Module hooks for the service process: the entry is loaded from bytes the
+ * hook read and hashed itself, and a mismatch stops the load. They run
+ * before the entry through `--import`, off the main thread (module.register).
+ *
+ * The entry checked is the main module node actually resolved (the one
+ * resolve without a parent), not only the URL the host computed: when the
+ * entry or a folder above it is replaced by a symlink after the host's check,
+ * node resolves the main module to another file, and that file must match the
+ * hash too. The host's URL stays checked as well.
+ *
+ * The hooks take their modules with `await import(...)`, never a static
+ * `import ... from`: electron-vite puts its CommonJS shim (`__dirname`,
+ * `require`) after the last static import it finds in the main bundle, and a
+ * static import inside this string would pull the shim into the string, which
+ * leaves the whole main process without `__dirname`.
+ */
+const ENTRY_GUARD_HOOKS = `
+const { createHash } = await import("node:crypto");
+const { readFile } = await import("node:fs/promises");
+let entryUrl = null;
+let mainUrl = null;
+let expected = null;
+export function initialize(data) { entryUrl = data.url; expected = data.sha256; }
+export async function resolve(specifier, context, nextResolve) {
+  const resolved = await nextResolve(specifier, context);
+  if (mainUrl === null && context.parentURL === undefined) mainUrl = resolved.url;
+  return resolved;
+}
+export async function load(url, context, nextLoad) {
+  if (url !== entryUrl && url !== mainUrl) return nextLoad(url, context);
+  const source = await readFile(new URL(url));
+  if (createHash("sha256").update(source).digest("hex") !== expected) {
+    throw new Error("The service entry changed after it was trusted.");
+  }
+  const loaded = await nextLoad(url, context);
+  return { format: loaded.format, source, shortCircuit: true };
+}
+`;
+
+export function entryGuardArguments(entryUrl: string, sha256: string): string[] {
+  const boot = [
+    'import { register } from "node:module";',
+    `register(${JSON.stringify(`data:text/javascript,${encodeURIComponent(ENTRY_GUARD_HOOKS)}`)},`
+      + ` { data: ${JSON.stringify({ url: entryUrl, sha256 })} });`
+  ].join("\n");
+  return ["--import", `data:text/javascript,${encodeURIComponent(boot)}`];
+}
 
 export function pluginServiceEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   const environment: Record<string, string> = {};
@@ -118,8 +169,6 @@ interface ServiceRecord {
   child: ChildProcess | null;
   pending: Map<number, PendingRequest>;
   nextId: number;
-  stdout: string;
-  discarding: boolean;
   crashes: number[];
   restarts: number;
   restartTimer: NodeJS.Timeout | null;
@@ -177,8 +226,6 @@ export class PluginServiceSupervisor {
           child: null,
           pending: new Map(),
           nextId: 1,
-          stdout: "",
-          discarding: false,
           crashes: [],
           restarts: 0,
           restartTimer: null,
@@ -300,7 +347,10 @@ export class PluginServiceSupervisor {
     await this.hostGate;
     if (record.removed || this.disposed) return;
     record.state = "starting";
+    let entryUrl: string;
     try {
+      // Node loads the main entry by its real path; the guard matches that URL.
+      entryUrl = pathToFileURL(await realpath(spec.entryPath)).href;
       const content = await readFile(spec.entryPath);
       if (createHash("sha256").update(content).digest("hex") !== spec.sha256) {
         // The file changed after the user trusted it: never run it, and do not retry.
@@ -317,15 +367,17 @@ export class PluginServiceSupervisor {
       return;
     }
 
-    const child = spawn(this.options.command, [spec.entryPath], {
+    // The check above and node's own read of the entry are separate reads: a file
+    // replaced in between would run as trusted. The guard makes node run only
+    // bytes it read and hashed itself, so what runs is what matched the hash,
+    // wherever node resolves `spec.entryPath` by then.
+    const child = spawn(this.options.command, [...entryGuardArguments(entryUrl, spec.sha256), spec.entryPath], {
       cwd: spec.root,
       env: pluginServiceEnvironment(this.options.environment),
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
     record.child = child;
-    record.stdout = "";
-    record.discarding = false;
     record.exited = new Promise((resolve) => {
       let settled = false;
       const finish = (code: number | null, signal: NodeJS.Signals | null, error?: Error): void => {
@@ -342,8 +394,11 @@ export class PluginServiceSupervisor {
       this.log(spec, "host", "info", `Started (pid ${child.pid ?? "?"}).`);
     });
     child.stdin?.on("error", () => undefined);
-    child.stdout?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk: string) => this.stdout(record, chunk));
+    // Frames over the limit are dropped up to their newline instead of buffered.
+    const frames = new NdjsonLineReader({ maxLineBytes: this.options.maxFrameBytes, onOversize: () => this.dropFrame(record) });
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const line of frames.push(chunk)) this.frame(record, line.toString("utf8"));
+    });
     child.stderr?.setEncoding("utf8");
     let stderr = "";
     child.stderr?.on("data", (chunk: string) => {
@@ -442,25 +497,6 @@ export class PluginServiceSupervisor {
     if (!stdin || stdin.destroyed || !stdin.writable) return false;
     stdin.write(`${frame}\n`);
     return true;
-  }
-
-  private stdout(record: ServiceRecord, chunk: string): void {
-    record.stdout += chunk;
-    let newline = record.stdout.indexOf("\n");
-    while (newline >= 0) {
-      const line = record.stdout.slice(0, newline);
-      record.stdout = record.stdout.slice(newline + 1);
-      if (record.discarding) record.discarding = false;
-      else if (Buffer.byteLength(line, "utf8") > this.options.maxFrameBytes) this.dropFrame(record);
-      else this.frame(record, line);
-      newline = record.stdout.indexOf("\n");
-    }
-    if (Buffer.byteLength(record.stdout, "utf8") > this.options.maxFrameBytes) {
-      // Skip the rest of an oversized frame up to its newline instead of buffering it.
-      if (!record.discarding) this.dropFrame(record);
-      record.discarding = true;
-      record.stdout = "";
-    }
   }
 
   private dropFrame(record: ServiceRecord): void {

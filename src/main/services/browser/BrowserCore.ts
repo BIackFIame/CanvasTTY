@@ -13,6 +13,7 @@ import { BrowserAuditStore } from "./BrowserAuditStore.ts";
 import { BrowserCommandDispatcher } from "./BrowserCommandDispatcher.ts";
 import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
 import { BrowserPolicyService, DEFAULT_BROWSER_URL } from "./BrowserPolicyService.ts";
+import { isSensitiveName } from "../safety/sensitiveNames.ts";
 
 export interface BrowserCoreTab {
   id: string;
@@ -435,7 +436,7 @@ function sanitizeAgentValue(value: unknown, key = "", depth = 0): unknown {
   if (value === null || typeof value === "number" || typeof value === "boolean") return value;
   const normalizedKey = key.toLowerCase();
   if (normalizedKey === "favicon") return null;
-  if (/(?:password|passwd|passcode|secret|cookie|authorization|authheader|credential|token|api[-_]?key|localstorage|sessionstorage)/i.test(normalizedKey)) {
+  if (isSensitiveName(normalizedKey)) {
     return "[REDACTED]";
   }
   if (typeof value === "string") return normalizedKey.endsWith("url") ? safeAgentUrl(value) : value;

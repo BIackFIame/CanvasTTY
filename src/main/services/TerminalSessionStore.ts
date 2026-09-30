@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
   SessionRole,
@@ -11,28 +11,13 @@ import type {
 } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { isLaunchProfile } from "../../shared/autoMode.ts";
+import { isProviderId } from "../../shared/providerCatalog.ts";
 
-export const TERMINAL_SESSION_STORE_VERSION = 2;
+const TERMINAL_SESSION_STORE_VERSION = 2;
 const MAX_PERSISTED_SESSIONS = 64;
 /** Opaque plugin-owned JSON (launch options, environment refs) is capped per value. */
 export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
-const PROVIDERS = new Set<ProviderId>([
-  "terminal",
-  "codex",
-  "claude",
-  "qwen",
-  "kimi",
-  "opencode",
-  "hermes",
-  "grok",
-  "omp",
-  "pi",
-  "cursor",
-  "minimax",
-  "devin",
-  "antigravity"
-]);
 
 export interface PersistedTerminalSession {
   id: string;
@@ -131,9 +116,15 @@ export class TerminalSessionStore {
     const snapshot = `${JSON.stringify(this.value, null, 2)}\n`;
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-      await rename(temporaryPath, this.filePath);
+      await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
+      try {
+        await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
+        await rename(temporaryPath, this.filePath);
+      } catch (error) {
+        // A failed rename (a locked file on Windows) must not leave the temp file behind.
+        await unlink(temporaryPath).catch(() => undefined);
+        throw error;
+      }
     });
     return this.writeQueue;
   }
@@ -194,7 +185,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     // codexThreadId: the v1 name of threadId (Codex only).
     const session = value as Partial<PersistedTerminalSession> & { codexThreadId?: unknown };
     if (!isSessionId(session.id) || ids.has(session.id)) continue;
-    if (!PROVIDERS.has(session.provider as ProviderId)) continue;
+    if (!isProviderId(session.provider)) continue;
     if (!isLaunchProfile(session.profile)) continue;
     if (typeof session.title !== "string" || session.title.trim().length === 0) continue;
     if (typeof session.titleCustomized !== "boolean") continue;

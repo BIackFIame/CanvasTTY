@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -465,3 +466,68 @@ function childResult(child) {
     child.once("exit", (code, signal) => resolve({ code, signal, stderr }));
   });
 }
+
+function fakeWindowsTransports({ failFirstStart = false } = {}) {
+  const transports = [];
+  const factory = () => {
+    const transport = new EventEmitter();
+    const index = transports.length;
+    transport.isRunning = false;
+    transport.closed = false;
+    transport.start = async () => {
+      if (failFirstStart && index === 0) throw new Error("host did not start");
+      transport.isRunning = true;
+      return `\\\\.\\pipe\\canvastty-agent-${index}`;
+    };
+    transport.close = async () => { transport.isRunning = false; transport.closed = true; };
+    transports.push(transport);
+    return transport;
+  };
+  return { transports, factory };
+}
+
+test("RuntimeGateway restarts a Windows pipe host that failed instead of refusing every later launch", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { transports, factory } = fakeWindowsTransports();
+  const gateway = new RuntimeGateway({ platform: "win32", windowsHostPath: "C:\\fake\\host.exe", windowsPipeHostFactory: factory });
+  t.after(() => gateway.close());
+
+  assert.equal(await gateway.start(), "\\\\.\\pipe\\canvastty-agent-0");
+  gateway.registerSession("terminal-before", "claude");
+  transports[0].isRunning = false;
+  transports[0].emit("fatal", new Error("host exited"));
+  assert.throws(() => gateway.registerSession("terminal-during", "claude"), /must be started/);
+
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 2);
+  assert.equal(gateway.address, "\\\\.\\pipe\\canvastty-agent-1");
+  assert.ok(gateway.registerSession("terminal-after", "claude"));
+
+  await gateway.close();
+  transports[1].emit("fatal", new Error("late"));
+  t.mock.timers.tick(10_000);
+  assert.equal(transports.length, 2, "a closed gateway does not restart");
+});
+
+test("RuntimeGateway drops a Windows transport whose start failed", async (t) => {
+  const { transports, factory } = fakeWindowsTransports({ failFirstStart: true });
+  const gateway = new RuntimeGateway({ platform: "win32", windowsHostPath: "C:\\fake\\host.exe", windowsPipeHostFactory: factory });
+  t.after(() => gateway.close());
+  await assert.rejects(gateway.start(), /did not start/);
+  assert.equal(transports[0].closed, true);
+  assert.equal(await gateway.start(), "\\\\.\\pipe\\canvastty-agent-1");
+});
+
+test("RuntimeGateway closes a connection that sends no message, so idle clients cannot hold every slot", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, firstMessageTimeoutMs: 100 });
+  const address = await gateway.start();
+  t.after(() => gateway.close());
+  const idle = createConnection(address);
+  await new Promise((resolve, reject) => { idle.once("connect", resolve); idle.once("error", reject); });
+  const closed = new Promise((resolve) => idle.once("close", resolve));
+  const outcome = await Promise.race([closed.then(() => "closed"), new Promise((resolve) => setTimeout(() => resolve("open"), 1_500))]);
+  idle.destroy();
+  assert.equal(outcome, "closed");
+});
