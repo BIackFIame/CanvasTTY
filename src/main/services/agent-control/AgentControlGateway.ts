@@ -30,8 +30,9 @@ const MAX_RECEIPTS = 4096;
 // request id must be performed again instead of replaying the refusal.
 const RETRYABLE_REFUSALS = new Set(["BUSY", "NOT_READY", "LIMIT_REACHED", "LIFECYCLE_DISABLED", "CLOSED"]);
 const MAX_SESSIONS = 32;
-const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
+/** A pipe host that keeps failing is tried again at most this far apart, never given up on. */
+const TRANSPORT_RESTART_MAX_DELAY_MS = 60_000;
 const MAX_TEXT = 16_000;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 /**
@@ -154,6 +155,7 @@ export class AgentControlGateway {
   private starting = false;
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
   private restartAttempts = 0;
+  private startingSubagents = 0;
   private closed = false;
 
   constructor(options: AgentControlGatewayOptions) { this.options = options; }
@@ -247,8 +249,8 @@ export class AgentControlGateway {
   }
 
   private scheduleTransportRestart(): void {
-    if (this.closed || this.restartTimer || this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) return;
-    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    if (this.closed || this.restartTimer) return;
+    const delay = Math.min(TRANSPORT_RESTART_MAX_DELAY_MS, TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** Math.min(this.restartAttempts, 16));
     this.restartAttempts += 1;
     this.restartTimer = setTimeout(() => {
       this.restartTimer = undefined;
@@ -503,7 +505,7 @@ export class AgentControlGateway {
         if (unknown) throw new ControlError("INVALID_PARAMS", unknown.replace("Call list_providers", "Run the providers command"));
       }
       if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
-      if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
+      if (this.sessions.size + this.startingSubagents >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
       let session: SessionSnapshot;
       try {
@@ -634,7 +636,8 @@ export class AgentControlGateway {
     if (params.profile === "yolo") throw new ControlError("REFUSED", "YOLO (bypass) is never given to a subagent. Omit --profile to get this session's profile, or pass auto, normal, acceptEdits or plan.");
     if (!this.options.spawnSubagent) throw new ControlError("NOT_SUPPORTED", "This CanvasTTY cannot create subagents through the control endpoint; use the canvastty_agents spawn_agent tool.");
     if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
-    if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
+    // Subagents still starting hold their slot: concurrent creates cannot all pass this check and launch.
+    if (this.sessions.size + this.startingSubagents >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
     const provider = params.provider;
     const cwd = string(params.cwd, 4096, "cwd");
     const title = params.title === undefined ? undefined : string(params.title, 80, "title");
@@ -642,6 +645,7 @@ export class AgentControlGateway {
       ?? (params.effort !== undefined ? launchEffortProblem(provider, params.effort) : null);
     if (problem) throw new ControlError("INVALID_PARAMS", `${problem} Run the providers command for what ${provider} takes.`);
     let session: SessionMetadata;
+    this.startingSubagents += 1;
     try {
       session = await this.options.spawnSubagent({ parentSessionId, provider, cwd,
         ...(title !== undefined ? { title } : {}),
@@ -650,6 +654,8 @@ export class AgentControlGateway {
         ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}) });
     } catch (error) {
       throw new ControlError("REFUSED", error instanceof Error ? error.message : "The subagent was not created.");
+    } finally {
+      this.startingSubagents -= 1;
     }
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
     const capabilities = controlCapabilities(provider);

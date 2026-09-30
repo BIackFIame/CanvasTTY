@@ -186,7 +186,7 @@ test("no agent-facing tool changes CanvasTTY's settings, protection, profiles or
   assert.doesNotMatch(host, /settings\.(update|set)/u);
 });
 
-async function gatewayFixture(t) {
+async function gatewayFixture(t, options = {}) {
   const { root, project, inner, other } = await folders(t);
   const userData = await realpath(await mkdtemp(join("/tmp", "ctty-grant-")));
   t.after(() => rm(userData, { recursive: true, force: true }));
@@ -199,12 +199,40 @@ async function gatewayFixture(t) {
   const settings = new SettingsStore(userData, "en");
   await settings.load();
   gateway = new AgentControlGateway({ userDataPath: userData, terminals, pixelSkinPacks, settings, lifecycleEnabled: () => true,
-    spawnSubagent: (request) => control.spawn(request) });
+    spawnSubagent: options.spawnSubagent ? (request) => options.spawnSubagent(request, terminals) : (request) => control.spawn(request) });
   const appConnection = await gateway.start();
   terminals.setControlConnection({ connectionPath: appConnection, cliPath: "/cli.mjs", grant: (id) => gateway.grantSession(id) });
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
   return { root, project, inner, other, userData, terminals, calls, gateway, appConnection, settings };
 }
+
+test("concurrent subagent creates never exceed the 32 controlled sessions", localSocket, async (t) => {
+  let open;
+  let hold = false;
+  const gate = new Promise((resolve) => { open = resolve; });
+  let started = 0;
+  const f = await gatewayFixture(t, {
+    // Slow to start, like a real launch: the held requests are all past the cap check before any finishes.
+    spawnSubagent: async (request, terminals) => {
+      started += 1;
+      if (hold) await gate;
+      return terminals.create({ provider: request.provider, profile: "normal", cwd: request.cwd, position: at });
+    }
+  });
+  f.terminals.create({ provider: "codex", profile: "auto", cwd: f.project, position: at, role: "orchestrator" });
+  const connectionPath = f.calls.at(-1).options.env.CANVASTTY_CONTROL_CONNECTION;
+  const clientPath = join(dirname(connectionPath), "controller.json");
+  const create = () => controlRequest({ connectionPath, clientPath, method: "create",
+    params: { provider: "opencode", cwd: f.inner }, requestId: randomUUID(), timeoutMs: 20_000 }).then(() => "ok", (error) => error.code ?? error.message);
+  for (let i = 0; i < 28; i++) assert.equal(await create(), "ok");
+  hold = true;
+  const results = Array.from({ length: 10 }, create);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  open();
+  const outcomes = await Promise.all(results);
+  assert.deepEqual(outcomes.sort(), [...Array(6).fill("LIMIT_REACHED"), ...Array(4).fill("ok")], `started ${started}`);
+  assert.equal(started, 32, "no launch past the cap");
+});
 
 test("an orchestrator's own control connection: never the app-wide one, subagents only, under every rule", localSocket, async (t) => {
   const f = await gatewayFixture(t);

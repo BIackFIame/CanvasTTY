@@ -220,6 +220,44 @@ test("agent control brings the Windows pipe host back after it fails and republi
   assert.equal(transports.length, 2);
 });
 
+test("agent control keeps bringing a failing Windows pipe host back, less often, instead of giving up after three tries", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-win-retry-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const transports = [];
+  let failing = true;
+  let restarted;
+  const republished = new Promise((resolve) => { restarted = resolve; });
+  const gateway = new AgentControlGateway({
+    userDataPath: root, terminals: {}, lifecycleEnabled: () => true, platform: "win32", windowsHostPath: "C:\\fake\\host.exe",
+    onTransportRestarted: (path) => restarted(path),
+    windowsPipeHostFactory: () => {
+      const transport = new EventEmitter();
+      const index = transports.length;
+      transport.start = async () => {
+        if (index > 0 && failing) throw new Error("pipe host did not start");
+        return `\\\\.\\pipe\\canvastty-agent-${index}`;
+      };
+      transport.close = async () => undefined;
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+  const connection = await gateway.start();
+  transports[0].emit("fatal", new Error("host exited"));
+  const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  for (let i = 0; i < 6; i++) {
+    t.mock.timers.tick(60_000);
+    await flush();
+  }
+  assert.ok(transports.length > 4, `${transports.length} starts: it did not give up after three`);
+  failing = false;
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(await republished, connection);
+});
+
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {
   const f = await fixture(t);
   const { session } = await f.create();
@@ -766,4 +804,21 @@ test("create refuses a model the worker's CLI does not list, naming the closest"
   await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "nosuch/model" }),
     (e) => e.code === "INVALID_PARAMS" && /does not list the model/u.test(e.message) && /Run the providers command/u.test(e.message));
   assert.equal(f.calls.length, before);
+});
+
+test("the control CLI reads a connection's scope as the person's only when there is no connection file", { skip: process.platform === "win32" }, async (t) => {
+  const { connectionScope } = await import("../scripts/canvastty-control.mjs");
+  const folder = await mkdtemp(join(tmpdir(), "canvastty-control-scope-"));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  assert.equal(await connectionScope(join(folder, "missing.json")), "person");
+  const path = join(folder, "connection.json");
+  await writeFile(path, JSON.stringify({ scope: "session" }), { mode: 0o600 });
+  assert.equal(await connectionScope(path), "session");
+  // A read that fails for another reason is that error, never a guess that turns a subagent into a YOLO person launch.
+  await chmod(path, 0o000);
+  try {
+    await assert.rejects(connectionScope(path), /EACCES|permission/iu);
+  } finally {
+    await chmod(path, 0o600);
+  }
 });
