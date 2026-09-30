@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   GitRiskReport,
   AgentProviderId,
@@ -47,13 +47,10 @@ import {
 } from "./lib/skinStyles";
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
-import { AgentLaunchDialog } from "./features/launcher/AgentLaunchDialog";
 import { environmentOptions } from "./features/launcher/LaunchOptionsSection";
-import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
-import { TerminalLinkDialog } from "./features/terminal/TerminalLinkDialog";
 import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import { createCameraStore } from "./features/workspace/cameraStore";
@@ -84,6 +81,16 @@ interface HomeEditDraft {
   homeGridSize: HomeGridSize;
   homeLayout: HomeWidgetPlacement[];
 }
+
+// Settings and the modal dialogs are not needed for the first paint of the canvas, so their code
+// (and everything they alone pull in, like the plugin browser and shortcut editors) is split into
+// separate chunks instead of shipping in the app's single startup bundle.
+const AgentLaunchDialog = lazy(() =>
+  import("./features/launcher/AgentLaunchDialog").then((module) => ({ default: module.AgentLaunchDialog })));
+const TerminalLinkDialog = lazy(() =>
+  import("./features/terminal/TerminalLinkDialog").then((module) => ({ default: module.TerminalLinkDialog })));
+const SettingsPanel = lazy(() =>
+  import("./features/settings/SettingsPanel").then((module) => ({ default: module.SettingsPanel })));
 
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
@@ -1320,62 +1327,64 @@ export function App(): React.JSX.Element {
         />
       </main>
 
-      <AgentLaunchDialog
-        provider={launchProvider}
-        settings={settings}
-        onClose={() => {
-          setLaunchProvider(null);
-          setLaunchPosition(null);
-        }}
-        onAcknowledge={acknowledgeDanger}
-        onEnableAgentControl={() => persistSettings({ agentControlEnabled: true })}
-        onLaunch={launchAgent}
-      />
-      <TerminalLinkDialog
-        locale={settings.locale}
-        url={pendingTerminalUrl}
-        onClose={() => setPendingTerminalUrl(null)}
-        onOpenCanvas={(url) => {
-          setPendingTerminalUrl(null);
-          void openBrowser(url).catch((error: unknown) => {
-            showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
-          });
-        }}
-        onOpenExternal={(url) => {
-          setPendingTerminalUrl(null);
-          void window.canvasTTY.external.openUrl(url).catch((error: unknown) => {
-            showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
-          });
-        }}
-      />
-      <SettingsPanel
-        open={settingsOpen}
-        settings={settings}
-        agentAvailability={agentAvailability}
-        onRecheckAgentClis={recheckAgentClis}
-        plugins={plugins}
-        browser={browser}
-        onClose={() => setSettingsOpen(false)}
-        onChange={saveSettings}
-        onPreviewPlugin={previewPlugin}
-        onInstallPlugin={installPlugin}
-        onSearchPlugins={searchPlugins}
-        onShowcasePlugins={showcasePlugins}
-        onFetchPluginIcons={fetchPluginIcons}
-        onPreviewManifests={previewManifests}
-        onCheckPluginUpdates={checkPluginUpdates}
-        onUpdatePlugin={updatePlugin}
-        onSetPluginModules={setPluginModules}
-        onSetPluginEnabled={setPluginEnabled}
-        onSetPluginHookEnabled={setPluginHookEnabled}
-        onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
-        onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
-        onUninstallPlugin={uninstallPlugin}
-        onOpenPluginContribution={openPluginContribution}
-        onToggleHomeWidget={toggleHomeWidget}
-        onEditHome={startHomeEditor}
-        onOpenBrowser={openBrowser}
-      />
+      <Suspense fallback={null}>
+        <AgentLaunchDialog
+          provider={launchProvider}
+          settings={settings}
+          onClose={() => {
+            setLaunchProvider(null);
+            setLaunchPosition(null);
+          }}
+          onAcknowledge={acknowledgeDanger}
+          onEnableAgentControl={() => persistSettings({ agentControlEnabled: true })}
+          onLaunch={launchAgent}
+        />
+        <TerminalLinkDialog
+          locale={settings.locale}
+          url={pendingTerminalUrl}
+          onClose={() => setPendingTerminalUrl(null)}
+          onOpenCanvas={(url) => {
+            setPendingTerminalUrl(null);
+            void openBrowser(url).catch((error: unknown) => {
+              showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
+            });
+          }}
+          onOpenExternal={(url) => {
+            setPendingTerminalUrl(null);
+            void window.canvasTTY.external.openUrl(url).catch((error: unknown) => {
+              showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
+            });
+          }}
+        />
+        <SettingsPanel
+          open={settingsOpen}
+          settings={settings}
+          agentAvailability={agentAvailability}
+          onRecheckAgentClis={recheckAgentClis}
+          plugins={plugins}
+          browser={browser}
+          onClose={() => setSettingsOpen(false)}
+          onChange={saveSettings}
+          onPreviewPlugin={previewPlugin}
+          onInstallPlugin={installPlugin}
+          onSearchPlugins={searchPlugins}
+          onShowcasePlugins={showcasePlugins}
+          onFetchPluginIcons={fetchPluginIcons}
+          onPreviewManifests={previewManifests}
+          onCheckPluginUpdates={checkPluginUpdates}
+          onUpdatePlugin={updatePlugin}
+          onSetPluginModules={setPluginModules}
+          onSetPluginEnabled={setPluginEnabled}
+          onSetPluginHookEnabled={setPluginHookEnabled}
+          onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
+          onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
+          onUninstallPlugin={uninstallPlugin}
+          onOpenPluginContribution={openPluginContribution}
+          onToggleHomeWidget={toggleHomeWidget}
+          onEditHome={startHomeEditor}
+          onOpenBrowser={openBrowser}
+        />
+      </Suspense>
       {closedGitRisks.length > 0 && (
         <div className="git-risk-panel">
           {closedGitRisks.map((report) => (
