@@ -358,3 +358,14 @@ test("curl: each operation between --next / -: uses its own --output-dir, and --
     assert.equal(rule(shell(`curl --output-dir build -c ${away}/jar ${URL}`)), "write-outside");
   }
 });
+
+test("a command hidden behind thousands of wrappers is refused, not a crash that lets it through", () => {
+  for (const wrapper of ["nohup", "env", "nice", "timeout 5", "xargs", "busybox", "su root -c"]) {
+    const command = `${`${wrapper} `.repeat(3_000)}rm -rf /`;
+    const verdict = check("Bash", { command });
+    assert.ok(verdict, `${wrapper}: denied`);
+  }
+  // A few wrappers are ordinary and judged by what they run.
+  assert.equal(check("Bash", { command: "nohup nice env FOO=1 true" }), null);
+  assert.equal(check("Bash", { command: "nohup nice env FOO=1 rm -rf /" })?.rule !== undefined, true);
+});

@@ -159,3 +159,26 @@ test("the profiles each CLI offers; YOLO that changes nothing is known", () => {
   assert.equal(profileAvailable("kimi", "acceptEdits", true), false);
   assert.deepEqual([...BYPASS_CHANGES_NOTHING].sort(), ["minimax", "pi"]);
 });
+
+test("a contributor's configuration path that is a FIFO or oversized is refused at once, never read blocking the app", { skip: process.platform === "win32" }, async (t) => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { spawnSync } = await import("node:child_process");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const folder = await mkdtemp(join(tmpdir(), "canvastty-config-fifo-"));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const fifo = join(folder, "opencode.json");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  const huge = join(folder, "huge.json");
+  await writeFile(huge, `{"x":"${"a".repeat(2 * 1024 * 1024)}"}`);
+  // In a child: the old synchronous read of a FIFO with no writer never returns.
+  const script = `
+    const { permissionConfigProblem } = await import(${JSON.stringify(new URL("../src/main/services/LaunchPipeline.ts", import.meta.url).href)});
+    for (const path of process.argv.slice(1)) console.log(JSON.stringify(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: path }, args: [], files: [] })));
+  `;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, fifo, huge], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(child.signal, null, "it did not hang");
+  const answers = child.stdout.trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(answers.length, 2);
+  for (const answer of answers) assert.match(answer, /cannot check/u);
+});

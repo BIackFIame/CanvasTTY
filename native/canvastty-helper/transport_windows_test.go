@@ -107,3 +107,33 @@ func TestLocalEndpointOnWindows(t *testing.T) {
 		}
 	}
 }
+
+// Close returns only after a pending overlapped read finished with the handle: CancelIoEx only asks, and closing the
+// handle under a GetOverlappedResult that still uses it is undefined.
+func TestCloseWaitsForPendingIO(t *testing.T) {
+	name := fmt.Sprintf(`\\.\pipe\canvastty-helper-close-%d`, os.Getpid())
+	server := pipeServer(t, name)
+	defer syscall.CloseHandle(server)
+	go procConnectNamedPipe.Call(uintptr(server), 0)
+	conn, err := dialEndpoint(name)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	pipe := conn.(*pipeConn)
+	finished := make(chan struct{})
+	go func() {
+		conn.Read(make([]byte, 8))
+		close(finished)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	conn.Close()
+	select {
+	case <-finished:
+	default:
+		t.Fatal("Close returned while the read still used the handle")
+	}
+	if n, err := pipe.overlapped(false, make([]byte, 8)); err == nil || n != 0 {
+		t.Fatal("I/O after Close reached the handle")
+	}
+	procDisconnectNamedPipe.Call(uintptr(server))
+}

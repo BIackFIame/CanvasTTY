@@ -36,7 +36,16 @@ type pipeConn struct {
 	handle    syscall.Handle
 	closeOnce sync.Once
 	closed    chan struct{}
+	// mu guards closing and the start of every overlapped call: once closing is set, no new I/O touches the handle,
+	// and Close waits for the calls already in flight (inflight) before it closes the handle.
+	mu       sync.Mutex
+	closing  bool
+	inflight sync.WaitGroup
 }
+
+// closeDrainTimeout bounds Close's wait for cancelled I/O; past it the handle is left open (a leak) rather than
+// closed under an operation that may still use it.
+const closeDrainTimeout = 5 * time.Second
 
 // dialEndpoint opens \\.\pipe\... like libuv: a busy pipe is waited for (up to 30 s) and retried.
 func dialEndpoint(address string) (io.ReadWriteCloser, error) {
@@ -59,11 +68,14 @@ func dialEndpoint(address string) (io.ReadWriteCloser, error) {
 }
 
 func (c *pipeConn) overlapped(write bool, buffer []byte) (int, error) {
-	select {
-	case <-c.closed:
+	c.mu.Lock()
+	if c.closing {
+		c.mu.Unlock()
 		return 0, io.ErrClosedPipe
-	default:
 	}
+	c.inflight.Add(1)
+	c.mu.Unlock()
+	defer c.inflight.Done()
 	event, _, callErr := procCreateEventW.Call(0, 1, 0, 0)
 	if event == 0 {
 		return 0, callErr
@@ -112,11 +124,25 @@ func (c *pipeConn) Write(buffer []byte) (int, error) {
 	return written, nil
 }
 
+// Close cancels the pending I/O, waits until those calls have returned (CancelIoEx only asks; a GetOverlappedResult
+// still waiting uses the handle and its OVERLAPPED), then closes the handle.
 func (c *pipeConn) Close() error {
 	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		c.closing = true
+		c.mu.Unlock()
 		close(c.closed)
 		syscall.CancelIoEx(c.handle, nil)
-		syscall.CloseHandle(c.handle)
+		drained := make(chan struct{})
+		go func() {
+			c.inflight.Wait()
+			close(drained)
+		}()
+		select {
+		case <-drained:
+			syscall.CloseHandle(c.handle)
+		case <-time.After(closeDrainTimeout):
+		}
 	})
 	return nil
 }

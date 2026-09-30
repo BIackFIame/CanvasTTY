@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type {
@@ -487,13 +487,34 @@ function parseConfigText(text: string): unknown {
  * person's profile). A file must be one of the contribution's own launch files or a readable file; one CanvasTTY
  * cannot read and check is refused. Returns the problem as text.
  */
+const MAX_CONFIG_FILE_BYTES = 1024 * 1024;
+
+/**
+ * A plugin-named configuration file, read on the launch path (the main thread): only a regular file of at most 1 MB.
+ * It is opened without blocking and checked before reading, so a FIFO or a device cannot hold the app. Null otherwise.
+ */
+function readConfigFile(path: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.size > MAX_CONFIG_FILE_BYTES) return null;
+    return readFileSync(fd, "utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
 export function permissionConfigProblem(provider: ProviderId, contribution: Pick<Contribution, "env" | "args" | "files">): string | null {
   const fromFile = (value: string): { text: string } | { problem: string } => {
     if (value.startsWith(`${LAUNCH_FILES_TOKEN}/`)) {
       const file = contribution.files.find((candidate) => candidate.relPath === value.slice(LAUNCH_FILES_TOKEN.length + 1));
       return file ? { text: file.content } : { problem: `names a launch file it did not write (${value.slice(0, 80)}).` };
     }
-    try { return { text: readFileSync(value, "utf8") }; } catch { return { problem: `hands the CLI a configuration file CanvasTTY cannot check (${value.slice(0, 80)}).` }; }
+    const text = readConfigFile(value);
+    return text !== null ? { text } : { problem: `hands the CLI a configuration file CanvasTTY cannot check (${value.slice(0, 80)}).` };
   };
   const check = (label: string, text: string): string | null => {
     const parsed = parseConfigText(text);
