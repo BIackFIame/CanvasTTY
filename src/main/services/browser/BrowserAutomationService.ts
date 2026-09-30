@@ -89,6 +89,7 @@ interface TabSession {
   onDialog?: (dialog: BrowserDialogSnapshot | null) => void;
   presences: AgentPresenceSnapshot[];
   presenceContextId: number | null;
+  presenceLastPayload: string | null;
   sensitiveNodes: Map<number, boolean>;
   electronDialog: ElectronDialogRequest | null;
   electronDialogListener: (info: ElectronDialogInfo, callback: ElectronDialogCallback) => void;
@@ -168,6 +169,7 @@ export class BrowserAutomationService {
         if (live) {
           live.attachPromise = null;
           live.presenceContextId = null;
+          live.presenceLastPayload = null;
           live.refs.clear();
           live.inflightRequests.clear();
           live.networkLastChangeAt = Date.now();
@@ -176,6 +178,7 @@ export class BrowserAutomationService {
       onDialog,
       presences: [],
       presenceContextId: null,
+      presenceLastPayload: null,
       sensitiveNodes: new Map(),
       electronDialog: null,
       electronDialogListener: (info, callback) => this.onElectronDialog(tabId, info, callback),
@@ -1086,6 +1089,7 @@ export class BrowserAutomationService {
         session.refs.clear();
         session.sensitiveNodes.clear();
         session.presenceContextId = null;
+        session.presenceLastPayload = null;
         if (session.presences.length > 0) void this.renderPresence(session).catch(() => undefined);
       }
     }
@@ -1153,6 +1157,7 @@ export class BrowserAutomationService {
 
   private async renderPresence(session: TabSession): Promise<void> {
     if (!session.contents.debugger.isAttached()) return;
+    let worldCreated = false;
     if (session.presenceContextId === null) {
       const tree = await this.command<{ frameTree?: { frame?: { id?: string } } }>(session, "Page.getFrameTree");
       const frameId = tree.frameTree?.frame?.id;
@@ -1163,6 +1168,7 @@ export class BrowserAutomationService {
         grantUniveralAccess: false
       });
       session.presenceContextId = world.executionContextId ?? null;
+      worldCreated = true;
     }
     if (session.presenceContextId === null) return;
     const safe = session.presences.filter((presence) => presence.cursor.updatedAt > 0).map((presence) => ({
@@ -1173,6 +1179,11 @@ export class BrowserAutomationService {
       stale: presence.connectionState === "stale"
     }));
     const payload = JSON.stringify(safe).replace(/</g, "\\u003c");
+    // The isolated world's presence host already reflects this exact state, so skip the
+    // redundant Runtime.evaluate round-trip (including repeated empty-array clears) unless
+    // the world was just (re)created and the host needs to be rebuilt from scratch.
+    if (!worldCreated && payload === session.presenceLastPayload) return;
+    session.presenceLastPayload = payload;
     await this.command(session, "Runtime.evaluate", {
       contextId: session.presenceContextId,
       expression: presenceExpression(payload),
