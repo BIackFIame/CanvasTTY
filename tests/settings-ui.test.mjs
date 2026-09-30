@@ -238,7 +238,7 @@ test("canvas windows use click-to-front stacking and Browser occlusion", async (
   assert.match(workspace, /canvasLayerIsOccluded\(browserLayerId, layerOrder, boundsByLayer\)/);
   assert.match(workspace, /!browserOccluded/);
   // The HUD is a sibling of the transformed scene, so it needs its own screen-space term.
-  assert.match(workspace, /canvasScreenRect\(renderedBrowserCanvas, camera\)/);
+  assert.match(workspace, /canvasScreenRect\(renderedBrowserCanvas, current\)/);
   assert.match(workspace, /!browserUnderOverlay/);
 });
 
