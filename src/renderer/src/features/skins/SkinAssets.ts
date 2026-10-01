@@ -1,17 +1,11 @@
 import { useEffect, useState } from "react";
+import { createReleasingCache } from "./releasingCache";
 import type { PixelSkinPackSummary, PixelSkinSlot, PixelTerminalBorderSkinId } from "../../../../shared/contracts";
 
 interface CachedImage { image: HTMLImageElement; references: number; promise: Promise<HTMLImageElement> }
 const images = new Map<string, CachedImage>();
 
 export type PixelSkinPackUrls = Readonly<Record<PixelSkinSlot, string>>;
-interface CachedPack {
-  references: number;
-  promise: Promise<PixelSkinPackUrls>;
-  urls?: PixelSkinPackUrls;
-  releaseTimer?: ReturnType<typeof setTimeout>;
-}
-const packs = new Map<PixelTerminalBorderSkinId, CachedPack>();
 const PACK_SLOTS: readonly PixelSkinSlot[] = [
   "minimal_idle", "minimal_working", "minimal_completed",
   "detailed_idle", "detailed_working", "detailed_completed",
@@ -58,47 +52,26 @@ export function isPixelSkinPackId(value: unknown): value is PixelTerminalBorderS
   return typeof value === "string" && /^pixel:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value);
 }
 
+const packs = createReleasingCache<PixelTerminalBorderSkinId, PixelSkinPackUrls>({
+  load: async (id) => {
+    const slots = await Promise.all(PACK_SLOTS.map(async (slot) => {
+      const bytes = await window.canvasTTY.pixelSkins.readAsset(id, slot);
+      if (!bytes) throw new Error(`Pixel skin asset ${slot} is unavailable.`);
+      const copy = new Uint8Array(bytes.byteLength);
+      copy.set(bytes);
+      return [slot, copy] as const;
+    }));
+    return Object.fromEntries(slots.map(([slot, bytes]) => [
+      slot, URL.createObjectURL(new Blob([bytes], { type: "image/png" }))
+    ])) as Record<PixelSkinSlot, string>;
+  },
+  dispose: (urls) => Object.values(urls).forEach((url) => URL.revokeObjectURL(url)),
+  delayMs: 30_000
+});
+
 function acquirePixelSkinPack(id: PixelTerminalBorderSkinId): { urls: Promise<PixelSkinPackUrls>; release(): void } {
-  let entry = packs.get(id);
-  if (!entry) {
-    entry = {
-      references: 0,
-      promise: Promise.all(PACK_SLOTS.map(async (slot) => {
-        const bytes = await window.canvasTTY.pixelSkins.readAsset(id, slot);
-        if (!bytes) throw new Error(`Pixel skin asset ${slot} is unavailable.`);
-        const copy = new Uint8Array(bytes.byteLength);
-        copy.set(bytes);
-        return [slot, copy] as const;
-      })).then((slots) => {
-        const urls = Object.fromEntries(slots.map(([slot, bytes]) => [
-          slot, URL.createObjectURL(new Blob([bytes], { type: "image/png" }))
-        ])) as Record<PixelSkinSlot, string>;
-        const current = packs.get(id);
-        if (current) current.urls = urls;
-        return urls;
-      }).catch((error) => {
-        packs.delete(id);
-        throw error;
-      })
-    };
-    packs.set(id, entry);
-  }
-  if (entry.releaseTimer) clearTimeout(entry.releaseTimer);
-  entry.references += 1;
-  let released = false;
-  return {
-    urls: entry.promise,
-    release() {
-      if (released) return;
-      released = true;
-      if (--entry!.references > 0) return;
-      entry!.releaseTimer = setTimeout(() => {
-        if (entry!.references > 0) return;
-        packs.delete(id);
-        if (entry!.urls) Object.values(entry!.urls).forEach((url) => URL.revokeObjectURL(url));
-      }, 30_000);
-    }
-  };
+  const acquired = packs.acquire(id);
+  return { urls: acquired.value, release: acquired.release };
 }
 
 export function usePixelSkinPackAssets(id: PixelTerminalBorderSkinId | null): PixelSkinPackUrls | null {

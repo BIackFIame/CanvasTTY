@@ -26,6 +26,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { matchesShortcut } from "../../lib/shortcuts";
+import { GitRiskNotice } from "./GitRiskNotice";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
@@ -54,7 +55,7 @@ import {
 import { shouldActivateCanvasFromClick } from "../workspace/focus";
 import type { ResizeDirection } from "../workspace/snap";
 import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
-import { renameCommit, visibleTerminalTitle } from "./terminalTitle";
+import { compactPath, renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
 import { webglContextPool } from "./webglContextPool";
 import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
@@ -717,12 +718,18 @@ function TerminalCardView({
 
   // A group drag takes pointer capture without a pointerup; drop local state so a
   // later hover cannot act on it.
+  // Pointer capture lost mid-gesture (no pointerup): nothing was committed, so the card goes back to its saved bounds.
+  // After a normal pointerup the gesture is already over and this does nothing.
   const cancelDrag = (): void => {
+    if (!dragState.current) return;
     dragState.current = null;
+    applyLiveBounds({ position: session.position, size: session.size });
   };
 
   const cancelResize = (): void => {
+    if (!resizeState.current) return;
     resizeState.current = null;
+    applyLiveBounds({ position: session.position, size: session.size });
   };
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>, direction: ResizeDirection): void => {
@@ -1122,6 +1129,9 @@ function TerminalCardView({
           </div>
         </div>
       )}
+      {session.gitRisk && !summaryMode && (
+        <GitRiskNotice report={session.gitRisk} locale={locale} className="terminal-card__git-risk" />
+      )}
       {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
         <div className="terminal-card__note" role="status">
           <span>{t(locale, session.restoreNote === "fresh-shared-folder" ? "restoreNoteSharedFolder"
@@ -1220,13 +1230,6 @@ function terminalTheme(palette: PaletteId, pixelSkin: string | null = null): { b
     cursor: palette === "lilac" ? "#bfc9ee" : "#b8cf99",
     selectionBackground: "#7b789966"
   };
-}
-
-function compactPath(path: string): string {
-  const home = "/home/";
-  if (!path.startsWith(home)) return path;
-  const parts = path.split("/").filter(Boolean);
-  return parts.length > 2 ? `~/${parts.slice(2).join("/")}` : path;
 }
 
 function isCardControl(target: EventTarget): boolean {

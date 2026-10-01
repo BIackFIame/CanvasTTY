@@ -77,7 +77,9 @@ export function guardedCall(tool, args) {
     const filePath = typeof args.filePath === "string" && args.filePath.length > 0 ? args.filePath
       : typeof args.file_path === "string" && args.file_path.length > 0 ? args.file_path : null;
     if (!filePath) return null;
-    const content = typeof args.content === "string" ? args.content : typeof args.newString === "string" ? args.newString : null;
+    const content = typeof args.content === "string" ? args.content
+      : typeof args.newString === "string" ? args.newString
+        : multieditText(args.edits);
     return { toolName: "edit", toolInput: { file_path: filePath, ...(content !== null ? { content } : {}) } };
   }
   if (tool === "apply_patch" || tool === "patch") {
@@ -85,6 +87,13 @@ export function guardedCall(tool, args) {
     return patch ? { toolName: "apply_patch", toolInput: { patch } } : null;
   }
   return null;
+}
+
+/** Every multiedit edit's new text, one per line (what the batch writes), or null. */
+function multieditText(edits) {
+  if (!Array.isArray(edits)) return null;
+  const texts = edits.flatMap((edit) => edit && typeof edit === "object" && typeof edit.newString === "string" ? [edit.newString] : []);
+  return texts.length > 0 ? texts.join("\n") : null;
 }
 
 /** POST /permission/{requestID}/reply with `once`. False on any failure (OpenCode's prompt stays for the person). */

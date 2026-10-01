@@ -136,6 +136,94 @@ test("bubblewrap: read-only root, writable project, tmpfs over what may not be r
   assert.deepEqual(args.slice(-5), ["--chdir", w.project, "--", "/usr/bin/claude", "--x"]);
 });
 
+test("the paths: another CLI's home moved by its own variable is unreadable, never this CLI's own", async (t) => {
+  const w = await world(t);
+  const custom = (name) => join(w.base, "creds", name);
+  const env = {
+    ...w.env, GROK_HOME: custom("grok"), CLAUDE_CONFIG_DIR: custom("claude"), HERMES_HOME: custom("hermes"), KIMI_HOME: custom("kimi"),
+    OPENCODE_CONFIG_DIR: custom("opencode"), OPENCODE_CONFIG: custom("opencode.json"), QWEN_HOME: custom("qwen"),
+    XDG_DATA_HOME: custom("xdg-data"), CODEX_HOME: join(w.userData, "account-homes", "a1")
+  };
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env, userDataPath: w.userData, sessionId: "s1" });
+  for (const moved of [custom("grok"), custom("claude"), custom("hermes"), custom("kimi"), custom("opencode"), custom("opencode.json"), custom("qwen"),
+    join(custom("xdg-data"), "opencode"), join(w.home, ".grok"), join(w.home, ".claude")]) {
+    assert.ok(paths.unreadable.includes(moved), `${moved} unreadable`);
+    assert.ok(!paths.writable.includes(moved) && !paths.readableAgain.includes(moved), `${moved} not handed back`);
+  }
+  assert.ok(paths.writable.includes(join(w.userData, "account-homes", "a1")) && paths.readableAgain.includes(join(w.userData, "account-homes", "a1")),
+    "this CLI's own moved home stays its own");
+  assert.ok(!paths.unreadable.includes(join(w.userData, "account-homes", "a1")));
+  const grok = isolationPaths({ provider: "grok", cwd: w.project, sessionTemp: join(w.temp, "s"), env, userDataPath: w.userData, sessionId: "s1" });
+  assert.ok(grok.writable.includes(custom("grok")) && !grok.unreadable.includes(custom("grok")), "Grok's own moved home is Grok's");
+  assert.ok(grok.unreadable.includes(join(w.userData, "account-homes", "a1")), "and Codex's account home is not");
+  // A variable that points at HOME or above the project would hide them: never listed.
+  const wide = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, GROK_HOME: w.home, KIMI_HOME: w.base },
+    userDataPath: w.userData, sessionId: "s1" });
+  assert.ok(!wide.unreadable.includes(w.home) && !wide.unreadable.includes(w.base));
+});
+
+test("bubblewrap: a granted private folder is read-only, the CLI's own moved home stays writable", async (t) => {
+  const w = await world(t);
+  const own = join(w.userData, "agent-control", "sessions", "own");
+  const accountHome = join(w.userData, "account-homes", "a1");
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, CODEX_HOME: accountHome },
+    userDataPath: w.userData, sessionId: "s", grantedPrivate: [own] });
+  // Its config.toml exists: the person's, or the placeholder LinuxHostPaths puts there before a launch.
+  const accountConfig = join(accountHome, "config.toml");
+  const kinds = new Map([[w.project, "directory"], [own, "directory"], [accountHome, "directory"], [join(w.userData, "agent-control"), "directory"],
+    [join(w.userData, "account-homes"), "directory"], [accountConfig, "file"]]);
+  const args = bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null);
+  const text = args.join(" ");
+  assert.ok(text.includes(`--ro-bind ${own} ${own}`), "the control grant is readable, not writable");
+  assert.ok(!text.includes(`--bind ${own} ${own}`));
+  const afterHidden = text.slice(text.indexOf(`--tmpfs ${join(w.userData, "account-homes")}`));
+  assert.ok(afterHidden.includes(`--bind ${accountHome} ${accountHome}`), "its own account home is bound back writable over the hidden folder");
+  const afterRebind = afterHidden.slice(afterHidden.indexOf(`--bind ${accountHome} ${accountHome}`));
+  assert.ok(afterRebind.includes(`--ro-bind ${accountConfig} ${accountConfig}`), "and its permission settings read-only again over that");
+  // Without the file (nothing prepared the host) the launch is refused, never run with the settings writable.
+  kinds.delete(accountConfig);
+  assert.throws(() => bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null),
+    /config\.toml would be writable for the agent/u);
+});
+
+test("bubblewrap: git hooks the agent could create later never reach the real project", async (t) => {
+  const w = await world(t);
+  const hooks = join(w.project, ".git", "hooks");
+  const argsFor = (kinds, options = {}) => {
+    const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: w.env, userDataPath: w.userData, sessionId: "s", ...options });
+    return bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => kinds.get(path) ?? null).join(" ");
+  };
+  // No repository yet: `git init` inside would create the hooks folder in the writable project.
+  const fresh = argsFor(new Map([[w.project, "directory"]]));
+  assert.ok(fresh.includes(`--tmpfs ${hooks}`), "a throwaway hooks folder the person's git never sees");
+  assert.ok(fresh.indexOf(`--tmpfs ${hooks}`) > fresh.indexOf(`--bind ${w.project} ${w.project}`), "mounted over the project");
+  // A repository without a hooks folder: the same.
+  assert.ok(argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "directory"]])).includes(`--tmpfs ${hooks}`));
+  // Existing hooks stay read-only.
+  const existing = argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "directory"], [hooks, "directory"]]));
+  assert.ok(existing.includes(`--ro-bind ${hooks} ${hooks}`) && !existing.includes(`--tmpfs ${hooks}`));
+  // A worktree's `.git` file (its hooks live in the main repository) and a read-only project need nothing.
+  assert.ok(!argsFor(new Map([[w.project, "directory"], [join(w.project, ".git"), "file"]])).includes(hooks));
+  assert.ok(!argsFor(new Map([[w.project, "directory"]]), { readOnlyProject: true }).includes(hooks));
+});
+
+test("bubblewrap: the empty .git a throwaway hooks mount leaves behind is removed; a repository made inside stays", async (t) => {
+  const w = await world(t);
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const launch = { sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env };
+  let wrapped = layer.wrap(launch);
+  // What bwrap does for the mount point.
+  await mkdir(join(w.project, ".git", "hooks"), { recursive: true });
+  wrapped.cleanup();
+  assert.equal(existsSync(join(w.project, ".git")), false, "nothing left in the project");
+  wrapped = layer.wrap(launch);
+  await mkdir(join(w.project, ".git", "hooks"), { recursive: true });
+  await writeFile(join(w.project, ".git", "HEAD"), "ref: refs/heads/main\n");
+  wrapped.cleanup();
+  assert.equal(existsSync(join(w.project, ".git", "HEAD")), true, "the agent's repository is kept");
+  assert.equal(existsSync(join(w.project, ".git", "hooks")), true, "with its hooks folder");
+});
+
 test("the launch: wrapped when the layer applies, refused (never unwrapped) when it cannot start", async (t) => {
   const w = await world(t);
   const calls = [];
@@ -224,6 +312,71 @@ test("seatbelt, for real: writes stay in the project, secrets stay unread, nothi
   assert.deepEqual((await readdir(w.temp)).filter((name) => name.startsWith(ISOLATION_FOLDER_PREFIX)), [], "cleaned up");
   // Nothing was written to the person's preferences on the agent's behalf.
   assert.notEqual(spawnSync("defaults", ["read", "ctty.isolation.probe"]).status, 0);
+});
+
+test("seatbelt, for real: the launch writes the account home it was handed, not its permission settings, and no other home", onMac, async (t) => {
+  const w = await world(t);
+  const own = join(w.userData, "account-homes", "a1");
+  const other = join(w.userData, "account-homes", "a2");
+  await mkdir(other, { recursive: true });
+  await writeFile(join(other, "auth.json"), "OTHER-ACCOUNT");
+  const grant = join(w.userData, "agent-control", "sessions", "own");
+  const { lines } = run(w, [
+    'echo refreshed > "$CODEX_HOME/auth.json" && cat "$CODEX_HOME/auth.json" >/dev/null && echo HOME-W-ok',
+    'mkdir "$CODEX_HOME/sessions" && mkdir "$CODEX_HOME/sessions/x" && echo s > "$CODEX_HOME/sessions/x/log" && echo HOME-SUB-ok',
+    'echo x > "$CODEX_HOME/config.toml" 2>/dev/null || echo HOME-CONFIG-denied',
+    `cat "${join(other, "auth.json")}" 2>/dev/null || echo OTHER-R-denied`,
+    `echo x > "${join(other, "auth.json")}" 2>/dev/null || echo OTHER-W-denied`,
+    `echo x > "${join(grant, "g")}" 2>/dev/null || echo GRANT-W-denied`,
+    `cat "${join(grant, "connection.json")}" >/dev/null && echo GRANT-R-ok`
+  ].join("; "), { env: { CODEX_HOME: own }, granted: [grant] });
+  assert.deepEqual(lines, ["HOME-W-ok", "HOME-SUB-ok", "HOME-CONFIG-denied", "OTHER-R-denied", "OTHER-W-denied", "GRANT-W-denied", "GRANT-R-ok"]);
+  assert.equal(await readFile(join(own, "auth.json"), "utf8"), "refreshed\n");
+});
+
+test("seatbelt, for real: git init works, but no repository in the project gets a hook or attributes from the agent", onMac, async (t) => {
+  const w = await world(t);
+  const { lines, env } = run(w, [
+    'git init -q . && git -c user.email=a@b -c user.name=n commit -q --allow-empty -m x && echo GIT-ok',
+    '[ -e .git/hooks ] && echo TEMPLATE-HOOKS || echo NO-TEMPLATE-HOOKS',
+    'mkdir -p .git/hooks && (echo evil > .git/hooks/pre-commit) 2>/dev/null || echo W-git-hook-denied',
+    'echo sample > .git/hooks/pre-commit.sample 2>/dev/null && echo W-sample-ok',
+    'mkdir -p .git/info && (echo "* filter=x" > .git/info/attributes) 2>/dev/null || echo W-attributes-denied',
+    'git init -q deep/nested && mkdir -p deep/nested/.git/hooks && (echo evil > deep/nested/.git/hooks/post-commit) 2>/dev/null || echo W-nested-hook-denied',
+    'git config core.hooksPath /tmp/x && echo CONFIG-ok'
+  ].join("; "));
+  assert.deepEqual(lines, ["GIT-ok", "NO-TEMPLATE-HOOKS", "W-git-hook-denied", "W-sample-ok", "W-attributes-denied", "W-nested-hook-denied", "CONFIG-ok"]);
+  assert.ok(env.GIT_TEMPLATE_DIR, "an empty template for git init");
+  assert.equal(existsSync(join(w.project, ".git", "hooks", "pre-commit")), false);
+});
+
+test("bubblewrap: the handed home is writable but its permission settings are read-only again; .git/info cannot gain attributes", async (t) => {
+  const w = await world(t);
+  const accountHome = join(w.userData, "account-homes", "a1");
+  const config = join(accountHome, "config.toml");
+  const paths = isolationPaths({ provider: "codex", cwd: w.project, sessionTemp: join(w.temp, "s"), env: { ...w.env, CODEX_HOME: accountHome },
+    userDataPath: w.userData, sessionId: "s" });
+  const base = [[w.project, "directory"], [accountHome, "directory"], [join(w.userData, "account-homes"), "directory"], [config, "file"]];
+  const text = (extra) => bubblewrapArguments(paths, { command: "/usr/bin/codex", args: [], cwd: w.project }, (path) => new Map([...base, ...extra]).get(path) ?? null).join(" ");
+  const fresh = text([]);
+  const rebound = fresh.lastIndexOf(`--bind ${accountHome} ${accountHome}`);
+  assert.ok(rebound > fresh.indexOf(`--tmpfs ${join(w.userData, "account-homes")}`));
+  assert.ok(fresh.lastIndexOf(`--ro-bind ${config} ${config}`) > rebound, "config.toml read-only over the rebound home");
+  const info = join(w.project, ".git", "info");
+  assert.ok(fresh.includes(`--tmpfs ${info}`), "no .git/info yet: a throwaway one");
+  const attributes = join(info, "attributes");
+  assert.ok(text([[join(w.project, ".git"), "directory"], [info, "directory"], [attributes, "file"]]).includes(`--ro-bind ${attributes} ${attributes}`));
+  assert.ok(text([[join(w.project, ".git"), "directory"], [info, "directory"]]).includes(`--ro-bind ${info} ${info}`), "no attributes file can be created");
+});
+
+test("an isolated launch gets an empty git template, so git init writes no hooks", async (t) => {
+  const w = await world(t);
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const wrapped = layer.wrap({ sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });
+  try {
+    assert.ok(wrapped.env.GIT_TEMPLATE_DIR);
+    assert.deepEqual(await readdir(wrapped.env.GIT_TEMPLATE_DIR), []);
+  } finally { wrapped.cleanup(); }
 });
 
 test("seatbelt, for real: Claude saves a refreshed sign-in in the login keychain; nothing else there; plan is read-only", onMac, async (t) => {

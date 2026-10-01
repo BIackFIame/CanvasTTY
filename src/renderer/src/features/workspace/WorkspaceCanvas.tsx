@@ -67,7 +67,10 @@ import {
   canvasLayerIsOccluded,
   canvasLayerZIndex,
   canvasScreenRect,
-  reconcileCanvasLayerOrder
+  keepLiveIds,
+  pruneToLive,
+  reconcileCanvasLayerOrder,
+  snapTargetsOf
 } from "./canvasStacking";
 import {
   browserCanvasWidgetId,
@@ -356,12 +359,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     return result;
   }, [renderablePluginIds, renderedBrowserCanvas, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
   // Every window on the canvas, in the order they are rendered: terminals, plugin canvases, browser, notes.
-  const allWindowBounds: SessionBounds[] = [
+  const allWindowBounds = useMemo((): SessionBounds[] => [
     ...renderedSessions,
     ...renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)),
     ...(renderedBrowserCanvas ? [renderedBrowserCanvas] : []),
     ...renderedStickyNotes
-  ];
+  ], [renderablePluginIds, renderedBrowserCanvas, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
   const focusCandidates: CanvasFocusCandidate[] = [
     ...renderedSessions.map((session) => ({ id: terminalCanvasWidgetId(session.id), bounds: session })),
     ...renderedPluginCanvas
@@ -370,10 +373,14 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     ...(renderedBrowserCanvas ? [{ id: browserCanvasWidgetId, bounds: renderedBrowserCanvas }] : [])
   ];
 
-  const homeBounds: SessionBounds = {
+  const homeBounds = useMemo((): SessionBounds => ({
     position: { x: 0, y: 0 },
     size: homeGridPixelSize(settings.homeGridSize)
-  };
+  }), [settings.homeGridSize]);
+  const snapTargetsFor = useMemo(() => snapTargetsOf([
+    homeBounds,
+    ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size }))
+  ], allWindowBounds), [allWindowBounds, homeBounds, renderedCanvasRegions]);
 
   const selectMarquee = useCallback((bounds: SessionBounds | null): void => {
     if (bounds === null) {
@@ -598,6 +605,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     }
     return toggle;
   };
+  // Closed sessions leave nothing behind in per-session state.
+  const liveSessionIds = useMemo(() => new Set(sessions.map((session) => session.id)), [sessions]);
+  useEffect(() => {
+    pruneToLive(fullscreenToggles.current, liveSessionIds);
+    setMasterPixelSkinSessionIds((current) => keepLiveIds(current, liveSessionIds));
+  }, [liveSessionIds]);
   const canvasOverrideActive = wheelNavigation.canvasOverrideActive;
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
   const editedRegion = regionEditor?.mode === "edit"
@@ -963,11 +976,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               renaming={renamingSessionId === session.id}
               fullscreen={fullscreenSessionId === session.id}
               onToggleFullscreen={toggleFullscreenFor(session.id)}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== session)
-              ]}
+              snapTargets={snapTargetsFor(session)}
               {...terminalCardCallbacks.canvas}
               restoreEnabled={settings.sessionRestoreMode !== "off"}
             />
@@ -989,11 +998,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 snapEnabled={settings.snapToGrid}
                 sessions={sessions}
                 limits={limits}
-                snapTargets={[
-                  homeBounds,
-                  ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                  ...allWindowBounds.filter((candidate) => candidate !== instance)
-                ]}
+                snapTargets={snapTargetsFor(instance)}
                 onActivate={() => {
                   raiseLayer(pluginLayerId(instance.id));
                   focusController.focus(pluginCanvasWidgetId(instance.id), "explicit");
@@ -1035,11 +1040,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               focused={widgetFocus.id === browserCanvasWidgetId}
               selected={browserSelected}
               showAgentPresence={settings.browserShowAgentPresence}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== renderedBrowserCanvas)
-              ]}
+              snapTargets={snapTargetsFor(renderedBrowserCanvas)}
               onBoundsChange={onBrowserBoundsChange}
               onActivate={() => {
                 raiseLayer(browserLayerId);
@@ -1069,11 +1070,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               stackIndex={canvasLayerZIndex(layerOrder, noteLayerId(note.id))}
               editRequest={noteEditRequest?.id === note.id ? noteEditRequest.version : 0}
               snapEnabled={settings.snapToGrid}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== note)
-              ]}
+              snapTargets={snapTargetsFor(note)}
               onBoundsChange={onStickyNoteBoundsChange}
               onTextChange={onStickyNoteTextChange}
               onClose={onDeleteStickyNote}

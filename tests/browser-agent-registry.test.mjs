@@ -76,3 +76,36 @@ test("bounded screenshot base64 plus its JSON envelope fits the 512 KiB bridge",
   };
   assert.ok(Buffer.byteLength(`${JSON.stringify(result)}\n`) < 512 * 1024);
 });
+
+test("presence expiry runs a timer only while an agent is present", () => {
+  let now = 1_000;
+  const running = new Set();
+  const timers = {
+    setInterval(callback, ms) { const timer = { callback, ms, unref() { return timer; } }; running.add(timer); return timer; },
+    clearInterval(timer) { running.delete(timer); }
+  };
+  let expired = 0;
+  const registry = new AgentRegistry(() => now, { onExpired: () => { expired += 1; }, timers });
+  assert.equal(running.size, 0, "nothing ticks for a browser no agent uses");
+  registry.touch(actor, "tab-1");
+  const presence = registry.snapshot()[0];
+  assert.equal(running.size, 1);
+  assert.equal([...running][0].ms, 1_000);
+  registry.touch({ ...actor, connectionId: "connection-2" }, "tab-1");
+  assert.equal(running.size, 1, "one timer for every agent");
+  registry.disconnect(actor);
+  assert.equal(running.size, 1, "another agent is still present");
+  now += 16_000;
+  [...running][0].callback();
+  assert.equal(expired, 1, "the expired agent is reported");
+  assert.equal(running.size, 0, "and the timer stops with the last agent");
+  registry.replace([{ ...presence, connectionId: "restored", lastHeartbeatAt: now }]);
+  assert.equal(running.size, 1, "restored presence expires too");
+  registry.replace([]);
+  assert.equal(running.size, 0);
+  registry.touch(actor, "tab-1");
+  registry.dispose();
+  assert.equal(running.size, 0);
+  registry.touch(actor, "tab-1");
+  assert.equal(running.size, 0, "never again once disposed");
+});

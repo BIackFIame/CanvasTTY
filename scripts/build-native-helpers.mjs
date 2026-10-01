@@ -44,7 +44,8 @@ export async function nativeHelperCatalog() {
       tools: orchestrationCatalog.ORCHESTRATION_TOOL_DEFINITIONS,
       providerIds: orchestrationCatalog.AGENT_PROVIDER_IDS,
       maxPluginToolNameLength: orchestrationCatalog.MAX_PLUGIN_TOOL_NAME_LENGTH,
-      maxLaunchOptionsBytes: 16 * 1024
+      maxLaunchOptionsBytes: 16 * 1024,
+      defaultAgentWaitSeconds: orchestrationCatalog.DEFAULT_AGENT_WAIT_SECONDS
     }
   };
 }

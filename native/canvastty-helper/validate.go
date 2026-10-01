@@ -230,7 +230,7 @@ func validateOrchestrationArguments(tool string, args any) (string, bool) {
 		case key == "launchOptions":
 			if !validLaunchOptions(candidate, property) {
 				errors = append(errors, key+" must map plugin ids to objects of text or true/false values.")
-			} else if text, err := canonicalStringify(candidate); err == nil && jsLength(text) > catalogInt("orchestration", "maxLaunchOptionsBytes") {
+			} else if text, err := canonicalStringify(candidate); err == nil && len(text) > catalogInt("orchestration", "maxLaunchOptionsBytes") {
 				errors = append(errors, key+" is too large.")
 			}
 		case field(property, "type") == "integer":

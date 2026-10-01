@@ -108,11 +108,12 @@ export class ProviderLaunchAdapters {
     this.kimiHomeDirectory = validateKimiHomeDirectory(
       options.kimiHomeDirectory ?? join(homedir(), ".kimi-code")
     );
-    this.probe = options.probeKimiPerRunConfig ?? probeKimiPerRunMcpConfig;
+    this.environment = options.environment ?? process.env;
+    // The probe runs Kimi with this adapter's environment (a fake HOME, an account's), never the app's own.
+    this.probe = options.probeKimiPerRunConfig ?? ((cli) => probeKimiPerRunMcpConfig(cli, undefined, this.environment));
     const syncProbe = options.probeKimiPerRunConfig;
     this.probeAsync = options.probeKimiPerRunConfigAsync
-      ?? (syncProbe ? async (cli) => syncProbe(cli) : probeKimiPerRunMcpConfigAsync);
-    this.environment = options.environment ?? process.env;
+      ?? (syncProbe ? async (cli) => syncProbe(cli) : (cli) => probeKimiPerRunMcpConfigAsync(cli, undefined, this.environment));
   }
 
   providerClisRefreshed(): void {
@@ -438,11 +439,15 @@ function orchestrationServerEntry(helper: StdioHelperLaunch): Record<string, unk
   };
 }
 
-export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli, timeoutMs = 3_000): boolean {
+export function probeKimiPerRunMcpConfig(
+  cli: AvailableProviderCli,
+  timeoutMs = 3_000,
+  environment: NodeJS.ProcessEnv = process.env
+): boolean {
   const launch = providerChildProcessLaunch(cli, ["--help"]);
   const result = spawnSync(launch.command, launch.args, {
     encoding: "utf8",
-    env: { ...process.env, ...launch.environment },
+    env: { ...environment, ...launch.environment },
     timeout: timeoutMs,
     maxBuffer: 256 * 1024,
     windowsHide: true,
@@ -453,12 +458,16 @@ export function probeKimiPerRunMcpConfig(cli: AvailableProviderCli, timeoutMs = 
 }
 
 /** probeKimiPerRunMcpConfig without blocking: the same command, limits and answer. */
-export function probeKimiPerRunMcpConfigAsync(cli: AvailableProviderCli, timeoutMs = 3_000): Promise<boolean> {
+export function probeKimiPerRunMcpConfigAsync(
+  cli: AvailableProviderCli,
+  timeoutMs = 3_000,
+  environment: NodeJS.ProcessEnv = process.env
+): Promise<boolean> {
   const launch = providerChildProcessLaunch(cli, ["--help"]);
   return new Promise((resolve) => {
     execFile(launch.command, launch.args, {
       encoding: "utf8",
-      env: { ...process.env, ...launch.environment },
+      env: { ...environment, ...launch.environment },
       timeout: timeoutMs,
       maxBuffer: 256 * 1024,
       windowsHide: true,

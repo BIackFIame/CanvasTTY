@@ -31,9 +31,19 @@ async function privateFile(path, maximum = 16 * 1024) {
   } finally { await file.close(); }
 }
 
-/** "session" for an orchestrator session's own connection, "person" otherwise (or when it cannot be read). */
-async function connectionScope(connectionPath) {
-  try { return JSON.parse(await privateFile(connectionPath)).scope === "session" ? "session" : "person"; }
+/**
+ * "session" for an orchestrator session's own connection, "person" otherwise or when there is no connection file.
+ * Any other failure to read it is thrown: guessing "person" would send an orchestrator's create as a YOLO launch,
+ * which the endpoint refuses for a subagent.
+ */
+export async function connectionScope(connectionPath) {
+  let text;
+  try { text = await privateFile(connectionPath); }
+  catch (error) {
+    if (error?.code === "ENOENT") return "person";
+    throw error;
+  }
+  try { return JSON.parse(text).scope === "session" ? "session" : "person"; }
   catch { return "person"; }
 }
 

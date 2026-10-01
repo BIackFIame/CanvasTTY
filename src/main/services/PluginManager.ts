@@ -2059,26 +2059,37 @@ function delay(durationMs: number): Promise<void> {
   });
 }
 
-async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+/**
+ * A response body read whole up to `maximumBytes`. Past that the stream is cancelled, which closes the connection;
+ * only releasing the reader would leave the socket open, still receiving what nobody reads.
+ */
+export async function readBoundedBody(body: ReadableStream<Uint8Array>, maximumBytes: number, tooLarge: string): Promise<Buffer> {
   const reader = body.getReader();
   const chunks: Buffer[] = [];
-  let totalBytes = 0;
+  let total = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_PACKAGE_BYTES) {
-        throw new Error("Plugin archive exceeds the 25 MB download limit.");
+      total += chunk.length;
+      if (total > maximumBytes) {
+        const error = new Error(tooLarge);
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
       }
       chunks.push(chunk);
     }
   } finally {
     reader.releaseLock();
   }
+  return Buffer.concat(chunks, total);
+}
+
+async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const archive = await readBoundedBody(body, MAX_PACKAGE_BYTES, "Plugin archive exceeds the 25 MB download limit.");
   try {
-    return gunzipSync(Buffer.concat(chunks, totalBytes), {
+    return gunzipSync(archive, {
       maxOutputLength: MAX_PACKAGE_BYTES + MAX_PACKAGE_ENTRIES * 1_024
     });
   } catch (error) {
@@ -2694,19 +2705,12 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
       throw new Error(message);
     }
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-    const reader = response.body.getReader();
-    const chunks: Buffer[] = [];
-    let total = 0;
+    if (Number.isFinite(declared) && declared > maximumBytes) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error("Plugin file exceeds its declared size.");
+    }
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = Buffer.from(value);
-        total += chunk.length;
-        if (total > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-        chunks.push(chunk);
-      }
+      return await readBoundedBody(response.body, maximumBytes, "Plugin file exceeds its declared size.");
     } catch (error) {
       if (controller.signal.aborted) {
         throw new TransientGithubDownloadError("GitHub plugin file download timed out.", { cause: error });
@@ -2715,10 +2719,7 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
         throw new TransientGithubDownloadError("GitHub plugin file download was interrupted.", { cause: error });
       }
       throw error;
-    } finally {
-      reader.releaseLock();
     }
-    return Buffer.concat(chunks, total);
   } finally {
     clearTimeout(timer);
   }

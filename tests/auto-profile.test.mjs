@@ -43,12 +43,17 @@ function registry() {
 function spawner(calls) {
   return (command, args, options) => {
     const data = [];
+    const exits = [];
     const written = [];
-    calls.push({ command, args, options, written, print: (text) => data.forEach((listener) => listener(text)) });
+    calls.push({
+      command, args, options, written,
+      print: (text) => data.forEach((listener) => listener(text)),
+      exit: (exitCode = 0) => exits.forEach((listener) => listener({ exitCode }))
+    });
     return {
       pid: 41_000 + calls.length, process: command, write(text) { written.push(text); }, resize() {}, kill() {}, pause() {}, resume() {},
       onData(listener) { data.push(listener); return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
+      onExit(listener) { exits.push(listener); return { dispose() {} }; }
     };
   };
 }
@@ -319,6 +324,36 @@ test("Claude's «✳» title is idle, and a hooked card's title defers to its ho
   assert.equal(status(), "working", "the title still reports a turn starting");
 });
 
+test("a restarted Claude card reads its new process's title until that process's own hooks report", async (t) => {
+  const { terminals, calls } = manager(t);
+  const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: at });
+  const status = () => terminals.list().find((session) => session.id === card.id).status;
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[0].exit(0);
+  await waitFor(() => terminals.list().find((session) => session.id === card.id).exitCode !== null);
+  terminals.restart(card.id);
+  assert.equal(calls.length, 2);
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "idle", "the previous process's hooks say nothing about this one");
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "needs_approval", "once this process's hooks report, the title defers to them again");
+});
+
+test("a restarted card has no answer or turn from its previous conversation", async (t) => {
+  const { terminals, calls } = manager(t);
+  const card = terminals.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: at });
+  await terminals.deliverInput(card.id, "do it\r");
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "working" });
+  terminals.recordAnswer(card.id, { text: "the old answer", truncated: false });
+  assert.deepEqual(terminals.turnProgress(card.id), { promptSent: true, turnStartedSincePrompt: true });
+  calls[0].exit(0);
+  await waitFor(() => terminals.list().find((session) => session.id === card.id).exitCode !== null);
+  terminals.restart(card.id);
+  assert.equal(terminals.answer(card.id), null, "the old conversation's answer is not this one's");
+  assert.deepEqual(terminals.turnProgress(card.id), { promptSent: false, turnStartedSincePrompt: false });
+});
+
 test("a declined Claude prompt ends idle; a hook after the answer keeps its state", async (t) => {
   const { terminals, calls } = manager(t);
   const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: at });
@@ -336,4 +371,13 @@ test("a declined Claude prompt ends idle; a hook after the answer keeps its stat
   terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
   await new Promise((resolve) => setTimeout(resolve, 3_300));
   assert.equal(status(), "needs_approval");
+});
+
+test("every open card is saved, not only the first 64; a broken record does not take a valid one's place", () => {
+  const record = (index) => ({ id: `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`, provider: "codex", profile: "normal", title: `t${index}`,
+    titleCustomized: false, cwd: process.cwd(), position: at, size: { width: 800, height: 600 } });
+  const many = Array.from({ length: 100 }, (_, index) => record(index));
+  assert.equal(normalizePersistedTerminalSessions({ version: 2, sessions: many }).sessions.length, 100);
+  const broken = [{ id: "nope" }, ...Array.from({ length: 64 }, (_, index) => record(index))];
+  assert.equal(normalizePersistedTerminalSessions({ version: 2, sessions: broken }).sessions.length, 64);
 });

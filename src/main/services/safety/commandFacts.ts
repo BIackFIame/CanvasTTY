@@ -231,6 +231,8 @@ interface Acc {
   flags: { elevation: boolean; pipeToShell: boolean; downloadExec: boolean; disk: boolean; forkBomb: boolean; appPrivate: boolean; unknownTarget: boolean };
   depth: number;
   budget: number;
+  /** Nesting of argv inside wrappers (nohup, env, xargs, su -c, busybox …): bounded like substitutions. */
+  argvDepth: number;
   /** Paths still to be checked against CanvasTTY's private data (each costs a realpath). */
   privateBudget: number;
 }
@@ -324,7 +326,20 @@ function fetchesIn(text: string): boolean {
 }
 
 /** Words → what the command does. Returns the working directory after it (for `cd`). */
+/** More wrappers around one command than any real one has: what runs is not followed, and the call is refused. */
+const MAX_ARGV_DEPTH = 32;
+
 function analyzeArgv(argvWords: Word[], cwd: string | null, acc: Acc, stdin: Stdin, downloadedHere: Target[]): string | null {
+  if (acc.argvDepth >= MAX_ARGV_DEPTH) {
+    acc.flags.unknownTarget = true;
+    return cwd;
+  }
+  acc.argvDepth++;
+  try { return analyzeArgvOnce(argvWords, cwd, acc, stdin, downloadedHere); }
+  finally { acc.argvDepth--; }
+}
+
+function analyzeArgvOnce(argvWords: Word[], cwd: string | null, acc: Acc, stdin: Stdin, downloadedHere: Target[]): string | null {
   const argv = argvWords.map(word => word.text);
   const argv0 = argv[0]!;
   const program = programName(argv0);
@@ -1099,7 +1114,7 @@ export function commandFromArgv(argv: readonly string[]): string { return argv.m
 
 export function analyzeAction(action: ToolAction, root: string, options: { home?: string; agentRoots?: readonly string[]; privateData?: PrivateData } = {}): HardFacts {
   const ctx = pathContext(root, options.home, options.agentRoots, options.privateData);
-  const acc: Acc = { ctx, writes: [], deletes: [], depth: 0, budget: 64, privateBudget: MAX_PRIVATE_CHECKS,
+  const acc: Acc = { ctx, writes: [], deletes: [], depth: 0, budget: 64, argvDepth: 0, privateBudget: MAX_PRIVATE_CHECKS,
     flags: { elevation: false, pipeToShell: false, downloadExec: false, disk: false, forkBomb: false, appPrivate: false, unknownTarget: false } };
   const commandCwd = action.commandCwd ? resolveTarget(action.commandCwd, ctx.rootReal, ctx) : null;
   const cwd = commandCwd ? commandCwd.abs : ctx.rootReal;

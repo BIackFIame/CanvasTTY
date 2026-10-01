@@ -42,10 +42,11 @@ const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
 };
 
 /**
- * How long a prepare that ran out of time may still answer: the plugin call itself keeps this budget (the host
- * call maximum), so an environment it creates late is still heard of and released instead of left running.
+ * How long a prepare or resume that ran out of time may still answer: the plugin call itself keeps this budget (the
+ * host call maximum), so an environment it creates or starts late is still heard of and released instead of left
+ * running.
  */
-const PREPARE_LATE_BUDGET_MS = 60_000;
+const LATE_ANSWER_BUDGET_MS = 60_000;
 
 /** What the host would spawn without an environment; `wrap` returns its replacement. */
 export interface EnvironmentLaunch {
@@ -73,6 +74,9 @@ const BARE_COMMAND = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/;
 export class EnvironmentRegistry {
   private readonly dependencies: EnvironmentRegistryDependencies;
   private readonly timeouts: Record<EnvironmentStep, number>;
+  /** The latest resume asked per session: a late answer to an earlier one never stops what a newer one started. */
+  private readonly resumes = new Map<string, number>();
+  private resumeSerial = 0;
 
   constructor(dependencies: EnvironmentRegistryDependencies) {
     this.dependencies = dependencies;
@@ -143,7 +147,7 @@ export class EnvironmentRegistry {
       cwd: request.cwd,
       options: request.choice.options ?? {}
     }, undefined, {
-      budgetMs: PREPARE_LATE_BUDGET_MS,
+      budgetMs: LATE_ANSWER_BUDGET_MS,
       // The launch already failed as timed out and nothing holds this ref: release it, data included.
       late: (value) => {
         if (!isRecord(value) || value.refuse !== undefined || value.ref === undefined || !fitsSlot(value.ref)) return;
@@ -177,7 +181,19 @@ export class EnvironmentRegistry {
   async resume(environment: PersistedEnvironmentRef, sessionId: string): Promise<{ ok: true } | { ok: false; reason: string }> {
     const found = this.lookup(environment.pluginId, environment.kind);
     if (!found) return { ok: false, reason: this.unavailableReason(environment) };
-    const answer = await this.ask(found.provider, "resume", refParams(environment, sessionId));
+    const serial = ++this.resumeSerial;
+    this.resumes.set(sessionId, serial);
+    const answer = await this.ask(found.provider, "resume", refParams(environment, sessionId), undefined, {
+      budgetMs: LATE_ANSWER_BUDGET_MS,
+      // The launch already failed as timed out, yet the plugin started the environment: stop it again. The card still
+      // holds the ref (a restart resumes it), so its data is kept.
+      late: (value) => {
+        if (this.resumes.get(sessionId) !== serial) return;
+        this.resumes.delete(sessionId);
+        if (isRecord(value) && value.ok === true) void this.release(environment, sessionId, { keepData: true, reason: "closed" });
+      }
+    });
+    if (answer.ok && this.resumes.get(sessionId) === serial) this.resumes.delete(sessionId);
     if (!answer.ok) return answer;
     const value = answer.value;
     const name = found.provider.pluginName;

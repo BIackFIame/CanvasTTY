@@ -15,7 +15,11 @@ import { isProviderId } from "../../shared/providerCatalog.ts";
 import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
 const TERMINAL_SESSION_STORE_VERSION = 2;
-const MAX_PERSISTED_SESSIONS = 64;
+/**
+ * A bound against a damaged or hostile file, far above what a canvas holds: every open card is saved (a cap that cut
+ * the newest cards lost them on the next restore). Records are counted after validation.
+ */
+const MAX_PERSISTED_SESSIONS = 1_024;
 /** Opaque plugin-owned JSON (launch options, environment refs) is capped per value. */
 export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
@@ -53,6 +57,8 @@ export interface PersistedTerminalSession {
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
+  /** An isolated session ran since then and its repositories were not audited yet, or a report is still open. */
+  gitAuditSince?: number;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
@@ -212,7 +218,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -244,6 +250,7 @@ export function persistedTerminalSession(
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
     ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
   };
@@ -259,7 +266,11 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
 
   const sessions: PersistedTerminalSession[] = [];
   const ids = new Set<string>();
-  for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS)) {
+  for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS * 4)) {
+    if (sessions.length >= MAX_PERSISTED_SESSIONS) {
+      console.warn(`CanvasTTY saves at most ${MAX_PERSISTED_SESSIONS} terminal windows; the rest are not restored.`);
+      break;
+    }
     if (!value || typeof value !== "object") continue;
     // codexThreadId: the v1 name of threadId (Codex only).
     const session = value as Partial<PersistedTerminalSession> & { codexThreadId?: unknown };
@@ -319,6 +330,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0
+        ? { gitAuditSince: session.gitAuditSince } : {}),
       // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
       ...(session.provider !== "terminal" && session.model !== undefined && launchModelProblem(session.provider as ProviderId, session.model) === null
         ? { model: session.model } : {}),

@@ -358,6 +358,9 @@ test("OpenCode: the guard throws a deny, remembers an allow and answers OpenCode
   assert.equal(sent.length, 3, "tools that neither run commands nor write files are not sent");
   assert.equal(createOpenCodeDecisions({ env: { ...env, [OPENCODE_DECISIONS_ENV]: "0" } }).enabled, false);
   assert.deepEqual(guardedCall("apply_patch", { patchText: "*** Begin Patch" }), { toolName: "apply_patch", toolInput: { patch: "*** Begin Patch" } });
+  // multiedit: every edit's new text reaches the decision, as Claude's MultiEdit tool_input does.
+  assert.deepEqual(guardedCall("multiedit", { filePath: "/p/a.ts", edits: [{ oldString: "a", newString: "TOKEN=1" }, { oldString: "b", newString: "rm -rf /" }, { newString: 5 }] }),
+    { toolName: "edit", toolInput: { file_path: "/p/a.ts", content: "TOKEN=1\nrm -rf /" } });
 });
 
 test("manifest: decide needs decision:provide, lists pre-tool, and at most one service per plugin decides", () => {

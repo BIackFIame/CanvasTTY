@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, posix, win32 } from "node:path";
 import { CLAUDE_HTTP_HOOK } from "../../../agent-runtime/runtime-protocol.mjs";
 
 /**
@@ -39,6 +39,8 @@ export interface ClaudeHttpHookPolicyOptions {
   /** Claude Code's managed settings files for this platform (tests replace them). */
   managedSettingsPaths?: readonly string[];
   readText?: (path: string) => string | null;
+  /** What is at a path (tests replace the file system). */
+  entry?: (path: string) => "file" | "directory" | null;
   version?: (executable: string) => string | null;
 }
 
@@ -51,6 +53,7 @@ export class ClaudeHttpHookPolicy {
   private readonly home: string;
   private readonly managedSettingsPaths: readonly string[];
   private readonly readText: (path: string) => string | null;
+  private readonly entry: (path: string) => "file" | "directory" | null;
   private readonly version: (executable: string) => string | null;
 
   constructor(options: ClaudeHttpHookPolicyOptions = {}) {
@@ -58,6 +61,7 @@ export class ClaudeHttpHookPolicy {
     this.home = options.home ?? homedir();
     this.managedSettingsPaths = options.managedSettingsPaths ?? managedSettingsFiles(this.platform);
     this.readText = options.readText ?? readSmallText;
+    this.entry = options.entry ?? entryAt;
     const versions = new ClaudeVersions();
     this.version = options.version ?? ((executable) => versions.get(executable));
   }
@@ -81,6 +85,8 @@ export class ClaudeHttpHookPolicy {
 
   /** Every settings object Claude reads for this launch that CanvasTTY can see: inline, managed, user, project. */
   private *settingsSources(facts: ClaudeHttpLaunchFacts): Generator<unknown> {
+    // The paths Claude reads on the platform this policy decides for (the host's in the app).
+    const { join, dirname } = pathRules(this.platform);
     for (let index = 0; index < facts.args.length; index++) {
       const argument = facts.args[index]!;
       const value = argument === "--settings" ? facts.args[index + 1] : argument.startsWith("--settings=") ? argument.slice(11) : undefined;
@@ -91,11 +97,15 @@ export class ClaudeHttpHookPolicy {
     for (const path of this.managedSettingsPaths) yield parseJson(this.readText(path));
     const configDir = facts.env.CLAUDE_CONFIG_DIR || join(this.home, ".claude");
     yield parseJson(this.readText(join(configDir, "settings.json")));
+    // Up to the repository root; never above HOME (its .claude is the user settings above, and nothing above it is a
+    // project). Every step is a synchronous stat on the launch path, so a folder without `.claude` costs one.
     let folder = facts.cwd;
     for (let depth = 0; depth < MAX_PROJECT_DEPTH; depth++) {
-      yield parseJson(this.readText(join(folder, ".claude", "settings.json")));
-      yield parseJson(this.readText(join(folder, ".claude", "settings.local.json")));
-      if (this.readText(join(folder, ".git")) !== null || isDirectory(join(folder, ".git"))) break;
+      if (this.entry(join(folder, ".claude")) === "directory") {
+        yield parseJson(this.readText(join(folder, ".claude", "settings.json")));
+        yield parseJson(this.readText(join(folder, ".claude", "settings.local.json")));
+      }
+      if (this.entry(join(folder, ".git")) !== null || folder === this.home) break;
       const parent = dirname(folder);
       if (parent === folder) break;
       folder = parent;
@@ -167,7 +177,10 @@ export class ClaudeVersions {
   }
 }
 
+const pathRules = (platform: NodeJS.Platform): typeof posix => platform === "win32" ? win32 : posix;
+
 function managedSettingsFiles(platform: NodeJS.Platform): string[] {
+  const { join } = pathRules(platform);
   const root = platform === "darwin" ? "/Library/Application Support/ClaudeCode"
     : platform === "win32" ? "C:\\Program Files\\ClaudeCode"
       : "/etc/claude-code";
@@ -180,18 +193,24 @@ function managedSettingsFiles(platform: NodeJS.Platform): string[] {
   return files;
 }
 
+/** A missing file costs one stat and no thrown error (the common case on the launch path). */
 function readSmallText(path: string): string | null {
   try {
-    const info = statSync(path);
-    if (!info.isFile() || info.size > MAX_SETTINGS_BYTES) return null;
+    const info = statSync(path, { throwIfNoEntry: false });
+    if (!info?.isFile() || info.size > MAX_SETTINGS_BYTES) return null;
     return readFileSync(path, "utf8");
   } catch {
     return null;
   }
 }
 
-function isDirectory(path: string): boolean {
-  try { return statSync(path).isDirectory(); } catch { return false; }
+function entryAt(path: string): "file" | "directory" | null {
+  try {
+    const info = statSync(path, { throwIfNoEntry: false });
+    return info?.isDirectory() ? "directory" : info ? "file" : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseJson(text: string | null | undefined): unknown {

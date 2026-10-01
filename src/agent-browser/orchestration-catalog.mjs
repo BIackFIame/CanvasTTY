@@ -165,7 +165,7 @@ export function validateOrchestrationArguments(toolName, args) {
         || !Object.values(candidate).every((values) => plain(values)
           && Object.values(values).every((item) => typeof item === "string" || typeof item === "boolean"))) {
         errors.push(`${key} must map plugin ids to objects of text or true/false values.`);
-      } else if (canonicalStringify(candidate).length > MAX_LAUNCH_OPTIONS_BYTES) {
+      } else if (Buffer.byteLength(canonicalStringify(candidate), "utf8") > MAX_LAUNCH_OPTIONS_BYTES) {
         errors.push(`${key} is too large.`);
       } else value[key] = candidate;
     } else if (property.type === "integer") {

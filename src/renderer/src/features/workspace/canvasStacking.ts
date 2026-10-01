@@ -12,6 +12,37 @@ export function reconcileCanvasLayerOrder(
   return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
 }
 
+/** The ids of `current` that are still live; `current` itself when none is gone (no state change). */
+export function keepLiveIds(current: ReadonlySet<string>, live: ReadonlySet<string>): ReadonlySet<string> {
+  for (const id of current) {
+    if (!live.has(id)) return new Set([...current].filter((candidate) => live.has(candidate)));
+  }
+  return current;
+}
+
+/** Drops, in place, the entries of a per-id cache whose id is no longer live. */
+export function pruneToLive(cache: Map<string, unknown>, live: ReadonlySet<string>): void {
+  for (const id of cache.keys()) {
+    if (!live.has(id)) cache.delete(id);
+  }
+}
+
+/**
+ * Snap targets per window: the fixed targets and every other window. A list is built the first time a window asks
+ * and kept while this layout lasts (a pan or zoom renders every card again without changing any of them).
+ */
+export function snapTargetsOf(fixed: readonly SessionBounds[], windows: readonly SessionBounds[]): (window: SessionBounds) => SessionBounds[] {
+  const lists = new Map<SessionBounds, SessionBounds[]>();
+  return (window) => {
+    let list = lists.get(window);
+    if (!list) {
+      list = [...fixed, ...windows.filter((candidate) => candidate !== window)];
+      lists.set(window, list);
+    }
+    return list;
+  };
+}
+
 export function bringCanvasLayerToFront(current: readonly string[], id: string): string[] {
   if (!current.includes(id) || current.at(-1) === id) return [...current];
   return [...current.filter((candidate) => candidate !== id), id];

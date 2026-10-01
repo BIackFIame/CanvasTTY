@@ -2,6 +2,7 @@ import { reportLifecycle } from "./runtime-client.mjs";
 import { CAPTURE_RESULT_ENV, MAX_RESULT_CHARS } from "./runtime-protocol.mjs";
 import { createOpenCodeDecisions } from "./opencode-decisions.mjs";
 import { spawn } from "node:child_process";
+import { HOOK_TIMEOUT_MS, preparePluginHook } from "./plugin-hook-dispatch.mjs";
 
 let rootSessionId = null;
 let rootWorking = false;
@@ -176,28 +177,36 @@ function runPluginHooks(event, providerEvent, payload) {
   }
 }
 
+/**
+ * One process per hook: the hook's own entry, started from here (under the runner command, Electron as Node), not a
+ * runner process that reads the registry and then starts it; after-tool fires on every tool call.
+ */
 function launchPluginHook(key, event, providerEvent, input) {
-  try {
-    const child = spawn(pluginHookRunnerCommand, [
-      pluginHookRunner,
-      pluginHookRegistry,
-      key,
-      "opencode",
-      event,
-      providerEvent
-    ], {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+  void preparePluginHook({
+    registryPath: pluginHookRegistry,
+    key,
+    provider: "opencode",
+    event,
+    providerEvent,
+    terminalSessionId: pluginHookTerminalSessionId,
+    raw: input,
+    environment: process.env
+  }).then((hook) => {
+    if (!hook) return;
+    const child = spawn(pluginHookRunnerCommand, [hook.entry], {
+      cwd: hook.root,
+      env: hook.env,
       stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true
     });
-    const timeout = setTimeout(() => child.kill(), 3_000);
+    const timeout = setTimeout(() => child.kill(), HOOK_TIMEOUT_MS);
     timeout.unref();
     const clear = () => clearTimeout(timeout);
     child.once("exit", clear);
     child.once("error", clear);
     child.stdin?.once("error", () => undefined);
-    child.stdin?.end(input);
-  } catch {
+    child.stdin?.end(hook.input);
+  }).catch(() => {
     // Optional plugin hooks never interrupt OpenCode's own event handling.
-  }
+  });
 }

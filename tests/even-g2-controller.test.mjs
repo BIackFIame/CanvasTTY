@@ -882,3 +882,47 @@ test("HTTP creation uses the selected hotbar provider and the desktop workspace/
     assert.equal(f.creates.at(-1).cwd, f.controller.state().config.workspace);
   }
 });
+
+test("a Bonjour name that cannot be published leaves the listener up and is retried only after a pause", async (t) => {
+  let starts = 0;
+  const discovery = { host: "", stop() {}, async start() { starts += 1; throw new Error("local-discovery-unavailable"); } };
+  const f = await fixture(t, { localDiscovery: discovery });
+  await f.enable();
+  assert.equal(f.controller.state().error, "", "not a listener failure");
+  assert.ok(f.controller.state().port > 0);
+  assert.equal((await f.call("/g2/discover")).status < 500, true, "the listener answers");
+  const before = starts;
+  await f.controller.reconcileNetwork();
+  await f.controller.reconcileNetwork();
+  assert.equal(starts, before, "no new dns-sd round on every tick");
+});
+
+test("pairing diagnostics are written in batches, not on every unauthenticated request", async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  const log = join(f.directory, "even-g2-pairing.log");
+  for (let i = 0; i < 10; i++) await f.call("/g2/discover");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(readFile(log, "utf8"), /ENOENT/u, "not written per request");
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 10);
+});
+
+test("a configure that cannot be saved changes nothing; a revoke that cannot be saved still holds and is saved later", { skip: process.platform === "win32" }, async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  const device = await f.pair();
+  const { chmod } = await import("node:fs/promises");
+  await chmod(f.directory, 0o500);
+  try {
+    await assert.rejects(f.enable({ allowClose: false }));
+    assert.equal(f.controller.state().config.allowClose, true, "the configuration that could not be saved was not applied");
+    await assert.rejects(f.controller.command({ type: "revoke", id: device.id }));
+    assert.equal(f.controller.state().peers?.some?.((peer) => peer.id === device.id) ?? false, false, "revoked at once");
+  } finally {
+    await chmod(f.directory, 0o700);
+  }
+  await f.controller.close();
+  const saved = JSON.parse(await readFile(join(f.directory, "even-g2.json"), "utf8"));
+  assert.deepEqual(saved.peers.map((peer) => peer.id), [], "the revoke reached the disk once it could");
+});

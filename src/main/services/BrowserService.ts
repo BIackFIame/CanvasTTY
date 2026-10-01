@@ -51,6 +51,7 @@ import {
 } from "./browser/BrowserPolicyService.ts";
 import {
   BrowserStore,
+  activeTabAmong,
   type PersistedBrowserState,
   type PersistedBrowserTab
 } from "./browser/BrowserStore.ts";
@@ -122,7 +123,6 @@ export class BrowserService {
   private readonly readyPromise: Promise<void>;
   private readonly downloadWaiters = new Set<DownloadWaiter>();
   private readonly observedOwners = new WeakSet<BrowserWindow>();
-  private readonly presenceTimer: NodeJS.Timeout;
   private browserSession: Session | null = null;
   private browserPagePreloadId: string | null = null;
   private activeTabId: string | null = null;
@@ -160,7 +160,8 @@ export class BrowserService {
       uploadStagingRoot: join(userDataPath, "browser", "upload-staging", randomUUID())
     });
     this.audit = new BrowserAuditStore(userDataPath, { now: this.now });
-    this.agents = new AgentRegistry(this.now);
+    // Presence that stopped heartbeating expires on its own; the timer runs only while an agent is present.
+    this.agents = new AgentRegistry(this.now, { onExpired: () => this.presenceChanged() });
     this.canvasGestures = new BrowserCanvasGestureController({
       getOwner: () => this.getOwner(),
       getViewport: () => this.viewport,
@@ -233,11 +234,6 @@ export class BrowserService {
       onActivity: (event) => this.emitActivity(event)
     });
     this.readyPromise = this.initialize();
-    this.presenceTimer = setInterval(() => {
-      if (!this.agents.prune()) return;
-      this.presenceChanged();
-    }, 1_000);
-    this.presenceTimer.unref();
   }
 
   ready(): Promise<void> {
@@ -331,7 +327,7 @@ export class BrowserService {
     this.canvasGestures.setInputFocused(false);
     this.canvasGestures.endSequence(false);
     this.canvasGestures.clear();
-    clearInterval(this.presenceTimer);
+    this.agents.dispose();
     this.destroyRuntimeTabs();
     if (this.browserSession && this.browserPagePreloadId) {
       this.browserSession.unregisterPreloadScript(this.browserPagePreloadId);
@@ -487,6 +483,8 @@ export class BrowserService {
       this.automation.unregister(id);
       this.tabs.delete(id);
     }
+    // A destroyed active tab must not leave the active slot pointing at nothing while other tabs are open.
+    this.activeTabId = activeTabAmong(this.tabs, this.activeTabId);
     if (this.tabs.size === 0 && this.persisted.tabs.length > 0) {
       for (const saved of this.persisted.tabs.slice(0, MAX_BROWSER_TABS)) {
         const tab = this.createRuntimeTab(saved.id, saved.url);
@@ -556,7 +554,7 @@ export class BrowserService {
     this.tabs.delete(tabId);
     this.destroyTab(tab);
     this.pendingDialogs.delete(tabId);
-    if (this.activeTabId === tabId) this.activeTabId = this.tabs.keys().next().value ?? null;
+    this.activeTabId = activeTabAmong(this.tabs, this.activeTabId);
     await this.persistRuntime();
     this.syncViews();
     this.emit();

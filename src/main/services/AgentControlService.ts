@@ -143,7 +143,7 @@ export class AgentControlService {
    * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
    * start; the card stays, so the caller can inspect or cancel it.
    */
-  spawn(request: SpawnAgentRequest): Promise<SessionMetadata> {
+  spawn(request: SpawnAgentRequest, signal?: AbortSignal): Promise<SessionMetadata> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
@@ -172,6 +172,8 @@ export class AgentControlService {
     if (live >= limits.maxSubagents) {
       throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
     }
+    // A call cancelled before its agent starts launches nothing.
+    if (signal?.aborted) return Promise.reject(spawnCanceled());
     const cascade = children.length;
     const created = this.terminals.create({
       provider: request.provider,
@@ -189,8 +191,13 @@ export class AgentControlService {
       ...(request.effort !== undefined ? { effort: request.effort } : {})
     }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
-    return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
-      .then(() => this.terminals.getMetadata(created.id) ?? created);
+    return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
+      .then(() => this.terminals.getMetadata(created.id) ?? created, (error: unknown) => {
+        // Cancelled while it started: nobody receives its id, so the card is closed instead of left running.
+        if (!signal?.aborted) throw error;
+        try { this.terminals.dispose(created.id); } catch { /* it already ended */ }
+        throw spawnCanceled();
+      });
   }
 
   /** The profile a subagent of this parent gets for this request (what spawn will use), or why it gets none. */
@@ -509,4 +516,8 @@ function abortError(): Error {
 function tail(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return text.slice(text.length - maxChars);
+}
+
+function spawnCanceled(): Error {
+  return new DOMException("The spawn was canceled before its agent started.", "AbortError");
 }

@@ -318,6 +318,31 @@ test("browser MCP: a dropped connection reconnects with the rotated token and re
   assert.match(reference.received[1][0], /"capabilityToken":"rotated-0"/u);
 });
 
+test("browser MCP: a screenshot over the image limit comes back as a note, not as a response too large to send", OPTIONS, async () => {
+  const big = "A".repeat(480_000);
+  const reference = await scenario("browser", {
+    makeGateway: browserGateway({
+      respond(connection, message) {
+        if (message.tool === "browser_screenshot") connection.send(ok(message, { image: { mimeType: "image/png", data: big, width: 4000 } }));
+        else connection.send(ok(message, { mimeType: "image/png", base64: big }));
+      }
+    }),
+    async script({ helper }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1));
+      helper.send(call(2, "browser_screenshot", { tabId: "t1" }));
+      helper.send(call(3, "browser_list_tabs", {}));
+      await helper.until((output) => outputHasId(2)(output) && outputHasId(3)(output));
+    }
+  });
+  for (const id of [2, 3]) {
+    const line = reference.output.find((candidate) => JSON.parse(candidate).id === id);
+    assert.ok(line.length < 10_000, "the image is not in the answer");
+    assert.match(line, /480000-byte image is over the 470000-byte limit/u);
+    assert.doesNotMatch(line, /exceeds 512KB/u);
+  }
+});
+
 test("browser MCP: oversized lines both ways, and a null request line ends the helper as before", OPTIONS, async () => {
   await scenario("browser", {
     makeGateway: browserGateway({ respond: (connection, message) => connection.send(ok(message, { text: "\"".repeat(200 * 1024) })) }),
@@ -499,6 +524,71 @@ test("orchestration MCP: an unreachable gateway, a failing tool list and a dropp
     }
   });
   assert.match(reconnected.received[1][0], /"capabilityToken":"rotated-0"/u);
+});
+
+test("orchestration MCP: a gateway that is not up yet is retried, and a failed first connection is not final", OPTIONS, async () => {
+  // Connections below `refuse` are dropped before authentication, like a gateway that is (re)starting.
+  const flakyGateway = (refuse) => () => lineServer(
+    (connection, message) => {
+      if (message?.type === "authenticate") connection.send({ v: 1, type: "authenticated", reconnectToken: `rotated-${connection.index}`, heartbeatIntervalMs: 5_000 });
+      if (message?.type === "request") connection.send({ v: 1, type: "response", id: message.id, result: { agents: [] } });
+    },
+    (connection) => {
+      if (connection.index < refuse) connection.socket.destroy();
+    }
+  );
+  // One dropped attempt: the same initialize still succeeds on a later attempt.
+  const retried = await scenario("orchestration", {
+    makeGateway: flakyGateway(1),
+    async script({ helper }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1), 10_000);
+      helper.send(call(2, "list_agents", {}));
+      await helper.until(outputHasId(2), 10_000);
+    }
+  });
+  assert.ok(retried.output.some((line) => line.includes('"id":1') && line.includes('"result"')), "initialize succeeded after a retry");
+  assert.ok(retried.output.some((line) => line.includes('"id":2') && line.includes("agents")), "the call went through");
+  // Every attempt of the first call is dropped: it fails, but the next call connects again instead of failing forever.
+  const recovered = await scenario("orchestration", {
+    makeGateway: flakyGateway(3),
+    async script({ helper, gateway }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1), 10_000);
+      assert.equal(gateway.connections.length, 3, "the first call tried a bounded number of times");
+      helper.send(call(2, "list_agents", {}));
+      await helper.until(outputHasId(2), 10_000);
+    }
+  });
+  assert.ok(recovered.output.some((line) => line.includes('"id":1') && line.includes('"error"')), "the first initialize failed");
+  assert.ok(recovered.output.some((line) => line.includes('"id":2') && line.includes("agents") && line.includes('"isError":false')), "a later call reconnected");
+});
+
+test("orchestration MCP: launch options are limited in bytes, calls time out and a cancelled call is cancelled at the gateway", OPTIONS, async () => {
+  const silent = orchestrationGateway({ respond: () => undefined });
+  const reference = await scenario("orchestration", {
+    makeGateway: silent,
+    env: { CANVASTTY_ORCHESTRATION_CALL_TIMEOUT_MS: "400" },
+    async script({ helper, gateway }) {
+      helper.send(rpc(1, "initialize", {}));
+      await helper.until(outputHasId(1));
+      // 6,000 characters of three UTF-8 bytes each: 18 KB, over the 16 KB budget.
+      helper.send(call(2, "spawn_agent", { provider: "codex", cwd: "/w", launchOptions: { p: { v: "界".repeat(6_000) } } }));
+      await helper.until(outputHasId(2));
+      helper.send(call(3, "list_agents", {}));
+      await helper.until(outputHasId(3));
+      helper.send(call(4, "observe_agent", { sessionId: "s" }));
+      while (!gateway.connections[0].lines.some((line) => line.includes("observe_agent"))) await delay(10);
+      helper.send(rpc(undefined, "notifications/cancelled", { requestId: 4 }));
+      await helper.until(outputHasId(4));
+      while (gateway.connections[0].lines.filter((line) => line.includes('"type":"cancel"')).length < 2) await delay(10);
+    }
+  });
+  const answer = (id) => JSON.parse(reference.output.find((line) => JSON.parse(line).id === id)).result.content[0].text;
+  assert.match(answer(2), /launchOptions is too large/u);
+  assert.match(answer(3), /"code":"TIMEOUT"/u);
+  assert.match(answer(4), /"code":"CANCELED"/u);
+  assert.equal(reference.received[0].filter((line) => line.includes('"type":"cancel"')).length, 2, "the gateway stops both");
 });
 
 test("orchestration MCP: the real OrchestrationGateway serves both implementations", OPTIONS, async (t) => {

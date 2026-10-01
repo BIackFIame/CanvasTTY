@@ -87,6 +87,39 @@ test("spawn_agent: folder, depth and live-count limits refuse with a reason the 
   await spawn({});
 });
 
+test("spawn_agent cancelled before or while the subagent starts leaves no card and no launch behind", async (t) => {
+  const { project, inner } = await folders(t);
+  // A launch policy that has not answered yet: the new agent is still starting meanwhile.
+  const answers = [];
+  const pipeline = {
+    hasPolicy: () => true,
+    normalizeOptions: (_provider, options) => options,
+    unavailable: () => [],
+    forgetSession: async () => undefined,
+    prepare: () => new Promise((resolve) => answers.push(resolve))
+  };
+  const { terminals, calls } = managerWith(t);
+  const control = new AgentControlService(terminals);
+  const handler = new ScopedOrchestrationHandler(control);
+  const orchestrator = terminals.create({ provider: "codex", profile: "auto", cwd: project, position: at, role: "orchestrator" });
+  terminals.configureLaunchPipeline(pipeline);
+  const launches = calls.length;
+  const children = () => terminals.list().filter((session) => session.parentSessionId === orchestrator.id);
+  const spawn = (signal) => handler.execute(orchestrator.id, { id: randomUUID(), tool: "spawn_agent", arguments: { provider: "opencode", cwd: inner, prompt: "go" } }, signal);
+  const canceled = (error) => error.bridgeError?.code === "CANCELED";
+  await assert.rejects(spawn(AbortSignal.abort()), canceled);
+  assert.equal(calls.length, launches, "nothing launched for a call already cancelled");
+  assert.deepEqual(children(), []);
+  // Cancelled while its prompt waits for the new agent to start: the card is closed, not left running.
+  const controller = new AbortController();
+  const pending = spawn(controller.signal);
+  for (let i = 0; i < 200 && answers.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(children().length, 1, "starting");
+  controller.abort();
+  await assert.rejects(pending, canceled);
+  assert.deepEqual(children(), [], "its card was closed");
+});
+
 test("YOLO is enforced in the main process: acknowledged by the person, never for a subagent", async (t) => {
   const { project } = await folders(t);
   const { terminals } = managerWith(t, { acknowledged: ["claude"] });
@@ -153,7 +186,7 @@ test("no agent-facing tool changes CanvasTTY's settings, protection, profiles or
   assert.doesNotMatch(host, /settings\.(update|set)/u);
 });
 
-async function gatewayFixture(t) {
+async function gatewayFixture(t, options = {}) {
   const { root, project, inner, other } = await folders(t);
   const userData = await realpath(await mkdtemp(join("/tmp", "ctty-grant-")));
   t.after(() => rm(userData, { recursive: true, force: true }));
@@ -166,12 +199,40 @@ async function gatewayFixture(t) {
   const settings = new SettingsStore(userData, "en");
   await settings.load();
   gateway = new AgentControlGateway({ userDataPath: userData, terminals, pixelSkinPacks, settings, lifecycleEnabled: () => true,
-    spawnSubagent: (request) => control.spawn(request) });
+    spawnSubagent: options.spawnSubagent ? (request) => options.spawnSubagent(request, terminals) : (request) => control.spawn(request) });
   const appConnection = await gateway.start();
   terminals.setControlConnection({ connectionPath: appConnection, cliPath: "/cli.mjs", grant: (id) => gateway.grantSession(id) });
   t.after(async () => { await gateway.close(); await terminals.shutdown(); });
   return { root, project, inner, other, userData, terminals, calls, gateway, appConnection, settings };
 }
+
+test("concurrent subagent creates never exceed the 32 controlled sessions", localSocket, async (t) => {
+  let open;
+  let hold = false;
+  const gate = new Promise((resolve) => { open = resolve; });
+  let started = 0;
+  const f = await gatewayFixture(t, {
+    // Slow to start, like a real launch: the held requests are all past the cap check before any finishes.
+    spawnSubagent: async (request, terminals) => {
+      started += 1;
+      if (hold) await gate;
+      return terminals.create({ provider: request.provider, profile: "normal", cwd: request.cwd, position: at });
+    }
+  });
+  f.terminals.create({ provider: "codex", profile: "auto", cwd: f.project, position: at, role: "orchestrator" });
+  const connectionPath = f.calls.at(-1).options.env.CANVASTTY_CONTROL_CONNECTION;
+  const clientPath = join(dirname(connectionPath), "controller.json");
+  const create = () => controlRequest({ connectionPath, clientPath, method: "create",
+    params: { provider: "opencode", cwd: f.inner }, requestId: randomUUID(), timeoutMs: 20_000 }).then(() => "ok", (error) => error.code ?? error.message);
+  for (let i = 0; i < 28; i++) assert.equal(await create(), "ok");
+  hold = true;
+  const results = Array.from({ length: 10 }, create);
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  open();
+  const outcomes = await Promise.all(results);
+  assert.deepEqual(outcomes.sort(), [...Array(6).fill("LIMIT_REACHED"), ...Array(4).fill("ok")], `started ${started}`);
+  assert.equal(started, 32, "no launch past the cap");
+});
 
 test("an orchestrator's own control connection: never the app-wide one, subagents only, under every rule", localSocket, async (t) => {
   const f = await gatewayFixture(t);

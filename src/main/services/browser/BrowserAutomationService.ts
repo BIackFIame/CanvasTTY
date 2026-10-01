@@ -15,6 +15,11 @@ import { SENSITIVE_FIELD_SOURCE, isSensitiveFieldIdentity } from "../safety/sens
 const MAX_OBSERVE_ELEMENTS = 200;
 const MAX_READ_CHARACTERS = 100_000;
 const MAX_READ_ITEMS = 500;
+/** Node classifications kept per document (like element refs): a long-lived single-page app keeps adding nodes. */
+const MAX_SENSITIVE_NODES = 1_000;
+/** A text or element wait re-reads the page: every 100 ms at first, then less often, at most once a second. */
+const WAIT_POLL_MS = 100;
+const WAIT_POLL_MAX_MS = 1_000;
 export const BROWSER_SCREENSHOT_MAX_BINARY_BYTES = 340 * 1024;
 const CDP_VERSION = "1.3";
 const PRESENCE_WORLD = "canvastty-agent-presence";
@@ -240,8 +245,13 @@ export class BrowserAutomationService {
     const viewportWidth = metrics.cssLayoutViewport?.clientWidth ?? Number.MAX_SAFE_INTEGER;
     const viewportHeight = metrics.cssLayoutViewport?.clientHeight ?? Number.MAX_SAFE_INTEGER;
     if (viewportWidth <= 0 || viewportHeight <= 0) throw viewportUnavailable();
+    const offset = decodeCursor(options.cursor, revision);
+    const limit = clampInteger(options.limit, 1, MAX_OBSERVE_ELEMENTS, 80);
+    // One box-model round trip per element: measured only up to this page and one more (is there a next page?).
+    const wanted = offset + limit + 1;
     const visible: Array<{ node: CdpAxNode; bounds: BrowserElementBounds }> = [];
     for (const node of nodes) {
+      if (visible.length >= wanted) break;
       throwIfAborted(options.signal);
       const bounds = await this.box(session, node.backendDOMNodeId!);
       if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
@@ -249,8 +259,6 @@ export class BrowserAutomationService {
         || bounds.x >= viewportWidth || bounds.y >= viewportHeight) continue;
       visible.push({ node, bounds });
     }
-    const offset = decodeCursor(options.cursor, revision);
-    const limit = clampInteger(options.limit, 1, MAX_OBSERVE_ELEMENTS, 80);
     const page = visible.slice(offset, offset + limit);
     const elements: BrowserObservedElement[] = [];
     for (const item of page) {
@@ -782,6 +790,7 @@ export class BrowserAutomationService {
   ): Promise<{ matched: true }> {
     const startedAt = Date.now();
     let idleSince: number | null = null;
+    let pollMs = WAIT_POLL_MS;
     while (Date.now() - startedAt < timeoutMs) {
       throwIfAborted(signal);
       const session = await this.ready(tabId, revision);
@@ -825,7 +834,9 @@ export class BrowserAutomationService {
           cursor = observation.nextCursor;
         }
       }
-      await abortableDelay(100, signal);
+      await abortableDelay(Math.min(pollMs, Math.max(0, timeoutMs - (Date.now() - startedAt))), signal);
+      // Load, URL and network idleness are cheap to check; text and elements walk the whole page.
+      if (condition === "text" || condition === "element") pollMs = Math.min(WAIT_POLL_MAX_MS, Math.round(pollMs * 1.5));
     }
     throw new BrowserKernelError("TIMEOUT", "Browser wait condition timed out.", { retryable: true });
   }
@@ -961,6 +972,9 @@ export class BrowserAutomationService {
       sensitive = true;
     }
     session.sensitiveNodes.set(backendNodeId, sensitive);
+    if (session.sensitiveNodes.size > MAX_SENSITIVE_NODES) {
+      session.sensitiveNodes.delete(session.sensitiveNodes.keys().next().value!);
+    }
     return sensitive;
   }
 

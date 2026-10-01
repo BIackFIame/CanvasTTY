@@ -14,6 +14,7 @@ import { BrowserCommandDispatcher } from "./BrowserCommandDispatcher.ts";
 import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
 import { BrowserPolicyService, DEFAULT_BROWSER_URL } from "./BrowserPolicyService.ts";
 import { isSensitiveName } from "../safety/sensitiveNames.ts";
+import type { AgentDisconnectReason } from "../agent-browser/protocol.ts";
 
 export interface BrowserCoreTab {
   id: string;
@@ -97,8 +98,9 @@ export class BrowserCore {
     this.host.heartbeatActor(actor, timestamp);
   }
 
-  agentDisconnected(actor: BrowserActor): void {
-    this.dispatcher.clearActor(actor);
+  agentDisconnected(actor: BrowserActor, reason?: AgentDisconnectReason): void {
+    // A dropped socket reconnects with the same connection; a revoked or expired one does not.
+    this.dispatcher.clearActor(actor, { reconnecting: reason === "closed" });
     this.host.disconnectActor(actor);
   }
 

@@ -578,8 +578,11 @@ export class RuntimeGateway {
     let size = 0;
     let oversized = Number.isFinite(declared) && declared > MAX_HOOK_INPUT_BYTES;
     const chunks: Buffer[] = [];
+    // Once per request: an input found oversized while it streams completes at once, and again at its "end".
+    let completed = false;
     const complete = (): void => {
-      if (response.headersSent) return;
+      if (completed || response.headersSent) return;
+      completed = true;
       let input: unknown = null;
       if (!oversized) {
         try {

@@ -75,3 +75,75 @@ test("maps visual coordinates back into xterm layout coordinates when zoomed in"
     { x: 216.66666666666669, y: 216.66666666666669 }
   );
 });
+
+/** A document that records its listeners, and a screen (scaled to half its layout size) with one child. */
+function fakeCards(count) {
+  const listeners = new Map();
+  const doc = {
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) { listeners.get(type)?.delete(listener); },
+    count: (type) => listeners.get(type)?.size ?? 0,
+    /** Capture on the document: every document listener sees the event first. */
+    fire(type, target, clientX, clientY, button = 0) {
+      const event = { type, target, clientX, clientY, button, buttons: 1, detail: 0, preventDefault() {}, stopImmediatePropagation() {} };
+      for (const listener of [...(listeners.get(type) ?? [])]) listener(event);
+    }
+  };
+  class FakeNode extends EventTarget {
+    constructor(parent = null) { super(); this.parent = parent; }
+  }
+  class FakeMouseEvent extends Event {
+    constructor(type, init) { super(type, init); this.clientX = init.clientX; this.clientY = init.clientY; }
+  }
+  const cards = Array.from({ length: count }, () => {
+    const screen = new FakeNode();
+    Object.assign(screen, {
+      ownerDocument: doc, offsetWidth: 700, offsetHeight: 400, contains(node) {
+        for (let current = node; current; current = current.parent) if (current === screen) return true;
+        return false;
+      },
+      getBoundingClientRect: () => ({ left: 100, top: 100, width: 350, height: 200 }),
+      matches: () => false
+    });
+    const child = new FakeNode(screen);
+    const received = [];
+    child.addEventListener("mousemove", (event) => received.push([event.clientX, event.clientY]));
+    child.addEventListener("mouseup", (event) => received.push(["up", event.clientX, event.clientY]));
+    return { screen, child, received };
+  });
+  return { doc, cards, FakeNode, FakeMouseEvent };
+}
+
+test("mouse moves anywhere cost nothing for cards the pointer is not over; a hovered or dragged card still remaps", async (t) => {
+  const { attachTerminalMouseCoordinateAdapter } = await import("../src/renderer/src/features/terminal/terminalMouseCoordinates.ts");
+  const { doc, cards, FakeNode, FakeMouseEvent } = fakeCards(5);
+  const originals = { Node: globalThis.Node, MouseEvent: globalThis.MouseEvent };
+  globalThis.Node = FakeNode;
+  globalThis.MouseEvent = FakeMouseEvent;
+  t.after(() => Object.assign(globalThis, originals));
+  const detach = cards.map(({ screen }) => attachTerminalMouseCoordinateAdapter(screen));
+
+  assert.equal(doc.count("mousemove"), 0, "no card listens to every mouse move in the window");
+  const [first] = cards;
+  first.screen.dispatchEvent(new Event("mouseenter"));
+  assert.equal(doc.count("mousemove"), 1, "only the hovered card listens");
+  doc.fire("mousemove", first.child, 135, 135);
+  assert.deepEqual(first.received, [[170, 170]], "a move over the hovered card is remapped");
+
+  doc.fire("mousedown", first.child, 135, 135);
+  first.screen.dispatchEvent(new Event("mouseleave"));
+  const outside = new FakeNode();
+  const outsideMoves = [];
+  outside.addEventListener("mousemove", (event) => outsideMoves.push([event.clientX, event.clientY]));
+  doc.fire("mousemove", outside, 600, 400);
+  assert.deepEqual(outsideMoves, [[1100, 700]], "a drag that left the card is still followed");
+  doc.fire("mouseup", outside, 600, 400);
+  assert.equal(doc.count("mousemove"), 0, "the drag ended outside: nothing listens any more");
+  assert.equal(doc.count("mousedown"), 0);
+
+  for (const stop of detach) stop();
+  assert.equal(doc.count("mouseup"), 0);
+});

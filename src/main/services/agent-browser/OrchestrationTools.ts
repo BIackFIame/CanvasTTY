@@ -145,6 +145,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       try { unknown = await this.providers.checkModel?.(provider, args.model as string) ?? null; } catch { unknown = null; }
       if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
     }
+    if (signal?.aborted) throw canceledError();
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
@@ -155,6 +156,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
       profile: profile.profile
+    }, signal).catch((error: unknown) => {
+      if (signal?.aborted) throw canceledError();
+      throw error;
     });
     if (signal?.aborted) {
       // Canceled while the agent was starting: nobody will receive its id, so close it.

@@ -7,6 +7,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -515,14 +516,24 @@ func formatToolResult(result any) (*jsObject, error) {
 		return errorToolResult(&internalError{message: "Browser returned no result."}), nil
 	}
 	content := []any{}
-	screenshot := screenshotContent(field(result, "data"))
-	if screenshot != nil {
+	image := imageOf(field(result, "data"))
+	var screenshot *jsObject
+	if image != nil && image.bytes <= maxImageContentBytes {
+		screenshot = obj("type", "image", "data", image.encoded, "mimeType", image.mimeType)
 		content = append(content, screenshot)
 	}
 	if resource := artifactContent(field(result, "data")); resource != nil {
 		content = append(content, resource)
 	}
-	text, err := canonicalStringify(summarizeResult(result, screenshot != nil))
+	// An image over the limit is never sent as text either (the whole answer would be too large to send): a note says
+	// what was left out.
+	placeholder := ""
+	if screenshot != nil {
+		placeholder = imagePlaceholder
+	} else if image != nil {
+		placeholder = fmt.Sprintf("<omitted: the %d-byte image is over the %d-byte limit>", image.bytes, maxImageContentBytes)
+	}
+	text, err := canonicalStringify(summarizeResult(result, placeholder))
 	if err != nil {
 		return nil, &internalError{message: err.Error()}
 	}
@@ -553,9 +564,9 @@ func spread(value any) *jsObject {
 
 const imagePlaceholder = "<returned as MCP image content>"
 
-func summarizeResult(result any, hasImage bool) any {
+func summarizeResult(result any, placeholder string) any {
 	data := field(result, "data")
-	if !hasImage || !truthy(data) || !isObjectLike(data) {
+	if placeholder == "" || !truthy(data) || !isObjectLike(data) {
 		return result
 	}
 	copied := spread(data)
@@ -563,18 +574,18 @@ func summarizeResult(result any, hasImage bool) any {
 	if truthy(image) && isObjectLike(image) {
 		next := spread(image)
 		if _, ok := field(image, "data").(string); ok {
-			next.set("data", imagePlaceholder)
+			next.set("data", placeholder)
 		}
 		if _, ok := field(image, "base64").(string); ok {
-			next.set("base64", imagePlaceholder)
+			next.set("base64", placeholder)
 		}
 		copied.set("image", next)
 	} else if _, ok := field(copied, "mimeType").(string); ok {
 		if _, ok := field(copied, "data").(string); ok {
-			copied.set("data", imagePlaceholder)
+			copied.set("data", placeholder)
 		}
 		if _, ok := field(copied, "base64").(string); ok {
-			copied.set("base64", imagePlaceholder)
+			copied.set("base64", placeholder)
 		}
 	}
 	summary := spread(result)
@@ -582,7 +593,15 @@ func summarizeResult(result any, hasImage bool) any {
 	return summary
 }
 
-func screenshotContent(data any) *jsObject {
+const maxImageContentBytes = 470_000
+
+type resultImage struct {
+	encoded, mimeType string
+	bytes             int
+}
+
+// imageOf is the image a result carries (PNG, JPEG or WebP, base64), with its size in UTF-8 bytes, or nil.
+func imageOf(data any) *resultImage {
 	if !truthy(data) || !isObjectLike(data) {
 		return nil
 	}
@@ -598,10 +617,7 @@ func screenshotContent(data any) *jsObject {
 	if (mimeType != "image/png" && mimeType != "image/jpeg" && mimeType != "image/webp") || !isString {
 		return nil
 	}
-	if len(encoded) > 470_000 {
-		return nil
-	}
-	return obj("type", "image", "data", encoded, "mimeType", mimeType)
+	return &resultImage{encoded: encoded, mimeType: mimeType, bytes: len(encoded)}
 }
 
 func artifactContent(data any) *jsObject {

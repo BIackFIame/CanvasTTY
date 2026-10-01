@@ -8,6 +8,9 @@ import {
   canvasLayerIsOccluded,
   canvasLayerZIndex,
   canvasScreenRect,
+  keepLiveIds,
+  pruneToLive,
+  snapTargetsOf,
   reconcileCanvasLayerOrder
 } from "../src/renderer/src/features/workspace/canvasStacking.ts";
 import { canvasWorldRect } from "../src/renderer/src/features/workspace/canvasSelectionGesture.ts";
@@ -74,4 +77,46 @@ test("embedded plugin focus participates in ordinary click-to-front activation",
     import.meta.url
   ), "utf8");
   assert.match(source, /<iframe[\s\S]*?onFocus=\{onFocus\}/);
+});
+
+test("per-session canvas state forgets closed sessions and keeps its identity while nothing closed", async () => {
+  const live = new Set(["a", "b"]);
+  const toggles = new Map([["a", () => "a"], ["gone", () => "gone"], ["b", () => "b"]]);
+  const a = toggles.get("a");
+  pruneToLive(toggles, live);
+  assert.deepEqual([...toggles.keys()], ["a", "b"]);
+  assert.equal(toggles.get("a"), a, "a live session keeps its callback");
+  const master = new Set(["a", "gone"]);
+  assert.deepEqual([...keepLiveIds(master, live)], ["a"]);
+  const unchanged = new Set(["b"]);
+  assert.equal(keepLiveIds(unchanged, live), unchanged, "no state change when nothing closed");
+  const source = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
+  assert.match(source, /pruneToLive\(fullscreenToggles\.current, liveSessionIds\)/u);
+  assert.match(source, /setMasterPixelSkinSessionIds\(\(current\) => keepLiveIds\(current, liveSessionIds\)\)/u);
+});
+
+test("a drag or resize cancelled by lost pointer capture snaps the card back to its saved bounds", async () => {
+  const read = (path) => readFile(new URL(`../src/renderer/src/features/${path}`, import.meta.url), "utf8");
+  const card = await read("terminal/TerminalCard.tsx");
+  for (const name of ["cancelDrag", "cancelResize"]) {
+    const body = card.slice(card.indexOf(`const ${name} = `), card.indexOf("};", card.indexOf(`const ${name} = `)));
+    assert.match(body, /applyLiveBounds\(\{ position: session\.position, size: session\.size \}\)/u, name);
+    assert.match(body, /if \(!(dragState|resizeState)\.current\) return;/u, `${name}: not after a normal pointerup`);
+  }
+  const region = await read("workspace/CanvasRegionCard.tsx");
+  const cancelDrag = region.slice(region.indexOf("const cancelDrag = "), region.indexOf("};", region.indexOf("const cancelDrag = ")));
+  assert.match(cancelDrag, /applyBounds\(\{ position: region\.position, size: region\.size \}\)/u);
+});
+
+test("each window's snap targets are every other window plus the fixed ones, built once per layout, not per render", async () => {
+  const home = bounds(0, 0, 1000, 1000);
+  const a = bounds(10, 10);
+  const b = bounds(300, 10);
+  const c = bounds(600, 10);
+  const targets = snapTargetsOf([home], [a, b, c]);
+  assert.deepEqual(targets(b), [home, a, c]);
+  assert.equal(targets(b), targets(b), "the same list while the layout is the same");
+  const source = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /allWindowBounds\.filter\(/u, "no per-card filter in render");
+  assert.match(source, /const allWindowBounds = useMemo\(/u);
 });
