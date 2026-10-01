@@ -89,7 +89,8 @@ function benchmarkHtml({ xtermModule, fitModule, xtermCss, suspensionRule, guard
       .xterm{height:100%;padding:0}
       ${suspensionRule}</style></head><body><div id="surfaces"></div>
     <script>${guardBundle}</script><script type="module">
-    globalThis.__hiddenDomProbe = (async () => {
+    globalThis.__startHiddenDomProbe = () => {
+      globalThis.__hiddenDomProbe = (async () => {
       const { Terminal } = await import(${JSON.stringify(xtermModule)});
       const { FitAddon } = await import(${JSON.stringify(fitModule)});
       const config = ${JSON.stringify(benchmark)};
@@ -229,7 +230,9 @@ function benchmarkHtml({ xtermModule, fitModule, xtermCss, suspensionRule, guard
       });
       return {config:{cards:config.cards,seconds:config.seconds,kiloCharactersPerSecond:config.kiloCharactersPerSecond,runs:config.runs},
         inputCadenceMs:tickMs,batchCharacters,summary:{oldHidden:summary('oldHidden'),screenDisplayNone:summary('screenDisplayNone')},runs};
-    })();
+      })();
+      return globalThis.__hiddenDomProbe;
+    };
     </script></body></html>`;
 }
 
@@ -273,11 +276,18 @@ async function runElectronProbe() {
     // taking focus; local runs and all benchmarks remain natively hidden.
     const linuxXvfbSmokeWindow = process.platform === "linux" && process.env.CI === "true" && !benchmark;
     if (linuxXvfbSmokeWindow) {
+      window.showInactive();
       window.webContents.setFrameRate(60);
       window.webContents.startPainting();
-      window.showInactive();
+      // The page is loaded while the native window is still hidden. Defer the
+      // fixture until Chromium has produced real frames for the now-visible
+      // Xvfb window, so its initial IntersectionObserver delivery describes
+      // the visible reference instead of racing the window activation.
+      await window.webContents.executeJavaScript(
+        "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+      );
     }
-    const result = await window.webContents.executeJavaScript("globalThis.__hiddenDomProbe");
+    const result = await window.webContents.executeJavaScript("globalThis.__startHiddenDomProbe()");
     if (!benchmark) Object.assign(result.diagnostics, {
       nativeWindowVisible: window.isVisible(),
       nativeWindowFocused: window.isFocused(),
@@ -415,7 +425,8 @@ function fixtureHtml() {
       .xterm{height:100%;padding:0}
       ${suspensionRule}</style></head><body><div id="surface" class="terminal-card__surface"></div>
     <script>${guardBundle}</script><script type="module">
-    globalThis.__hiddenDomProbe = (async () => {
+    globalThis.__startHiddenDomProbe = () => {
+      globalThis.__hiddenDomProbe = (async () => {
       const { Terminal } = await import(${JSON.stringify(xtermModule)});
       const { FitAddon } = await import(${JSON.stringify(fitModule)});
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -608,6 +619,8 @@ function fixtureHtml() {
       return {...result,diagnostics:{documentVisibilityState:document.visibilityState,documentHasFocus:document.hasFocus(),
         nativeRafHeartbeatFrames:rafProbe.heartbeatFrames,pageRafRequests:rafProbe.pageRafRequests,
         pageRafCallbacks:rafProbe.pageRafCallbacks}};
-    })();
+      })();
+      return globalThis.__hiddenDomProbe;
+    };
     </script></body></html>`;
 }
