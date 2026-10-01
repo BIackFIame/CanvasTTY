@@ -1,5 +1,5 @@
-import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import { Readable } from "node:stream";
 
 export async function streamFile(
@@ -8,7 +8,26 @@ export async function streamFile(
   mimeType: string,
   extraHeaders: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
-  const metadata = await stat(path);
+  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
+  let streaming = false;
+  try {
+    return await respond(request, handle, mimeType, extraHeaders, () => {
+      streaming = true;
+    });
+  } finally {
+    if (!streaming) await handle.close().catch(() => undefined);
+  }
+}
+
+async function respond(
+  request: Request,
+  handle: import("node:fs/promises").FileHandle,
+  mimeType: string,
+  extraHeaders: Readonly<Record<string, string>>,
+  streaming: () => void
+): Promise<Response> {
+  const metadata = await handle.stat();
+  if (!metadata.isFile()) throw new Error("Not a regular file.");
   if (metadata.size === 0) {
     return new Response(null, {
       status: 200,
@@ -36,7 +55,8 @@ export async function streamFile(
   });
   if (range) headers.set("content-range", `bytes ${start}-${end}/${metadata.size}`);
   if (request.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
-  const stream = Readable.toWeb(createReadStream(path, { start, end })) as ReadableStream<Uint8Array>;
+  const stream = Readable.toWeb(handle.createReadStream({ start, end, autoClose: true })) as ReadableStream<Uint8Array>;
+  streaming();
   return new Response(stream, { status: range ? 206 : 200, headers });
 }
 
