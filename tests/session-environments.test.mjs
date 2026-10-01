@@ -92,6 +92,21 @@ const defaultAnswers = (extra = {}) => ({
   ...extra
 });
 
+// Managers keep writing until shutdown; remove their shared directory only after every
+// owner has stopped. Node after hooks run in registration order, not resource order.
+function persistenceFixtureLifetime(t, directory) {
+  const shutdowns = [];
+  t.after(async () => {
+    const errors = [];
+    for (const shutdown of shutdowns.reverse()) {
+      try { await shutdown(); } catch (error) { errors.push(error); }
+    }
+    try { await rm(directory, { recursive: true, force: true }); } catch (error) { errors.push(error); }
+    if (errors.length) throw new AggregateError(errors, "Environment fixture cleanup failed");
+  });
+  return { after: (shutdown) => shutdowns.push(shutdown) };
+}
+
 async function managerFixture(t, registry, { mode = "continue", directory } = {}) {
   const storeDirectory = directory ?? await mkdtemp(join(tmpdir(), "canvastty-env-store-"));
   const calls = [];
@@ -253,7 +268,7 @@ test("refusals and timeouts leave the card failed with the reason and nothing sp
 
 test("restore resumes environments first, then parents before children; stopped and missing never run locally", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-restore-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   const environment = (box) => ({ pluginId: PLUGIN, kind: "box", ref: { box }, label: `box ${box}` });
   const base = { provider: "terminal", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
     position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true };
@@ -275,7 +290,7 @@ test("restore resumes environments first, then parents before children; stopped 
       return { command: process.execPath, args: [params.sessionId], cwd: params.cwd };
     }
   }) });
-  const { manager, calls } = await managerFixture(t, registry, { directory });
+  const { manager, calls } = await managerFixture(lifetime, registry, { directory });
   await waitFor(() => calls.filter((call) => call.command === process.execPath).length === 2);
   // Every resume is answered before any wrapped launch starts, and the parent launches before its child.
   const firstWrap = order.findIndex((entry) => entry.startsWith("wrap:"));
@@ -298,13 +313,13 @@ test("restore resumes environments first, then parents before children; stopped 
   assert.deepEqual(records.filter((record) => ["stopped", "missing"].includes(record.id)).map((record) => record.lastState), ["running", "running"]);
 
   // Restarting a stopped card asks the plugin to resume again, never runs it locally.
-  const again = await managerFixture(t, registryFixture({ answers: defaultAnswers({ resume: { stopped: { reason: "still gone" } } }) }).registry, { directory });
+  const again = await managerFixture(lifetime, registryFixture({ answers: defaultAnswers({ resume: { stopped: { reason: "still gone" } } }) }).registry, { directory });
   assert.equal(again.calls.filter((call) => call.command !== process.execPath).length, 1);
 });
 
 test("an exited card resumes its environment only when restarted", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-exited-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{
     id: "done", provider: "terminal", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
     position: at, size: { width: 700, height: 430 }, lastState: "exited", exitCode: 0, restore: true,
@@ -312,7 +327,7 @@ test("an exited card resumes its environment only when restarted", async (t) => 
   }] }));
   let resume = { stopped: { reason: "box is asleep" } };
   const { registry, requests } = registryFixture({ answers: defaultAnswers({ resume: () => resume }) });
-  const { manager, calls } = await managerFixture(t, registry, { directory });
+  const { manager, calls } = await managerFixture(lifetime, registry, { directory });
   assert.equal(card(manager, "done").status, "done");
   assert.equal(requests.length, 0);
   manager.restart("done");
@@ -381,7 +396,7 @@ test("wrap secrets are masked in agent-readable text", async (t) => {
 
 test("the env-worktree example: a terminal in a real git worktree, restored in it, removed or kept on close", async (t) => {
   const root = realpathSync(await mkdtemp(join(tmpdir(), "canvastty-env-worktree-")));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  const lifetime = persistenceFixtureLifetime(t, root);
   const repo = join(root, "repo");
   await mkdir(join(repo, "sub"), { recursive: true });
   await writeFile(join(repo, "sub", "file.txt"), "hello\n");
@@ -398,7 +413,7 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
     command: process.execPath, hostVersion: "9.9.9", locale: () => "en", stopGraceMs: 300,
     host: { storageGet: async () => null, storageSet: async () => undefined, emit: () => undefined }
   });
-  t.after(() => supervisor.dispose());
+  lifetime.after(() => supervisor.dispose());
   const pluginId = exampleManifest.id;
   await supervisor.sync([{ pluginId, serviceId: "worktree", root: pluginRoot, entryPath,
     sha256: createHash("sha256").update(await readFile(entryPath)).digest("hex"), dataDir, permissions: ["environment:provide"] }]);
@@ -411,7 +426,7 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
     secret: async () => null
   });
   const store = join(root, "store");
-  const first = await managerFixture(t, registry, { directory: store });
+  const first = await managerFixture(lifetime, registry, { directory: store });
   const worktree = { pluginId, kind: "worktree" };
   const removed = first.manager.create({ provider: "terminal", profile: "normal", cwd: join(repo, "sub"), position: at, environment: worktree });
   const kept = first.manager.create({ provider: "terminal", profile: "normal", cwd: repo, position: at,
@@ -433,7 +448,7 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
   assert.ok(existsSync(removedDir) && existsSync(keptDir), "quitting keeps both worktrees");
 
   // Relaunch: resumed and wrapped into the same folders.
-  const second = await managerFixture(t, registry, { directory: store });
+  const second = await managerFixture(lifetime, registry, { directory: store });
   await waitFor(() => second.calls.length === 2, 15_000);
   assert.deepEqual(second.calls.map((call) => call.options.cwd).sort(), [keptDir, removedDir].sort());
   assert.equal(card(second.manager, removed.id).environment.label, `worktree canvastty/${removed.id.slice(0, 8)}`);
@@ -448,10 +463,10 @@ test("the env-worktree example: a terminal in a real git worktree, restored in i
 
 test("quitting while prepare is pending: the choice is saved, the card comes back held, never local; Restart prepares with it", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-pending-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   let finish;
   const slow = registryFixture({ answers: defaultAnswers({ prepare: () => new Promise((resolve) => { finish = resolve; }) }) });
-  const first = await managerFixture(t, slow.registry, { directory });
+  const first = await managerFixture(lifetime, slow.registry, { directory });
   const pending = first.manager.create({ provider: "terminal", profile: "normal", cwd, position: at,
     environment: { ...choice, options: { name: "two" } } });
   await waitFor(() => typeof finish === "function");
@@ -471,7 +486,7 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
 
   // Next start: held with the reason, nothing spawned locally or anywhere, the choice kept for Restart.
   const second = registryFixture({ answers: defaultAnswers() });
-  const restored = await managerFixture(t, second.registry, { directory });
+  const restored = await managerFixture(lifetime, second.registry, { directory });
   const held = card(restored.manager, pending.id);
   assert.equal(held.status, "failed");
   assert.equal(held.restoreNote, "environment-pending");
@@ -484,7 +499,7 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
   assert.deepEqual((await saved(directory))[0].environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
   assert.equal((await saved(directory))[0].lastState, "running");
 
-  const third = await managerFixture(t, second.registry, { directory });
+  const third = await managerFixture(lifetime, second.registry, { directory });
   third.manager.restart(pending.id);
   await waitFor(() => third.calls.length === 1);
   assert.deepEqual(second.requests.filter((request) => request.step === "prepare").map((request) => request.params.options), [{ name: "two" }]);
@@ -496,7 +511,7 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
   await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{
     ...record, environmentChoice: { pluginId: "gone.plugin", kind: "box" }
   }] }));
-  const gone = await managerFixture(t, registryFixture({ answers: defaultAnswers() }).registry, { directory });
+  const gone = await managerFixture(lifetime, registryFixture({ answers: defaultAnswers() }).registry, { directory });
   assert.equal(card(gone.manager, pending.id).restoreNote, "environment-pending");
   assert.match(card(gone.manager, pending.id).failureDetails, /Needs plugin gone\.plugin.*not started locally/u);
   assert.throws(() => gone.manager.restart(pending.id), /not started locally/u);
@@ -505,10 +520,10 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
 
 test("a failed prepare keeps its choice across an app restart; manual Restart prepares it again, never locally", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-failed-"));
-  t.after(() => rm(directory, { recursive: true, force: true }));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   let answer = { refuse: { reason: "no docker" } };
   const { registry, requests } = registryFixture({ answers: defaultAnswers({ prepare: () => answer }) });
-  const first = await managerFixture(t, registry, { directory });
+  const first = await managerFixture(lifetime, registry, { directory });
   const created = first.manager.create({ provider: "terminal", profile: "normal", cwd, position: at,
     environment: { ...choice, options: { name: "two" } } });
   await waitFor(() => card(first.manager, created.id).status === "failed");
@@ -520,7 +535,7 @@ test("a failed prepare keeps its choice across an app restart; manual Restart pr
   assert.equal(record.lastState, "failed");
   assert.deepEqual(record.environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
 
-  const second = await managerFixture(t, registry, { directory });
+  const second = await managerFixture(lifetime, registry, { directory });
   const restored = card(second.manager, created.id);
   assert.equal(restored.status, "failed");
   assert.match(restored.failureDetails, /environment was not prepared.*not started locally/u);
