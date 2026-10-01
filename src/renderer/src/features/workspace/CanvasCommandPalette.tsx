@@ -25,6 +25,8 @@ interface CanvasCommandPaletteProps {
   onLaunch(provider: ProviderId): void;
   onCreateRegion(): void;
   onCreateNote(): void;
+  onAddFiles(): void;
+  onPasteFiles(): void;
   onFitCanvas(): void;
   onOpenBrowser(): void;
   onOpenSettings(): void;
@@ -51,6 +53,8 @@ export function CanvasCommandPalette({
   onLaunch,
   onCreateRegion,
   onCreateNote,
+  onAddFiles,
+  onPasteFiles,
   onFitCanvas,
   onOpenBrowser,
   onOpenSettings,
@@ -96,6 +100,24 @@ export function CanvasCommandPalette({
       icon: "sticky-note",
       run: onCreateNote
     },
+    {
+      id: "materials:add",
+      group: "actions",
+      kind: "action",
+      label: t(locale, "materialsAddFiles"),
+      searchDetail: t(locale, "canvasMenuActions"),
+      icon: "image-plus",
+      run: onAddFiles
+    },
+    {
+      id: "materials:paste",
+      group: "actions",
+      kind: "action",
+      label: t(locale, "materialsPaste"),
+      searchDetail: t(locale, "canvasMenuActions"),
+      icon: "clipboard-paste",
+      run: onPasteFiles
+    },
     ...launcherItems.map((provider) => ({
       id: `launch:${provider}`,
       group: "actions" as const,
@@ -126,7 +148,8 @@ export function CanvasCommandPalette({
       shortcut: window.canvasTTY.window.isMacOS ? "⌘," : "Ctrl+,",
       run: onOpenSettings
     }
-  ], [launcherItems, locale, onCreateNote, onCreateRegion, onFitCanvas, onFocusSession, onLaunch, onOpenBrowser, onOpenSettings, sessions]);
+  ], [launcherItems, locale, onAddFiles, onCreateNote, onCreateRegion, onFitCanvas, onFocusSession, onLaunch, onOpenBrowser,
+    onOpenSettings, onPasteFiles, sessions]);
   const filtered = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase(locale);
     if (!normalized) return commands;

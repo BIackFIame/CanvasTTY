@@ -520,6 +520,13 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ persistStickyNotes: value === "save" })}
                 />
               </SettingGroup>
+              <SettingGroup label={t(locale, "persistMaterials")}>
+                <Segmented
+                  value={settings.persistMaterials ? "save" : "discard"}
+                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
+                  onChange={(value) => void onChange({ persistMaterials: value === "save" })}
+                />
+              </SettingGroup>
             </>
           )}
 

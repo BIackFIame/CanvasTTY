@@ -194,6 +194,7 @@ export class SettingsStore {
         || !("terminalLinkOpenMode" in source)
         || !("persistCanvasRegions" in source)
         || !("persistStickyNotes" in source)
+        || !("persistMaterials" in source)
         || !("canvasRegions" in source)
         || !("stickyNotes" in source)
         || !("apiProfiles" in source)
@@ -358,6 +359,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     sessionRestoreMode: "off",
     persistCanvasRegions: true,
     persistStickyNotes: true,
+    persistMaterials: true,
     palette: "sage",
     homeAccentPreset: "classic",
     homeAccentColors: { ...DEFAULT_HOME_ACCENT_COLORS },
@@ -578,6 +580,9 @@ export function normalizeSettings(
     persistStickyNotes: typeof source.persistStickyNotes === "boolean"
       ? source.persistStickyNotes
       : fallback.persistStickyNotes ?? true,
+    persistMaterials: typeof source.persistMaterials === "boolean"
+      ? source.persistMaterials
+      : fallback.persistMaterials ?? true,
     palette,
     homeAccentPreset: HOME_ACCENT_PRESETS.has(source.homeAccentPreset as HomeAccentPresetId)
       ? source.homeAccentPreset as HomeAccentPresetId

@@ -260,6 +260,69 @@ export const STICKY_NOTE_MIN_SIZE: Size = { width: 180, height: 140 };
 export const STICKY_NOTE_MAX_SIZE: Size = { width: 1_000, height: 800 };
 export const STICKY_NOTE_DEFAULT_SIZE: Size = { width: 300, height: 220 };
 
+export type MaterialKind = "image" | "text" | "video" | "audio" | "pdf" | "file";
+export type MaterialState = "ready" | "missing" | "moved" | "unreadable";
+export type MaterialVersionReason = "pinned" | "remark" | "handoff" | "result" | "capture";
+
+export type MaterialOrigin =
+  | { kind: "clipboard" }
+  | { kind: "browser"; url: string; title: string; viewport: Size }
+  | { kind: "watch"; folderName: string };
+
+export interface MaterialVersion {
+  id: string;
+  number: number;
+  createdAt: number;
+  byteSize: number;
+  reason: MaterialVersionReason;
+}
+
+export interface CanvasMaterial extends SessionBounds {
+  id: string;
+  kind: MaterialKind;
+  name: string;
+  mimeType: string;
+  location: string | null;
+  state: MaterialState;
+  movedTo: string | null;
+  liveRevision: number;
+  byteSize: number | null;
+  modifiedAt: number | null;
+  origin: MaterialOrigin | null;
+  versions: MaterialVersion[];
+  createdAt: number;
+}
+
+export interface MaterialsSnapshot {
+  revision: number;
+  materials: CanvasMaterial[];
+}
+
+export type MaterialRejectionReason = "not-a-file" | "unreadable" | "limit" | "empty-clipboard";
+
+export interface MaterialRejection {
+  name: string;
+  reason: MaterialRejectionReason;
+}
+
+export interface MaterialsAddResult {
+  added: string[];
+  existing: string[];
+  rejected: MaterialRejection[];
+}
+
+export type MaterialFailure =
+  | "unavailable"
+  | "too-large"
+  | "quota"
+  | "unreadable"
+  | "not-a-file"
+  | "kind-mismatch"
+  | "already-on-canvas"
+  | "cancelled";
+
+export type MaterialResult = { ok: true } | { ok: false; reason: MaterialFailure };
+
 export interface CameraState extends Point {
   zoom: number;
 }
@@ -269,6 +332,7 @@ export interface AppSettings {
   sessionRestoreMode: SessionRestoreMode;
   persistCanvasRegions: boolean;
   persistStickyNotes: boolean;
+  persistMaterials: boolean;
   palette: PaletteId;
   homeAccentPreset: HomeAccentPresetId;
   homeAccentColors: HomeAccentColors;
@@ -1586,6 +1650,19 @@ export interface CanvasTTYApi {
   media: {
     read(path: string): Promise<string | null>;
   };
+  materials: {
+    snapshot(): Promise<MaterialsSnapshot>;
+    addFiles(files: File[], point: Point): Promise<MaterialsAddResult>;
+    pick(point: Point): Promise<MaterialsAddResult>;
+    paste(point: Point): Promise<MaterialsAddResult>;
+    setBounds(id: string, bounds: SessionBounds): void;
+    setBoundsBatch(entries: { id: string; bounds: SessionBounds }[]): void;
+    remove(id: string): Promise<void>;
+    reveal(id: string): Promise<void>;
+    relink(id: string): Promise<MaterialResult>;
+    acceptMove(id: string): Promise<MaterialResult>;
+    onChanged(listener: (snapshot: MaterialsSnapshot) => void): () => void;
+  };
   limits: {
     get(): Promise<LimitsSnapshot>;
   };
@@ -1743,6 +1820,17 @@ export const IPC = {
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",
+  materialsSnapshot: "materials:snapshot",
+  materialsAddPaths: "materials:add-paths",
+  materialsPick: "materials:pick",
+  materialsPaste: "materials:paste",
+  materialsSetBounds: "materials:set-bounds",
+  materialsSetBoundsBatch: "materials:set-bounds-batch",
+  materialsRemove: "materials:remove",
+  materialsReveal: "materials:reveal",
+  materialsRelink: "materials:relink",
+  materialsAcceptMove: "materials:accept-move",
+  materialsChanged: "materials:changed",
   limitsGet: "limits:get",
   pluginsList: "plugins:list",
   pluginsSearch: "plugins:search",
