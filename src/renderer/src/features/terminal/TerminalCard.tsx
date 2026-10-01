@@ -44,6 +44,7 @@ import {
 } from "./terminalShortcuts";
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
 import { limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
+import { terminalLinkTarget } from "./terminalLinkTarget";
 import { attachTerminalOutput } from "./terminalOutput";
 import {
   constrainResize,
@@ -300,10 +301,10 @@ function TerminalCardView({
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
       linkHandler: {
-        activate: (event, uri) => {
+        activate: (event, uri, range) => {
           event.preventDefault();
           event.stopPropagation();
-          onOpenUrlRef.current(uri);
+          onOpenUrlRef.current(terminalLinkTarget(uri, range, terminal.buffer.active, terminal.cols));
         }
       }
     });
