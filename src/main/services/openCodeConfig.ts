@@ -89,6 +89,9 @@ export function openCodeYoloEnvironment(
  * - a tool that any of the person's deny or ask rules reaches through another key (`"*"`, `"ed*"`, …) is left alone,
  *   as is a tool the person's config files already name under `agent.build.permission` (merging would put auto's
  *   rules after theirs). Such a tool behaves exactly as without auto;
+ * - a tool with canonical array-index pattern names is left alone too: object enumeration puts those rules
+ *   before auto's wildcard regardless of insertion order. Numeric bash rules that would lose the shell prompt
+ *   require guarded Auto; otherwise launch stops;
  * - for any other tool, auto's rules come first and the person's own rules for that tool (top-level and this run's
  *   agent.build, in their order) after them, so the person's rules still win;
  * - a config file that exists but cannot be read or parsed leaves every tool alone. Malformed OPENCODE_PERMISSION
@@ -230,8 +233,18 @@ function autoWithPersonRules(
   for (const tool of AUTO_TOOLS) {
     const reachedElsewhere = personRules.some((rule) => rule.permission !== tool && rule.action !== "allow"
       && wildcardMatch(tool, rule.permission, platform));
+    // JavaScript enumerates array-index keys before every other string key, including our wildcard.
+    // An overlay cannot put those person rules last. Keep this tool's original ordering instead.
+    const indexedPattern = personRules.some((rule) => wildcardMatch(tool, rule.permission, platform)
+      && isArrayIndexPattern(rule.pattern));
     if (reachedElsewhere || Object.hasOwn(person.fileAgent, tool)) continue;
-    const patterns: Record<string, Action> = {};
+    if (indexedPattern) {
+      if (tool === "bash" && auto.bash === "ask") {
+        throw new Error("OpenCode numeric bash permission patterns require guarded Auto; Auto without base protection and Accept edits cannot preserve these rules safely.");
+      }
+      continue;
+    }
+    const patterns: Record<string, Action> = Object.create(null);
     const add = (rule: Rule | undefined): void => {
       if (rule === undefined) return;
       for (const [pattern, action] of Object.entries(typeof rule === "string" ? { "*": rule } : rule)) {
@@ -247,6 +260,11 @@ function autoWithPersonRules(
     result[tool] = keys.length === 1 && keys[0] === "*" ? patterns["*"] : patterns;
   }
   return result;
+}
+
+function isArrayIndexPattern(pattern: string): boolean {
+  const index = Number(pattern);
+  return Number.isInteger(index) && index >= 0 && index < 4_294_967_295 && String(index) === pattern;
 }
 
 /** OpenCode's Permission.fromConfig: one rule per tool action, one per pattern of a tool object, in order. */
