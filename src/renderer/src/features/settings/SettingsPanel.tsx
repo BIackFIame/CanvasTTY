@@ -1136,6 +1136,13 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ useScrollWheelToZoom: value === "on" })}
                 />
               </SettingGroup>
+              <SettingGroup label={t(locale, "copyOnSelect")} description={t(locale, "copyOnSelectDescription")}>
+                <Segmented
+                  value={settings.copyOnSelect ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ copyOnSelect: value === "on" })}
+                />
+              </SettingGroup>
               <SettingGroup label={t(locale, "terminalWheelDirection")}>
                 <Segmented
                   value={settings.invertTerminalWheel ? "inverted" : "normal"}

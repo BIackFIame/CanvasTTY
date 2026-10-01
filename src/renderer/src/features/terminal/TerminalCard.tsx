@@ -31,6 +31,7 @@ import { GitRiskNotice } from "./GitRiskNotice";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
+import { attachTerminalCopyOnSelect } from "./terminalCopyOnSelect";
 import {
   CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
@@ -80,6 +81,7 @@ interface TerminalCardProps {
   snapEnabled: boolean;
   focusActivation: FocusActivation;
   invertTerminalWheel: boolean;
+  copyOnSelect: boolean;
   captureCanvasWheelOverWidgets: boolean;
   focused: boolean;
   focusChangeSource: "explicit" | "hover";
@@ -159,6 +161,7 @@ function TerminalCardView({
   snapEnabled,
   focusActivation,
   invertTerminalWheel,
+  copyOnSelect,
   captureCanvasWheelOverWidgets,
   focused,
   focusChangeSource,
@@ -210,6 +213,8 @@ function TerminalCardView({
   const restartAction = useRef<(resume?: boolean) => Promise<void>>(async () => undefined);
   const invertTerminalWheelRef = useRef(invertTerminalWheel);
   invertTerminalWheelRef.current = invertTerminalWheel;
+  const copyOnSelectRef = useRef(copyOnSelect);
+  copyOnSelectRef.current = copyOnSelect;
   const captureCanvasWheelRef = useRef(captureCanvasWheelOverWidgets);
   captureCanvasWheelRef.current = captureCanvasWheelOverWidgets;
   const dragState = useRef<DragState | null>(null);
@@ -314,6 +319,8 @@ function TerminalCardView({
       // into the pinned row below it.
       scrollOnUserInput: false,
       allowTransparency: true,
+      macOptionClickForcesSelection: copyOnSelectRef.current,
+      altClickMovesCursor: !(copyOnSelectRef.current && window.canvasTTY.window.isMacOS),
       // Search decorations (highlighting every match and reporting the match
       // count) are proposed API in xterm; without this flag findNext throws and
       // the counter never leaves 0/0. The flag only unlocks that surface.
@@ -537,7 +544,20 @@ function TerminalCardView({
       ? attachTerminalMouseCoordinateAdapter(
         screen,
         () => invertTerminalWheelRef.current ? -1 : 1,
-        () => captureCanvasWheelRef.current
+        () => captureCanvasWheelRef.current,
+        () => copyOnSelectRef.current && window.canvasTTY.window.isMacOS
+      )
+      : () => undefined;
+    const detachCopyOnSelect = screen
+      ? attachTerminalCopyOnSelect(
+        screen,
+        () => terminal.getSelection(),
+        () => copyOnSelectRef.current,
+        (text) => window.canvasTTY.clipboard.writeText(text),
+        (listener) => {
+          const disposable = terminal.onSelectionChange(listener);
+          return () => disposable.dispose();
+        }
       )
       : () => undefined;
     terminalRef.current = terminal;
@@ -585,6 +605,7 @@ function TerminalCardView({
       unregisterWebgl();
       cancelAnimationFrame(frame);
       detachMouseCoordinateAdapter();
+      detachCopyOnSelect();
       detachScrollbarCoordinateAdapter();
       unsubscribe();
       resizeObserver.disconnect();
@@ -613,6 +634,13 @@ function TerminalCardView({
     const terminal = terminalRef.current;
     if (terminal) terminal.options.theme = terminalTheme(palette, pixelSkinTheme);
   }, [palette, pixelSkinTheme]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.macOptionClickForcesSelection = copyOnSelect;
+    terminal.options.altClickMovesCursor = !(copyOnSelect && window.canvasTTY.window.isMacOS);
+  }, [copyOnSelect]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
     if (webglAddonRef.current) return true;
