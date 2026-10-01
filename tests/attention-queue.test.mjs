@@ -61,7 +61,7 @@ test("the queue lives in the screen-anchored overlay layer, not inside the trans
   // stays underneath the overlay layer. It must be anchored in the overlay layer instead.
   assert.equal(home.includes("attention-queue"), false, "the HOME scene does not render the queue");
   assert.ok(queue, "the overlay layer renders the attention queue");
-  assert.match(queue, /className="attention-queue__empty"[\s\S]*?needsAttentionEmpty/);
+  assert.doesNotMatch(queue, /attention-queue__empty|needsAttentionEmpty/);
   assert.match(queue, /className="attention-queue__item"[\s\S]*?focusSessionFromHome\(session\)/);
   assert.match(queue, /<SessionFailureDetails details=\{failureDetails\} locale=\{settings\.locale\} \/>/);
 });

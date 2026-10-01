@@ -1263,14 +1263,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             {/* The canvas scene is transformed and therefore its own stacking context, so anything
                 inside it paints under this layer and scales with the camera. The queue is a
                 screen-anchored HUD: it belongs here, alongside the other corner overlays. */}
-            {attentionQueueRenderedAt(settings, placement) && (
+            {attentionQueueRenderedAt(settings, placement, attention.length) && (
               <section className="attention-queue" aria-label={t(settings.locale, "needsAttention")}
                 title={t(settings.locale, "needsAttentionHint")}>
                 <span className="attention-queue__title">{t(settings.locale, "needsAttention")}</span>
                 <span className="attention-queue__caption">{t(settings.locale, "needsAttentionCaption")}</span>
-                {attention.length === 0 ? (
-                  <span className="attention-queue__empty">{t(settings.locale, "needsAttentionEmpty")}</span>
-                ) : attention.map((session) => {
+                {attention.map((session) => {
                   const failureDetails = sessionFailureDetails(session, settings.locale);
                   return (
                     <div style={{ position: "relative" }} key={session.id}>

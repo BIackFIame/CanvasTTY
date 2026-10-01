@@ -20,8 +20,9 @@ test("terminal HTTP(S) links open a Canvas or system-browser chooser", async () 
   ]);
 
   assert.match(terminal, /new WebLinksAddon/);
-  assert.match(terminal, /onOpenUrlRef\.current\(uri\)/);
-  assert.match(terminal, /linkHandler:\s*\{[\s\S]*?activate:\s*\(event, uri\)[\s\S]*?onOpenUrlRef\.current\(uri\)/);
+  assert.match(terminal, /terminalLinkTarget\(uri, range, terminal\.buffer\.active, terminal\.cols\)/);
+  assert.match(terminal, /linkHandler:\s*\{[\s\S]*?activate:\s*\(event, uri, range\)[\s\S]*?onOpenUrlRef\.current\(terminalLinkTarget/);
+  assert.match(terminal, /new WebLinksAddon[\s\S]*?onOpenUrlRef\.current\(uri\)/);
   // The card gets a stable callback that calls the workspace's latest onOpenTerminalUrl.
   assert.match(workspace, /openUrl: onOpenTerminalUrl/);
   assert.match(workspace, /onOpenUrl: \(url: string\) => latest\.current!\.openUrl\(url\)/);

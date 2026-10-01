@@ -446,7 +446,12 @@ button { border: 0; }
 .terminal-card__action { transition: color .15s ease, background .15s ease; }
 .terminal-card__action--restart .ui-icon--working { animation: spin 1.2s linear infinite; }
 .terminal-card__actions .terminal-card__action--close:hover { background: var(--danger); }
-.terminal-card__surface { height: calc(100% - var(--card-header-height)); padding: 0; user-select: text; background: var(--terminal-background, #202430); }
+.terminal-card__surface { position: relative; height: calc(100% - var(--card-header-height)); padding: 0; user-select: text; background: var(--terminal-background, #202430); }
+.terminal-card__surface.terminal-card__surface--pinned-input .xterm { height: calc(100% - var(--pinned-input-height, 1.2em)); }
+.terminal-card__pinned-input { position: absolute; bottom: 0; left: 0; z-index: 8; height: var(--pinned-input-height); overflow: hidden; padding: 0; color: var(--terminal-foreground, #fff); background: var(--terminal-background, #202430); box-shadow: 0 -1px rgba(255,255,255,.14); font: 14px/1.2 "JetBrains Mono", "Cascadia Code", monospace; font-variant-ligatures: none; pointer-events: none; user-select: none; }
+.terminal-card__pinned-input-row { position: relative; width: 100%; height: 1.2em; overflow: hidden; white-space: pre; }
+.terminal-card__pinned-input-row--cursor::after { content: ""; position: absolute; top: 0; bottom: 0; left: calc(var(--pinned-cursor-column) * 100% / var(--pinned-terminal-columns)); width: calc(100% / var(--pinned-terminal-columns)); background: var(--terminal-foreground, #fff); opacity: .62; pointer-events: none; }
+.terminal-card__pinned-input[hidden] { display: none; }
 .terminal-card--grok .terminal-card__surface { padding: 6px 8px 8px; }
 .terminal-card__surface .xterm { height: 100%; }
 .terminal-card__surface .xterm-viewport { background-color: var(--terminal-background, #202430); }

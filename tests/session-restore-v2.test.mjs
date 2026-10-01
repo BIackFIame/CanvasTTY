@@ -12,6 +12,7 @@ import { planSessionRestore } from "../src/main/services/sessionRestorePlan.ts";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 
 const CONVERSATION = "5f1c2a90-aa11-4b22-9c33-0d44e55f6677";
+const HERMES_CONVERSATION = "20261001_031347_02c965";
 const base = {
   provider: "claude",
   profile: "normal",
@@ -92,13 +93,17 @@ test("v2 slots are validated: thread ids, 4 KB plugin options and environment re
         environment
       }),
       record("flag-id", { threadId: "--resume-evil", restore: false }),
+      record("hermes-id", { provider: "hermes", threadId: HERMES_CONVERSATION }),
+      record("bad-hermes-id", { provider: "hermes", threadId: "../../config.yaml" }),
       record("bad-environment", { environment: { ...environment, ref: "x".repeat(5_000) } })
     ]
   });
   assert.deepEqual(sessions, [
     record("kept", { lastState: "failed", exitCode: 2, threadId: CONVERSATION,
       options: { "good.plugin": { a: 1 } }, environment }),
-    record("flag-id", { restore: false })
+    record("flag-id", { restore: false }),
+    record("hermes-id", { provider: "hermes", threadId: HERMES_CONVERSATION }),
+    record("bad-hermes-id", { provider: "hermes" })
   ]);
 });
 
@@ -155,6 +160,21 @@ test("Continue resumes each card's own conversation and never shares the folder'
   const saved = JSON.parse(await readFile(join(fixture.directory, "terminal-sessions.json"), "utf8"));
   assert.equal(saved.sessions[0].threadId, CONVERSATION);
   assert.doesNotMatch(JSON.stringify(saved), /buffer|prompt|token|capability/u);
+});
+
+test("Hermes restores exact sessions by id and legacy same-folder cards open pickers", async (t) => {
+  const fixture = await withManagers(t);
+  await new TerminalSessionStore(fixture.directory).replace([
+    record("exact-hermes", { provider: "hermes", threadId: HERMES_CONVERSATION }),
+    record("legacy-hermes-a", { provider: "hermes" }),
+    record("legacy-hermes-b", { provider: "hermes" })
+  ]);
+
+  const { manager, calls } = await fixture.start("continue");
+  assert.deepEqual(calls[0].args.slice(-2), ["--resume", HERMES_CONVERSATION]);
+  assert.deepEqual(calls[1].args.slice(-2), ["sessions", "browse"]);
+  assert.deepEqual(calls[2].args.slice(-2), ["sessions", "browse"]);
+  assert.deepEqual(manager.list().map((session) => session.restoreNote), [undefined, undefined, undefined]);
 });
 
 test("Reopen windows starts every agent fresh and forgets the old conversation; Don't save clears the store", async (t) => {

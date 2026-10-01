@@ -109,13 +109,14 @@ test("normalizeSettings keeps explicit values and rejects unknown placements", a
   });
 });
 
-test("only the panel setting decides whether the panel renders; OS notifications never do", () => {
+test("the panel renders only when enabled and at least one session needs attention; OS notifications never decide it", () => {
   for (const attentionNotifications of [true, false]) {
     for (const attentionQueueVisible of [true, false]) {
       const settings = { attentionNotifications, attentionQueueVisible, attentionQueuePlacement: "bottom-right" };
-      assert.equal(attentionQueueRenderedAt(settings, "bottom-right"), attentionQueueVisible);
+      assert.equal(attentionQueueRenderedAt(settings, "bottom-right", 1), attentionQueueVisible);
+      assert.equal(attentionQueueRenderedAt(settings, "bottom-right", 0), false);
       for (const other of PLACEMENTS.filter((placement) => placement !== "bottom-right")) {
-        assert.equal(attentionQueueRenderedAt(settings, other), false);
+        assert.equal(attentionQueueRenderedAt(settings, other, 1), false);
       }
     }
   }
@@ -124,7 +125,7 @@ test("only the panel setting decides whether the panel renders; OS notifications
 test("the panel follows its placement setting into any of the four corners", () => {
   for (const placement of PLACEMENTS) {
     const settings = { attentionQueueVisible: true, attentionQueuePlacement: placement };
-    const rendered = PLACEMENTS.filter((corner) => attentionQueueRenderedAt(settings, corner));
+    const rendered = PLACEMENTS.filter((corner) => attentionQueueRenderedAt(settings, corner, 1));
     assert.deepEqual(rendered, [placement]);
   }
 });
@@ -148,7 +149,7 @@ test("the workspace renders the whole panel only through the placement helper", 
 
   // No hard-coded corner and nothing of the panel (title, empty state, reserved box) outside the guard.
   assert.doesNotMatch(canvas, /placement === "bottom-right" && \(\s*<section className="attention-queue"/);
-  assert.match(canvas, /\{attentionQueueRenderedAt\(settings, placement\) && \(\s*<section className="attention-queue"/);
+  assert.match(canvas, /\{attentionQueueRenderedAt\(settings, placement, attention\.length\) && \(\s*<section className="attention-queue"/);
   assert.match(canvas, /className="attention-queue__caption">\{t\(settings\.locale, "needsAttentionCaption"\)\}/);
   assert.match(canvas, /title=\{t\(settings\.locale, "needsAttentionHint"\)\}/);
   assert.match(canvas, /settings\.attentionQueuePlacement,\s*settings\.attentionQueueVisible,/);
