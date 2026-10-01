@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { normalizeMaterialState } from "../src/main/services/materials/materialState.ts";
+import { normalizeAnchor, normalizeMaterialState } from "../src/main/services/materials/materialState.ts";
 
 const SHA = "a".repeat(64);
 
@@ -104,10 +104,24 @@ test("a capture needs at least one valid version and sizes are clamped", () => {
   assert.equal(state.materials[0].origin.kind, "browser");
 });
 
+
 test("the material count is bounded", () => {
   const many = Array.from({ length: 300 }, (_, index) => material({
     id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
     path: `/work/${index}.png`
   }));
   assert.equal(normalizeMaterialState({ version: 1, materials: many }).materials.length, 256);
+});
+
+test("image and file anchors are normalized to their own bounds", () => {
+  assert.deepEqual(normalizeAnchor({ kind: "whole" }), { kind: "whole" });
+  assert.deepEqual(normalizeAnchor({ kind: "point", x: 0.5, y: 0.25 }), { kind: "point", x: 0.5, y: 0.25 });
+  assert.deepEqual(
+    normalizeAnchor({ kind: "region", x: 0.1, y: 0.2, width: 0.3, height: 0.4 }),
+    { kind: "region", x: 0.1, y: 0.2, width: 0.3, height: 0.4 }
+  );
+  assert.equal(normalizeAnchor({ kind: "point", x: 1.1, y: 0 }), null);
+  assert.equal(normalizeAnchor({ kind: "point", x: -0.1, y: 0 }), null);
+  assert.equal(normalizeAnchor({ kind: "region", x: 0.8, y: 0, width: 0.3, height: 0.1 }), null);
+  assert.equal(normalizeAnchor({ kind: "region", x: 0, y: 0, width: 0, height: 0.1 }), null);
 });

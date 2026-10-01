@@ -17,6 +17,7 @@ import type {
   LaunchProfileId,
   MaterialsAddResult,
   LaunchRole,
+  MaterialRemark,
   PluginLaunchValues,
   SessionEnvironmentChoice,
   LimitsSnapshot,
@@ -27,6 +28,9 @@ import type {
   PluginManifest,
   PluginUpdateStatus,
   ProviderId,
+  RemarkDraft,
+  RemarkPatch,
+  RemarkResult,
   SessionBounds,
   SessionSnapshot,
   StickyNote,
@@ -934,6 +938,10 @@ export function App(): React.JSX.Element {
       if (!location) return;
       window.canvasTTY.clipboard.writeText(location);
       showToast(t(locale, "materialPathCopied"));
+    } else if (command === "pin") {
+      void materials.pinVersion(id).then((result) => {
+        if (!result.ok) fail(result.reason);
+      }, reportMaterialsFailure);
     } else {
       const request = command === "relink" ? materials.relink(id) : materials.acceptMove(id);
       void request.then((result) => {
@@ -941,6 +949,42 @@ export function App(): React.JSX.Element {
       }, reportMaterialsFailure);
     }
   }, [materials, reportMaterialsFailure, showToast]);
+
+  const addRemark = useCallback(async (draft: RemarkDraft): Promise<boolean> => {
+    const locale = settingsRef.current.locale;
+    const fail = (reason: Parameters<typeof materialFailureKey>[0]): void => {
+      const key = materialFailureKey(reason);
+      if (key) showToast(t(locale, key));
+    };
+    const result = await materials.addRemark(draft);
+    if (!result.ok) {
+      fail(result.reason);
+      return false;
+    }
+    showToast(t(locale, "remarkAdded"));
+    return true;
+  }, [materials, showToast]);
+
+  const updateRemark = useCallback(async (id: string, patch: RemarkPatch): Promise<RemarkResult> => {
+    const locale = settingsRef.current.locale;
+    const fail = (reason: Parameters<typeof materialFailureKey>[0]): void => {
+      const key = materialFailureKey(reason);
+      if (key) showToast(t(locale, key));
+    };
+    const result = await materials.updateRemark(id, patch);
+    if (!result.ok) fail(result.reason);
+    return result;
+  }, [materials, showToast]);
+
+  const deleteRemark = useCallback((id: string): Promise<void> => (
+    materials.deleteRemark(id)
+  ), [materials]);
+
+  const remarkAction = useCallback((remarkId: string, action: "delete"): void => {
+    if (action === "delete") {
+      void deleteRemark(remarkId).catch(() => showToast(t(settingsRef.current.locale, "materialFailureUnavailable")));
+    }
+  }, [deleteRemark, showToast]);
 
   const deleteCanvasRegion = useCallback((id: string): void => {
     const canvasRegions = settingsRef.current.canvasRegions.filter((region) => region.id !== id);
@@ -1556,6 +1600,9 @@ export function App(): React.JSX.Element {
           onMaterialBoundsChangeBatch={materials.setBoundsBatch}
           onRemoveMaterial={removeMaterial}
           onMaterialCommand={runMaterialCommand}
+          remarks={materials.remarks}
+          onAddRemark={addRemark}
+          onRemarkAction={remarkAction}
         />}
       </main>
 
@@ -1598,6 +1645,7 @@ export function App(): React.JSX.Element {
           onRecheckAgentClis={recheckAgentClis}
           plugins={plugins}
           browser={browser}
+          materialStorage={materials.snapshot.storage}
           onClose={() => setSettingsOpen(false)}
           onChange={saveSettings}
           onPreviewPlugin={previewPlugin}

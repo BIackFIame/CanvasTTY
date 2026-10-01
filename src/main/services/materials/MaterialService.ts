@@ -50,7 +50,6 @@ import {
 import { DirectoryWatchSet, nodeWatchFactory, type WatchFactory } from "./materialWatch.ts";
 import { fileDigest, MaterialBlobError, MaterialBlobs } from "./MaterialBlobs.ts";
 
-const MAX_PATHS_PER_ADD = 64;
 const MAX_NAME = 255;
 const MATERIAL_CAPTURE_MAX_BYTES = 32 * 1024 * 1024;
 const PERSIST_DELAY_MS = 250;
@@ -195,7 +194,10 @@ export class MaterialService {
       }
       const fresh: StoredMaterial[] = [];
       const infos = new Map<string, Stats>();
-      for (const candidate of paths.slice(0, MAX_PATHS_PER_ADD)) {
+      if (paths.length > MATERIAL_LIMIT) {
+        result.rejected.push({ name: `+${paths.length - MATERIAL_LIMIT}`, reason: "limit" });
+      }
+      for (const candidate of paths.slice(0, MATERIAL_LIMIT)) {
         const name = typeof candidate === "string" ? displayName(candidate) : "file";
         if (typeof candidate !== "string" || !isAbsolute(candidate) || candidate.includes("\0")) {
           result.rejected.push({ name, reason: "unreadable" });
@@ -337,9 +339,13 @@ export class MaterialService {
   remove(id: string): Promise<void> {
     return this.serial(async () => {
       if (!this.materials.delete(id)) return;
+      this.remarks = this.remarks
+        .filter((remark) => remark.target.materialId !== id)
+        .map((remark) => remark.reference?.materialId === id ? { ...remark, reference: null } : remark);
       this.live.delete(id);
       this.pendingRefresh.delete(id);
       this.watchers.untrack(id);
+      await this.collect();
       this.changed();
       await this.collect();
     });
