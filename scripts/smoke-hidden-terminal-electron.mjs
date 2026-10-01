@@ -1,4 +1,4 @@
-// Standalone real Electron/xterm regression proof; no app import, focus, or visible window.
+// Standalone real Electron/xterm proof without app imports or focus. Linux CI uses an inactive Xvfb window.
 // npm run smoke:terminal-hidden
 // npm run bench:terminal-hidden-renderer -- [cards=5] [seconds=10] [Ki UTF-16 units/s=1024] [runs=3]
 // Smoke CPU timings are diagnostic only. Use the separate serial benchmark for comparisons.
@@ -261,7 +261,24 @@ async function runElectronProbe() {
     console.log("CANVASTTY_HIDDEN_DOM_PROBE_STAGE fixture-written");
     await window.loadFile(fixturePath);
     console.log("CANVASTTY_HIDDEN_DOM_PROBE_STAGE fixture-loaded");
+    // The Linux CI smoke runs under xvfb-run. A native-hidden BrowserWindow
+    // globally pauses Chromium's renderer there, invalidating the baseline. Keep
+    // this isolated offscreen fixture painting on the virtual display without
+    // taking focus; local runs and all benchmarks remain natively hidden.
+    const linuxXvfbSmokeWindow = process.platform === "linux" && process.env.CI === "true" && !benchmark;
+    if (linuxXvfbSmokeWindow) {
+      window.webContents.setFrameRate(60);
+      window.webContents.startPainting();
+      window.showInactive();
+    }
     const result = await window.webContents.executeJavaScript("globalThis.__hiddenDomProbe");
+    if (!benchmark) Object.assign(result.diagnostics, {
+      nativeWindowVisible: window.isVisible(),
+      nativeWindowFocused: window.isFocused(),
+      fixtureVisibilityMode: linuxXvfbSmokeWindow ? "xvfb-visible-inactive" : "native-hidden",
+      offscreenPainting: window.webContents.isPainting(),
+      offscreenFrameRate: window.webContents.getFrameRate()
+    });
     if (benchmark) {
       for (const run of result.runs) {
         assert.equal(run.oldHidden.hiddenRenders > 0, true, "hidden-window rendering paused; benchmark baseline is invalid");
@@ -286,7 +303,12 @@ async function runElectronProbe() {
       }, null, 2));
       return;
     }
-    assert.equal(result.oldHidden.renders > 0, true, "global hidden-window rendering paused; comparison is invalid");
+    assert.equal(result.oldHidden.renders > 0, true, "hidden baseline rendered no xterm frames; diagnostics: " + JSON.stringify(result.diagnostics));
+    assert.ok(result.oldHidden.renderWarmupEvents > 0, "hidden baseline produced no xterm onRender during warm-up; diagnostics: " + JSON.stringify(result.diagnostics));
+    assert.ok(result.oldHidden.rafFramesDuringHidden > 0, "hidden baseline received no animation frames; diagnostics: " + JSON.stringify(result.diagnostics));
+    assert.ok(result.screenDisplayNone.rafFramesDuringHidden > 0, "candidate received no animation frames; window-level throttling invalidates comparison: " + JSON.stringify(result.diagnostics));
+    assert.equal(result.oldHidden.intersection.isIntersecting, true, "baseline xterm surface did not reach the visible intersection state");
+    assert.equal(result.screenDisplayNone.intersection.isIntersecting, false, "candidate xterm screen was not removed from intersection by display:none");
     assert.equal(result.screenDisplayNone.renders, 0, "screen display:none still rendered during hidden output");
     assert.equal(result.screenDisplayNone.resumeFullRefresh, true, "resume did not produce a full viewport refresh");
     assert.deepEqual(result.oldHidden.afterHidden, result.reference.afterHidden);
@@ -303,14 +325,14 @@ async function runElectronProbe() {
     assert.equal(result.selectedScreenHidden.resumeFullRefresh, true);
     assert.deepEqual(result.selectedScreenHidden.afterHidden, result.selectedOldHidden.afterHidden);
     assert.deepEqual(result.selectedScreenHidden.final, result.selectedOldHidden.final);
-    for (const value of Object.values(result)) {
+    for (const value of Object.entries(result).filter(([key]) => key !== "diagnostics").map(([, value]) => value)) {
       assert.equal(value.fitGridMaintained, true);
       assert.equal(value.stateUnchangedByResume, true);
       assert.equal(value.afterHidden.active.type, value.usedAlternate ? "alternate" : "normal");
       assert.equal(value.final.active.type, "normal");
       assert.equal(value.final.normal.lines.length > value.grid.rows, true);
     }
-    assert.equal(window.isVisible(), false);
+    assert.equal(window.isVisible(), linuxXvfbSmokeWindow, "native visibility must match the platform fixture mode: " + JSON.stringify(result.diagnostics));
     assert.equal(window.isFocused(), false);
     const compact = value => ({
       rendererCpuMs: value.rendererCpuMs,
@@ -327,11 +349,21 @@ async function runElectronProbe() {
       finalCursor: value.final.active.cursor,
       finalModes: value.final.modes,
       selectionTextWhileHidden: value.afterHidden.selection,
-      streamCharacters: value.streamCharacters
+      streamCharacters: value.streamCharacters,
+      rafFramesDuringHidden: value.rafFramesDuringHidden,
+      rafWarmupFrames: value.rafWarmupFrames,
+      hiddenBaselineRenderWarmupEvents: value.renderWarmupEvents,
+      intersection: value.intersection,
+      documentVisibilityState: value.documentVisibilityState
     });
     console.log("CANVASTTY_HIDDEN_DOM_PROBE_OK " + JSON.stringify({
       windowShown: window.isVisible(),
       nativeWindowFocused: window.isFocused(),
+      fixtureVisibilityMode: linuxXvfbSmokeWindow ? "xvfb-visible-inactive" : "native-hidden",
+      offscreenPainting: window.webContents.isPainting(),
+      offscreenFrameRate: window.webContents.getFrameRate(),
+      documentVisibilityState: result.diagnostics.documentVisibilityState,
+      documentHasFocus: result.diagnostics.documentHasFocus,
       publicBufferAndRenderInspection: true,
       actualProductSelectionGuardBundled: true,
       fullBufferCellsHistoryCursorModesEqualToVisibleReference: true,
@@ -381,7 +413,45 @@ function fixtureHtml() {
       const { Terminal } = await import(${JSON.stringify(xtermModule)});
       const { FitAddon } = await import(${JSON.stringify(fitModule)});
       const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+      const rafProbe = {heartbeatFrames:0,pageRafRequests:0,pageRafCallbacks:0};
+      const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
+      let rafHeartbeatActive = true;
+      const heartbeat = () => nativeRequestAnimationFrame(() => {
+        rafProbe.heartbeatFrames++;
+        if (rafHeartbeatActive) heartbeat();
+      });
+      heartbeat();
+      window.requestAnimationFrame = callback => {
+        rafProbe.pageRafRequests++;
+        return nativeRequestAnimationFrame(timestamp => {
+          rafProbe.pageRafCallbacks++;
+          callback(timestamp);
+        });
+      };
       const check = (condition, message) => { if (!condition) throw new Error(message); };
+      const waitForAnimationFrames = async (minimum, timeoutMs = 1500) => {
+        const start = rafProbe.heartbeatFrames;
+        const deadline = performance.now() + timeoutMs;
+        while (rafProbe.heartbeatFrames - start < minimum && performance.now() < deadline) await delay(16);
+        const received = rafProbe.heartbeatFrames - start;
+        check(received >= minimum, "bounded native rAF warm-up got " + received + "/" + minimum
+          + "; visibility=" + document.visibilityState + " focused=" + document.hasFocus()
+          + " pageCallbacks=" + rafProbe.pageRafCallbacks);
+        return received;
+      };
+      const waitForIntersection = async (probe, expected, timeoutMs = 1500) => {
+        const deadline = performance.now() + timeoutMs;
+        while (probe.isIntersecting !== expected && performance.now() < deadline) await delay(16);
+        check(probe.isIntersecting === expected, "IntersectionObserver did not settle to " + expected
+          + "; state=" + JSON.stringify(probe));
+      };
+      const waitForXtermRender = async (renders, minimum, probe, timeoutMs = 1500) => {
+        const deadline = performance.now() + timeoutMs;
+        while (renders.length < minimum && performance.now() < deadline) await delay(16);
+        check(renders.length >= minimum, "bounded hidden-baseline xterm render warm-up got " + renders.length
+          + "/" + minimum + "; visibility=" + document.visibilityState + " IO=" + JSON.stringify(probe)
+          + " rAF=" + rafProbe.heartbeatFrames);
+      };
       const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
       const host = document.querySelector('#surface');
       const cellSnapshot = cell => [cell.getChars(), cell.getWidth(), cell.getFgColorMode(), cell.getFgColor(),
@@ -429,6 +499,14 @@ function fixtureHtml() {
         const writes = text => new Promise(resolve => terminal.write(text, resolve));
         const renders = [];
         const listener = terminal.onRender(event => renders.push({...event}));
+        const intersection = {callbacks:0,isIntersecting:null,intersectionRatio:null};
+        const intersectionObserver = new IntersectionObserver(entries => {
+          const entry = entries.at(-1);
+          intersection.callbacks++;
+          intersection.isIntersecting = entry.isIntersecting;
+          intersection.intersectionRatio = entry.intersectionRatio;
+        });
+        intersectionObserver.observe(terminal.element.querySelector('.xterm-screen'));
         let rowMutations = 0;
         const rowObserver = new MutationObserver(records => { rowMutations += records.length; });
         rowObserver.observe(terminal.element.querySelector('.xterm-rows'),
@@ -448,7 +526,7 @@ function fixtureHtml() {
         const hostSize = [host.clientWidth, host.clientHeight];
         if (mode !== 'visible-reference') host.style.visibility = 'hidden';
         if (mode === 'screen-display-none') host.dataset.suspended = 'true';
-        await delay(250); // Let the real xterm IntersectionObserver settle before counting.
+        await waitForIntersection(intersection, mode !== 'screen-display-none');
         fit.fit();
         let fitGridMaintained = terminal.cols === grid.cols && terminal.rows === grid.rows
           && equal(hostSize, [host.clientWidth, host.clientHeight]);
@@ -465,12 +543,20 @@ function fixtureHtml() {
           grid = {cols:terminal.cols,rows:terminal.rows};
           await delay(80);
         }
+        const rafWarmupFrames = await waitForAnimationFrames(3);
+        const rafStart = rafProbe.heartbeatFrames;
         const beforeCount = renders.length;
         const beforeMutationCount = rowMutations;
         const startCpu = process.cpuUsage();
         if (!selected) await writes(enterAlternate);
+        let renderWarmupEvents = 0;
         for (let index = 0; index < 40; index++) {
+          const beforeWarmup = renders.length;
           await writes(burst);
+          if (mode === 'visibility-hidden' && index === 0) {
+            await waitForXtermRender(renders, beforeWarmup + 1, intersection);
+            renderWarmupEvents = renders.length - beforeWarmup;
+          }
           await delay(4);
         }
         if (!selected) await writes(footer);
@@ -479,6 +565,8 @@ function fixtureHtml() {
         const rendererCpuMs = (usedCpu.user + usedCpu.system) / 1000;
         const hiddenRenders = renders.length - beforeCount;
         const hiddenRowMutations = rowMutations - beforeMutationCount;
+        const rafFramesDuringHidden = rafProbe.heartbeatFrames - rafStart;
+        const hiddenIntersection = {...intersection};
         const afterHidden = snapshot(terminal);
         const beforeResume = renders.length;
         host.style.visibility = 'visible';
@@ -494,20 +582,26 @@ function fixtureHtml() {
         const final = snapshot(terminal);
         const result = {grid,fitGridMaintained,rendererCpuMs,renders:hiddenRenders,rowMutations:hiddenRowMutations,usedAlternate:!selected,
           resumeRenders:resumeEvents.length,resumeFullRefresh:resumeEvents.some(event => event.start === 0 && event.end === terminal.rows - 1),
-          stateUnchangedByResume:equal(afterHidden,afterResume),afterHidden,final,
+          stateUnchangedByResume:equal(afterHidden,afterResume),afterHidden,final,rafFramesDuringHidden,rafWarmupFrames,
+          intersection:hiddenIntersection,documentVisibilityState:document.visibilityState,renderWarmupEvents,
           streamCharacters:seed.length+enterAlternate.length+40*burst.length+footer.length+leaveAlternate.length};
         listener.dispose();
+        intersectionObserver.disconnect();
         rowObserver.disconnect();
         restoreGuard();
         terminal.dispose();
         return result;
       };
-      return {reference:await runCase('visible-reference'),oldHidden:await runCase('visibility-hidden'),
+      const result = {reference:await runCase('visible-reference'),oldHidden:await runCase('visibility-hidden'),
         screenDisplayNone:await runCase('screen-display-none'),
         initialHiddenReference:await runCase('visible-reference', {initiallyHidden:true,resizeWhileHidden:true}),
         initialScreenHidden:await runCase('screen-display-none', {initiallyHidden:true,resizeWhileHidden:true}),
         selectedOldHidden:await runCase('visibility-hidden', {selected:true}),
         selectedScreenHidden:await runCase('screen-display-none', {selected:true})};
+      rafHeartbeatActive = false;
+      return {...result,diagnostics:{documentVisibilityState:document.visibilityState,documentHasFocus:document.hasFocus(),
+        nativeRafHeartbeatFrames:rafProbe.heartbeatFrames,pageRafRequests:rafProbe.pageRafRequests,
+        pageRafCallbacks:rafProbe.pageRafCallbacks}};
     })();
     </script></body></html>`;
 }
