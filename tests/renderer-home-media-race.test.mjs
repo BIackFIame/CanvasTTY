@@ -12,26 +12,57 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function appMediaReadHelper() {
-  const app = await readFile(appPath, "utf8");
-  const start = app.indexOf("function startHomeMediaRead(");
-  const end = app.indexOf("\n}\n", start) + 2;
-  assert.notEqual(start, -1, "App uses the tested deferred media-read helper");
-  assert.ok(end > start);
-  return runInNewContext(`${stripTypeScriptTypes(app.slice(start, end))}; startHomeMediaRead`, {
+function extractFunctionSource(app, signature) {
+  const start = app.indexOf(signature);
+  assert.notEqual(start, -1, `App contains ${signature}`);
+  const closing = /(?:\r\n|\n)\}(?=\r\n|\n|$)/g;
+  closing.lastIndex = start;
+  const match = closing.exec(app);
+  assert.ok(match, `App contains the closing brace for ${signature}`);
+  return app.slice(start, match.index + match[0].length);
+}
+
+async function appMediaReadHelper(app) {
+  app ??= await readFile(appPath, "utf8");
+  const source = extractFunctionSource(app, "function startHomeMediaRead(");
+  return runInNewContext(`${stripTypeScriptTypes(source)}; startHomeMediaRead`, {
     Promise,
     undefined
   });
 }
 
-async function appProvidedPathHelper() {
-  const app = await readFile(appPath, "utf8");
-  const start = app.indexOf("function consumeProvidedHomeMediaPath(");
-  const end = app.indexOf("\n}\n", start) + 2;
-  assert.notEqual(start, -1, "App uses the tested chooser-path suppression helper");
-  assert.ok(end > start);
-  return runInNewContext(`${stripTypeScriptTypes(app.slice(start, end))}; consumeProvidedHomeMediaPath`);
+async function appProvidedPathHelper(app) {
+  app ??= await readFile(appPath, "utf8");
+  const source = extractFunctionSource(app, "function consumeProvidedHomeMediaPath(");
+  return runInNewContext(`${stripTypeScriptTypes(source)}; consumeProvidedHomeMediaPath`);
 }
+
+test("application helper extraction accepts Windows CRLF source", async () => {
+  const app = await readFile(appPath, "utf8");
+  const lfApp = app.replace(/\r\n/g, "\n");
+  const crlfApp = lfApp.replace(/\n/g, "\r\n");
+  const readSource = extractFunctionSource(lfApp, "function startHomeMediaRead(");
+  const chooserSource = extractFunctionSource(lfApp, "function consumeProvidedHomeMediaPath(");
+  assert.equal(extractFunctionSource(crlfApp, "function startHomeMediaRead(").replace(/\r\n/g, "\n"), readSource);
+  assert.equal(extractFunctionSource(crlfApp, "function consumeProvidedHomeMediaPath(").replace(/\r\n/g, "\n"), chooserSource);
+
+  const startHomeMediaRead = await appMediaReadHelper(crlfApp);
+  const consumeProvidedHomeMediaPath = await appProvidedPathHelper(crlfApp);
+  const read = deferred();
+  let active = true;
+  const applied = [];
+  const stop = startHomeMediaRead("/wallpaper.png", () => read.promise, () => active, (data) => applied.push(data));
+  active = false;
+  stop();
+  read.resolve("stale bytes");
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(applied, []);
+
+  const ref = { current: { path: "/picked.png" } };
+  assert.equal(consumeProvidedHomeMediaPath("/picked.png", ref), true);
+  assert.equal(ref.current, null);
+});
 
 test("deferred HOME media reads ignore cleanup and stale generation results", async () => {
   const startHomeMediaRead = await appMediaReadHelper();
