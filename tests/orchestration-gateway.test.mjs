@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { connect } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -407,6 +408,240 @@ test("start and stop in flight: a second start waits for the first, and a stop d
   const client = await TestClient.connectTo(gateway.address);
   client.socket.destroy();
   await gateway.stop();
+});
+
+function fakeWindowsPipeHostFactory(onStart = () => undefined) {
+  const transports = [];
+  const factory = () => {
+    const transport = new EventEmitter();
+    transport.isRunning = false;
+    transport.start = async () => {
+      const index = transports.length;
+      transports.push(transport);
+      await onStart(index, transport);
+      transport.isRunning = true;
+      return `fake-pipe-${index}`;
+    };
+    transport.close = async () => { transport.isRunning = false; };
+    return transport;
+  };
+  return { factory, transports };
+}
+
+test("a fatal Windows host recovers for new orchestrators and permanently revokes old leases", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, transports } = fakeWindowsPipeHostFactory();
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  const oldCapability = gateway.registerOrchestrator({ terminalSessionId: "old-orchestrator" });
+  transports[0].isRunning = false;
+  transports[0].emit("fatal", new Error("host exited"));
+  await assert.rejects(oldCapability.authenticated, /Capability expired/u);
+  assert.equal(gateway.address, null);
+  assert.throws(() => gateway.registerOrchestrator({ terminalSessionId: "too-early" }), /not running/u);
+
+  t.mock.timers.tick(499);
+  assert.equal(transports.length, 1);
+  t.mock.timers.tick(1);
+  await new Promise(setImmediate);
+  assert.equal(gateway.address, "fake-pipe-1");
+  const freshCapability = gateway.registerOrchestrator({ terminalSessionId: "new-orchestrator" });
+  assert.equal(freshCapability.address, "fake-pipe-1");
+  assert.notEqual(freshCapability.capabilityToken, oldCapability.capabilityToken);
+
+  transports[0].emit("fatal", new Error("late old-host event"));
+  t.mock.timers.tick(10_000);
+  await new Promise(setImmediate);
+  assert.equal(gateway.address, "fake-pipe-1", "a stale host cannot stop its successor");
+  assert.equal(transports.length, 2, "a stale host cannot schedule another replacement");
+});
+
+test("an initial Windows host startup failure rejects without automatic retry", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, transports } = fakeWindowsPipeHostFactory((_index, transport) => {
+    transport.emit("fatal", new Error("failed before ready"));
+    throw new Error("host failed before ready");
+  });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await assert.rejects(gateway.start(), /host failed before ready/u);
+  t.mock.timers.tick(10_000);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 1);
+  assert.equal(gateway.address, null);
+});
+
+test("Windows host recovery is bounded to three retries and disabling cancels backoff", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { factory, transports } = fakeWindowsPipeHostFactory((index) => {
+    if (index > 0) throw new Error("replacement host failed");
+  });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 2);
+  t.mock.timers.tick(1_000);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 3);
+  t.mock.timers.tick(2_000);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 4);
+  t.mock.timers.tick(20_000);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 4, "recovery stops after three replacement attempts");
+
+  // A fresh gateway isolates the cancellation case from the exhausted retry budget above.
+  const pending = fakeWindowsPipeHostFactory();
+  const disabledGateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: pending.factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => disabledGateway.stop());
+  await disabledGateway.start();
+  const disabledLease = disabledGateway.registerOrchestrator({ terminalSessionId: "disabled-old" });
+  pending.transports[0].emit("fatal", new Error("host exited"));
+  disabledGateway.setEnabled(false);
+  t.mock.timers.tick(5_000);
+  await new Promise(setImmediate);
+  assert.equal(pending.transports.length, 1);
+  assert.equal(disabledGateway.address, null);
+  await assert.rejects(disabledLease.authenticated, /Capability expired/u);
+
+  disabledGateway.setEnabled(true);
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(pending.transports.length, 2, "reenabling resumes recovery for new sessions");
+  const enabledLease = disabledGateway.registerOrchestrator({ terminalSessionId: "enabled-new" });
+  assert.equal(enabledLease.address, "fake-pipe-1");
+});
+
+test("an explicit stop wins over a replacement host that is still starting", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishReplacement;
+  const { factory, transports } = fakeWindowsPipeHostFactory((index) => {
+    if (index === 1) return new Promise((resolve) => { finishReplacement = resolve; });
+  });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 2);
+  assert.equal(gateway.address, null);
+
+  const stopping = gateway.stop();
+  finishReplacement();
+  await stopping;
+  await new Promise(setImmediate);
+  t.mock.timers.tick(10_000);
+  assert.equal(gateway.address, null);
+  assert.equal(transports[1].isRunning, false);
+  assert.equal(transports.length, 2, "the cancelled retry does not create another host");
+});
+
+test("an explicit start takes ownership of a cancelled in-flight recovery", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishReplacement;
+  const { factory, transports } = fakeWindowsPipeHostFactory((index) => {
+    if (index === 1) return new Promise((resolve) => { finishReplacement = resolve; });
+  });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  transports[0].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 2);
+  assert.equal(gateway.address, null);
+
+  gateway.setEnabled(false);
+  gateway.setEnabled(true);
+  const explicitStart = gateway.start();
+  finishReplacement();
+  await explicitStart;
+  await new Promise(setImmediate);
+  t.mock.timers.tick(10_000);
+  assert.equal(gateway.address, "fake-pipe-1");
+  assert.equal(transports[1].isRunning, true, "the stale recovery continuation leaves the explicit start alive");
+  assert.equal(transports.length, 2, "the superseded continuation cannot launch another host");
+  assert.equal(gateway.registerOrchestrator({ terminalSessionId: "explicit-new" }).address, "fake-pipe-1");
+});
+
+test("reenabling during a replacement start lets recovery finish for new sessions", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let finishReplacement;
+  const { factory, transports } = fakeWindowsPipeHostFactory((index) => {
+    if (index === 1) return new Promise((resolve) => { finishReplacement = resolve; });
+  });
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  const oldLease = gateway.registerOrchestrator({ terminalSessionId: "before-disable" });
+  transports[0].emit("fatal", new Error("host exited"));
+  await assert.rejects(oldLease.authenticated, /Capability expired/u);
+  t.mock.timers.tick(500);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 2);
+
+  gateway.setEnabled(false);
+  gateway.setEnabled(true);
+  t.mock.timers.tick(1_000);
+  await new Promise(setImmediate);
+  finishReplacement();
+  await new Promise(setImmediate);
+  assert.equal(gateway.address, "fake-pipe-1");
+  assert.equal(transports[1].isRunning, true);
+  assert.equal(gateway.registerOrchestrator({ terminalSessionId: "after-enable" }).address, "fake-pipe-1");
 });
 
 test("a send_to_agent canceled while its text waited delivers nothing and answers CANCELED", async () => {
