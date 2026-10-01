@@ -266,6 +266,7 @@ function TerminalCardView({
     render: { dispose(): void } | null;
     fallback: number | null;
     animation: Animation | null;
+    visibilityCleanup: (() => void) | null;
   } | null>(null);
   const restoreRendererTransition = (): void => {
     const transition = rendererTransitionRef.current;
@@ -273,6 +274,7 @@ function TerminalCardView({
     rendererTransitionRef.current = null;
     if (transition.frame !== null) cancelAnimationFrame(transition.frame);
     if (transition.fallback !== null) window.clearTimeout(transition.fallback);
+    transition.visibilityCleanup?.();
     transition.render?.dispose();
     transition.animation?.cancel();
     transition.snapshot.remove();
@@ -310,7 +312,18 @@ function TerminalCardView({
       return null;
     }
     element.append(snapshot);
-    rendererTransitionRef.current = { snapshot, frame: null, render: null, fallback: null, animation: null };
+    const onVisibilityChange = (): void => {
+      if (document.hidden) restoreRendererTransition();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    rendererTransitionRef.current = {
+      snapshot,
+      frame: null,
+      render: null,
+      fallback: window.setTimeout(restoreRendererTransition, 250),
+      animation: null,
+      visibilityCleanup: () => document.removeEventListener("visibilitychange", onVisibilityChange)
+    };
     return snapshot;
   };
   const revealRendererTransition = (terminal: Terminal, snapshot: HTMLElement): void => {
@@ -334,15 +347,11 @@ function TerminalCardView({
       if (rendererTransitionRef.current !== transition || transition.frame !== null) return;
       transition.render?.dispose();
       transition.render = null;
-      if (transition.fallback !== null) window.clearTimeout(transition.fallback);
-      transition.fallback = null;
       transition.frame = requestAnimationFrame(() => {
         transition.frame = requestAnimationFrame(fadeAfterPaint);
       });
     };
     transition.render = terminal.onRender(ready);
-    // Offscreen or lost contexts may never emit onRender; never leave a stale overlay behind.
-    transition.fallback = window.setTimeout(ready, 250);
     terminal.refresh(0, terminal.rows - 1);
   };
   const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, focused });
@@ -707,7 +716,9 @@ function TerminalCardView({
     // terminal options, and this terminal is constructed with allowTransparency,
     // so cell backgrounds stay transparent and the card's palette background
     // keeps showing through the canvas exactly as it does in the DOM renderer.
-    // Preserve the last painted frame for the short snapshot when switching back to DOM.
+    // Preserve the last painted frame for the short snapshot when switching back to DOM. A one-shot
+    // readback after compositing is not reliable with preserveDrawingBuffer disabled; the bounded WebGL
+    // pool still limits the number of contexts that pay this cost.
     const webgl = new WebglAddon(true);
     webgl.onContextLoss(() => {
       // GPU context gone and not restored: drop the renderer, xterm falls back to the DOM renderer with
@@ -792,6 +803,10 @@ function TerminalCardView({
       return () => cancelAnimationFrame(frame);
     }
   }, [session.id, lifecycle]);
+
+  useEffect(() => {
+    if (!surfaceIsLive(lifecycle)) restoreRendererTransition();
+  }, [lifecycle]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
