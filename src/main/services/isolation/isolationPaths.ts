@@ -165,7 +165,7 @@ export function spellings(path: string): string[] {
 function realish(path: string): string {
   const rest: string[] = [];
   let current = path;
-  for (let i = 0; i < 128; i++) {
+  for (;;) {
     try {
       const real = realpathSync.native(current);
       return rest.length > 0 ? join(real, ...rest.reverse()) : real;
@@ -175,7 +175,6 @@ function realish(path: string): string {
     rest.push(current.slice(parent.length).replace(/^[\\/]+/u, ""));
     current = parent;
   }
-  return path;
 }
 
 export function isolationPaths(input: IsolationPathInput): IsolationPaths {
