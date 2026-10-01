@@ -86,6 +86,15 @@ import {
 
 const MAX_SCROLLBACK_CHARS = 240_000;
 const OUTPUT_BATCH_MS = 16;
+/**
+ * A flood of PTY output (e.g. `cat` on a huge file) can emit many `data` events before the batch timer's
+ * callback runs, since each event only needs the event loop, not the timer's turn. Without a cap, pendingOutput
+ * grows unbounded for that whole burst. Once a session's queued output crosses this many UTF-16 code units, it
+ * is flushed immediately instead of waiting for the timer.
+ */
+const MAX_PENDING_OUTPUT_CHARS = 1_048_576;
+/** How long repeated setBounds/rename/etc. calls are coalesced before the session store is rewritten once. */
+const PERSISTENCE_DEBOUNCE_MS = 150;
 const DEFAULT_TERMINAL_SIZE = { width: 700, height: 430 };
 const MIN_TERMINAL_SIZE = { width: 420, height: 260 };
 const MAX_TERMINAL_SIZE = { width: 1_600, height: 1_100 };
@@ -100,6 +109,7 @@ interface ManagedSession {
   bufferLength: number;
   outputOffset: number;
   pendingOutput: string[];
+  pendingOutputChars: number;
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
@@ -247,6 +257,9 @@ export class TerminalManager {
   // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
   private readonly liveProcesses = new Map<IPty, Promise<void>>();
   private suppressPersistence = false;
+  // Coalesces rapid persistence requests (a drag fires setBounds many times a second) into one
+  // normalize+stringify+atomic-write of the session store instead of one per call.
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
   private controlConnection: ControlConnection | null = null;
@@ -449,6 +462,10 @@ export class TerminalManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.persistenceTimer !== null) {
+      clearTimeout(this.persistenceTimer);
+      this.persistenceTimer = null;
+    }
     await this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
@@ -489,8 +506,13 @@ export class TerminalManager {
     return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * Every card's metadata, without its scrollback: at initial hydration every card subscribes and calls
+   * readBuffer() for its own history anyway (attachTerminalOutput), so a full copy here would only be
+   * serialized across IPC and thrown away unread. Use readBuffer(id) for a card's actual history.
+   */
   list(): SessionSnapshot[] {
-    return [...this.sessions.values()].map((session) => snapshot(session));
+    return [...this.sessions.values()].map((session) => ({ ...structuredClone(session.metadata), buffer: "" }));
   }
 
   /**
@@ -656,6 +678,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
       agentOrchestration: launched.agentOrchestration,
@@ -938,7 +961,7 @@ export class TerminalManager {
       height: clamp(bounds.size.height, MIN_TERMINAL_SIZE.height, MAX_TERMINAL_SIZE.height)
     };
     this.emitSession(session.metadata);
-    this.schedulePersistence();
+    this.scheduleBoundsPersistence();
   }
 
   rename(id: string, title: string): SessionMetadata {
@@ -1050,14 +1073,11 @@ export class TerminalManager {
     // suffix arrives — once — without resending the history before it. The
     // observers get no replay: they already received every chunk.
     //
-    // The window is bounded by MAX_SCROLLBACK_CHARS: when the hidden stretch
-    // was longer than the ring, the buffer no longer reaches back to
-    // hiddenSince and the head of that stretch is gone for good. There is no
-    // field on TerminalDataEvent to say so, so the consumer derives the hole
-    // from the offset arithmetic (the event starts after the offset it already
-    // wrote) and marks it in the card instead of stitching it as continuous
-    // output. Never widen the ring to hide this: the truncation must stay
-    // visible.
+    // The stretch fits the ring: keepHiddenCardWhole hands a hidden card what
+    // it missed before the ring could drop any of it, so this replay starts
+    // exactly where the card stopped and its terminal state stays the
+    // session's. Should a hole ever reach the renderer anyway, the consumer
+    // derives it from the offsets and marks it instead of stitching it.
     this.flushOutput(id, session);
     this.hiddenSinceOffset.delete(id);
     if (hiddenSince === undefined || session.outputOffset === hiddenSince) return;
@@ -1277,6 +1297,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser,
       agentRuntime,
       agentOrchestration,
@@ -1392,6 +1413,23 @@ export class TerminalManager {
     void this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved.", error);
     });
+  }
+
+  /**
+   * Same as `schedulePersistence`, but coalesced: a drag fires `setBounds` many times a second, and each one
+   * used to normalize, stringify and atomically rewrite the whole session store. Rapid geometry updates are
+   * batched into a single write instead, `PERSISTENCE_DEBOUNCE_MS` after the last of them.
+   */
+  private scheduleBoundsPersistence(): void {
+    if (this.persistenceTimer !== null) return;
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      void this.persistSessions().catch((error) => {
+        console.warn("CanvasTTY terminal window state could not be saved.", error);
+      });
+    }, PERSISTENCE_DEBOUNCE_MS);
+    // A background timer must never be the reason the process (or a test) stays alive.
+    this.persistenceTimer.unref?.();
   }
 
   private emitSession(metadata: SessionMetadata, failureOrigin: FailureOrigin | null = null): void {
@@ -2023,7 +2061,9 @@ export class TerminalManager {
       if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
         this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState }, "title");
       }
+      this.keepHiddenCardWhole(id, current, data);
       appendScrollback(current, data);
+      this.keepHiddenCardWhole(id, current, null, data);
       this.queueOutput(id, current, data);
     });
 
@@ -2065,8 +2105,41 @@ export class TerminalManager {
     this.schedulePersistence();
   }
 
+  /**
+   * A hidden card is not streamed, but its terminal must still see every byte: a replay that starts after the ring
+   * dropped part of the hidden stretch cannot restore what that part did to the terminal (an alternate screen entered,
+   * modes set, an escape sequence cut in half), and the card's parser would continue from a state the session never
+   * had. So just before the ring would drop output this card has not received, the card gets the stretch it missed
+   * as one renderer-only event, and the stretch starts again. The card parses it without painting (it is hidden), so
+   * a quiet hidden card still costs nothing and a flooding one costs its parsing in ring-sized pieces, never a gap.
+   * Called before the chunk joins the ring (`before`) and after it (`after`: a single chunk longer than the ring).
+   */
+  private keepHiddenCardWhole(id: string, session: ManagedSession, before: string | null, after?: string): void {
+    const since = this.hiddenSinceOffset.get(id);
+    if (since === undefined) return;
+    const missed = session.outputOffset - since;
+    if (before !== null) {
+      if (missed === 0 || missed + before.length <= MAX_SCROLLBACK_CHARS) return;
+      this.emit(IPC.terminalData, { id, data: scrollbackTail(session, missed), outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+      return;
+    }
+    // The chunk alone outgrew the ring: it is the whole stretch (the part before it was handed over just now).
+    if (after !== undefined && missed > MAX_SCROLLBACK_CHARS) {
+      this.emit(IPC.terminalData, { id, data: after, outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+    }
+  }
+
   private queueOutput(id: string, session: ManagedSession, data: string): void {
     session.pendingOutput.push(data);
+    session.pendingOutputChars += data.length;
+    // A flood (e.g. `cat` on a huge file) can push many chunks before the batch timer's callback gets a
+    // turn; flush this session now instead of letting its buffer grow without bound.
+    if (session.pendingOutputChars >= MAX_PENDING_OUTPUT_CHARS) {
+      this.flushOutput(id, session);
+      return;
+    }
     this.queuedOutput.set(id, session);
     if (this.outputTimer !== null) return;
     // Keep a TUI's clear-and-redraw sequence in one renderer update whenever possible.
@@ -2091,6 +2164,7 @@ export class TerminalManager {
 
     const data = session.pendingOutput.join("");
     session.pendingOutput.length = 0;
+    session.pendingOutputChars = 0;
     // While the card is hidden the batch is for the observers only: the
     // renderer catches up through the replay in setVisible.
     this.emit(IPC.terminalData, {

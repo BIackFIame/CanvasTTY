@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { limitPinnedTerminalInput, pinnedTerminalInput } from "../src/renderer/src/features/terminal/terminalPinnedInput.ts";
+import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput } from "../src/renderer/src/features/terminal/terminalPinnedInput.ts";
 
 function buffer(overrides = {}) {
   const lines = new Map([[12, { text: "  ask something   ", isWrapped: false }]]);
@@ -99,4 +99,51 @@ test("the pinned input uses reserved terminal space and does not intercept selec
   assert.match(css, /\.terminal-card__pinned-input\s*\{[^}]*position:\s*absolute;[^}]*bottom:\s*0;[^}]*pointer-events:\s*none;/s);
   assert.match(css, /\.terminal-card__pinned-input-row--cursor::after\s*\{[^}]*left:\s*calc\(var\(--pinned-cursor-column\)[^}]*width:\s*calc\(100%\s*\/\s*var\(--pinned-terminal-columns\)/s);
   assert.match(css, /font-variant-ligatures:\s*none/);
+});
+
+test("pinned input does no hidden work and coalesces visible parser events into one frame", () => {
+  let live = false;
+  let calls = 0;
+  let serial = 0;
+  const frames = new Map();
+  const refresh = createPinnedInputRefresh({
+    isLive: () => live,
+    refresh: () => { calls++; },
+    requestFrame: (callback) => { frames.set(++serial, callback); return serial; },
+    cancelFrame: (frame) => frames.delete(frame)
+  });
+  for (let index = 0; index < 1000; index++) refresh.schedule();
+  assert.equal(frames.size, 0);
+  assert.equal(calls, 0);
+  live = true;
+  for (let index = 0; index < 1000; index++) refresh.schedule();
+  assert.equal(frames.size, 1);
+  const callback = frames.get(serial); frames.clear(); callback();
+  assert.equal(calls, 1);
+  refresh.schedule();
+  live = false;
+  const hiddenCallback = frames.get(serial); frames.clear(); hiddenCallback();
+  assert.equal(calls, 1, "suspending before the frame suppresses the pending DOM refresh");
+  live = true;
+  refresh.schedule();
+  const resumedCallback = frames.get(serial); frames.clear(); resumedCallback();
+  assert.equal(calls, 2, "resume schedules a fresh view of the current buffer");
+});
+
+test("disposing a pinned input refresh cancels pending work and prevents late callbacks", () => {
+  let callback;
+  let cancelled;
+  let calls = 0;
+  const refresh = createPinnedInputRefresh({
+    isLive: () => true,
+    refresh: () => { calls++; },
+    requestFrame: (frameCallback) => { callback = frameCallback; return 7; },
+    cancelFrame: (frame) => { cancelled = frame; }
+  });
+  refresh.schedule();
+  refresh.dispose();
+  assert.equal(cancelled, 7);
+  callback();
+  refresh.schedule();
+  assert.equal(calls, 0);
 });

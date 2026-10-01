@@ -11,6 +11,7 @@ import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
 import xterm from "@xterm/headless";
 import { AgentControlGateway, CONTROL_REFUSAL_MESSAGE, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { IPC } from "../src/shared/contracts.ts";
 import { PixelSkinPackRegistry } from "../src/main/services/PixelSkinPackRegistry.ts";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
@@ -172,6 +173,33 @@ test("a create whose controller setup fails closes the card instead of leaving i
   f.terminals.geometry = geometry;
   const { session } = await f.create("create-after-failure");
   assert.deepEqual(f.terminals.listMetadata().map((card) => card.id), [session.id]);
+});
+
+test("closing stops draining new PTY output instead of letting it grow the shutdown wait forever", localSocket, async (t) => {
+  const f = await fixture(t);
+  const { session } = await f.create();
+  await f.ready(session.id);
+
+  let writes = 0;
+  const original = xterm.Terminal.prototype.write;
+  xterm.Terminal.prototype.write = function(data, callback) {
+    writes += 1;
+    return original.call(this, data, callback);
+  };
+  t.after(() => { xterm.Terminal.prototype.write = original; });
+
+  const closePromise = f.gateway.close();
+  const writesAtCloseStart = writes;
+  // Output arriving after close() started must not keep extending the session's pending-write
+  // chain: observe() is closing's own signal to stop accepting more of it.
+  let offset = 0;
+  for (let i = 0; i < 25; i += 1) {
+    const chunk = `flood-${i}`;
+    offset += chunk.length;
+    f.gateway.observe(IPC.terminalData, { id: session.id, data: chunk, outputOffset: offset });
+  }
+  await closePromise;
+  assert.equal(writes, writesAtCloseStart, "no write was queued for output observed after close() began");
 });
 
 test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {

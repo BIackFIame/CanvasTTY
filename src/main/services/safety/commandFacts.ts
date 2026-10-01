@@ -1026,6 +1026,9 @@ function classifyGit(argWords: Word[], cwd: string | null, acc: Acc): void {
   if (sub === 'worktree' && rest[0] === 'add') {
     const dest = restWords.slice(1).find(word => !word.text.startsWith('-'));
     if (dest) acc.writes.push(resolveTarget(dest, dir, acc.ctx));
+    // `worktree add` also records the new worktree in the repository's own .git/worktrees administrative area,
+    // wherever the new worktree folder itself lands.
+    if (elsewhere) acc.writes.push(elsewhere);
     return;
   }
   if (elsewhere) acc.writes.push(elsewhere);

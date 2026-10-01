@@ -189,6 +189,18 @@ test("git with -C another repository: mutating forms are writes or deletes outsi
   }
 });
 
+test("git worktree add with -C another repository writes that repository's metadata even when the new worktree lands inside the project", () => {
+  // The worktree itself lands inside the project (ordinary), but `worktree add` also records the new worktree in
+  // the *other* repository's own .git/worktrees administrative area: a write to that repository, wherever the
+  // new worktree folder goes.
+  assert.equal(rule(shell(`git -C ${outside} worktree add ${join(project, "wt")} -b feature`)), "write-outside");
+  assert.equal(rule(shell(`git -C ${outside} worktree add wt-here`)), "write-outside");
+  assert.equal(rule(shell(`git --git-dir ${outside}/.git worktree add ${join(project, "wt2")}`)), "write-outside");
+  // Inside the project (no -C/--git-dir naming another repository): unaffected, as before.
+  assert.equal(rule(shell("git worktree add ../wt")), "write-outside");
+  assert.equal(rule(shell("git worktree add src/wt")), null);
+});
+
 test("wrapped and less common forms: the same deny as the plain command outside, no deny inside the project", () => {
   // Each form once with a target outside the working folder (denied like the plain `rm -rf OUT` / `cp a OUT`) and
   // once with a target inside it (ordinary work). `%` is where the target goes.

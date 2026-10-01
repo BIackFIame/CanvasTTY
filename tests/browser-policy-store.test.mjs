@@ -9,6 +9,7 @@ import {
   DEFAULT_BROWSER_URL,
   MAX_BROWSER_TABS,
   MAX_BROWSER_URL_LENGTH,
+  MAX_STAGED_UPLOAD_DIRS,
   MAX_UPLOAD_FILE_BYTES,
   MAX_UPLOAD_FILES,
   isSafeBrowserUrl
@@ -151,6 +152,51 @@ test("BrowserPolicyService enforces the 20-file and 100 MB upload boundaries", a
   assert.equal((await stat(stagedBoundary)).size, MAX_UPLOAD_FILE_BYTES);
   await truncate(boundary, MAX_UPLOAD_FILE_BYTES + 1);
   await assert.rejects(policy.validateUploadPaths([boundary]), assertBrowserError("PAYLOAD_TOO_LARGE"));
+});
+
+test("a rejected multi-file upload leaves no staged copies behind", async (t) => {
+  const root = await fixture(t, "canvastty-policy-partial-");
+  const allowed = join(root, "allowed");
+  await mkdir(allowed);
+  const ok = join(allowed, "ok.txt");
+  await writeFile(ok, "ok");
+  const policy = new BrowserPolicyService({
+    downloadRoot: join(root, "downloads"),
+    uploadRoots: [allowed]
+  });
+
+  // The second path does not exist, so the whole request fails after the first
+  // file has already been copied into the staging directory.
+  await assert.rejects(
+    policy.validateUploadPaths([ok, join(allowed, "missing.txt")]),
+    assertBrowserError("PATH_DENIED")
+  );
+
+  const staged = await readdir(policy.uploadStagingRoot, { withFileTypes: true }).catch(() => []);
+  assert.deepEqual(staged.filter((entry) => entry.isDirectory()), [], "no staging directories from the failed request should remain");
+});
+
+test("staged upload directories are bounded across many requests", async (t) => {
+  const root = await fixture(t, "canvastty-policy-bounded-");
+  const allowed = join(root, "allowed");
+  await mkdir(allowed);
+  const file = join(allowed, "small.txt");
+  await writeFile(file, "x");
+  const policy = new BrowserPolicyService({
+    downloadRoot: join(root, "downloads"),
+    uploadRoots: [allowed]
+  });
+
+  for (let index = 0; index < MAX_STAGED_UPLOAD_DIRS + 10; index += 1) {
+    await policy.validateUploadPaths([file]);
+  }
+
+  const staged = await readdir(policy.uploadStagingRoot, { withFileTypes: true });
+  const directories = staged.filter((entry) => entry.isDirectory());
+  assert.ok(
+    directories.length <= MAX_STAGED_UPLOAD_DIRS,
+    `${directories.length} staged upload directories retained, expected at most ${MAX_STAGED_UPLOAD_DIRS}`
+  );
 });
 
 test("normalizePersistedBrowserState preserves safe order, uniqueness, and a valid active tab", () => {

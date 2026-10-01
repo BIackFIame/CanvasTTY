@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -166,6 +166,32 @@ test("BrowserAuditStore prunes expired rotations while retaining a verifiable ch
   assert.equal(firstSurviving.previousHash.length, 64);
 });
 
+test("deleting an initial rotated segment outside retention pruning fails verification", async (t) => {
+  const root = await fixture(t, "canvastty-audit-deleted-segment-");
+  let now = 1_700_000_000_000;
+  const store = new BrowserAuditStore(root, { maxBytes: 1_024, now: () => now });
+  for (let index = 0; index < 5; index += 1) {
+    now += 1_000;
+    await store.append(auditInput(`segment-${index}`, {
+      timestamp: now,
+      details: { note: `${index}-${"x".repeat(700)}` }
+    }));
+  }
+
+  const directory = dirname(store.filePath);
+  const rotated = (await auditFiles(store)).filter((name) => name.startsWith("browser-audit-")).sort();
+  assert.ok(rotated.length >= 1, "the fixture must actually rotate at least once");
+
+  // Remove the earliest rotated segment directly, the way a bug or an external
+  // actor could - never through pruneExpired(), so no anchor was ever recorded
+  // for what remains.
+  await rm(join(directory, rotated[0]));
+
+  const reopened = new BrowserAuditStore(root, { maxBytes: 1_024, now: () => now });
+  const verification = await reopened.verify();
+  assert.equal(verification.valid, false, "verification must not accept the truncated chain as a fresh genesis");
+});
+
 test("BrowserAuditStore propagates storage failures instead of pretending to audit", async (t) => {
   const root = await fixture(t, "canvastty-audit-failure-");
   await writeFile(join(root, "browser"), "directory blocker");
@@ -234,6 +260,86 @@ test("the audit hash does not depend on the system locale", async (t) => {
   assert.equal(other.records, 1);
   assert.equal(runInLocale("en_US.UTF-8", root, "append").records, 2);
   assert.equal(runInLocale("sv_SE.UTF-8", root, "verify").valid, true);
+});
+
+test("BrowserAuditStore enforces an aggregate quota across retained segments, oldest first, keeping the chain anchor consistent", async (t) => {
+  const root = await fixture(t, "canvastty-audit-aggregate-");
+  let now = 1_700_000_000_000;
+  // Each record is ~1.2 KB; maxBytes=1024 rotates roughly every record, maxTotalBytes=3000 should
+  // keep only the last couple of rotated segments plus the active file once enough accumulate.
+  // (Quota, like the existing per-file maxBytes rotation, is enforced going into the next write -
+  // not by reaching back into the file currently being appended to - so the resting total can
+  // run at most one record over quota until the next append or reopen re-checks it.)
+  const store = new BrowserAuditStore(root, { maxBytes: 1_024, maxTotalBytes: 3_000, now: () => now });
+  const records = [];
+  for (let index = 0; index < 30; index += 1) {
+    now += 1_000;
+    records.push(await store.append(auditInput(`aggregate-${index}`, {
+      timestamp: now,
+      details: { note: `${index}-${"x".repeat(700)}` }
+    })));
+  }
+
+  const directory = dirname(store.filePath);
+  const sizeOf = async (names) => {
+    let total = 0;
+    for (const name of names) total += (await stat(join(directory, name))).size;
+    return total;
+  };
+  const oneRecordBytes = (await stat(store.filePath)).size;
+  const totalBytesAfterAppends = await sizeOf(await auditFiles(store));
+  assert.ok(
+    totalBytesAfterAppends <= 3_000 + oneRecordBytes,
+    `aggregate retained size ${totalBytesAfterAppends} must stay bounded near the quota across 30 appends, not grow with every rotation`
+  );
+
+  const verification = await store.verify();
+  assert.equal(verification.valid, true);
+  assert.equal(verification.records < records.length, true, "older records must actually have been dropped, not merely closed over");
+
+  // Reopening re-checks the quota (the same lag as the existing per-file rotation check) and must
+  // land at or under it, while the chain it trusts stays valid and keeps extending forward.
+  const reopened = new BrowserAuditStore(root, { maxBytes: 1_024, maxTotalBytes: 3_000, now: () => now });
+  const reopenedVerification = await reopened.verify();
+  assert.equal(reopenedVerification.valid, true);
+  assert.equal(reopenedVerification.lastHash, records.at(-1).hash);
+  const totalBytesAfterReopen = await sizeOf(await auditFiles(reopened));
+  assert.ok(totalBytesAfterReopen <= 3_000, `reopening must enforce the quota exactly: got ${totalBytesAfterReopen}`);
+
+  const appended = await reopened.append(auditInput("aggregate-after-reopen", { timestamp: now + 1 }));
+  assert.equal(appended.sequence, records.length + 1);
+  assert.equal(appended.previousHash, records.at(-1).hash);
+  assert.equal((await reopened.verify()).valid, true);
+});
+
+test("BrowserAuditStore never deletes the active file to satisfy the aggregate quota", async (t) => {
+  const root = await fixture(t, "canvastty-audit-aggregate-active-");
+  const store = new BrowserAuditStore(root, { maxBytes: 1_024, maxTotalBytes: 1, now: () => 1_700_000_000_000 });
+  const record = await store.append(auditInput("solo"));
+  assert.deepEqual(await store.verify(), { valid: true, records: 1, lastHash: record.hash });
+  const directory = dirname(store.filePath);
+  assert.ok((await readdir(directory)).includes("browser-audit.jsonl"));
+});
+
+test("BrowserAuditStore.verify and reopening a store both stay correct over a large multi-segment log", async (t) => {
+  const root = await fixture(t, "canvastty-audit-stream-");
+  const store = new BrowserAuditStore(root, { maxBytes: 8 * 1024 });
+  const records = [];
+  for (let index = 0; index < 400; index += 1) {
+    records.push(await store.append(auditInput(`stream-${index}`, { details: { note: "y".repeat(2_000) } })));
+  }
+  const rotatedCount = (await auditFiles(store)).filter((name) => name.startsWith("browser-audit-")).length;
+  assert.ok(rotatedCount >= 2, "the fixture must actually span several rotated segments");
+
+  const verification = await store.verify();
+  assert.deepEqual(verification, { valid: true, records: 400, lastHash: records.at(-1).hash });
+
+  // A freshly opened store re-derives the same sequence/hash state from disk (this is exactly
+  // the read path `initialize()` streams instead of loading every segment into memory at once).
+  const reopened = new BrowserAuditStore(root, { maxBytes: 8 * 1024 });
+  const next = await reopened.append(auditInput("stream-400"));
+  assert.equal(next.sequence, 401);
+  assert.equal(next.previousHash, records.at(-1).hash);
 });
 
 test("records hashed with the earlier locale-ordered keys still verify and extend the chain", async (t) => {

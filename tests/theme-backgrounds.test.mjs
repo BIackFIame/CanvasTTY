@@ -6,30 +6,28 @@ import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../src/shared/contracts.ts";
 
 const BUNDLED_THEMES = ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"];
 
-test("verify bundled theme background PNGs exist and have correct signature and dimensions", () => {
+/** Width and height from an AVIF file's `ispe` (image spatial extents) property. */
+function avifDimensions(buf) {
+  const at = buf.indexOf("ispe", 0, "ascii");
+  assert.ok(at > 0, "AVIF must carry an ispe property");
+  return { width: buf.readUInt32BE(at + 8), height: buf.readUInt32BE(at + 12) };
+}
+
+test("verify bundled theme backgrounds exist as 1536x1024 AVIF", () => {
   const backgroundsDir = path.resolve("src/renderer/src/assets/theme-backgrounds");
 
   for (const theme of BUNDLED_THEMES) {
-    const filePath = path.join(backgroundsDir, `${theme}.png`);
-    assert.ok(fs.existsSync(filePath), `${theme}.png should exist in repo`);
+    const filePath = path.join(backgroundsDir, `${theme}.avif`);
+    assert.ok(fs.existsSync(filePath), `${theme}.avif should exist in repo`);
+    assert.equal(fs.existsSync(path.join(backgroundsDir, `${theme}.png`)), false, `${theme}.png should not ship next to the AVIF`);
 
     const buf = fs.readFileSync(filePath);
-    assert.ok(buf.length > 24, `${theme}.png should have valid size`);
-
-    // Verify 8-byte PNG signature: 89 50 4E 47 0D 0A 1A 0A
-    const expectedSignature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-    for (let i = 0; i < expectedSignature.length; i++) {
-      assert.equal(buf[i], expectedSignature[i], `Byte ${i} of ${theme}.png should match PNG signature`);
-    }
-
-    // Verify IHDR chunk header (bytes 12-15: "IHDR")
-    assert.equal(buf.toString("ascii", 12, 16), "IHDR", `${theme}.png must contain IHDR chunk`);
-
-    // Verify dimensions 1536x1024 from IHDR chunk (width at offset 16, height at offset 20, 32-bit big-endian)
-    const width = buf.readUInt32BE(16);
-    const height = buf.readUInt32BE(20);
-    assert.equal(width, 1536, `${theme}.png width should be 1536 (got ${width})`);
-    assert.equal(height, 1024, `${theme}.png height should be 1024 (got ${height})`);
+    // ISO-BMFF: size, "ftyp", major brand "avif"
+    assert.equal(buf.toString("ascii", 4, 12), "ftypavif", `${theme}.avif must be an AVIF file`);
+    const { width, height } = avifDimensions(buf);
+    assert.equal(width, 1536, `${theme}.avif width should be 1536 (got ${width})`);
+    assert.equal(height, 1024, `${theme}.avif height should be 1024 (got ${height})`);
+    assert.ok(buf.length < 1_000_000, `${theme}.avif should stay small (${buf.length} bytes)`);
   }
 });
 
@@ -45,8 +43,8 @@ test("verify appSkins.css defines rules for all bundled themes", () => {
     );
     assert.match(
       css,
-      new RegExp(`url\\(["']?\\.\\./assets/theme-backgrounds/${theme}\\.png["']?\\)`),
-      `appSkins.css should reference ../assets/theme-backgrounds/${theme}.png`
+      new RegExp(`url\\(["']?\\.\\./assets/theme-backgrounds/${theme}\\.avif["']?\\)`),
+      `appSkins.css should reference ../assets/theme-backgrounds/${theme}.avif`
     );
   }
 

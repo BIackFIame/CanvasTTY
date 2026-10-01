@@ -49,6 +49,9 @@ jobs:
         run: npm run typecheck
       - name: Build production bundles
         run: npm run build
+      - name: Verify hidden terminal rendering and state restoration
+        timeout-minutes: 2
+        run: xvfb-run -a npm run smoke:terminal-hidden
       - name: Smoke-test the real Chromium browser core
         timeout-minutes: 2
         run: xvfb-run -a npm run smoke:browser
@@ -111,3 +114,9 @@ jobs:
         run: npm run package:mac
       - name: Smoke-test packaged macOS CLI resolution
         run: npm run smoke:cli-resolution:mac
+      - name: Verify hidden terminal rendering and state restoration on macOS
+        timeout-minutes: 2
+        run: npm run smoke:terminal-hidden
+      - name: Smoke-test browser input on macOS
+        timeout-minutes: 2
+        run: npm run smoke:browser

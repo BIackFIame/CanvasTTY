@@ -29,3 +29,19 @@ export function paginate<T>(items: readonly T[], page: number, pageSize: number)
   const start = safePage * pageSize;
   return items.slice(start, start + pageSize);
 }
+
+/**
+ * URLs of the items on one page that are not already in `resolvedKeys`. Used to fetch showcase/search
+ * manifests and icons only for what a page actually shows, instead of the full unpaginated result set:
+ * a page that was already fetched (or is off-screen) costs nothing on a page change or a re-render.
+ */
+export function unresolvedPageUrls<T extends { url: string; fullName: string }>(
+  items: readonly T[],
+  page: number,
+  pageSize: number,
+  resolvedKeys: ReadonlySet<string>
+): string[] {
+  return paginate(items, page, pageSize)
+    .filter((item) => !resolvedKeys.has(item.fullName))
+    .map((item) => item.url);
+}

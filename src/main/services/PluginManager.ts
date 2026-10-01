@@ -45,6 +45,7 @@ import {
   PLUGIN_API_VERSION
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
+import { PLUGIN_VISIBILITY_BRIDGE_SOURCE } from "../../shared/pluginVisibility.ts";
 import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
 import type { LaunchContributor } from "./LaunchPipeline.ts";
 import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
@@ -61,6 +62,10 @@ const METADATA_DIR = "metadata";
 const PLATFORM_ID = "canvastty";
 /** Manifest candidates: metadata/ first, then the legacy root. */
 const MANIFEST_CANDIDATES = [`${METADATA_DIR}/${MANIFEST_FILE}`, MANIFEST_FILE];
+/** How long a showcase manifest preview is reused (the listing and its visible page ask for the same ones). */
+const MANIFEST_PREVIEW_TTL_MS = 5 * 60_000;
+/** The showcase lists at most 1000 repositories. */
+const MANIFEST_PREVIEW_CACHE_LIMIT = 1_024;
 /** Icon candidates: metadata/ first, then the legacy root. */
 const ICON_CANDIDATES = [
   `${METADATA_DIR}/icon.png`,
@@ -78,6 +83,13 @@ const VERSIONS_FILE = "plugin-versions.json";
 const SEARCH_MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 15_000;
 const PREVIEW_TTL_MS = 10 * 60_000;
+/**
+ * Aggregate cap on install previews held at once. Each preview downloads a repository into its own
+ * staging directory and is only swept lazily (on the next previewInstall/install call) once its TTL
+ * passes; without a cap, previewing many plugins inside one TTL window (e.g. paging through the
+ * showcase) accumulates one staging directory per preview until the oldest ones happen to expire.
+ */
+const MAX_PENDING_PREVIEWS = 20;
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_RETRY_DELAY_MS = 1_500;
@@ -186,6 +198,7 @@ type DownloadModuleFiles = (
 ) => Promise<void>;
 
 export class PluginManager {
+  private readonly manifestPreviewCache = new Map<string, { at: number; manifest: PluginManifest }>();
   private readonly pluginRoot: string;
   private readonly stagingRoot: string;
   private readonly storageRoot: string;
@@ -355,6 +368,7 @@ export class PluginManager {
         manifest,
         expiresAt: Date.now() + PREVIEW_TTL_MS
       };
+      await this.enforcePendingPreviewCap();
       this.pending.set(token, { directory, packageRoot, preview });
       return structuredClone(preview);
     } catch (error) {
@@ -867,9 +881,20 @@ export class PluginManager {
     const manifests = new Map<string, PluginManifest>();
     if (unique.length === 0) return manifests;
 
+    // The showcase listing already fetched every manifest to filter by platform; the page the renderer then
+    // shows asks for the same ones. Found manifests are reused for a few minutes instead of downloaded again.
+    const now = Date.now();
+    const toFetch: string[] = [];
+    for (const sourceUrl of unique) {
+      const cached = this.manifestPreviewCache.get(sourceUrl);
+      if (cached && now - cached.at < MANIFEST_PREVIEW_TTL_MS) manifests.set(sourceUrl, cached.manifest);
+      else toFetch.push(sourceUrl);
+    }
+    if (toFetch.length === 0) return manifests;
+
     // Metadata-first: metadata/canvastty.plugin.json, then legacy root file.
     const parsed = new Map<string, { owner: string; repository: string }>();
-    for (const sourceUrl of unique) {
+    for (const sourceUrl of toFetch) {
       try {
         const source = new URL(sourceUrl);
         const parts = source.pathname.split("/").filter(Boolean);
@@ -892,13 +917,23 @@ export class PluginManager {
       for (const [key, result] of results) {
         if (!result.ok || result.text === undefined) continue;
         try {
-          manifests.set(key, validatePluginManifest(JSON.parse(result.text) as unknown));
+          const manifest = validatePluginManifest(JSON.parse(result.text) as unknown);
+          manifests.set(key, manifest);
+          this.rememberManifestPreview(key, manifest, now);
         } catch {
           // Malformed manifest — skipped; tile falls back to a live preview.
         }
       }
     }
     return manifests;
+  }
+
+  private rememberManifestPreview(sourceUrl: string, manifest: PluginManifest, at: number): void {
+    this.manifestPreviewCache.delete(sourceUrl);
+    if (this.manifestPreviewCache.size >= MANIFEST_PREVIEW_CACHE_LIMIT) {
+      this.manifestPreviewCache.delete(this.manifestPreviewCache.keys().next().value!);
+    }
+    this.manifestPreviewCache.set(sourceUrl, { at, manifest });
   }
 
   async checkForUpdates(): Promise<PluginUpdateStatus[]> {
@@ -1257,6 +1292,23 @@ export class PluginManager {
       this.pending.delete(token);
       void rm(pending.directory, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Keeps at most MAX_PENDING_PREVIEWS - 1 previews before a new one is added, evicting the oldest
+   * (insertion order) first so the map and its staging directories never grow past the cap even when
+   * every preview is still within its TTL.
+   */
+  private async enforcePendingPreviewCap(): Promise<void> {
+    const evicted: Promise<void>[] = [];
+    while (this.pending.size >= MAX_PENDING_PREVIEWS) {
+      const oldest = this.pending.keys().next();
+      if (oldest.done) break;
+      const pending = this.pending.get(oldest.value);
+      this.pending.delete(oldest.value);
+      if (pending) evicted.push(rm(pending.directory, { recursive: true, force: true }));
+    }
+    if (evicted.length > 0) await Promise.all(evicted);
   }
 
   private persistRegistry(): Promise<void> {
@@ -3280,6 +3332,12 @@ const PLUGIN_SDK_SOURCE = `(() => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    visibility: () => (document.visibilityState === "hidden" ? "hidden" : "visible"),
+    onVisibilityChange: (listener) => {
+      const notify = () => listener(document.visibilityState === "hidden" ? "hidden" : "visible");
+      document.addEventListener("visibilitychange", notify);
+      return () => document.removeEventListener("visibilitychange", notify);
+    },
     onStorageChange: (listener) => {
       storageListeners.add(listener);
       return () => storageListeners.delete(listener);
@@ -3290,6 +3348,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
 
 const PLUGIN_INPUT_BRIDGE_SOURCE = `(() => {
   if (parent === window) return;
+${PLUGIN_VISIBILITY_BRIDGE_SOURCE}
   let captureWheel = false;
   addEventListener("message", (event) => {
     const message = event.data;

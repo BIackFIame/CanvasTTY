@@ -56,3 +56,28 @@ export function pinnedTerminalInput(buffer: TerminalBufferLike): PinnedTerminalI
     cursorColumn: buffer.cursorX
   };
 }
+
+/** Coalesce parser events into one visible DOM refresh; hidden output still advances xterm's buffer. */
+export function createPinnedInputRefresh(options: {
+  isLive(): boolean;
+  refresh(): void;
+  requestFrame(callback: () => void): number;
+  cancelFrame(frame: number): void;
+}): { schedule(): void; dispose(): void } {
+  let frame: number | null = null;
+  let disposed = false;
+  return {
+    schedule() {
+      if (disposed || frame !== null || !options.isLive()) return;
+      frame = options.requestFrame(() => {
+        frame = null;
+        if (!disposed && options.isLive()) options.refresh();
+      });
+    },
+    dispose() {
+      disposed = true;
+      if (frame !== null) options.cancelFrame(frame);
+      frame = null;
+    }
+  };
+}

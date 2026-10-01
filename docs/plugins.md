@@ -495,6 +495,20 @@ Scanned audio extensions are `.aac`, `.flac`, `.m4a`, `.mp3`, `.oga`, `.ogg`, `.
 
 Recommended startup flow: call `listLibraries()`, ask for a folder with `pickLibrary()` only when none is granted, scan the chosen library, restore queue/preferences from `storage`, then list and parse playlists. Treat revoked or moved folders as an explicit unavailable state and let the user choose them again.
 
+### Visibility
+
+A canvas app keeps running while its card is not drawn: zoomed out to a summary, hidden while HOME is being edited, panned off-screen, or with the window minimized. The host does not reload the frame; it suspends it the way a browser suspends a background tab. While suspended, `document.visibilityState` is `"hidden"` (and `visibilitychange` fires on each change), timers (`setTimeout`, `setInterval`) wake at most once a second, and `requestAnimationFrame` callbacks wait until the card is shown again. DOM, JavaScript state, network requests, audio and workers are untouched.
+
+```js
+host.onVisibilityChange((state) => {
+  if (state === "hidden") pausePolling();
+  else resumePolling();
+});
+const current = host.visibility(); // "visible" | "hidden"
+```
+
+Plain `document.addEventListener("visibilitychange", …)` works too, without the SDK. The host message behind it is `{ source: "canvastty-host", type: "visibility", state: "visible" | "hidden" }`; plugins do not need to handle it themselves.
+
 Context updates include the active CanvasTTY locale and palette. Plugins own their internal localization and styling; they should remain legible at the contribution's intended size and should not invent loading progress, sessions, status, limits, or telemetry.
 
 ## Install and manage

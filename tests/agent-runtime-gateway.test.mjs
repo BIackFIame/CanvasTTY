@@ -117,6 +117,26 @@ test("RuntimeGateway rejects a wrong capability and ignores a stale turn complet
   assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
 });
 
+test("RuntimeGateway: a late revoke carrying an older launch's capability leaves the newer lease alone", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const older = gateway.registerSession("terminal-reused", "codex");
+  const newer = gateway.registerSession("terminal-reused", "codex");
+
+  // The older launch's cleanup runs late, after the card was relaunched under the same id.
+  gateway.revokeTerminalSession("terminal-reused", older.capabilityToken);
+  await send(newer.address, message(newer, "working", "UserPromptSubmit", "turn-after-late-cleanup"));
+  assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
+
+  // Its own capability still revokes it.
+  gateway.revokeTerminalSession("terminal-reused", newer.capabilityToken);
+  await send(newer.address, message(newer, "idle", "Stop", "turn-after-late-cleanup"));
+  assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
+});
+
 test("RuntimeGateway: a late start of an earlier turn does not take over from the newer turn", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];

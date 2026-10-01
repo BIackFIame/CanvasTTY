@@ -471,6 +471,10 @@ if (library) {
 
 Context сообщает текущие locale и palette CanvasTTY. Локализация и внутренние стили — ответственность плагина. Плагин не должен выдумывать progress, sessions, status, limits или telemetry.
 
+### Видимость
+
+Canvas-приложение продолжает жить, пока его карточка не отрисована: свёрнута в сводку при отдалении, скрыта на время редактирования HOME, уведена за край экрана или окно свёрнуто. Хост не перезагружает frame, а приостанавливает его так же, как браузер фоновую вкладку: `document.visibilityState` равен `"hidden"` (при каждой смене приходит `visibilitychange`), таймеры (`setTimeout`, `setInterval`) срабатывают не чаще раза в секунду, а колбэки `requestAnimationFrame` ждут, пока карточку снова покажут. DOM, состояние JavaScript, сетевые запросы, звук и workers не затрагиваются. Подписка: `host.onVisibilityChange((state) => …)`, текущее значение: `host.visibility()`; без SDK подходит обычный `visibilitychange`. Сообщение хоста: `{ source: "canvastty-host", type: "visibility", state: "visible" | "hidden" }`.
+
 ## Установка и управление
 
 1. Опубликуйте готовый статический пакет в корне публичного GitHub-репозитория.

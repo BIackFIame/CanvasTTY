@@ -4,6 +4,7 @@ import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { lazyRequire } from "../../lazyRequire.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
@@ -30,6 +31,8 @@ const MAX_RECEIPTS = 4096;
 // request id must be performed again instead of replaying the refusal.
 const RETRYABLE_REFUSALS = new Set(["BUSY", "NOT_READY", "LIMIT_REACHED", "LIFECYCLE_DISABLED", "CLOSED"]);
 const MAX_SESSIONS = 32;
+/** How long close() waits for a session's queued headless-terminal writes before disposing it anyway. */
+const CLOSE_DRAIN_TIMEOUT_MS = 2_000;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 /** A pipe host that keeps failing is tried again at most this far apart, never given up on. */
 const TRANSPORT_RESTART_MAX_DELAY_MS = 60_000;
@@ -329,6 +332,9 @@ export class AgentControlGateway {
   }
 
   observe(channel: string, payload: unknown): void {
+    // Once closing, PTY output must not keep extending a session's `ready` chain: close() awaits a
+    // fixed snapshot of it, and an observation accepted afterwards would grow the chain forever.
+    if (this.closed) return;
     if (channel === IPC.terminalRemoved) {
       const id = (payload as { id: string }).id;
       this.revokeSession(id);
@@ -376,7 +382,11 @@ export class AgentControlGateway {
     clearTimeout(this.restartTimer);
     this.restartTimer = undefined;
     for (const socket of this.sockets) socket.destroy();
-    for (const owned of this.sessions.values()) { await owned.ready; owned.terminal.dispose(); }
+    // Fixed snapshot: `observe` refuses new writes once `closed` is set above, so this is every
+    // session's whole pending output as of now, not a chain that PTY output could keep growing.
+    const owned = [...this.sessions.values()];
+    await Promise.all(owned.map((session) => Promise.race([session.ready, delay(CLOSE_DRAIN_TIMEOUT_MS)]).catch(() => undefined)));
+    for (const session of owned) session.terminal.dispose();
     this.sessions.clear();
     for (const grant of this.grants.values()) rmSync(grant.folder, { recursive: true, force: true });
     this.grants.clear();

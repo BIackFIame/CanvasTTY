@@ -62,6 +62,14 @@ export interface PluginServiceSupervisorOptions {
   restartWindowMs?: number;
   maxFrameBytes?: number;
   /**
+   * Cap on bytes handed to a service's stdin that have not yet been accepted by the OS pipe. `write()`
+   * (node's Writable) queues without bound when a service does not read its stdin as fast as the host
+   * writes to it; a slow or stuck service otherwise lets buffered bytes grow forever even though
+   * MAX_PENDING_REQUESTS bounds only the number of *logical* in-flight requests, not their bytes, and a
+   * request timeout frees its logical slot without retracting the bytes already queued for it.
+   */
+  maxQueuedBytes?: number;
+  /**
    * Services start only after hostReady(): the host APIs they may call on initialize (sessions, cards, secrets)
    * must exist first. Without it services start at once.
    */
@@ -80,6 +88,8 @@ const DEFAULT_RESTART_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000];
 const DEFAULT_MAX_RESTARTS = 5;
 const DEFAULT_RESTART_WINDOW_MS = 10 * 60_000;
 const PLUGIN_SERVICE_MAX_FRAME_BYTES = 1024 * 1024;
+/** Default stdin queue cap: enough for a handful of max-size frames, bounded regardless of how slow the service reads. */
+const DEFAULT_MAX_QUEUED_BYTES = 4 * PLUGIN_SERVICE_MAX_FRAME_BYTES;
 const MAX_PENDING_REQUESTS = 64;
 const MAX_LOG_ENTRIES = 300;
 const MAX_LOG_MESSAGE = 2_000;
@@ -175,6 +185,8 @@ interface ServiceRecord {
   removed: boolean;
   exited: Promise<void> | null;
   lastError?: string;
+  /** Bytes handed to stdin.write() that have not yet drained (accepted by the OS pipe). */
+  queuedBytes: number;
 }
 
 /**
@@ -202,6 +214,7 @@ export class PluginServiceSupervisor {
       maxRestarts: DEFAULT_MAX_RESTARTS,
       restartWindowMs: DEFAULT_RESTART_WINDOW_MS,
       maxFrameBytes: PLUGIN_SERVICE_MAX_FRAME_BYTES,
+      maxQueuedBytes: DEFAULT_MAX_QUEUED_BYTES,
       waitForHost: false,
       ...options
     };
@@ -230,7 +243,8 @@ export class PluginServiceSupervisor {
           restarts: 0,
           restartTimer: null,
           removed: false,
-          exited: null
+          exited: null,
+          queuedBytes: 0
         };
         this.services.set(key, record);
         await this.start(record);
@@ -288,6 +302,11 @@ export class PluginServiceSupervisor {
     }
     if (Buffer.byteLength(frame, "utf8") >= this.options.maxFrameBytes) {
       return Promise.reject(new Error("Plugin service request exceeds the 1 MB message limit."));
+    }
+    // Same backpressure check `write()` makes, done up front so a request that cannot be queued
+    // right now is rejected as "busy" rather than silently added to `pending` and only timing out.
+    if (record.queuedBytes + Buffer.byteLength(frame, "utf8") + 1 > this.options.maxQueuedBytes) {
+      return Promise.reject(new Error("Plugin service is busy."));
     }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -492,10 +511,22 @@ export class PluginServiceSupervisor {
     await settlesWithin(exited, this.options.stopGraceMs);
   }
 
+  /**
+   * Writes one frame to the service's stdin, honoring backpressure: bytes already queued (written but
+   * not yet drained by the OS pipe) count against maxQueuedBytes, and a write that would exceed the cap
+   * is refused instead of piling up in node's unbounded internal write queue. A stuck or slow-reading
+   * service therefore bounds memory growth instead of accepting requests indefinitely; the caller sees
+   * false exactly as it would for a dead stdin, and rejects or drops the message accordingly.
+   */
   private write(record: ServiceRecord, frame: string): boolean {
     const stdin = record.child?.stdin;
     if (!stdin || stdin.destroyed || !stdin.writable) return false;
-    stdin.write(`${frame}\n`);
+    const bytes = Buffer.byteLength(frame, "utf8") + 1; // +1 for the newline
+    if (record.queuedBytes + bytes > this.options.maxQueuedBytes) return false;
+    record.queuedBytes += bytes;
+    stdin.write(`${frame}\n`, () => {
+      record.queuedBytes = Math.max(0, record.queuedBytes - bytes);
+    });
     return true;
   }
 

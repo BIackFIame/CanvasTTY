@@ -11,8 +11,8 @@ import {
 } from "../src/main/services/PixelSkinPackRegistry.ts";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { DEFAULT_PIXEL_SKIN_APERTURES } from "../src/shared/contracts.ts";
+import { testPng } from "./helpers/png.mjs";
 
-const imagePath = new URL("../src/renderer/src/features/skins/assets/pilots/sakura_l1_idle.png", import.meta.url);
 
 function zipFixture(entries) {
   const local = [];
@@ -68,7 +68,7 @@ async function fixture(t) {
 
 test("a ten-PNG pixel pack installs, persists and is readable by slot", async (t) => {
   const { root, registry } = await fixture(t);
-  const png = await readFile(imagePath);
+  const png = testPng();
   const files = Object.fromEntries(PIXEL_SKIN_SLOTS.map((slot) => [slot, png]));
   let changes = 0;
   registry.onChanged(() => { changes += 1; });
@@ -86,7 +86,7 @@ test("a ten-PNG pixel pack installs, persists and is readable by slot", async (t
 
 test("each detail level keeps its own terminal opening and legacy packs still load", async (t) => {
   const { root, registry } = await fixture(t);
-  const png = await readFile(imagePath);
+  const png = testPng();
   const files = Object.fromEntries(PIXEL_SKIN_SLOTS.map((slot) => [slot, png]));
   const apertures = {
     minimal: { left: 5, right: 5, top: 10, bottom: 8 },
@@ -115,7 +115,7 @@ test("each detail level keeps its own terminal opening and legacy packs still lo
 
 test("pack import rejects missing slots and corrupt PNG data before writing", async (t) => {
   const { registry } = await fixture(t);
-  const png = await readFile(imagePath);
+  const png = testPng();
   const files = Object.fromEntries(PIXEL_SKIN_SLOTS.map((slot) => [slot, png]));
   delete files.master_completed;
   await assert.rejects(registry.install({ name: "Incomplete", files }), /exactly nine/);
@@ -132,7 +132,7 @@ test("pack import rejects missing slots and corrupt PNG data before writing", as
 
 test("one ZIP installs all ten named images and rejects missing or duplicate roles", async (t) => {
   const { registry } = await fixture(t);
-  const png = await readFile(imagePath);
+  const png = testPng();
   const entries = PIXEL_SKIN_SLOTS.map((slot) => [`My Theme/${slot}.png`, png]);
   const installed = await registry.installZip(zipFixture(entries), "ZIP Sakura");
   assert.equal(installed.name, "ZIP Sakura");
@@ -143,14 +143,9 @@ test("one ZIP installs all ten named images and rejects missing or duplicate rol
   assert.equal(registry.list().length, 1);
 });
 
-test("the shipped Cat theme can be imported as a real ten-image pack", async (t) => {
+test("a ten-image pack with distinct frames per state installs and restores as the active skin", async (t) => {
   const { root, registry } = await fixture(t);
-  const files = Object.fromEntries(await Promise.all(PIXEL_SKIN_SLOTS.map(async (slot) => {
-    const path = slot === "background"
-      ? new URL("../src/renderer/src/assets/theme-backgrounds/cat.png", import.meta.url)
-      : new URL(`../src/renderer/src/features/skins/assets/pilots/cat_${slot}.png`, import.meta.url);
-    return [slot, await readFile(path)];
-  })));
+  const files = Object.fromEntries(PIXEL_SKIN_SLOTS.map((slot, index) => [slot, testPng({ seed: index + 1 })]));
   const pack = await registry.install({ name: "Cat", files });
   assert.equal(registry.list()[0].id, pack.id);
   assert.notDeepEqual(await registry.readAsset(pack.id, "master_idle"), await registry.readAsset(pack.id, "master_working"));

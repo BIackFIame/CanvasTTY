@@ -6,10 +6,12 @@ import type {
   PluginServiceState
 } from "../../../../shared/contracts";
 import { t, type TranslationKey } from "../../lib/i18n";
+import { pollWhileOpen } from "./settingsPolling";
 
 interface PluginServicesSettingsProps {
   locale: LocaleId;
   plugins: InstalledPlugin[];
+  open?: boolean;
   onSetNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
 }
@@ -22,6 +24,7 @@ interface PluginServicesSettingsProps {
 export function PluginServicesSettings({
   locale,
   plugins,
+  open = true,
   onSetNativeCodeTrusted,
   onSetDecisionsMayAllow
 }: PluginServicesSettingsProps): React.JSX.Element | null {
@@ -34,20 +37,18 @@ export function PluginServicesSettings({
 
   useEffect(() => {
     let cancelled = false;
-    const refresh = async (): Promise<void> => {
+    const stop = pollWhileOpen(open, 3_000, async () => {
       const entries = await Promise.all(rows.map(async (plugin) => (
         [plugin.manifest.id, await window.canvasTTY.plugins.serviceReport(plugin.manifest.id)] as const
       )));
       if (!cancelled) setReports(Object.fromEntries(entries));
-    };
-    void refresh().catch(() => undefined);
-    const timer = window.setInterval(() => void refresh().catch(() => undefined), 3_000);
+    });
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      stop();
     };
     // Rows are derived from plugins; the key captures what changes the report.
-  }, [trustedKey]);
+  }, [trustedKey, open]);
 
   if (rows.length === 0) return null;
 

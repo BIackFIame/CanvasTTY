@@ -27,19 +27,40 @@ export function pruneToLive(cache: Map<string, unknown>, live: ReadonlySet<strin
   }
 }
 
+/** The layout snap targets are taken from: fixed targets (home, regions), every window, and each card's window. */
+export interface SnapLayout {
+  fixed: readonly SessionBounds[];
+  windows: readonly SessionBounds[];
+  byLayer: ReadonlyMap<string, SessionBounds>;
+}
+
 /**
- * Snap targets per window: the fixed targets and every other window. A list is built the first time a window asks
- * and kept while this layout lasts (a pan or zoom renders every card again without changing any of them).
+ * Per card a getter that stays the same function across renders and builds that card's snap targets (the fixed
+ * targets and every other window) only when called: once, when the card's drag or resize starts. A render, a pan
+ * or a neighbour's move builds no list and changes no card prop, so N cards cost nothing per render instead of N
+ * lists of N. `read` returns the latest layout.
  */
-export function snapTargetsOf(fixed: readonly SessionBounds[], windows: readonly SessionBounds[]): (window: SessionBounds) => SessionBounds[] {
-  const lists = new Map<SessionBounds, SessionBounds[]>();
-  return (window) => {
-    let list = lists.get(window);
-    if (!list) {
-      list = [...fixed, ...windows.filter((candidate) => candidate !== window)];
-      lists.set(window, list);
+export function snapTargetGetters(read: () => SnapLayout): {
+  forLayer(layerId: string): () => SessionBounds[];
+  prune(live: ReadonlySet<string>): void;
+} {
+  const getters = new Map<string, () => SessionBounds[]>();
+  return {
+    forLayer(layerId) {
+      let getter = getters.get(layerId);
+      if (!getter) {
+        getter = () => {
+          const { fixed, windows, byLayer } = read();
+          const self = byLayer.get(layerId);
+          return [...fixed, ...windows.filter((candidate) => candidate !== self)];
+        };
+        getters.set(layerId, getter);
+      }
+      return getter;
+    },
+    prune(live) {
+      pruneToLive(getters, live);
     }
-    return list;
   };
 }
 

@@ -15,6 +15,7 @@ import {
   type PluginCanvasWheelInput
 } from "./pluginInputBridge";
 import { createFrameReplyGate } from "./frameReplies";
+import { pluginVisibilityMessage } from "../../../../shared/pluginVisibility";
 import { isProviderId } from "../../../../shared/providerCatalog.ts";
 
 const storageListeners = new Map<string, Set<(key: string, value: unknown) => void>>();
@@ -34,6 +35,12 @@ interface PluginFrameProps {
   onHoverChange(active: boolean): void;
   onOpenLauncher(provider: ProviderId): void;
   onError(message: string): void;
+  /**
+   * Nobody can see the frame (summary, HOME editing, off-screen, minimized). The document stays loaded;
+   * the host tells it so, and the injected bridge reports `document.visibilityState === "hidden"`,
+   * fires `visibilitychange`, caps its timers at one wake-up a second and holds its animation frames.
+   */
+  suspended?: boolean;
 }
 
 interface PluginMessage {
@@ -58,7 +65,8 @@ export function PluginFrame({
   onFocus,
   onHoverChange,
   onOpenLauncher,
-  onError
+  onError,
+  suspended = false
 }: PluginFrameProps): React.JSX.Element {
   const frame = useRef<HTMLIFrameElement>(null);
   // Tells which document a finished request belongs to, so a reload never receives an earlier reply.
@@ -178,6 +186,12 @@ export function PluginFrame({
     postCanvasInputPolicy(frame.current, captureCanvasWheelOverWidgets);
   }, [captureCanvasWheelOverWidgets]);
 
+  const suspendedRef = useRef(suspended);
+  suspendedRef.current = suspended;
+  useEffect(() => {
+    postToFrame(frame.current, pluginVisibilityMessage(!suspended));
+  }, [suspended]);
+
   useEffect(() => subscribeStorage(plugin.manifest.id, (key, value) => {
     postToFrame(frame.current, { source: "canvastty-host", type: "storage-change", key, value });
   }), [plugin.manifest.id]);
@@ -200,11 +214,15 @@ export function PluginFrame({
       title={`${plugin.manifest.name}: ${contribution.title}`}
       sandbox="allow-scripts"
       referrerPolicy="no-referrer"
+      inert={suspended}
+      data-suspended={suspended ? "true" : undefined}
       onFocus={onFocus}
       onLoad={() => {
         replies.loaded();
         postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
         postCanvasInputPolicy(frame.current, captureCanvasWheelOverWidgets);
+        // A new document starts visible; tell it at once if it loaded while suspended.
+        if (suspendedRef.current) postToFrame(frame.current, pluginVisibilityMessage(false));
       }}
     />
   );

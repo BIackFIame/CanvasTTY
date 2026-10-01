@@ -289,9 +289,17 @@ async function scenario(win) {
     commits: countsBefore && countsAfter ? countsAfter.commits - countsBefore.commits : null,
     componentRendersPerEvent: countsBefore && countsAfter ? r1((countsAfter.rendered - countsBefore.rendered) / events) : null,
     terminalCardRendersPerEvent: countsBefore && countsAfter ? r1((countsAfter.terminalCards - countsBefore.terminalCards) / events) : null,
+    // The components rendered most per event (names survive only in unminified builds).
+    topRendersPerEvent: countsBefore && countsAfter ? Object.fromEntries(Object.entries(countsAfter.byName)
+      .map(([name, count]) => [name, r1((count - (countsBefore.byName[name] ?? 0)) / events)])
+      .filter(([, perEvent]) => perEvent > 0).sort((a, b) => b[1] - a[1]).slice(0, 8)) : null,
     rendererMsPerEvent: Object.fromEntries(Object.keys(timesAfter).map((key) => [key, Math.round((timesAfter[key] - timesBefore[key]) / events * 100) / 100]))
   };
   await snapshot(win, "end");
+  // Chromium keeps tiles rastered during a gesture in its resource pool for a few seconds after it ends;
+  // this snapshot shows what navigation leaves behind once the canvas is still.
+  await wait(Number(env.BENCH_SETTLED_MS || 10_000));
+  await snapshot(win, "endSettled");
   report.statusesAtEnd = await statuses();
 
   // Agent-side log: MCP handshakes and hook runs (command hooks with max RSS and CPU from /usr/bin/time -l).

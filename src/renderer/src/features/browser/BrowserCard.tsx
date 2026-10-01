@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import type {
   AgentPresenceSnapshot,
   BrowserCanvasFreezeFrameEvent,
@@ -7,7 +8,6 @@ import type {
   BrowserSnapshot,
   BrowserTabSnapshot,
   BrowserViewportSurface,
-  CameraState,
   FocusActivation,
   LocaleId,
   Point,
@@ -24,8 +24,8 @@ interface BrowserCardProps {
   browser: BrowserSnapshot;
   bounds: BrowserCanvasState;
   locale: LocaleId;
-  zoom: number;
-  camera: CameraState;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   visible: boolean;
   stackIndex: number;
   uiScale: number;
@@ -34,7 +34,8 @@ interface BrowserCardProps {
   focused: boolean;
   selected: boolean;
   showAgentPresence: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onBoundsChange(bounds: BrowserCanvasState): void;
   onActivate(): void;
   onSelect(): void;
@@ -50,6 +51,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -64,8 +67,7 @@ export function BrowserCard({
   browser,
   bounds,
   locale,
-  zoom,
-  camera,
+  camera: cameraStore,
   visible,
   stackIndex,
   uiScale,
@@ -74,7 +76,7 @@ export function BrowserCard({
   focused,
   selected,
   showAgentPresence,
-  snapTargets,
+  getSnapTargets,
   onBoundsChange,
   onActivate,
   onSelect,
@@ -96,8 +98,11 @@ export function BrowserCard({
   const [panel, setPanel] = useState<BrowserPanel>(null);
   const [dialogPrompt, setDialogPrompt] = useState("");
   const [freezeFrame, setFreezeFrame] = useState<BrowserCanvasFreezeFrameEvent | null>(null);
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  // The native page view follows the card on screen, so this card renders on every camera move.
+  const camera = useCameraSelector(cameraStore, (current) => current);
+  const zoom = camera.zoom;
+  const summaryScale = summaryScaleForZoom(zoom);
+  const summaryMode = summaryScale > 1;
   const activeAgents = useMemo(
     () => mergeAgents(activeTab?.agents ?? [], browser.agents.filter((agent) => agent.currentTabId === activeTab?.id)),
     [activeTab?.agents, activeTab?.id, browser.agents]
@@ -238,7 +243,8 @@ export function BrowserCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -248,11 +254,11 @@ export function BrowserCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / cameraStore.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / cameraStore.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -281,7 +287,8 @@ export function BrowserCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -292,8 +299,8 @@ export function BrowserCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / cameraStore.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / cameraStore.get().zoom;
     const raw: SessionBounds = {
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),
@@ -309,7 +316,7 @@ export function BrowserCard({
       }
     };
     const constrained = constrainBrowserResize(raw, state.direction);
-    applyBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {

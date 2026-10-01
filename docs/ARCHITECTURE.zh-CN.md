@@ -80,6 +80,8 @@ App
 
 `SessionMetadata` 同时拥有 world-space position 与卡片尺寸。`App` 协调 bounds；`TerminalCard` 可以在 pointer-up 前暂存 pointer-move geometry。主进程在发送 session snapshot 前校验并限制已提交尺寸。Camera wheel 只处理空白 canvas；交互界面保留自己的 native scroll/input ownership。
 
+Camera 不是 React state。`App` 持有 `cameraStore`（`features/workspace/cameraStore.ts`）；`WorkspaceCanvas` 在 store 的 listener 中同步写入场景 transform，早于任何测量场景的组件渲染。只有小地图和 `BrowserCard` 订阅每次移动；卡片订阅派生值（`useCameraSelector`：摘要缩放、WebGL 资格），拖拽处理函数在移动时读取 `camera.get().zoom`，因此平移或缩放不会渲染卡片。
+
 一个实时 `TerminalCard` 在对应 session ID 的整个生命周期内拥有同一个 xterm instance。切换 palette 时就地更新 `terminal.options.theme`；title/settings 变化不得销毁 terminal 或 renderer scrollback。窗口标题通过 `terminal:rename` 作为 session metadata 更新。与进程退出竞态的 PTY input/resize event 在主进程边界内处理，不会形成未捕获 Electron error。
 
 输出 batching 是 IPC/rendering 边界，而不是历史边界：每个 PTY chunk 都立即追加到有界 scrollback；待发送的 renderer 输出在 16ms timer、exit 前和 dispose 前 flush。所有会话共用一个 timer：同一次 flush 的 renderer 输出由 `TerminalRendererOutbox` 作为一条 `terminal:data-batch` 消息发送（session/removed 事件会先 flush 之前收集的输出，保持顺序）；preload 只把事件交给对应会话的卡片（`TerminalDataRouter`）。Scrollback trimming 通过推进 chunk 完成，不会每次写入都重建整个 buffer；snapshot 只 join 保留的后缀。

@@ -84,6 +84,9 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
+/** Spawns and stays alive, but never reads stdin: every byte the host writes stays queued. */
+const DEAF_PROBE = `setInterval(() => {}, 60_000);\n`;
+
 test("manifest apiVersion 2 declares services; v1 manifests stay valid and cannot declare them", () => {
   const validated = validatePluginManifest(exampleManifest);
   assert.equal(validated.apiVersion, 2);
@@ -327,6 +330,38 @@ test("message sizes are bounded in both directions", async (t) => {
   assert.equal(await instance.request("com.example.a", "probe", "big", { bytes: 20_000 }), "after");
   assert.ok(instance.report("com.example.a").log.some((entry) => /larger than 1 MB/.test(entry.message)));
   assert.equal(await instance.request("com.example.a", "probe", "ping", null), "pong");
+});
+
+test("stdin backpressure is capped in bytes, not just in pending request count", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-service-backpressure-"));
+  // A tiny queue cap (two ~2 KB frames) that a service which never reads stdin fills almost at once.
+  // requestTimeoutMs is left long (and irrelevant to what we assert) so a slow CI box never turns a
+  // request that *did* get queued into a spurious timeout rejection during this test.
+  const { instance } = supervisor({ maxQueuedBytes: 4_096, requestTimeoutMs: 60_000 });
+  t.after(async () => { await instance.dispose(); await rm(root, { recursive: true, force: true }); });
+  await instance.sync([await specFor(root, "com.example.a", "probe", DEAF_PROBE)]);
+
+  const payload = { text: "x".repeat(2_000) };
+  let rejectedForBackpressure = 0;
+  // Far more requests than the byte cap could ever hold queued at once (the service never reads any of
+  // them, so every request that IS queued stays pending forever). The busy check is synchronous
+  // (thrown before any pending entry or timer is created), so the count below is fixed as soon as this
+  // loop returns; we only need a microtask turn for the already-settled rejections to run their handler.
+  for (let i = 0; i < 40; i += 1) {
+    // Requests that got queued never settle from the deaf service; they are only ever rejected later,
+    // by t.after's dispose() tearing the service down ("Plugin service stopped."), which this ignores.
+    instance.request("com.example.a", "probe", "ping", payload).catch((error) => {
+      if (/busy/.test(error.message)) rejectedForBackpressure += 1;
+    });
+  }
+  // Let the synchronous rejections' .then handlers run (they need no I/O, just a microtask turn).
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.ok(rejectedForBackpressure > 0, "later requests were rejected once the byte cap was reached");
+  assert.ok(
+    rejectedForBackpressure < 40,
+    `expected some requests to still be queued before the cap, but all 40 were rejected as busy`
+  );
 });
 
 test("timeouts return errors, crashes restart with backoff, and repeated crashes stop restarts", async (t) => {

@@ -796,24 +796,24 @@
 }
 
 .workspace[data-theme-background="sakura"] {
-  background-image: url("../assets/theme-backgrounds/sakura.png");
+  background-image: url("../assets/theme-backgrounds/sakura.avif");
 }
 
 .workspace[data-theme-background="matrix"] {
-  background-image: url("../assets/theme-backgrounds/matrix.png");
+  background-image: url("../assets/theme-backgrounds/matrix.avif");
 }
 
 .workspace[data-theme-background="forest-cabin"] {
-  background-image: url("../assets/theme-backgrounds/forest-cabin.png");
+  background-image: url("../assets/theme-backgrounds/forest-cabin.avif");
 }
 
 .workspace[data-theme-background="gold-black"] {
-  background-image: url("../assets/theme-backgrounds/gold-black.png");
+  background-image: url("../assets/theme-backgrounds/gold-black.avif");
 }
 
 .workspace[data-theme-background="cat"] {
-  background-image: url("../assets/theme-backgrounds/cat.png");
+  background-image: url("../assets/theme-backgrounds/cat.avif");
 }
 .workspace[data-theme-background="gothic-eclipse"] {
-  background-image: url("../assets/theme-backgrounds/gothic-eclipse.png");
+  background-image: url("../assets/theme-backgrounds/gothic-eclipse.avif");
 }
