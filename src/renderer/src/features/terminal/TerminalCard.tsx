@@ -242,6 +242,91 @@ function TerminalCardView({
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
+  const rendererTransitionRef = useRef<{
+    snapshot: HTMLElement;
+    frame: number | null;
+    render: { dispose(): void } | null;
+    fallback: number | null;
+    animation: Animation | null;
+  } | null>(null);
+  const restoreRendererTransition = (): void => {
+    const transition = rendererTransitionRef.current;
+    if (!transition) return;
+    rendererTransitionRef.current = null;
+    if (transition.frame !== null) cancelAnimationFrame(transition.frame);
+    if (transition.fallback !== null) window.clearTimeout(transition.fallback);
+    transition.render?.dispose();
+    transition.animation?.cancel();
+    transition.snapshot.remove();
+  };
+  const beginRendererTransition = (terminal: Terminal): HTMLElement | null => {
+    restoreRendererTransition();
+    const element = terminal.element;
+    const screen = element?.querySelector<HTMLElement>(".xterm-screen");
+    if (!element || !screen || !screen.checkVisibility({ visibilityProperty: true })) return null;
+    const webglCanvas = element.dataset.renderer === "webgl"
+      ? screen.querySelector<HTMLCanvasElement>("canvas:not([class])") : null;
+    if (webglCanvas?.getContext("webgl2")?.isContextLost()) return null;
+    const snapshot = screen.cloneNode(true) as HTMLElement;
+    // DOM renderer disposal removes its owner class; keep the cloned row styles scoped to the snapshot.
+    for (const className of element.classList) {
+      if (className.startsWith("xterm-dom-renderer-owner-") || className === "focus") snapshot.classList.add(className);
+    }
+    snapshot.setAttribute("data-renderer-transition", "true");
+    snapshot.setAttribute("aria-hidden", "true");
+    snapshot.inert = true;
+    Object.assign(snapshot.style, {
+      position: "absolute", left: `${screen.offsetLeft}px`, top: `${screen.offsetTop}px`,
+      pointerEvents: "none", zIndex: "4", overflow: "hidden",
+      backgroundColor: "var(--terminal-background, #202430)"
+    });
+    // cloneNode copies DOM rows, but canvas pixels must be copied before disposing WebGL.
+    const canvases = snapshot.querySelectorAll("canvas");
+    try {
+      screen.querySelectorAll("canvas").forEach((canvas, index) => {
+        const context = canvases[index].getContext("2d");
+        if (!context) throw new Error("Renderer snapshot unavailable");
+        context.drawImage(canvas, 0, 0);
+      });
+    } catch {
+      return null;
+    }
+    element.append(snapshot);
+    rendererTransitionRef.current = { snapshot, frame: null, render: null, fallback: null, animation: null };
+    return snapshot;
+  };
+  const revealRendererTransition = (terminal: Terminal, snapshot: HTMLElement): void => {
+    const transition = rendererTransitionRef.current;
+    if (!transition || transition.snapshot !== snapshot) return;
+    const fadeAfterPaint = (): void => {
+      if (rendererTransitionRef.current !== transition) return;
+      transition.frame = null;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        restoreRendererTransition();
+        return;
+      }
+      transition.animation = snapshot.animate([{ opacity: 1 }, { opacity: 0 }], {
+        duration: 180, easing: "ease-out", fill: "forwards"
+      });
+      transition.animation.onfinish = () => {
+        if (rendererTransitionRef.current === transition) restoreRendererTransition();
+      };
+    };
+    const ready = (): void => {
+      if (rendererTransitionRef.current !== transition || transition.frame !== null) return;
+      transition.render?.dispose();
+      transition.render = null;
+      if (transition.fallback !== null) window.clearTimeout(transition.fallback);
+      transition.fallback = null;
+      transition.frame = requestAnimationFrame(() => {
+        transition.frame = requestAnimationFrame(fadeAfterPaint);
+      });
+    };
+    transition.render = terminal.onRender(ready);
+    // Offscreen or lost contexts may never emit onRender; never leave a stale overlay behind.
+    transition.fallback = window.setTimeout(ready, 250);
+    terminal.refresh(0, terminal.rows - 1);
+  };
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchOpenRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -544,6 +629,7 @@ function TerminalCardView({
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
       fitRef.current = null;
+      restoreRendererTransition();
       unregisterWebgl();
       cancelAnimationFrame(frame);
       detachMouseCoordinateAdapter();
@@ -574,11 +660,13 @@ function TerminalCardView({
 
   const enableWebgl = (terminal: Terminal): boolean => {
     if (webglAddonRef.current) return true;
+    const transitionElement = beginRendererTransition(terminal);
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
     // terminal options, and this terminal is constructed with allowTransparency,
     // so cell backgrounds stay transparent and the card's palette background
     // keeps showing through the canvas exactly as it does in the DOM renderer.
-    const webgl = new WebglAddon();
+    // Preserve the last painted frame for the short snapshot when switching back to DOM.
+    const webgl = new WebglAddon(true);
     webgl.onContextLoss(() => {
       // GPU context gone and not restored: drop the renderer, xterm falls back to the DOM renderer with
       // the buffer intact, and the pool keeps this card off WebGL for a while.
@@ -591,17 +679,20 @@ function TerminalCardView({
     } catch {
       // WebGL2 unavailable — stay on the DOM renderer.
       webgl.dispose();
+      restoreRendererTransition();
       return false;
     }
     webglAddonRef.current = webgl;
     terminal.element?.setAttribute("data-renderer", "webgl");
     fitRef.current?.();
+    if (transitionElement) revealRendererTransition(terminal, transitionElement);
     return true;
   };
 
   const disableWebgl = (terminal: Terminal): void => {
     const webgl = webglAddonRef.current;
     if (!webgl) return;
+    const transitionElement = fitRef.current ? beginRendererTransition(terminal) : null;
     webglAddonRef.current = null;
     // The WebGL canvas is the one xterm-screen child without a layer class (the link layer is a 2D canvas).
     const canvas = terminal.element?.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not([class])");
@@ -610,6 +701,7 @@ function TerminalCardView({
     // WebGL snaps the cell width down to whole device pixels, so its cells can be narrower than the DOM
     // renderer's. A grid fitted while on WebGL may then be too wide for DOM: fit again.
     fitRef.current?.();
+    if (transitionElement) revealRendererTransition(terminal, transitionElement);
     // Disposing the addon drops the canvas but not its context, which counts against Chromium's
     // per-renderer limit until it is collected. Lose it now so the slot is really free. getContext
     // returns the canvas's existing context here; it creates nothing.
