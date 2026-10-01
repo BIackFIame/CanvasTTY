@@ -221,8 +221,12 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     const configured = providerFolders(provider, hostEnv, hostHome);
     return [...defaults.folders, ...defaults.files, ...configured.folders, ...configured.files,
       ...movedProviderHomes(provider, hostEnv), ...movedProviderHomes(provider, hostEnv, CONFIG_FILE_VARIABLES)];
-  }).filter((path) => ![...trustedOwn.folders, ...trustedOwn.files].includes(path) && !hides(path));
+  }).filter((path) => ![...trustedOwn.folders, ...trustedOwn.files].includes(path)
+    && ![hostHome, input.cwd].some((kept) => isWithin(kept, path)));
   const sensitive = all([...sensitiveHomeFolders(home, xdg.config), ...sensitiveHomeFolders(hostHome, hostXdg.config), ...trustedOthers]);
+  if (pathSpellings(home).some((candidate) => sensitive.some((path) => isWithin(candidate, path)))) {
+    throw new Error(`Launch HOME ${home} overlaps protected host credentials.`);
+  }
   const privateSpellings = privateData.map((path) => ({ path, spellings: pathSpellings(path) }));
   const grantSpellings = all(grants);
   const accountRoot = join(input.userDataPath, "account-homes");
