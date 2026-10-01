@@ -12,7 +12,7 @@ export default function CanvasTTYLifecycle(api) {
     }
   }
 
-  for (const event of ["session_start", "session_switch", "session_branch"]) {
+  for (const event of ["session_start", "session_switch", "session_branch", "session_fork"]) {
     api.on(event, (_event, ctx) => report(ctx, "idle", event));
   }
   api.on("agent_start", (_event, ctx) => report(ctx, "working", "UserPromptSubmit"));

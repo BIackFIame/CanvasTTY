@@ -101,7 +101,7 @@ export interface PreparedProviderRuntimeLaunch {
   releaseConfiguration(): void;
 }
 
-const HOOK_PROVIDERS: ReadonlySet<string> = new Set(["claude", "codex", "qwen", "opencode", "kimi", "hermes", "grok", "omp"]);
+const HOOK_PROVIDERS: ReadonlySet<string> = new Set(["claude", "codex", "qwen", "opencode", "kimi", "hermes", "grok", "omp", "pi"]);
 
 export class ProviderRuntimeLaunchAdapters {
   private readonly options: ProviderRuntimeLaunchOptions;
@@ -191,8 +191,8 @@ export class ProviderRuntimeLaunchAdapters {
       ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs) : [])
     ];
     const openCodeDecisions = gate && provider === "opencode";
-    // Only providers with a hook adapter get lifecycle configuration. Anything else (pi,
-    // cursor, minimax, devin, antigravity) must never reach Grok's shared hook overlay.
+    // Only providers with a hook adapter get lifecycle configuration. Cursor,
+    // MiniMax, Devin and Antigravity must never reach Grok's shared hook overlay.
     const hasHooks = HOOK_PROVIDERS.has(provider)
       && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && (pluginRegistrations.length > 0 || openCodeDecisions)));
     const environment = hasHooks
@@ -239,7 +239,7 @@ export class ProviderRuntimeLaunchAdapters {
         )
       });
     }
-    if (provider === "omp") {
+    if (provider === "omp" || provider === "pi") {
       return prepared(coreHooksEnabled
         ? ["--extension", join(dirname(this.options.openCodePluginPath), "omp-extension.mjs")]
         : [], environment);
