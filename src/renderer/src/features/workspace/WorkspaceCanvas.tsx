@@ -1379,6 +1379,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           materialHasLocation={Boolean(materials.find((material) => material.id === contextMenu.targetId)?.location)}
           onAddFiles={() => pickMaterialsAt(contextMenu.worldPoint)}
           onPasteFiles={() => pasteMaterialsAt(contextMenu.worldPoint)}
+          onPinMaterial={() => {
+            if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "pin");
+            setContextMenu(null);
+          }}
           onRevealMaterial={() => {
             if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "reveal");
             setContextMenu(null);
