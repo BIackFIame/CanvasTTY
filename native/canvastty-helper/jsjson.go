@@ -306,8 +306,18 @@ func jsonParse(raw []byte) (any, error) {
 	return jsonParseString(decodeUTF8(raw))
 }
 
+// jsonParseWithMaxNesting applies a caller-owned portable container-depth limit while preserving the default
+// JSON.parse-compatible behavior for the other helper protocols.
+func jsonParseWithMaxNesting(raw []byte, maxNesting int) (any, error) {
+	return jsonParseStringWithMaxNesting(decodeUTF8(raw), maxNesting)
+}
+
 func jsonParseString(text string) (any, error) {
-	p := &parser{s: text}
+	return jsonParseStringWithMaxNesting(text, 0)
+}
+
+func jsonParseStringWithMaxNesting(text string, maxNesting int) (any, error) {
+	p := &parser{s: text, maxNesting: maxNesting}
 	p.ws()
 	value, err := p.value(0)
 	if err != nil {
@@ -321,8 +331,9 @@ func jsonParseString(text string) (any, error) {
 }
 
 type parser struct {
-	s string
-	i int
+	s          string
+	i          int
+	maxNesting int
 }
 
 func (p *parser) ws() {
@@ -342,6 +353,9 @@ func (p *parser) value(depth int) (any, error) {
 	}
 	switch c := p.s[p.i]; {
 	case c == '{':
+		if p.maxNesting > 0 && depth >= p.maxNesting {
+			return nil, errJSONSyntax
+		}
 		p.i++
 		o := newObject()
 		p.ws()
@@ -384,6 +398,9 @@ func (p *parser) value(depth int) (any, error) {
 			return nil, errJSONSyntax
 		}
 	case c == '[':
+		if p.maxNesting > 0 && depth >= p.maxNesting {
+			return nil, errJSONSyntax
+		}
 		p.i++
 		a := []any{}
 		p.ws()
