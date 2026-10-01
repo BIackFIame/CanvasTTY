@@ -25,7 +25,7 @@ export function openCodeConfigPaths(
   const projectDirsRootToCwd: string[] = [];
   if (cwd && includeProject) {
     let current = resolve(cwd);
-    for (let index = 0; index < 64; index++) {
+    for (;;) {
       projectDirsRootToCwd.push(current);
       const parent = dirname(current);
       if (parent === current) break;
