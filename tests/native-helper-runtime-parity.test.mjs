@@ -25,6 +25,8 @@ import {
 const OPTIONS = { skip: SKIP_NATIVE, timeout: 120_000 };
 const PROVIDERS = ["claude", "codex", "qwen", "opencode"];
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+// Windows CI builds this current-user-only named-pipe host before running gateway integration tests.
+const WINDOWS_PIPE_HOST = join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe");
 
 function runtimeEnvironment(address, provider, extra = {}) {
   return baseEnvironment({
@@ -109,6 +111,10 @@ const INPUTS = {
   "empty tool name": '{"tool_name":"","tool_input":{}}',
   "tool name not text": '{"tool_name":7,"tool_input":{}}',
   "trailing garbage": `${bashInput({ command: "x" })} x`,
+  // The outer hook object counts as one container, so 255 nested tool_input arrays reach the 256 limit.
+  "deep nesting at the portable limit": `{"tool_name":"Bash","tool_input":${"[".repeat(255)}0${"]".repeat(255)}}`,
+  "deep nesting just beyond the portable limit": `{"tool_name":"Bash","tool_input":${"[".repeat(256)}0${"]".repeat(256)}}`,
+  "quoted braces and escaped quotes are not containers": bashInput({ command: ('[{' + String.fromCharCode(34, 92)).repeat(300) }),
   "deep nesting": `{"tool_name":"Bash","tool_input":${"[".repeat(3000)}${"]".repeat(3000)}}`
 };
 
@@ -119,7 +125,13 @@ test("permission gate: the request each implementation sends is byte-identical, 
   }));
   for (const { label, results } of await limited(jobs, 3)) {
     const reference = assertSame(results, label);
-    if (label === "plain command") assert.equal(reference.received.length, 1, "the request reached the gateway");
+    if (["plain command", "deep nesting at the portable limit", "quoted braces and escaped quotes are not containers"].includes(label)) {
+      assert.equal(reference.received.length, 1, `${label}: the request reached the gateway`);
+    }
+    if (["deep nesting just beyond the portable limit", "deep nesting"].includes(label)) {
+      assert.equal(reference.received.length, 0, `${label}: rejected before contacting the gateway`);
+      assert.equal(JSON.parse(reference.stdout).hookSpecificOutput.permissionDecisionReason, FAIL_CLOSED_MESSAGE, label);
+    }
     for (const raw of reference.received) {
       // What RuntimeGateway checks: the hash of JSON.stringify(JSON.parse(toolInput)).
       const request = JSON.parse(raw);
@@ -128,6 +140,16 @@ test("permission gate: the request each implementation sends is byte-identical, 
       }
       assert.ok(Buffer.byteLength(`${raw}\n`) <= 64 * 1024, `${label}: within the wire cap`);
     }
+  }
+});
+
+test("permission gate: excessive nesting preserves legacy mode without contacting the gateway", OPTIONS, async () => {
+  for (const provider of PROVIDERS) {
+    const results = await gateCase({ provider, failClosed: false, input: INPUTS["deep nesting just beyond the portable limit"] });
+    const reference = assertSame(results, provider);
+    assert.equal(reference.stdout, "");
+    assert.equal(reference.received.length, 0);
+    assert.equal(reference.code, 0);
   }
 });
 
@@ -233,6 +255,7 @@ test("permission gate: the real RuntimeGateway accepts both implementations' req
   const seen = [];
   const gateway = new RuntimeGateway({
     runtimeDirectory: runtime,
+    windowsHostPath: WINDOWS_PIPE_HOST,
     onPermissionRequest: async (_id, request) => {
       seen.push(request);
       return { behavior: "deny", message: `saw ${request.toolName}` };
@@ -320,7 +343,7 @@ test("lifecycle hook: both implementations send the same lines and exit the same
 test("lifecycle hook: the real RuntimeGateway turns both implementations' reports into the same signal", OPTIONS, async (t) => {
   const runtime = await mkdtemp(join(tmpdir(), "canvastty-native-life-"));
   const signals = [];
-  const gateway = new RuntimeGateway({ runtimeDirectory: runtime, onSignal: (id, signal) => signals.push({ id, signal }) });
+  const gateway = new RuntimeGateway({ runtimeDirectory: runtime, windowsHostPath: WINDOWS_PIPE_HOST, onSignal: (id, signal) => signals.push({ id, signal }) });
   await gateway.start();
   t.after(async () => { await gateway.close(); await rm(runtime, { recursive: true, force: true }); });
   const collected = [];
