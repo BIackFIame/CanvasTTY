@@ -553,7 +553,11 @@ function TerminalCardView({
         screen,
         () => terminal.getSelection(),
         () => copyOnSelectRef.current,
-        (text) => window.canvasTTY.clipboard.writeText(text)
+        (text) => window.canvasTTY.clipboard.writeText(text),
+        (listener) => {
+          const disposable = terminal.onSelectionChange(listener);
+          return () => disposable.dispose();
+        }
       )
       : () => undefined;
     terminalRef.current = terminal;
