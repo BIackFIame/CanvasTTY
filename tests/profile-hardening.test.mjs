@@ -200,6 +200,84 @@ test("OpenCode auto and accept-edits reject scalar deny or ask instead of leavin
   }
 });
 
+test("OpenCode auto preserves permission patterns named __proto__ through file, inline, and environment merges", () => {
+  const permission = JSON.parse('{"edit":{"__proto__":"deny"},"bash":{"__proto__":"ask"}}');
+  const configurations = [
+    { environment: { OPENCODE_CONFIG: "/person/opencode.json" }, files: [{ permission }] },
+    { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission }) }, files: [] },
+    { environment: { OPENCODE_PERMISSION: JSON.stringify(permission) }, files: [] }
+  ];
+  for (const { environment, files } of configurations) {
+    const result = auto(environment, {
+      readFile: (path) => path === environment.OPENCODE_CONFIG ? JSON.stringify(files[0]) : null
+    });
+    assert.equal(decide(files, result, "edit", "__proto__", environment), "deny");
+    assert.equal(decide(files, result, "bash", "__proto__", environment), "ask");
+    assert.equal(decide(files, result, "edit", "src/normal.ts", environment), "allow");
+    assert.equal(decide(files, result, "bash", "ls", environment), "allow");
+    assert.equal(Object.hasOwn(result.agent.build.permission.edit, "__proto__"), true);
+  }
+});
+
+test("OpenCode auto preserves numeric pattern decisions that cannot follow its wildcard in object order", () => {
+  for (const pattern of ["0", "123", "4294967294"]) {
+    for (const action of ["deny", "ask", "allow"]) {
+      for (const tool of ["edit", "bash"]) {
+        const permission = { [tool]: { [pattern]: action } };
+        const configurations = [
+          { environment: { OPENCODE_CONFIG: "/person/opencode.json" }, files: [{ permission }], inline: {} },
+          { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission }) }, files: [], inline: { permission } },
+          { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { build: { permission } } }) },
+            files: [], inline: { agent: { build: { permission } } } },
+          { environment: { OPENCODE_PERMISSION: JSON.stringify(permission) }, files: [], inline: {} }
+        ];
+        for (const { environment, files, inline } of configurations) {
+          for (const shellGuarded of [true, false]) {
+            const options = {
+              shellGuarded,
+              readFile: (path) => path === environment.OPENCODE_CONFIG ? JSON.stringify(files[0]) : null
+            };
+            if (tool === "bash" && !shellGuarded) {
+              assert.throws(() => auto(environment, options), /numeric bash permission patterns require guarded Auto/u);
+              continue;
+            }
+            const result = auto(environment, options);
+            assert.equal(decide(files, result, tool, pattern, environment), action,
+              `${tool} ${pattern} keeps ${action}, guarded=${shellGuarded}`);
+            assert.deepEqual(result.agent.build.permission[tool], inline.agent?.build?.permission?.[tool],
+              "the affected tool's original build rules keep their ordering");
+            assert.equal(result.agent.build.permission.grep, "allow", "other tools still receive Auto rules");
+          }
+        }
+      }
+    }
+  }
+  // Similar-looking keys outside the array-index range retain insertion order and permit an overlay.
+  for (const pattern of ["01", "-0", "4294967295"]) {
+    const environment = { OPENCODE_PERMISSION: JSON.stringify({ edit: { [pattern]: "deny" } }) };
+    const result = auto(environment);
+    assert.equal(result.agent.build.permission.edit["*"], "allow");
+    assert.equal(decide([], result, "edit", pattern, environment), "deny");
+  }
+});
+
+test("numeric bash patterns cannot silently remove unguarded shell prompts", () => {
+  const providerCli = availableRegistry().get("opencode");
+  const environment = { OPENCODE_PERMISSION: JSON.stringify({ bash: { "123": "deny" } }) };
+  // Omitting the entire tool overlay preserves 123 but would let unrelated ls inherit OpenCode's allow default.
+  assert.equal(decide([], { agent: { build: { permission: {} } } }, "bash", "ls", environment), "allow");
+  for (const profile of ["auto", "acceptEdits"]) {
+    assert.throws(() => resolveTerminalLaunch("opencode", profile, [], {
+      providerCli, environment, shellGuarded: false
+    }), /numeric bash permission patterns require guarded Auto/u);
+  }
+  assert.throws(() => auto(environment, { shellGuarded: true, thirdPartyModel: true }),
+    /numeric bash permission patterns require guarded Auto/u);
+  const guarded = auto(environment);
+  assert.equal(decide([], guarded, "bash", "123", environment), "deny");
+  assert.equal(decide([], guarded, "bash", "ls", environment), "allow", "only the guarded Auto profile can leave baseline shell decisions intact");
+});
+
 test("OpenCode auto without environment restrictions still opens edit and asks for unguarded bash", () => {
   const result = auto({}, { shellGuarded: false });
   for (const tool of ["read", "glob", "grep", "list", "edit"]) {
