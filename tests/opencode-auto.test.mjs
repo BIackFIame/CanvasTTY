@@ -84,3 +84,16 @@ test("OpenCode auto treats an existing uninspectable FIFO as unknown and grants 
   const result = JSON.parse(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: home }).OPENCODE_CONFIG_CONTENT);
   assert.deepEqual(result.agent.build.permission, {});
 });
+
+test("OpenCode Auto keeps ancestor restrictions when the working directory is more than 64 levels deep", () => {
+  const root = join(tmpdir(), "ctty-deep-config-project");
+  const cwd = join(root, ...Array.from({ length: 70 }, () => "nested"));
+  const environment = { HOME: join(tmpdir(), "ctty-deep-config-home") };
+  const readFile = (path) => path === join(root, "opencode.json")
+    ? '{"permission":{"bash":"deny"}}' : null;
+  const person = openCodePersonRules(environment, cwd, readFile);
+  assert.equal(person.unknown, false);
+  assert.equal(person.top.bash, "deny");
+  const config = JSON.parse(openCodeAutoEnvironment(environment, { cwd, readFile, shellGuarded: true }).OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(config.agent.build.permission.bash, { "*": "deny" });
+});
