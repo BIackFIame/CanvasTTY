@@ -58,3 +58,63 @@ function axisVelocity(position: number, length: number, zone: number, maxSpeed: 
   }
   return 0;
 }
+
+export interface EdgePanLoopDeps {
+  requestFrame(callback: (time: number) => void): number;
+  cancelFrame(handle: number): void;
+  /** The camera velocity for the pointer this frame, or null when nothing should pan (the loop stops). */
+  velocity(pointer: Point): Point | null;
+  /** Moves the camera by `velocity` for `dt` seconds. */
+  commit(velocity: Point, dt: number): void;
+}
+
+export interface EdgePanLoop {
+  /** The pointer moved: remember it and start the loop if it is not running. */
+  move(pointer: Point): void;
+  /** The pointer left the canvas: the next frame ends the loop. */
+  leave(): void;
+  /** Ends the loop now (window blur, gesture cancel, unmount): no frame stays requested. */
+  stop(): void;
+  readonly running: boolean;
+}
+
+/**
+ * The edge-pan animation loop. It runs off the last pointer position alone, not off a pointer-down
+ * gesture, so anything that ends the hover without a pointerleave (the window losing focus) must call
+ * `stop()`, or the loop keeps requesting frames and moving the camera in the background.
+ */
+export function createEdgePanLoop(deps: EdgePanLoopDeps): EdgePanLoop {
+  let pointer: Point | null = null;
+  let frame: number | null = null;
+  let lastTime = 0;
+  const step = (time: number): void => {
+    frame = null;
+    if (!pointer) return;
+    const velocity = deps.velocity(pointer);
+    if (!velocity) return;
+    const dt = lastTime === 0 ? 0 : Math.min(0.05, (time - lastTime) / 1000);
+    lastTime = time;
+    deps.commit(velocity, dt);
+    frame = deps.requestFrame(step);
+  };
+  return {
+    get running() {
+      return frame !== null;
+    },
+    move(next) {
+      pointer = next;
+      if (frame !== null) return;
+      lastTime = 0;
+      frame = deps.requestFrame(step);
+    },
+    leave() {
+      pointer = null;
+    },
+    stop() {
+      if (frame !== null) deps.cancelFrame(frame);
+      frame = null;
+      pointer = null;
+      lastTime = 0;
+    }
+  };
+}

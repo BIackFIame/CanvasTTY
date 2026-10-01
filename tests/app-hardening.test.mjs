@@ -14,7 +14,7 @@ test("a crashed renderer reloads only the application surface and a clean exit d
   const handler = main.slice(main.indexOf('window.webContents.on("render-process-gone"'));
   assert.match(handler, /if \(details\.reason === "clean-exit"\) return;/);
   assert.match(handler, /void loadApplicationSurface\(window\)/);
-  const reload = main.slice(main.indexOf("async function loadApplicationSurface"), main.indexOf("async function loadApplication("));
+  const reload = main.slice(main.indexOf("async function loadApplicationSurface"), main.indexOf("async function runStartupSmokes("));
   assert.doesNotMatch(reload, /SMOKE/u, "smoke hooks run once at startup, not on recovery");
   assert.match(main, /app\.on\("child-process-gone"/);
 });

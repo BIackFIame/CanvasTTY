@@ -126,7 +126,7 @@ test("the message tells the model calmly why and what to do instead, without pat
   assert.equal(verdict.rule, "app-private");
   assert.match(verdict.message, /^CanvasTTY blocked this: it reads CanvasTTY's own access tokens/u);
   assert.match(verdict.message, /Orchestrator role/u);
-  assert.match(verdict.message, /canvastty_agents tools \(spawn_agent, list_routes, wait_for_agent/u);
+  assert.match(verdict.message, /canvastty_agents tools: list_providers shows which agents CanvasTTY can launch, then spawn_agent, wait_for_agent/u);
   assert.doesNotMatch(verdict.message, /token-|\.sock|agent-control|Application Support|ctty-/u);
 });
 

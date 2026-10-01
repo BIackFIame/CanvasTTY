@@ -6,6 +6,7 @@ export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
 /** "auto" only for agents with a native auto mode (autoMode.ts); "normal" is the default. */
 export type LaunchProfileId = import("./autoMode.ts").LaunchProfile;
+export type ReasoningEffort = import("./launchModel.ts").ReasoningEffort;
 /**
  * What a session is for, independent of its normal/YOLO profile: an ordinary
  * agent, or an orchestrator that drives other sessions through the local
@@ -344,6 +345,30 @@ export interface AppSettings {
    * `--agent-control` / `CANVASTTY_AGENT_CONTROL=1` force it on for one launch.
    */
   agentControlEnabled: boolean;
+  /**
+   * Agent isolation (Settings → Agents): the operating-system layer around agents that the person did not launch
+   * directly (subagents, agents a plugin starts) and around every agent in auto. "on" by default; "off" runs them
+   * without it (the person's choice; on Windows, where there is no layer yet, this is the opt-in for auto subagents).
+   */
+  agentIsolation: AgentIsolationSetting;
+  /** How many levels of subagents one top-level orchestrator may have below it (1–4, 2 by default). */
+  orchestrationMaxDepth: number;
+  /** How many live subagents one top-level orchestrator may have at once, all levels together (1–32, 8 by default). */
+  orchestrationMaxSubagents: number;
+  /** The mode the launcher starts in (auto by default); a CLI without it starts in the next one it has. */
+  defaultLaunchProfile: LaunchProfileId;
+}
+
+export type AgentIsolationSetting = "on" | "off";
+
+/** What the operating-system isolation layer does for one card (shown on the card). */
+export interface SessionIsolation {
+  /** "on": the agent runs inside the layer; "off": the person turned it off; "unavailable": no layer here (reason). */
+  state: "on" | "off" | "unavailable" | "environment";
+  /** The mechanism: macOS seatbelt (sandbox-exec) or Linux bubblewrap. */
+  layer?: "seatbelt" | "bubblewrap";
+  /** Why it is not on, or what changed because of that (e.g. auto ran as normal). */
+  reason?: string;
 }
 
 export interface CreateSessionRequest {
@@ -363,6 +388,10 @@ export interface CreateSessionRequest {
   environment?: SessionEnvironmentChoice;
   /** Exact provider conversation to resume when this card is created from history. */
   resumeThreadId?: string;
+  /** The CLI's --model for this launch (launchModel.ts); omitted keeps the CLI's own default. */
+  model?: string;
+  /** The CLI's reasoning effort for this launch; only the levels that CLI takes. */
+  effort?: ReasoningEffort;
 }
 
 /** Every non-terminal agent that CanvasTTY can install and resolve. */
@@ -417,6 +446,39 @@ export interface SessionMetadata {
   environment?: SessionEnvironmentBadge;
   /** Profile "auto" runs as accept-edits: a launch contributor put the agent on a third-party model. */
   autoDowngraded?: true;
+  /** The model and effort the launch asked the CLI for; restarts and restores keep them. */
+  model?: string;
+  effort?: ReasoningEffort;
+  /** The operating-system isolation layer around this agent, when one applies or was wanted. */
+  isolation?: SessionIsolation;
+  /**
+   * In the normal (manual) profile the CLI follows its own configuration: when that configuration skips approvals
+   * (Claude's defaultMode, Codex's approval_policy/sandbox_mode, OpenCode's permission), what it says and where.
+   */
+  configuredMode?: { mode: string; source: string };
+  /** Dangerous git settings the isolated agent's session left under its folder (see GitRiskReport). */
+  gitRisk?: GitRiskReport;
+}
+
+/** Something in a repository's git folder that runs a program when the person uses git there (gitAudit.ts). */
+export type GitRiskItem =
+  | { kind: "config"; key: string; value: string }
+  | { kind: "hook"; name: string }
+  | { kind: "attributes" };
+
+/**
+ * What an isolated agent's session left in repositories under its folder that would run outside the layer the next
+ * time the person uses git there. Shown on the card (or, for a closed card, by the app) until the person neutralizes
+ * or keeps it; never changed without them.
+ */
+export interface GitRiskReport {
+  id: string;
+  /** The card's folder. */
+  cwd: string;
+  /** The card's title, for a report about a card that was closed. */
+  title?: string;
+  /** Each repository's working folder (the parent of its .git) and what was found there. */
+  repositories: Array<{ path: string; items: GitRiskItem[] }>;
 }
 
 export interface SessionSnapshot extends SessionMetadata {
@@ -644,6 +706,22 @@ export interface PluginEnvironmentKind {
   appliesTo?: ProviderId[];
   /** Launcher fields for this kind; values go to `canvastty.environment.prepare` only. */
   fields?: PluginLaunchField[];
+  /**
+   * What of CanvasTTY's protection reaches the agent inside this environment, as the plugin declares it. Undeclared
+   * means no: the core then refuses a launch that needs it, or marks the card as not protected.
+   */
+  keeps?: PluginEnvironmentKeeps;
+}
+
+export interface PluginEnvironmentKeeps {
+  /** The launch's arguments and environment reach the agent unchanged: CanvasTTY's hooks (base protection, decisions,
+   * lifecycle) and the profile's per-run settings (auto, accept-edits, plan) work there. */
+  launch?: boolean;
+  /** The agent does not run on this computer's files (a container, a remote host), so this computer's isolation layer
+   * does not apply; the environment's own boundary does. */
+  isolated?: boolean;
+  /** The environment itself confines the agent to the project (for example a container that mounts only it). */
+  confines?: boolean;
 }
 
 export interface SessionEnvironmentChoice {
@@ -683,6 +761,11 @@ export interface PluginServiceLaunch {
   /** Also asked, with `chosen: false`, before every launch of those agents where the person did not choose the
    * plugin; such an answer may only refuse. */
   policy?: boolean;
+  /**
+   * The plugin declares these options safe for an orchestrator to choose for its subagents (spawn_agent's
+   * launchOptions). Without it only the person chooses them, in the launcher.
+   */
+  delegable?: boolean;
 }
 
 /** Field key -> extra choices a service offered for an `optionsFrom: "service"` select. */
@@ -1549,6 +1632,10 @@ export interface CanvasTTYApi {
     onData(listener: (event: TerminalDataEvent) => void, id?: string): () => void;
     onSession(listener: (event: SessionEvent) => void): () => void;
     onRemoved(listener: (event: SessionRemovedEvent) => void): () => void;
+    /** Neutralize (remove the reported keys, disable the hooks) or keep what a git risk report found. */
+    resolveGitRisk(reportId: string, action: "neutralize" | "keep"): Promise<void>;
+    /** A git risk report about a card that was closed (a live card carries its own on SessionMetadata.gitRisk). */
+    onGitRisk(listener: (report: GitRiskReport) => void): () => void;
   };
   updater: {
     state(): Promise<UpdaterState>;
@@ -1558,6 +1645,8 @@ export interface CanvasTTYApi {
   };
   window: {
     isMacOS: boolean;
+    /** The operating system (process.platform); the launcher uses it to know whether agent isolation exists here. */
+    platform: string;
     minimize(): void;
     toggleMaximize(): Promise<WindowState>;
     close(): void;
@@ -1700,6 +1789,8 @@ export const IPC = {
   terminalDataBatch: "terminal:data-batch",
   terminalSession: "terminal:session",
   terminalRemoved: "terminal:removed",
+  terminalGitRisk: "terminal:git-risk",
+  terminalResolveGitRisk: "terminal:resolve-git-risk",
   windowMinimize: "window:minimize",
   windowToggleMaximize: "window:toggle-maximize",
   windowClose: "window:close",

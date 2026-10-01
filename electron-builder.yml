@@ -12,6 +12,24 @@ files:
   - package.json
   - LICENSE
   - "!**/*.map"
+  # Dead weight inside production node_modules: type declarations, TypeScript and
+  # C sources, docs, changelogs, tests, and native build intermediates. Runtime
+  # code, package.json and LICENSE files stay.
+  - "!**/node_modules/**/*.{d.ts,d.mts,d.cts,ts,mts,cts,tsbuildinfo}"
+  - "!**/node_modules/**/{README,CHANGELOG,HISTORY,AUTHORS,CONTRIBUTING}*"
+  - "!**/node_modules/**/*.md"
+  - "!**/node_modules/**/{test,tests,__tests__,example,examples,docs,.github,coverage,benchmark,benchmarks}/**"
+  - "!**/node_modules/**/*.test.js"
+  # node-pty loads build/Release (rebuilt for Electron by npmRebuild) and falls
+  # back to prebuilds; its C++ and winpty sources, build scripts and header-only
+  # node-addon-api are compile-time only. (A platform-level `files` list would
+  # replace this one, so foreign-OS prebuilds stay.)
+  - "!**/node_modules/node-pty/{src,deps,scripts,node-addon-api}/**"
+  - "!**/node_modules/node-addon-api/**"
+  # Browser builds that Node never resolves (yaml's "node" export is dist/,
+  # bluebird's main is js/release).
+  - "!**/node_modules/yaml/browser/**"
+  - "!**/node_modules/bluebird/js/browser/**"
 
 asar: true
 asarUnpack:
@@ -23,8 +41,9 @@ asarUnpack:
 # macOS (>= 16) and Windows (>= 30), so the Linux AppImage and deb targets flip
 # the bit without receiving validation from it.
 #
-# runAsNode is deliberately left ENABLED: provider CLIs and the agent runtime
-# spawn the bundled helpers as
+# runAsNode is deliberately left ENABLED: where the native canvastty-helper is
+# not shipped or not chosen (Windows, CANVASTTY_HELPERS=node), provider CLIs and
+# the agent runtime spawn the bundled helpers as
 # { command: process.execPath, args: [helper], env: { ELECTRON_RUN_AS_NODE: "1" } }
 # (src/main/index.ts for the browser, agent-runtime, and plugin-hook helpers,
 # src/agent-runtime/*.mjs, plus the generated lifecycle hook commands). Setting
@@ -75,6 +94,23 @@ extraResources:
     to: agent/browser
     filter:
       - SKILL.md
+  # canvastty-helper for this target (scripts/build-native-helpers.mjs, `npm run build:helpers`). Without it the app
+  # runs the .mjs helpers above under Electron-as-Node (src/main/services/agentHelpers.ts).
+  - from: build/native-helpers/${os}-${arch}
+    to: helpers
+    filter:
+      - canvastty-helper
+      - canvastty-helper.exe
+# UI strings exist in English and Russian (the README ships a Simplified Chinese
+# translation), so keep only those Chromium locales; other system languages fall
+# back to English for native menus and dialogs. macOS uses .lproj names, Linux and
+# Windows .pak names.
+electronLanguages:
+  - en
+  - en-US
+  - ru
+  - zh_CN
+  - zh-CN
 npmRebuild: true
 compression: normal
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
@@ -126,6 +162,12 @@ mac:
   target:
     - dmg
     - zip
+
+# bzip2 dmg: 9 MB smaller than the default zlib (UDZO) image; lzfse (ULFO) saves
+# only 2 MB. Set here rather than via `compression: maximum`, which would also
+# move deb/nsis to maximum XZ/LZMA (the zip gains only 0.1 MB from -mx=9).
+dmg:
+  format: UDBZ
 
 publish:
   provider: github

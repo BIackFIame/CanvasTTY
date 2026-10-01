@@ -7,6 +7,8 @@
 - Node.js and npm.
 - A native compiler toolchain supported by `node-pty` on your platform.
 - A graphical desktop session capable of running Electron.
+- Optional: Go 1.21 or newer, to build the native agent helper (`npm run build:helpers`, also run by `npm run build`). Without it the app uses its JavaScript helpers.
+- Optional on Linux: bubblewrap (`bwrap`) for agent isolation.
 - Optional agent CLIs — `codex`, `claude`, `qwen`, `kimi`, `opencode`, `hermes`, `grok`, `omp`, or `pi` — installed and available in `PATH` for the launchers you intend to use.
 
 Agents settings links to official installation instructions and can check again after installation. CanvasTTY does not install or authenticate agent CLIs for you. Complete each provider's own login flow before expecting its sessions or subscription limits to work.
@@ -23,13 +25,13 @@ npm run dev
 ## First session
 
 1. Open **Terminal** on Home to start a shell immediately in the last project directory.
-2. Open **Codex**, **Claude**, **Kimi**, **OpenCode**, **Hermes**, or **Grok Build** to choose a project folder and launch profile for that fixed provider.
+2. Open **Codex**, **Claude**, **Kimi**, **OpenCode**, **Hermes**, or **Grok Build** to choose a project folder and launch mode (Auto by default) for that fixed provider.
 3. Open **Browser** on Home to create or restore the built-in browser card. Agent sessions launched by CanvasTTY can use its open tabs while **Settings → Browser → Agent access** is enabled.
 4. Move or resize the live terminal and browser on the same canvas.
 5. Zoom out to use semantic summaries as navigation targets; zoom back in to interact with xterm or the native browser page.
 6. Return to Home to inspect real sessions, connected browser agents, and any provider quota windows that their adapters expose.
 
-The **YOLO** profile disables provider safety prompts where the provider supports such a mode. For OpenCode, CanvasTTY applies a launch-only inline `permission: "allow"` override while preserving the rest of the merged OpenCode configuration. Hermes receives its native `--yolo` flag, while Grok Build receives its native `--always-approve` flag for that launch. CanvasTTY presents an explicit danger confirmation; use it only in a directory you are willing to let the agent modify.
+Launch modes are **Auto** (the default), **Manual**, **Accept edits**, **Plan** and **Bypass**, each offered only where that CLI supports it; the protection layers around them are described in [Installing and security](installing-and-security.md#agent-protection-layers). **Bypass** (YOLO) disables provider safety prompts where the provider supports such a mode, still inside base protection and agent isolation. For OpenCode, CanvasTTY applies a launch-only inline `permission: "allow"` override while preserving the rest of the merged OpenCode configuration. Hermes receives its native `--yolo` flag, while Grok Build receives its native `--always-approve` flag for that launch. CanvasTTY asks you to acknowledge it once per CLI and never gives it to a subagent; use it only in a directory you are willing to let the agent modify.
 
 ## Terminal input and controls
 
@@ -56,7 +58,7 @@ The **YOLO** profile disables provider safety prompts where the provider support
 | `npm run dev` | Start the Electron development build |
 | `npm test` | Run the Node test suite |
 | `npm run typecheck` | Type-check main/preload and renderer projects |
-| `npm run build` | Type-check and create the production bundles |
+| `npm run build` | Build the native helper, type-check and create the production bundles |
 | `npm run preview` | Launch the built application for a production-path check |
 
 Before handing off a change, run the test, typecheck, and build commands, then inspect the affected flow in a real Electron window.

@@ -15,6 +15,17 @@ import { SENSITIVE_FIELD_SOURCE, isSensitiveFieldIdentity } from "../safety/sens
 const MAX_OBSERVE_ELEMENTS = 200;
 const MAX_READ_CHARACTERS = 100_000;
 const MAX_READ_ITEMS = 500;
+/** Node classifications kept per document (like element refs): a long-lived single-page app keeps adding nodes. */
+const MAX_SENSITIVE_NODES = 1_000;
+/** A text or element wait re-reads the page: every 100 ms at first, then less often, at most once a second. */
+const WAIT_POLL_MS = 100;
+const WAIT_POLL_MAX_MS = 1_000;
+/**
+ * How long a tab is kept "busy" (background throttling disabled) after the last CDP command or
+ * attach for it. Automation commands are a burst of several sequential CDP round-trips, not one;
+ * this bridges the gaps between them without requiring every call site to track begin/end explicitly.
+ */
+const AUTOMATION_BUSY_GRACE_MS = 500;
 export const BROWSER_SCREENSHOT_MAX_BINARY_BYTES = 340 * 1024;
 const CDP_VERSION = "1.3";
 const PRESENCE_WORLD = "canvastty-agent-presence";
@@ -75,6 +86,7 @@ interface RefEntry {
 }
 
 interface TabSession {
+  tabId: string;
   contents: WebContents;
   revision: number;
   refs: Map<string, RefEntry>;
@@ -84,6 +96,7 @@ interface TabSession {
   onDialog?: (dialog: BrowserDialogSnapshot | null) => void;
   presences: AgentPresenceSnapshot[];
   presenceContextId: number | null;
+  presenceLastPayload: string | null;
   sensitiveNodes: Map<number, boolean>;
   electronDialog: ElectronDialogRequest | null;
   electronDialogListener: (info: ElectronDialogInfo, callback: ElectronDialogCallback) => void;
@@ -136,6 +149,36 @@ export interface BrowserPointerResult {
 
 export class BrowserAutomationService {
   private readonly sessions = new Map<string, TabSession>();
+  private readonly busyTimers = new Map<string, NodeJS.Timeout>();
+  private readonly onBusyChange?: (tabId: string, busy: boolean) => void;
+
+  constructor(onBusyChange?: (tabId: string, busy: boolean) => void) {
+    this.onBusyChange = onBusyChange;
+  }
+
+  /**
+   * Marks a tab as actively driven by automation (background throttling must stay disabled) for
+   * a short grace window, refreshed by every CDP command. Idle tabs are left throttleable.
+   */
+  private markBusy(tabId: string): void {
+    const wasBusy = this.busyTimers.has(tabId);
+    const existing = this.busyTimers.get(tabId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.busyTimers.delete(tabId);
+      this.onBusyChange?.(tabId, false);
+    }, AUTOMATION_BUSY_GRACE_MS);
+    this.busyTimers.set(tabId, timer);
+    if (!wasBusy) this.onBusyChange?.(tabId, true);
+  }
+
+  private clearBusy(tabId: string): void {
+    const existing = this.busyTimers.get(tabId);
+    if (!existing) return;
+    clearTimeout(existing);
+    this.busyTimers.delete(tabId);
+    this.onBusyChange?.(tabId, false);
+  }
 
   async register(
     tabId: string,
@@ -153,6 +196,7 @@ export class BrowserAutomationService {
     if (current) this.unregister(tabId);
 
     const session: TabSession = {
+      tabId,
       contents,
       revision,
       refs: new Map(),
@@ -163,6 +207,7 @@ export class BrowserAutomationService {
         if (live) {
           live.attachPromise = null;
           live.presenceContextId = null;
+          live.presenceLastPayload = null;
           live.refs.clear();
           live.inflightRequests.clear();
           live.networkLastChangeAt = Date.now();
@@ -171,6 +216,7 @@ export class BrowserAutomationService {
       onDialog,
       presences: [],
       presenceContextId: null,
+      presenceLastPayload: null,
       sensitiveNodes: new Map(),
       electronDialog: null,
       electronDialogListener: (info, callback) => this.onElectronDialog(tabId, info, callback),
@@ -198,6 +244,7 @@ export class BrowserAutomationService {
     const session = this.sessions.get(tabId);
     if (!session) return;
     this.sessions.delete(tabId);
+    this.clearBusy(tabId);
     this.cancelElectronDialog(tabId, session);
     const dialogEvents = session.contents as unknown as EventEmitter;
     dialogEvents.removeListener(ELECTRON_RUN_DIALOG_EVENT, session.electronDialogListener);
@@ -240,8 +287,13 @@ export class BrowserAutomationService {
     const viewportWidth = metrics.cssLayoutViewport?.clientWidth ?? Number.MAX_SAFE_INTEGER;
     const viewportHeight = metrics.cssLayoutViewport?.clientHeight ?? Number.MAX_SAFE_INTEGER;
     if (viewportWidth <= 0 || viewportHeight <= 0) throw viewportUnavailable();
+    const offset = decodeCursor(options.cursor, revision);
+    const limit = clampInteger(options.limit, 1, MAX_OBSERVE_ELEMENTS, 80);
+    // One box-model round trip per element: measured only up to this page and one more (is there a next page?).
+    const wanted = offset + limit + 1;
     const visible: Array<{ node: CdpAxNode; bounds: BrowserElementBounds }> = [];
     for (const node of nodes) {
+      if (visible.length >= wanted) break;
       throwIfAborted(options.signal);
       const bounds = await this.box(session, node.backendDOMNodeId!);
       if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
@@ -249,8 +301,6 @@ export class BrowserAutomationService {
         || bounds.x >= viewportWidth || bounds.y >= viewportHeight) continue;
       visible.push({ node, bounds });
     }
-    const offset = decodeCursor(options.cursor, revision);
-    const limit = clampInteger(options.limit, 1, MAX_OBSERVE_ELEMENTS, 80);
     const page = visible.slice(offset, offset + limit);
     const elements: BrowserObservedElement[] = [];
     for (const item of page) {
@@ -540,13 +590,17 @@ export class BrowserAutomationService {
     return point;
   }
 
+  /**
+   * Types into an element. `typed` is false when a JavaScript dialog opened while the element was being focused or
+   * selected (its focus handler raised it), so no text was inserted.
+   */
   async type(
     tabId: string,
     revision: number,
     ref: BrowserElementRef | string | undefined,
     text: string | undefined,
     signal?: AbortSignal
-  ): Promise<BrowserPointerResult> {
+  ): Promise<{ point: BrowserPointerResult; typed: boolean }> {
     if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 64 * 1024) {
       throw new BrowserKernelError("PAYLOAD_TOO_LARGE", "Browser input text exceeds 64 KB.");
     }
@@ -555,7 +609,7 @@ export class BrowserAutomationService {
     const focused = await this.commandAllowDialog(session, "DOM.focus", {
       backendNodeId: entry.value.backendNodeId
     });
-    if (!focused.completed) return point;
+    if (!focused.completed) return { point, typed: false };
     const resolved = await this.command<{ object?: { objectId?: string } }>(session, "DOM.resolveNode", {
       backendNodeId: entry.value.backendNodeId
     });
@@ -566,10 +620,11 @@ export class BrowserAutomationService {
         functionDeclaration: "function(){if(this instanceof HTMLInputElement||this instanceof HTMLTextAreaElement){this.focus();this.select();}}",
         silent: true
       });
-      if (!selected.completed) return point;
+      if (!selected.completed) return { point, typed: false };
     }
+    // A dialog raised by the page's input handler comes after the text went in.
     await this.commandAllowDialog(session, "Input.insertText", { text });
-    return point;
+    return { point, typed: true };
   }
 
   async select(
@@ -777,6 +832,7 @@ export class BrowserAutomationService {
   ): Promise<{ matched: true }> {
     const startedAt = Date.now();
     let idleSince: number | null = null;
+    let pollMs = WAIT_POLL_MS;
     while (Date.now() - startedAt < timeoutMs) {
       throwIfAborted(signal);
       const session = await this.ready(tabId, revision);
@@ -820,7 +876,9 @@ export class BrowserAutomationService {
           cursor = observation.nextCursor;
         }
       }
-      await abortableDelay(100, signal);
+      await abortableDelay(Math.min(pollMs, Math.max(0, timeoutMs - (Date.now() - startedAt))), signal);
+      // Load, URL and network idleness are cheap to check; text and elements walk the whole page.
+      if (condition === "text" || condition === "element") pollMs = Math.min(WAIT_POLL_MAX_MS, Math.round(pollMs * 1.5));
     }
     throw new BrowserKernelError("TIMEOUT", "Browser wait condition timed out.", { retryable: true });
   }
@@ -842,6 +900,7 @@ export class BrowserAutomationService {
       throw new BrowserKernelError("TAB_CLOSED", "Browser tab is closed.");
     }
     if (session.revision !== revision) throw staleRef(session.revision);
+    this.markBusy(tabId);
     await this.attach(session);
     return session;
   }
@@ -881,6 +940,7 @@ export class BrowserAutomationService {
     method: string,
     params?: Record<string, unknown>
   ): Promise<T> {
+    this.markBusy(session.tabId);
     try {
       return await session.contents.debugger.sendCommand(method, params) as T;
     } catch (error) {
@@ -956,6 +1016,9 @@ export class BrowserAutomationService {
       sensitive = true;
     }
     session.sensitiveNodes.set(backendNodeId, sensitive);
+    if (session.sensitiveNodes.size > MAX_SENSITIVE_NODES) {
+      session.sensitiveNodes.delete(session.sensitiveNodes.keys().next().value!);
+    }
     return sensitive;
   }
 
@@ -1067,6 +1130,7 @@ export class BrowserAutomationService {
         session.refs.clear();
         session.sensitiveNodes.clear();
         session.presenceContextId = null;
+        session.presenceLastPayload = null;
         if (session.presences.length > 0) void this.renderPresence(session).catch(() => undefined);
       }
     }
@@ -1134,6 +1198,7 @@ export class BrowserAutomationService {
 
   private async renderPresence(session: TabSession): Promise<void> {
     if (!session.contents.debugger.isAttached()) return;
+    let worldCreated = false;
     if (session.presenceContextId === null) {
       const tree = await this.command<{ frameTree?: { frame?: { id?: string } } }>(session, "Page.getFrameTree");
       const frameId = tree.frameTree?.frame?.id;
@@ -1144,6 +1209,7 @@ export class BrowserAutomationService {
         grantUniveralAccess: false
       });
       session.presenceContextId = world.executionContextId ?? null;
+      worldCreated = true;
     }
     if (session.presenceContextId === null) return;
     const safe = session.presences.filter((presence) => presence.cursor.updatedAt > 0).map((presence) => ({
@@ -1154,6 +1220,11 @@ export class BrowserAutomationService {
       stale: presence.connectionState === "stale"
     }));
     const payload = JSON.stringify(safe).replace(/</g, "\\u003c");
+    // The isolated world's presence host already reflects this exact state, so skip the
+    // redundant Runtime.evaluate round-trip (including repeated empty-array clears) unless
+    // the world was just (re)created and the host needs to be rebuilt from scratch.
+    if (!worldCreated && payload === session.presenceLastPayload) return;
+    session.presenceLastPayload = payload;
     await this.command(session, "Runtime.evaluate", {
       contextId: session.presenceContextId,
       expression: presenceExpression(payload),

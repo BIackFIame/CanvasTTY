@@ -19,7 +19,8 @@
           "description": "A branch in its own folder; the project folder stays untouched.",
           "fields": [
             { "key": "branch", "label": "Branch (empty: canvastty/<card>)", "kind": "text", "default": "", "maxLength": 80 }
-          ]
+          ],
+          "keeps": { "launch": true }
         }
       ]
     }

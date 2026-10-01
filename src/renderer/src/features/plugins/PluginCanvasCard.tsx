@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import type {
   InstalledPlugin,
   LimitsSnapshot,
@@ -18,6 +19,7 @@ import { constrainPluginResize } from "./pluginBounds";
 import { PluginFrame } from "./PluginFrame";
 import type { PluginCanvasWheelInput } from "./pluginInputBridge";
 import { pluginCanvasWidgetId } from "../workspace/canvasWidgetFocus";
+import { surfaceIsLive, surfaceLifecycle, useSurfaceOffscreen, useWindowHidden } from "../workspace/surfaceLifecycle";
 
 interface PluginCanvasCardProps {
   instance: PluginCanvasInstance;
@@ -25,12 +27,14 @@ interface PluginCanvasCardProps {
   contribution: PluginCanvasAppContribution;
   locale: LocaleId;
   palette: PaletteId;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
   sessions: readonly SessionSnapshot[];
   limits: LimitsSnapshot | null;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onActivate(instance: PluginCanvasInstance): void;
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onDispose(id: string): void;
@@ -42,12 +46,16 @@ interface PluginCanvasCardProps {
   onCanvasWheel(event: PluginCanvasWheelInput): void;
   /** True while this card is part of the marquee selection. */
   groupSelected?: boolean;
+  /** An ancestor hides the card with CSS (HOME editing hides the whole window layer). */
+  hidden?: boolean;
 }
 
 interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -62,12 +70,12 @@ export function PluginCanvasCard({
   contribution,
   locale,
   palette,
-  zoom,
+  camera,
   stackIndex,
   snapEnabled,
   sessions,
   limits,
-  snapTargets,
+  getSnapTargets,
   onActivate,
   onBoundsChange,
   onDispose,
@@ -77,7 +85,8 @@ export function PluginCanvasCard({
   onWidgetFocus,
   onWidgetHoverChange,
   onCanvasWheel,
-  groupSelected = false
+  groupSelected = false,
+  hidden = false
 }: PluginCanvasCardProps): React.JSX.Element {
   const dragState = useRef<DragState | null>(null);
   const resizeState = useRef<ResizeState | null>(null);
@@ -89,8 +98,14 @@ export function PluginCanvasCard({
   const [position, setPosition] = useState(initialBounds.position);
   const [size, setSize] = useState(initialBounds.size);
   const liveBounds = useRef<SessionBounds>(initialBounds);
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  // Renders when the summary scale changes, not on every camera move.
+  const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
+  const summaryMode = summaryScale > 1;
+  // The plugin document is suspended whenever nobody can see it: its timers drop to one wake-up a second
+  // and its animation frames wait, but the document (and all its state) stays loaded.
+  const offscreen = useSurfaceOffscreen(camera, { position, size });
+  const windowHidden = useWindowHidden();
+  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, offscreen, windowHidden });
 
   useEffect(() => {
     const bounds = constrainPluginResize(
@@ -112,7 +127,8 @@ export function PluginCanvasCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -122,11 +138,11 @@ export function PluginCanvasCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -155,7 +171,8 @@ export function PluginCanvasCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -166,8 +183,8 @@ export function PluginCanvasCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const raw: SessionBounds = {
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),
@@ -183,7 +200,7 @@ export function PluginCanvasCard({
       }
     };
     const constrained = constrainPluginResize(raw, state.direction, contribution.minSize);
-    applyBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -208,6 +225,7 @@ export function PluginCanvasCard({
       data-canvas-widget-id={pluginCanvasWidgetId(instance.id)}
       data-canvas-widget-focusable="true"
       data-wheel-owner={summaryMode ? undefined : "local"}
+      data-surface-lifecycle={lifecycle}
       style={{
         width: size.width,
         height: size.height,
@@ -245,6 +263,7 @@ export function PluginCanvasCard({
         canvasInstanceId={instance.id}
         onOpenLauncher={onOpenLauncher}
         onError={onError}
+        suspended={!surfaceIsLive(lifecycle)}
       />
       <button
         className="plugin-canvas-card__summary"

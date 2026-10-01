@@ -47,3 +47,12 @@ test("an initial list does not discard a session created after its snapshot", ()
 
   assert.deepEqual(mergeSessionSnapshots([live], []), [live]);
 });
+
+test("a late initial list does not bring back a session removed while it was loading", () => {
+  const kept = session({ id: "session-kept", revision: 2, status: "idle" });
+  const removedBeforeList = session({ id: "session-removed", revision: 1, status: "idle" });
+  // onRemoved already dropped "session-removed" from the current state; the startup list still carries it.
+  const merged = mergeSessionSnapshots([kept], [kept, removedBeforeList], new Set(["session-removed"]));
+
+  assert.deepEqual(merged.map((entry) => entry.id), ["session-kept"]);
+});

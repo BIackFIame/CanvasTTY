@@ -7,13 +7,50 @@ import { BROWSER_PROVIDER_COLORS } from "../../../shared/contracts.ts";
 
 const STALE_AFTER_MS = 10_000;
 const EXPIRE_AFTER_MS = 15_000;
+const EXPIRY_CHECK_MS = 1_000;
+
+interface ExpiryTimers {
+  setInterval(callback: () => void, ms: number): { unref?(): unknown };
+  clearInterval(timer: unknown): void;
+}
+
+export interface AgentRegistryOptions {
+  /** Called when presence expired on its own (no heartbeat for 15 s). */
+  onExpired?: () => void;
+  timers?: ExpiryTimers;
+}
 
 export class AgentRegistry {
   private readonly values = new Map<string, AgentPresenceSnapshot>();
   private readonly now: () => number;
+  private readonly onExpired: (() => void) | undefined;
+  private readonly timers: ExpiryTimers;
+  /** Runs only while an agent is present: a browser nobody's agent uses never wakes up for it. */
+  private expiryTimer: { unref?(): unknown } | null = null;
+  private disposed = false;
 
-  constructor(now: () => number = Date.now) {
+  constructor(now: () => number = Date.now, options: AgentRegistryOptions = {}) {
     this.now = now;
+    this.onExpired = options.onExpired;
+    this.timers = options.timers ?? { setInterval: (callback, ms) => setInterval(callback, ms), clearInterval: (timer) => clearInterval(timer as NodeJS.Timeout) };
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    this.syncExpiry();
+  }
+
+  private syncExpiry(): void {
+    const wanted = Boolean(this.onExpired) && !this.disposed && this.values.size > 0;
+    if (wanted && !this.expiryTimer) {
+      this.expiryTimer = this.timers.setInterval(() => {
+        if (this.prune()) this.onExpired?.();
+      }, EXPIRY_CHECK_MS);
+      this.expiryTimer.unref?.();
+    } else if (!wanted && this.expiryTimer) {
+      this.timers.clearInterval(this.expiryTimer);
+      this.expiryTimer = null;
+    }
   }
 
   touch(
@@ -44,6 +81,7 @@ export class AgentRegistry {
       connectedAt: current?.connectedAt ?? timestamp,
       lastHeartbeatAt: timestamp
     });
+    this.syncExpiry();
     return true;
   }
 
@@ -57,7 +95,9 @@ export class AgentRegistry {
   }
 
   disconnect(actor: BrowserActor): boolean {
-    return actor.kind === "agent" && this.values.delete(actor.connectionId);
+    const removed = actor.kind === "agent" && this.values.delete(actor.connectionId);
+    this.syncExpiry();
+    return removed;
   }
 
   replace(values: readonly AgentPresenceSnapshot[]): void {
@@ -66,6 +106,7 @@ export class AgentRegistry {
       if (!value.connectionId || this.values.has(value.connectionId)) continue;
       this.values.set(value.connectionId, structuredClone(value));
     }
+    this.syncExpiry();
   }
 
   snapshot(): AgentPresenceSnapshot[] {
@@ -89,6 +130,7 @@ export class AgentRegistry {
       this.values.delete(connectionId);
       changed = true;
     }
+    if (changed) this.syncExpiry();
     return changed;
   }
 }

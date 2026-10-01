@@ -54,6 +54,7 @@ type Terminals = Pick<
   | "dispose"
   | "rename"
   | "inputChecked"
+  | "redactSecrets"
 >;
 type SpeechPort = Pick<
   SpeechRecognizer,
@@ -123,7 +124,12 @@ export class EvenG2Controller {
   private readonly speech: SpeechPort;
   private readonly localLink: LocalLink;
   private readonly localName: string;
-  private readonly discovery: LocalDiscovery | null;
+  private readonly discovery: Pick<LocalDiscovery, "host" | "start" | "stop"> | null;
+  /** When a Bonjour name that could not be published is tried again (every name taken: ~40 s of dns-sd each time). */
+  private discoveryRetryAt = 0;
+  /** A revoke is in memory but not yet on disk: saved again until it is. */
+  private unsaved = false;
+  private diagnosticsTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly defaultWorkspace: string;
   private readonly speechSetup: SpeechSetup | null;
   private readonly mobileRoot: string | null;
@@ -170,11 +176,13 @@ export class EvenG2Controller {
     defaultWorkspace?: string;
     bundledSpeech?: string;
     localHostname?: string;
-    localDiscovery?: boolean;
+    /** true: publish through macOS Bonjour; an object replaces LocalDiscovery (tests). */
+    localDiscovery?: boolean | Pick<LocalDiscovery, "host" | "start" | "stop">;
   }) {
     this.file = join(options.userDataPath, "even-g2.json");
     this.localLink = new LocalLink(options.userDataPath);
-    this.discovery = options.localDiscovery ? new LocalDiscovery() : null;
+    this.discovery = typeof options.localDiscovery === "object" ? options.localDiscovery
+      : options.localDiscovery ? new LocalDiscovery() : null;
     this.localName =
       options.localHostname || hostname().split(".")[0] + ".local";
     this.defaultWorkspace =
@@ -370,11 +378,11 @@ export class EvenG2Controller {
       allowBrowser: this.config.allowBrowser,
     });
   }
-  private save(): Promise<void> {
+  private save(config: EvenG2Config = this.config): Promise<void> {
     const payload = JSON.stringify(
       {
         version: 1,
-        config: this.config,
+        config,
         peers: this.peers.map((p) => ({ ...p, grant: this.access.get(p.id) })),
       },
       null,
@@ -391,7 +399,7 @@ export class EvenG2Controller {
         await rm(temporary, { force: true });
       }
     });
-    this.saveQueue = operation.catch(() => undefined);
+    this.saveQueue = operation.then(() => { this.unsaved = false; }, () => undefined);
     return operation;
   }
   /** Whether the companion is switched on; decides answer capture for sessions spawned now. */
@@ -445,6 +453,8 @@ export class EvenG2Controller {
     try {
       if (command.type === "configure") {
         const config = await this.validateConfig(command.config);
+        // Saved before it is applied: a configuration that cannot be saved changes nothing (like approve).
+        await this.save(config);
         this.speech.cancelAll();
         this.config = config;
         this.pairing = null;
@@ -453,7 +463,6 @@ export class EvenG2Controller {
         this.speech.configure(config.speechExecutable, config.speechModel);
         if (config.enabled) await this.start();
         else await this.stop();
-        await this.save();
       } else if (command.type === "prepare-speech") {
         if (!this.speechSetup) throw new Error("bundled-speech-unavailable");
         const current = this.config.speechExecutable;
@@ -522,7 +531,14 @@ export class EvenG2Controller {
         this.ledger.forgetDevice(command.id);
         this.peers = this.peers.filter((p) => p.id !== command.id);
         this.seen.delete(command.id);
-        await this.save();
+        // The device lost access at once; never rolled back. Not saved: saved again until it is, so a restart
+        // does not bring the device back.
+        try {
+          await this.save();
+        } catch (error) {
+          this.unsaved = true;
+          throw error;
+        }
       } else throw new Error("unknown-command");
       if (!this.config.enabled || this.server?.listening) this.error = "";
       return this.state();
@@ -537,7 +553,8 @@ export class EvenG2Controller {
       this.timer = setInterval(() => {
         if (this.commandBusy || this.closing) return;
         this.commandBusy = true;
-        void this.reconcileNetwork()
+        void (this.unsaved ? this.save().catch(() => undefined) : Promise.resolve())
+          .then(() => this.reconcileNetwork())
           .catch(() => {
             this.error = "listener-unavailable";
           })
@@ -577,7 +594,7 @@ export class EvenG2Controller {
     }
     if (this.server?.listening) {
       if (!this.config.publicOrigin && this.discovery && !this.discovery.host)
-        await this.discovery.start(targets.find(a => !a.includes(":")) || this.boundAddress, selected.name, this.port);
+        await this.startDiscovery(targets.find(a => !a.includes(":")) || this.boundAddress, selected.name);
       return;
     }
     try {
@@ -625,12 +642,25 @@ export class EvenG2Controller {
         } else this.extraServers.set(address, server);
       }
       if (!this.config.publicOrigin && this.discovery && !this.closing)
-        await this.discovery.start(targets.find(a => !a.includes(":")) || this.boundAddress, selected.name, this.port);
+        await this.startDiscovery(targets.find(a => !a.includes(":")) || this.boundAddress, selected.name);
       if (this.closing) await this.closeListener();
       this.error = "";
     } catch (error) {
       await this.closeListener();
       throw error;
+    }
+  }
+  /**
+   * Publishes the Bonjour name. A failure is not the listener's (it serves addresses typed by hand; pairing says
+   * local-discovery-unavailable) and is tried again after five minutes, not on every 5 s network check.
+   */
+  private async startDiscovery(address: string, interfaceName: string): Promise<void> {
+    if (!this.discovery || Date.now() < this.discoveryRetryAt) return;
+    try {
+      await this.discovery.start(address, interfaceName, this.port);
+      this.discoveryRetryAt = 0;
+    } catch {
+      this.discoveryRetryAt = Date.now() + 5 * 60_000;
     }
   }
   private localOrigins(): string[] {
@@ -674,10 +704,14 @@ export class EvenG2Controller {
   }
   async close(): Promise<void> {
     this.closing = true;
+    if (this.diagnosticsTimer) clearTimeout(this.diagnosticsTimer);
+    this.diagnosticsTimer = null;
     this.speechSetup?.cancel();
     await this.stop();
     this.presentation.close();
+    if (this.unsaved) await this.save().catch(() => undefined);
     await this.saveQueue;
+    await this.diagnosticsWrite;
   }
   private json(res: ServerResponse, status: number, value: unknown): void {
     res.writeHead(status, {
@@ -734,11 +768,18 @@ export class EvenG2Controller {
     if (["/g2/discover", "/g2/pair-start", "/g2/pair-finish"].includes(url.pathname)) {
       const active = !!this.pairing && this.pairing.expiresAt > Date.now();
       res.once("finish", () => {
+        if (this.closing) return;
         const line = `${new Date().toISOString()} ${req.method} ${url.pathname} HTTP ${res.statusCode} active=${active} family=${address.includes(":") ? "IPv6" : "IPv4"}`;
         this.pairingDiagnostics = [...this.pairingDiagnostics, line].slice(-64);
-        const text = this.pairingDiagnostics.join("\n") + "\n";
-        this.diagnosticsWrite = this.diagnosticsWrite.catch(() => {}).then(() =>
-          writeFile(join(this.file, "..", "even-g2-pairing.log"), text, { mode: 0o600 })).catch(() => {});
+        // Anyone on the LAN can call these: the log is written at most once a second, not per request.
+        if (this.diagnosticsTimer) return;
+        this.diagnosticsTimer = setTimeout(() => {
+          this.diagnosticsTimer = null;
+          const text = this.pairingDiagnostics.join("\n") + "\n";
+          this.diagnosticsWrite = this.diagnosticsWrite.catch(() => {}).then(() =>
+            writeFile(join(this.file, "..", "even-g2-pairing.log"), text, { mode: 0o600 })).catch(() => {});
+        }, 1_000);
+        this.diagnosticsTimer.unref?.();
       });
     }
     const expectedHost = new URL(addressOrigin(address, this.port)).host;

@@ -30,6 +30,7 @@ import type {
   SessionBounds,
   SessionEvent,
   SessionRemovedEvent,
+  GitRiskReport,
   TerminalDataEvent,
   UpdaterState,
   UpdaterStateEvent
@@ -253,7 +254,9 @@ const api: CanvasTTYApi = {
     setVisible: (id: string, visible: boolean) => ipcRenderer.send(IPC.terminalSetVisible, id, visible),
     onData: (listener: (event: TerminalDataEvent) => void, id?: string) => terminalData.subscribe(listener, id),
     onSession: (listener: (event: SessionEvent) => void) => subscribe(IPC.terminalSession, listener),
-    onRemoved: (listener: (event: SessionRemovedEvent) => void) => subscribe(IPC.terminalRemoved, listener)
+    onRemoved: (listener: (event: SessionRemovedEvent) => void) => subscribe(IPC.terminalRemoved, listener),
+    resolveGitRisk: (reportId: string, action: "neutralize" | "keep") => ipcRenderer.invoke(IPC.terminalResolveGitRisk, reportId, action),
+    onGitRisk: (listener: (report: GitRiskReport) => void) => subscribe(IPC.terminalGitRisk, listener)
   },
   updater: {
     state: () => Promise.resolve(latestUpdaterState),
@@ -263,6 +266,7 @@ const api: CanvasTTYApi = {
   },
   window: {
     isMacOS: process.platform === "darwin",
+    platform: process.platform,
     minimize: () => ipcRenderer.send(IPC.windowMinimize),
     toggleMaximize: () => ipcRenderer.invoke(IPC.windowToggleMaximize),
     close: () => ipcRenderer.send(IPC.windowClose),

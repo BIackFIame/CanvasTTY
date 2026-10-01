@@ -189,6 +189,18 @@ test("git with -C another repository: mutating forms are writes or deletes outsi
   }
 });
 
+test("git worktree add with -C another repository writes that repository's metadata even when the new worktree lands inside the project", () => {
+  // The worktree itself lands inside the project (ordinary), but `worktree add` also records the new worktree in
+  // the *other* repository's own .git/worktrees administrative area: a write to that repository, wherever the
+  // new worktree folder goes.
+  assert.equal(rule(shell(`git -C ${outside} worktree add ${join(project, "wt")} -b feature`)), "write-outside");
+  assert.equal(rule(shell(`git -C ${outside} worktree add wt-here`)), "write-outside");
+  assert.equal(rule(shell(`git --git-dir ${outside}/.git worktree add ${join(project, "wt2")}`)), "write-outside");
+  // Inside the project (no -C/--git-dir naming another repository): unaffected, as before.
+  assert.equal(rule(shell("git worktree add ../wt")), "write-outside");
+  assert.equal(rule(shell("git worktree add src/wt")), null);
+});
+
 test("wrapped and less common forms: the same deny as the plain command outside, no deny inside the project", () => {
   // Each form once with a target outside the working folder (denied like the plain `rm -rf OUT` / `cp a OUT`) and
   // once with a target inside it (ordinary work). `%` is where the target goes.
@@ -226,7 +238,13 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     ["curl -sc %/jar https://example.com", "write-outside"], ["curl -sD %/headers https://example.com", "write-outside"],
     ["wget -qo %/log https://example.com/x -O-", "write-outside"], ["env -C % rm -rf x", "delete-outside"],
     ["perl -pie 's/a/b/' %/f", "write-outside"], ["perl -i -- -e %/f", "write-outside"], ["rsync -t src/a.ts %/", "write-outside"],
-    ["find -f % -delete", "delete-outside"]
+    ["find -f % -delete", "delete-outside"],
+    // A folder named once in a shell variable of the same command, then used.
+    ["OUT=%; rm -rf \"$OUT\"", "delete-outside"], ["OUT=% && rm -rf ${OUT}/x", "delete-outside"], ["export OUT=%; rm -rf $OUT", "delete-outside"],
+    ["DEST=%; cp src/a.ts \"$DEST/a.ts\"", "write-outside"], ["OUT=/; OUT=%; rm -rf $OUT", "delete-outside"],
+    // tar's -C with the folder attached; git aliases and config values that run a shell command.
+    ["tar -xf a.tar -C%", "write-outside"], ["git -c alias.x='!rm -rf %' x", "delete-outside"],
+    ["git -c core.fsmonitor='rm -rf %' status", "delete-outside"]
   ];
   const OUT = [outside, "../elsewhere"];
   const IN = ["build", join(project, "build")];
@@ -247,8 +265,26 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     "cp -t build src/a.ts", "tar -czf build/a.tgz -C src .", "tar -tzf a.tgz", "unzip -l a.zip", "unzip -o a.zip",
     "curl -fsSL https://example.com", "curl -fsSLO https://example.com/x.tgz", "curl -fsSLo build/x https://example.com/x && tar -xzf build/x -C build",
     "wget -qO- https://example.com", "wget -q https://example.com/x.tgz", "stdbuf -oL npm test", "if true; then echo hi; fi",
-    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts"
+    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts",
+    // A variable set to the project, then set again; one set only for its own command; one never set.
+    "OUT=/; OUT=build; rm -rf \"$OUT\"", "OUT=/ echo hi; rm -rf build", "git -c alias.st=status st", "git -c core.pager=less log"
   ]) assert.equal(rule(shell(command)), null, command);
+});
+
+test("a delete or move whose path comes from a variable or output CanvasTTY cannot resolve is denied as an unknown target", () => {
+  for (const command of [
+    "rm -rf \"$OUT\"", "rm -rf $BUILD_DIR/cache", "rm -r \"$(cat target.txt)\"", "rm \"$FILE\"", "rmdir \"$DIR\"",
+    "OUT=$(mktemp -d -p .); rm -rf \"$OUT\"", "mv \"$SRC\" build/", "mv build/a \"$DEST\"", "find \"$ROOT\" -delete",
+    "for f in $(ls); do rm -rf \"$f\"; done"
+  ]) assert.equal(rule(shell(command)), "unknown-target", command);
+  // Resolved variables, loop words and plain paths keep their ordinary reading.
+  for (const command of [
+    "OUT=build; rm -rf \"$OUT\"", "rm -rf build/cache", "for f in build dist; do rm -rf \"$f\"; done",
+    "for f in src/*.tmp; do rm \"$f\"; done", "rm -rf build", "mv src/a.ts src/b.ts", "echo \"$OUT\"", "cat \"$(ls)\""
+  ]) assert.equal(rule(shell(command)), null, command);
+  // A loop over a folder outside is the delete outside it.
+  assert.equal(rule(shell(`for f in build ${outside}; do rm -rf "$f"; done`)), "delete-outside");
+  assert.match(check("Bash", { command: "rm -rf \"$OUT\"" }).message, /cannot resolve/u);
 });
 
 test("curl and wget: every spelling of an output or side file, and --output-dir in either order, is judged where it lands", () => {
@@ -333,4 +369,15 @@ test("curl: each operation between --next / -: uses its own --output-dir, and --
     assert.equal(rule(shell(`curl --output-dir ${away} -D ${away}/h ${URL}`)), "write-outside");
     assert.equal(rule(shell(`curl --output-dir build -c ${away}/jar ${URL}`)), "write-outside");
   }
+});
+
+test("a command hidden behind thousands of wrappers is refused, not a crash that lets it through", () => {
+  for (const wrapper of ["nohup", "env", "nice", "timeout 5", "xargs", "busybox", "su root -c"]) {
+    const command = `${`${wrapper} `.repeat(3_000)}rm -rf /`;
+    const verdict = check("Bash", { command });
+    assert.ok(verdict, `${wrapper}: denied`);
+  }
+  // A few wrappers are ordinary and judged by what they run.
+  assert.equal(check("Bash", { command: "nohup nice env FOO=1 true" }), null);
+  assert.equal(check("Bash", { command: "nohup nice env FOO=1 rm -rf /" })?.rule !== undefined, true);
 });

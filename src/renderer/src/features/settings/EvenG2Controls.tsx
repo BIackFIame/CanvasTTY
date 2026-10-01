@@ -7,6 +7,7 @@ import type {
 } from "../../../../shared/evenG2";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
+import { pollWhileOpen } from "./settingsPolling";
 import "./evenG2Controls.css";
 
 const USB_ORIGIN = "http://127.0.0.1:3481";
@@ -16,8 +17,10 @@ const isWebOrigin = (origin: string): boolean =>
 type Stage = "overview" | "transport" | "web" | "scope" | "pair";
 export function EvenG2Controls({
   locale,
+  open = true,
 }: {
   locale: LocaleId;
+  open?: boolean;
 }): React.JSX.Element {
   const [state, setState] = useState<EvenG2State | null>(null);
   const [draft, setDraft] = useState<EvenG2Config | null>(null);
@@ -34,7 +37,7 @@ export function EvenG2Controls({
   useEffect(() => {
     let active = true;
     const read = () =>
-      void window.canvasTTY.evenG2
+      window.canvasTTY.evenG2
         .state()
         .then((next) => {
           if (!active) return;
@@ -66,13 +69,12 @@ export function EvenG2Controls({
               t(locale, "evenG2ConnectionSettingsUnavailable"),
             );
         });
-    read();
-    const timer = setInterval(read, 1500);
+    const stop = pollWhileOpen(open, 1500, read);
     return () => {
       active = false;
-      clearInterval(timer);
+      stop();
     };
-  }, [locale]);
+  }, [locale, open]);
   useEffect(() => {
     if (
       stage === "pair" &&

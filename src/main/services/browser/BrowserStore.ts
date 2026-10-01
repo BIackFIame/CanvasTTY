@@ -121,3 +121,9 @@ function restorableUrl(value: string): string {
 function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
+
+/** The active tab once tabs were removed: unchanged while it is still open, else the first open tab (or none). */
+export function activeTabAmong(tabs: ReadonlyMap<string, unknown>, activeTabId: string | null): string | null {
+  if (activeTabId === null || tabs.has(activeTabId)) return activeTabId;
+  return tabs.keys().next().value ?? null;
+}

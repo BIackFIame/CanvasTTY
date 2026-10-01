@@ -409,3 +409,43 @@ test("BrowserCommandDispatcher bounds a stalled result audit during shutdown", a
   ]);
   assert.equal((await pending).ok, true);
 });
+
+test("BrowserCommandDispatcher answers a mutation resent after a dropped connection from its record instead of running it again", async () => {
+  let executions = 0;
+  const service = dispatcher({
+    execute: async (_actor, command) => {
+      executions += 1;
+      return { tabId: command.tabId ?? null, data: { execution: executions } };
+    }
+  });
+  const click = navigate("click-1", "tab-a");
+  const first = await service.execute(agent, click);
+  // The socket dropped before the answer arrived; the helper reconnects with the same connection and resends.
+  service.clearActor(agent, { reconnecting: true });
+  assert.deepEqual(await service.execute(agent, click), first);
+  assert.equal(executions, 1, "not clicked twice");
+  // A revoked or expired connection keeps nothing.
+  service.clearActor(agent);
+  await service.execute(agent, click);
+  assert.equal(executions, 2);
+});
+
+test("BrowserCommandDispatcher forgets completed agent mutations after ten minutes", async () => {
+  let now = 1_000;
+  let executions = 0;
+  const service = dispatcher({
+    now: () => now,
+    execute: async (_actor, command) => {
+      executions += 1;
+      return { tabId: command.tabId ?? null, data: { execution: executions } };
+    }
+  });
+  await service.execute(agent, navigate("old", "tab-a"));
+  now += 9 * 60_000;
+  await service.execute(agent, navigate("old", "tab-a"));
+  assert.equal(executions, 1, "still remembered");
+  now += 2 * 60_000;
+  await service.execute(agent, navigate("new", "tab-a"));
+  await service.execute(agent, navigate("old", "tab-a"));
+  assert.equal(executions, 3, "the old record was released");
+});

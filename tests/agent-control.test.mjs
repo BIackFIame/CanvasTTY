@@ -5,12 +5,13 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
 import xterm from "@xterm/headless";
 import { AgentControlGateway, CONTROL_REFUSAL_MESSAGE, codexComposerReady } from "../src/main/services/agent-control/AgentControlGateway.ts";
+import { IPC } from "../src/shared/contracts.ts";
 import { PixelSkinPackRegistry } from "../src/main/services/PixelSkinPackRegistry.ts";
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
@@ -162,6 +163,45 @@ test("request receipts are bounded without locking the gateway, and a refused re
   assert.equal(f.calls[0].pty.writes.length, 2);
 });
 
+test("a create whose controller setup fails closes the card instead of leaving it running unowned", localSocket, async (t) => {
+  const f = await fixture(t);
+  const geometry = f.terminals.geometry.bind(f.terminals);
+  f.terminals.geometry = () => { throw new Error("no geometry"); };
+  await assert.rejects(f.create("create-broken"));
+  assert.equal(f.calls.length, 1, "the card was started");
+  assert.deepEqual(f.terminals.listMetadata(), [], "and closed again");
+  f.terminals.geometry = geometry;
+  const { session } = await f.create("create-after-failure");
+  assert.deepEqual(f.terminals.listMetadata().map((card) => card.id), [session.id]);
+});
+
+test("closing stops draining new PTY output instead of letting it grow the shutdown wait forever", localSocket, async (t) => {
+  const f = await fixture(t);
+  const { session } = await f.create();
+  await f.ready(session.id);
+
+  let writes = 0;
+  const original = xterm.Terminal.prototype.write;
+  xterm.Terminal.prototype.write = function(data, callback) {
+    writes += 1;
+    return original.call(this, data, callback);
+  };
+  t.after(() => { xterm.Terminal.prototype.write = original; });
+
+  const closePromise = f.gateway.close();
+  const writesAtCloseStart = writes;
+  // Output arriving after close() started must not keep extending the session's pending-write
+  // chain: observe() is closing's own signal to stop accepting more of it.
+  let offset = 0;
+  for (let i = 0; i < 25; i += 1) {
+    const chunk = `flood-${i}`;
+    offset += chunk.length;
+    f.gateway.observe(IPC.terminalData, { id: session.id, data: chunk, outputOffset: offset });
+  }
+  await closePromise;
+  assert.equal(writes, writesAtCloseStart, "no write was queued for output observed after close() began");
+});
+
 test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-start-")));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -198,14 +238,68 @@ test("agent control brings the Windows pipe host back after it fails and republi
   t.after(() => gateway.close());
   const connection = await gateway.start();
   assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-0$/);
+  const grant = gateway.grantSession("orchestrator-one");
+  assert.ok(grant);
+  const before = JSON.parse(await readFile(grant, "utf8"));
+  const token = await readFile(before.tokenFile, "utf8");
+  const controllerPath = join(dirname(grant), "controller.json");
+  const controller = await readFile(controllerPath, "utf8");
+  const revoked = gateway.grantSession("orchestrator-closed");
   transports[0].emit("fatal", new Error("host exited"));
+  assert.equal(gateway.grantSession("while-offline"), null, "no dead endpoint is handed out");
+  gateway.revokeSession("orchestrator-closed");
   t.mock.timers.tick(500);
   assert.equal(await republished, connection);
   assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-1$/);
+  const after = JSON.parse(await readFile(grant, "utf8"));
+  assert.match(after.endpoint, /agent-1$/, "the same session descriptor follows the recovered host");
+  assert.equal(after.scope, "session");
+  assert.equal(after.tokenFile, before.tokenFile);
+  assert.equal(await readFile(after.tokenFile, "utf8"), token);
+  assert.equal(await readFile(controllerPath, "utf8"), controller);
+  await assert.rejects(readFile(revoked), { code: "ENOENT" }, "revoked grants are not recreated");
   await gateway.close();
   transports[1].emit("fatal", new Error("late"));
   t.mock.timers.tick(10_000);
   assert.equal(transports.length, 2);
+});
+
+test("agent control keeps bringing a failing Windows pipe host back, less often, instead of giving up after three tries", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-win-retry-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const transports = [];
+  let failing = true;
+  let restarted;
+  const republished = new Promise((resolve) => { restarted = resolve; });
+  const gateway = new AgentControlGateway({
+    userDataPath: root, terminals: {}, lifecycleEnabled: () => true, platform: "win32", windowsHostPath: "C:\\fake\\host.exe",
+    onTransportRestarted: (path) => restarted(path),
+    windowsPipeHostFactory: () => {
+      const transport = new EventEmitter();
+      const index = transports.length;
+      transport.start = async () => {
+        if (index > 0 && failing) throw new Error("pipe host did not start");
+        return `\\\\.\\pipe\\canvastty-agent-${index}`;
+      };
+      transport.close = async () => undefined;
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+  const connection = await gateway.start();
+  transports[0].emit("fatal", new Error("host exited"));
+  const flush = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
+  for (let i = 0; i < 6; i++) {
+    t.mock.timers.tick(60_000);
+    await flush();
+  }
+  assert.ok(transports.length > 4, `${transports.length} starts: it did not give up after three`);
+  failing = false;
+  t.mock.timers.tick(60_000);
+  await flush();
+  assert.equal(await republished, connection);
 });
 
 test("controller cannot list, read, interrupt or send to other controllers or UI sessions", localSocket, async (t) => {
@@ -367,6 +461,7 @@ test("unauthenticated, garbage and HTTP requests get the same guidance and a clo
   // The guidance names the way in and nothing about the protocol, the token or where anything lives.
   assert.match(CONTROL_REFUSAL_MESSAGE, /Orchestrator role/u);
   assert.match(CONTROL_REFUSAL_MESSAGE, /canvastty_agents tools/u);
+  assert.match(CONTROL_REFUSAL_MESSAGE, /list_providers/u);
   assert.doesNotMatch(CONTROL_REFUSAL_MESSAGE, /token|instanceId|controller|\.sock|connection\.json|agent-control|ndjson|json/iu);
   assert.equal(f.calls.length, 0);
 });
@@ -656,21 +751,18 @@ test("cancel disposes the subagent and plain terminals are not agents", async ()
   terminals.disposeAll();
 });
 
-test("a parent cannot exceed the subagent fan-out cap", () => {
+test("a parent cannot exceed the person's live-subagent limit, nor the card cap", () => {
   const { terminals, control } = serviceFixture();
-  const parent = terminals.create({
-    provider: "codex",
-    cwd: process.cwd(),
-    profile: "normal",
-    position: { x: 0, y: 0 }
-  });
-  for (let index = 0; index < 16; index += 1) {
-    control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
-  }
-  assert.throws(
-    () => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
-    /16 subagents/u
-  );
+  const parent = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 8; index += 1) control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
+    /already runs 8 live subagents, its limit \(Settings → Agents/u);
+  terminals.disposeAll();
+
+  const wide = new AgentControlService(terminals, { limits: () => ({ maxDepth: 2, maxSubagents: 32 }) });
+  const other = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 16; index += 1) wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() }), /16 subagent cards/u);
   terminals.disposeAll();
 });
 
@@ -719,4 +811,58 @@ test("an orchestrator tool call looks its sessions up by id: no other card's scr
 
   assert.deepEqual(copied, [child.id, child.id], "only the observed card's own scrollback is read, and no list() snapshot of every card");
   terminals.disposeAll();
+});
+
+test("the providers command lists what CanvasTTY can create and an unknown provider points to it", localSocket, async (t) => {
+  const f = await fixture(t, { providers: () => ({ providers: [{ id: "opencode", name: "OpenCode", installed: true, available: true,
+    signIn: "unknown", subagent: true, orchestrator: true }], note: "n" }) });
+  const listed = await f.request("providers");
+  assert.deepEqual(listed.providers.map((entry) => entry.id), ["opencode"]);
+  await assert.rejects(f.request("providers", { extra: 1 }), (e) => e.code === "INVALID_PARAMS");
+  await assert.rejects(f.request("create", { provider: "glm", profile: "yolo", cwd: f.root }),
+    (e) => e.code === "INVALID_PARAMS" && /providers command/u.test(e.message) && /opencode/u.test(e.message));
+  const cli = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath, "providers"]);
+  assert.equal(cli.result.providers[0].id, "opencode");
+  await assert.rejects(runCli(["providers", "extra"]), /Unexpected or missing positional/u);
+});
+
+test("create passes a model and effort to the worker's CLI and refuses ones it cannot take", localSocket, async (t) => {
+  const f = await fixture(t);
+  const cli = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath, "create", "--cwd", f.root,
+    "--model", "gpt-5.5", "--effort", "high"]);
+  assert.equal(cli.result.session.model, "gpt-5.5");
+  assert.equal(cli.result.session.effort, "high");
+  const args = f.calls.at(-1).args;
+  assert.ok(args.includes("--model") && args.includes("gpt-5.5"));
+  assert.ok(args.includes("model_reasoning_effort=\"high\""));
+  await assert.rejects(f.request("create", { provider: "codex", profile: "yolo", cwd: f.root, effort: "max" }),
+    (e) => e.code === "INVALID_PARAMS" && /codex takes effort/u.test(e.message) && /providers command/u.test(e.message));
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "glm" }),
+    (e) => e.code === "INVALID_PARAMS" && /provider\/model/u.test(e.message));
+});
+
+test("create refuses a model the worker's CLI does not list, naming the closest", localSocket, async (t) => {
+  const f = await fixture(t, { checkModel: async (provider, model) => provider === "opencode" && model !== "zai/glm-5.3-flash"
+    ? "opencode does not list the model \"nosuch/model\". Closest: zai/glm-5.3-flash. Call list_providers for the models it lists." : null });
+  const before = f.calls.length;
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "nosuch/model" }),
+    (e) => e.code === "INVALID_PARAMS" && /does not list the model/u.test(e.message) && /Run the providers command/u.test(e.message));
+  assert.equal(f.calls.length, before);
+});
+
+test("the control CLI reads a connection's scope as the person's only when there is no connection file", { skip: process.platform === "win32" }, async (t) => {
+  const { connectionScope } = await import("../scripts/canvastty-control.mjs");
+  const folder = await mkdtemp(join(tmpdir(), "canvastty-control-scope-"));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  assert.equal(await connectionScope(join(folder, "missing.json")), "person");
+  const path = join(folder, "connection.json");
+  await writeFile(path, JSON.stringify({ scope: "session" }), { mode: 0o600 });
+  assert.equal(await connectionScope(path), "session");
+  // A read that fails for another reason is that error, never a guess that turns a subagent into a YOLO person launch.
+  await chmod(path, 0o000);
+  try {
+    await assert.rejects(connectionScope(path), /EACCES|permission/iu);
+  } finally {
+    await chmod(path, 0o600);
+  }
 });

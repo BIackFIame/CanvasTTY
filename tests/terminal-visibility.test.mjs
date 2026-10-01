@@ -143,55 +143,26 @@ test("the real renderer dedup writes the hidden stretch exactly once", async (t)
 // continuity the session never had.
 const MAX_SCROLLBACK_CHARS = 240_000;
 
-test("a replay longer than the scrollback ring is marked as truncated, never stitched as contiguous", async (t) => {
+test("a hole in a card's stream is marked as missing output, never stitched as contiguous", async () => {
+  // The manager no longer leaves a hidden card a hole (terminal-hidden-output.test.mjs), but the card's side still
+  // must not present one as continuous output should any event ever start after what it wrote.
   const listeners = new Set();
-  let emitData;
-  const manager = new TerminalManager((channel, event) => {
-    if (channel === IPC.terminalData && reachesRenderer(event)) for (const listener of listeners) listener(event);
-  }, availableRegistry, undefined, undefined, true, () => ({
-    pid: 10000, process: "codex", kill() {}, write() {}, resize() {},
-    onData(listener) { emitData = listener; return { dispose() {} }; },
-    onExit() { return { dispose() {} }; }
-  }));
-  t.after(() => manager.disposeAll());
-  const { id } = manager.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
-  const flush = () => manager.flushOutput(id, manager.sessions.get(id));
   const written = [];
   const detach = attachTerminalOutput({
     onData(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    readBuffer() { return Promise.resolve(manager.readBuffer(id)); }
-  }, id, (chunk) => written.push(chunk), assert.fail,
+    readBuffer() { return Promise.resolve({ buffer: "V".repeat(1_000), outputOffset: 1_000 }); }
+  }, "s", (chunk) => written.push(chunk), assert.fail,
   // The caller owns the wording so the notice follows the app locale (the card passes
   // the localized string); the test passes the same shape and checks it is used verbatim.
   (missing) => `[CanvasTTY] ${missing} characters of output produced while this window was hidden are no longer available`);
-  t.after(detach);
-  const settle = () => new Promise((resolve) => setImmediate(resolve));
-
-  const visible = "V".repeat(1_000);
-  emitData(visible);
-  flush();
-  await settle();
-  assert.deepEqual(written, [visible], "the card starts with the visible batch");
-
-  manager.setVisible(id, false);
-  // 300 011 code units while hidden: 60 011 more than the ring retains.
-  const dropped = "D".repeat(60_011);
+  await new Promise((resolve) => setImmediate(resolve));
   const retained = "R".repeat(MAX_SCROLLBACK_CHARS);
-  emitData(dropped + retained);
-  flush();
-  assert.deepEqual(written, [visible], "hidden output is not streamed");
-  const buffered = manager.readBuffer(id);
-  assert.equal(buffered.outputOffset, visible.length + dropped.length + retained.length);
-  assert.equal(buffered.buffer, retained, "the ring holds the tail and only the tail");
+  for (const listener of listeners) listener({ id: "s", data: retained, outputOffset: 1_000 + 60_011 + retained.length, audience: "renderer" });
+  detach();
 
-  manager.setVisible(id, true);
-  await settle();
-
-  assert.equal(written.length, 3, "the replay is one bounded notice plus the retained window");
+  assert.equal(written.length, 3, "the history, one bounded notice, then what arrived");
   const [notice, replay] = written.slice(1);
-  assert.equal(replay, retained, "the tail survives the replay intact");
-  assert.equal(notice.includes(dropped), false, "the notice never carries the dropped output");
-  assert.equal(written.join("").includes("D"), false, "the dropped head is never written as if it had arrived");
+  assert.equal(replay, retained, "the tail survives intact");
   assert.equal(notice.split("\r\n").filter(Boolean).length, 1, "the notice is one line, not an output dump");
   assert.ok(notice.length < 200, "the notice stays bounded");
   assert.ok(notice.includes("60011"), "the notice states exactly how much output is missing");

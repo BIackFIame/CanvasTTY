@@ -27,6 +27,12 @@ The application interface currently supports English and Russian. This documenta
 
 Launch a shell or agent in a project directory, move and resize its live terminal, zoom out to navigate semantically, and return to Home for sessions, limits, media, and launch shortcuts. CanvasTTY keeps PTY state in the trusted main process and exposes only typed, allow-listed capabilities to the renderer.
 
+## Agents, orchestration and protection
+
+Agents start in **Auto** by default: the CLI's own auto mode (Claude Code, Codex, Grok), CanvasTTY's per-run rules for OpenCode, or, for a CLI without one, its approval bypass only inside agent isolation. Manual, Accept edits, Plan and Bypass are offered only where the CLI has them; Bypass is acknowledged once per CLI and never handed to a subagent. Around every mode sit layers the person controls in Settings → Agents: base protection (hooks that refuse elevation, `curl | sh`, disk commands and writes outside the project before the tool call runs), delegation rules (a subagent never gets more than its orchestrator and stays in its project; 2 levels and 8 live subagents by default), and an OS isolation layer (macOS `sandbox-exec`, Linux bubblewrap; none on Windows yet, where subagents run in Manual). When an isolated session ends, CanvasTTY checks the repositories it touched for git settings that would run programs outside isolation and offers to neutralize them.
+
+An **Orchestrator** session gets the `canvastty_agents` tools: `list_providers` (installed agents, sign-in state, models, efforts, profiles), `spawn_agent` with optional `model`, `effort` and `profile`, `wait_for_agent` (up to 600 s) and `get_agent_result`, which returns a Codex or OpenCode subagent's final reply as `answer` (up to 4,096 characters, masked). See [agent orchestration and isolation](docs/agent-orchestration.md) and [protection layers](docs/installing-and-security.md#agent-protection-layers).
+
 ## Windows shells and provider CLIs
 
 On Windows, the Terminal launcher uses the built-in Windows PowerShell with a clean `-NoLogo -NoProfile` session, then falls back to `pwsh` or `cmd.exe`. Codex, Claude, Qwen Code, Kimi, OpenCode, Hermes, and Grok Build are resolved to a concrete `.exe`, `.com`, `.cmd`, or `.bat` launcher from the user's `PATH` or standard per-user CLI directories before they are passed to `node-pty`/ConPTY.
@@ -44,6 +50,8 @@ npm install
 npm run dev
 ```
 
+`npm run build` and packaging also build the native agent helper (`canvastty-helper`, Go ≥ 1.21, `npm run build:helpers`) that runs the MCP servers and hooks on macOS and Linux; without Go the app keeps its JavaScript helpers, which Windows uses by default.
+
 ## Docs
 
 | Start here | Build on CanvasTTY |
@@ -51,7 +59,7 @@ npm run dev
 | [Documentation hub](docs/README.md) | [Widget authoring](docs/widget-authoring.md) |
 | [Getting started](docs/getting-started.md) | [Metrics and telemetry](docs/metrics-and-telemetry.md) |
 | [Built-in browser and audit log](docs/browser.md) | [Bundled agent browser skill](agent/browser/SKILL.md) |
-| [Native Codex control CLI](docs/agent-orchestration.md) | [Bundled orchestration skill](agent/orchestrator/SKILL.md) |
+| [Agent orchestration and isolation](docs/agent-orchestration.md) | [Bundled orchestration skill](agent/orchestrator/SKILL.md) |
 | [Install, releases, and local data](docs/installing-and-security.md) | [Security policy](SECURITY.md) |
 | [Architecture](docs/ARCHITECTURE.md) | [UI contract](docs/UI_CONTRACT.md) |
 | [Runtime plugin authoring](docs/plugins.md) | [Typed plugin SDK](docs/plugin-api.d.ts) |
@@ -79,7 +87,7 @@ Plugin examples:
 
 CanvasTTY includes a core browser rather than a plugin capability: trusted React chrome backed by sandboxed Electron `WebContentsView` tabs in one persistent Chromium profile. It is available from HOME, restores safe HTTP(S) tabs, keeps website credentials inside Chromium, manages downloads/uploads, and exposes typed browser actions to Claude Code, Codex, Kimi, OpenCode, and Hermes sessions launched by CanvasTTY.
 
-The browser card participates in the same canvas selection, hover-focus, drag, resize, and semantic-zoom model as terminals. Settings controls agent access, tab restore, recent downloads/activity, and browser-data clearing. Agent access uses an authenticated local socket or named pipe and a bundled stdio MCP helper; it does not open a TCP or remote-debugging port and never exports cookies, passwords, auth headers, local storage, arbitrary JavaScript, or raw CDP.
+The browser card participates in the same canvas selection, hover-focus, drag, resize, and semantic-zoom model as terminals. Settings controls agent access, tab restore, recent downloads/activity, and browser-data clearing. Agent access uses an authenticated local socket or named pipe and a bundled stdio MCP helper (native on macOS and Linux); it does not open a TCP or remote-debugging port and never exports cookies, passwords, auth headers, local storage, arbitrary JavaScript, or raw CDP.
 
 Every browser command produces a redacted local activity record. Persistent JSONL audit files form a hash chain below Electron `userData/browser/audit`, rotate at 100 MB, and prune rotated files older than 30 days during store initialization or rotation. Typed/page text, screenshots, credentials, URL queries/fragments, headers, cookies, and tokens are not stored. See the [browser and audit-log guide](docs/browser.md) and [Architecture](docs/ARCHITECTURE.md).
 

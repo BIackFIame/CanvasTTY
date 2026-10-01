@@ -46,10 +46,15 @@ export function isLaunchRole(value: unknown): value is LaunchRole {
 }
 
 export interface ControlConnection {
-  /** Absolute path of the descriptor the gateway wrote at `start()`. */
+  /** Absolute path of the descriptor the gateway wrote at `start()` (the person's own automation). */
   connectionPath: string;
   /** Absolute path of the CLI script that reads that descriptor. */
   cliPath: string;
+  /**
+   * A private connection for one orchestrator session (AgentControlGateway.grantSession): what the session gets
+   * instead of the app-wide descriptor. Null: the session gets none.
+   */
+  grant?: (sessionId: string) => string | null;
 }
 
 /**
@@ -57,7 +62,9 @@ export interface ControlConnection {
  * without setup; ordinary sessions get nothing and inherit nothing (see
  * `terminalEnvironment`, which strips both variables from the parent).
  */
-export function controlEnvironment(role: SessionRole, connection: ControlConnection | null): Record<string, string> {
+export function controlEnvironment(role: SessionRole, connection: ControlConnection | null, sessionId?: string): Record<string, string> {
   if (role !== "orchestrator" || !connection) return {};
-  return { [CONTROL_CONNECTION_ENV]: connection.connectionPath, [CONTROL_CLI_ENV]: connection.cliPath };
+  // An agent never gets the person's app-wide descriptor when the gateway can give it its own.
+  const path = connection.grant ? (sessionId ? connection.grant(sessionId) : null) : connection.connectionPath;
+  return path ? { [CONTROL_CONNECTION_ENV]: path, [CONTROL_CLI_ENV]: connection.cliPath } : {};
 }

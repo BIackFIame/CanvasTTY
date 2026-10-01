@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, clipboard, dialog, shell } from "electron";
 import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type {
   AppSettings,
@@ -38,6 +38,7 @@ import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
 import type { ProviderSecretsService } from "../services/ProviderSecretsService";
 import type { BrowserService } from "../services/BrowserService";
+import type { IpcRegistrar } from "./IpcReadinessGate";
 import { normalizePluginBrowserUrl } from "../services/browser/PluginBrowserOpenPolicy";
 import { PluginBrowserOpenBroker } from "./PluginBrowserOpenBroker";
 import type { GithubAuthService } from "../services/GithubAuthService";
@@ -45,11 +46,17 @@ import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { readHomeMedia } from "../services/homeMedia";
 
-interface Dependencies {
+interface CriticalDependencies {
   settings: SettingsStore;
   terminalBorderSkins: SkinRegistry;
   pixelSkinPacks: PixelSkinPackRegistry;
   providerClis: ProviderCliRegistry;
+  plugins: PluginManager;
+  getMainWindow(): BrowserWindow | null;
+}
+
+interface Dependencies {
+  settings: SettingsStore;
   recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
   agentChatHistory: AgentChatHistoryService;
@@ -83,52 +90,29 @@ interface Dependencies {
   };
 }
 
-export function registerIpc({
+/**
+ * The handlers the renderer's first frame depends on (settings, appearance, CLI availability, installed plugins,
+ * window chrome), registered as soon as the few services behind them are loaded — before terminals, gateways, the
+ * browser and the other services start. Returns the window-state observer the main entry point keeps current.
+ */
+export function registerCriticalIpc(ipcMain: IpcRegistrar, {
   settings,
   terminalBorderSkins,
   pixelSkinPacks,
   providerClis,
-  recheckProviderClis,
-  terminals,
-  agentChatHistory,
-  limits,
   plugins,
-  pluginServices,
-  pluginCards,
-  pluginMedia,
-  pluginSecrets,
-  providerSecrets,
-  browser,
-  githubAuth,
-  hermesHud,
-  launchFieldOptions,
-  getMainWindow,
-  applyBrowserSettings,
-  setCanvasNavigationShortcutCapture,
-  setCanvasNavigationPointerBinding,
-  openPluginWindow,
-  closePluginWindows,
-  requestPluginLauncher,
-  requestPluginCanvas,
-  broadcastPluginStorageChange,
-  updater
-}: Dependencies): (window: BrowserWindow | null) => void {
-  const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
-  // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
-  // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
-  const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
-    const serviceId = stringValue(values.serviceId, "serviceId");
-    plugins.assertService(pluginId, serviceId);
-    return pluginServices.request(pluginId, serviceId, stringValue(values.method, "method"), values.params);
-  };
-  const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
-    plugins.assertPermission(pluginId, "browser:open");
-    await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
-  };
-
-  ipcMain.handle(IPC.clipboardRead, () => clipboard.readText());
-  ipcMain.handle(IPC.clipboardHasImage, () => !clipboard.readImage().isEmpty());
-  ipcMain.on(IPC.clipboardWrite, (_event, text: string) => {
+  getMainWindow
+}: CriticalDependencies): (window: BrowserWindow | null) => void {
+  ipcMain.handle(IPC.clipboardRead, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return clipboard.readText();
+  });
+  ipcMain.handle(IPC.clipboardHasImage, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return !clipboard.readImage().isEmpty();
+  });
+  ipcMain.on(IPC.clipboardWrite, (event, text: string) => {
+    if (!isMainRenderer(event, getMainWindow)) return;
     if (typeof text === "string" && text.length > 0) clipboard.writeText(text);
   });
   ipcMain.handle(IPC.externalOpenUrl, (event, value: unknown) => {
@@ -140,7 +124,10 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return app.getVersion();
   });
-  ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.settingsGet, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return settings.get();
+  });
   ipcMain.handle(IPC.terminalBorderSkinsList, (event) => {
     assertMainRenderer(event, getMainWindow);
     return terminalBorderSkins.list();
@@ -179,6 +166,79 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return providerCliAvailability(providerClis);
   });
+
+  ipcMain.handle(IPC.pluginsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return plugins.list();
+  });
+
+  const observeMainWindow = createWindowStateObserver<BrowserWindow>((window, state) => {
+    if (!window.isDestroyed()) window.webContents.send(IPC.windowState, state);
+  });
+  observeMainWindow(getMainWindow());
+
+  // Window controls come only from the app's own renderer; a foreign sender is dropped or refused.
+  ipcMain.on(IPC.windowMinimize, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+  ipcMain.handle(IPC.windowToggleMaximize, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return readWindowState(null);
+    window.isMaximized() ? window.unmaximize() : window.maximize();
+    return readWindowState(window);
+  });
+  ipcMain.on(IPC.windowClose, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+  ipcMain.handle(IPC.windowGetState, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return readWindowState(BrowserWindow.fromWebContents(event.sender));
+  });
+
+  return observeMainWindow;
+}
+
+export function registerIpc(ipcMain: IpcRegistrar, {
+  settings,
+  recheckProviderClis,
+  terminals,
+  agentChatHistory,
+  limits,
+  plugins,
+  pluginServices,
+  pluginCards,
+  pluginMedia,
+  pluginSecrets,
+  providerSecrets,
+  browser,
+  githubAuth,
+  hermesHud,
+  launchFieldOptions,
+  getMainWindow,
+  applyBrowserSettings,
+  setCanvasNavigationShortcutCapture,
+  setCanvasNavigationPointerBinding,
+  openPluginWindow,
+  closePluginWindows,
+  requestPluginLauncher,
+  requestPluginCanvas,
+  broadcastPluginStorageChange,
+  updater
+}: Dependencies): void {
+  const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
+  // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
+  // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
+  const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
+    const serviceId = stringValue(values.serviceId, "serviceId");
+    plugins.assertService(pluginId, serviceId);
+    return pluginServices.request(pluginId, serviceId, stringValue(values.method, "method"), values.params);
+  };
+  const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
+    plugins.assertPermission(pluginId, "browser:open");
+    await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
+  };
+
   ipcMain.handle(IPC.agentsRecheck, (event) => {
     assertMainRenderer(event, getMainWindow);
     return recheckProviderClis();
@@ -226,6 +286,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickDirectory, async (event, defaultPath?: string) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose a project folder",
@@ -239,6 +300,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickMedia, async (event) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose Home media",
@@ -267,12 +329,11 @@ export function registerIpc({
     }
   });
 
-  ipcMain.handle(IPC.limitsGet, () => limits.get());
-
-  ipcMain.handle(IPC.pluginsList, (event) => {
+  ipcMain.handle(IPC.limitsGet, (event) => {
     assertMainRenderer(event, getMainWindow);
-    return plugins.list();
+    return limits.get();
   });
+
   ipcMain.handle(IPC.pluginsSearch, (event, query: string) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof query !== "string") throw new Error("Search query is required.");
@@ -396,17 +457,27 @@ export function registerIpc({
   ipcMain.handle(IPC.pluginsUninstall, async (event, pluginId: string) => {
     assertMainRenderer(event, getMainWindow);
     closePluginWindows(pluginId);
-    await pluginSecrets.revokeAll(pluginId);
-    await pluginMedia.revokeAll(pluginId);
-    await plugins.uninstall(pluginId);
+    // Uninstall first: it stops the plugin's services before removing its files, and afterwards
+    // no surface or service of the plugin passes authorization, so nothing can write a secret or
+    // media grant after they are revoked. A failed uninstall keeps the plugin's secrets.
+    // A media folder pick still open refuses to store its grant while this runs (and after, the plugin is gone).
+    pluginMedia.beginRemoval(pluginId);
+    try {
+      await plugins.uninstall(pluginId);
+      await pluginSecrets.revokeAll(pluginId);
+      await pluginMedia.revokeAll(pluginId);
+    } finally {
+      pluginMedia.endRemoval(pluginId);
+    }
     pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (
-    _event,
+    event,
     pluginId: string,
     contributionId: string,
     sourceCanvasInstanceId?: string
   ) => {
+    assertMainRenderer(event, getMainWindow);
     const target = plugins.contribution(pluginId, contributionId);
     if (target.kind !== "canvas-app") throw new Error("Plugin contribution is not a canvas app.");
     requestPluginCanvas({
@@ -417,9 +488,10 @@ export function registerIpc({
         : {})
     });
   });
-  ipcMain.handle(IPC.pluginsOpenWindow, (_event, pluginId: string, contributionId: string) => (
-    openPluginWindow(pluginId, contributionId)
-  ));
+  ipcMain.handle(IPC.pluginsOpenWindow, (event, pluginId: string, contributionId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return openPluginWindow(pluginId, contributionId);
+  });
   ipcMain.handle(IPC.pluginsOpenExternal, async (event, pluginId: string, value: string) => {
     assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "external:open");
@@ -430,10 +502,12 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     await requestPluginBrowserOpen(pluginId, value);
   });
-  ipcMain.handle(IPC.pluginsStorageGet, (_event, pluginId: string, key: string) => (
-    plugins.storageGet(pluginId, key)
-  ));
-  ipcMain.handle(IPC.pluginsStorageSet, async (_event, pluginId: string, key: string, value: unknown) => {
+  ipcMain.handle(IPC.pluginsStorageGet, (event, pluginId: string, key: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return plugins.storageGet(pluginId, key);
+  });
+  ipcMain.handle(IPC.pluginsStorageSet, async (event, pluginId: string, key: string, value: unknown) => {
+    assertMainRenderer(event, getMainWindow);
     await plugins.storageSet(pluginId, key, value);
     broadcastPluginStorageChange(pluginId, key, value);
   });
@@ -461,45 +535,57 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return providerSecrets.delete(providerSecretValue(secretId));
   });
-  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => (
-    pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia)
-  ));
-  ipcMain.handle(IPC.pluginsMediaListLibraries, (_event, pluginId: string) => (
-    pluginMedia.listLibraries(pluginId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaScanLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.scanLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.revokeLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsList, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.listPlaylists(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsRead, (_event, pluginId: string, libraryId: string, playlistId: string) => (
-    pluginMedia.readPlaylist(pluginId, libraryId, playlistId)
-  ));
+  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia);
+  });
+  ipcMain.handle(IPC.pluginsMediaListLibraries, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listLibraries(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsMediaScanLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.scanLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.revokeLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsList, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listPlaylists(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsRead, (event, pluginId: string, libraryId: string, playlistId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.readPlaylist(pluginId, libraryId, playlistId);
+  });
   ipcMain.handle(IPC.pluginsPlaylistsWrite, (
-    _event,
+    event,
     pluginId: string,
     libraryId: string,
     name: string,
     content: string
-  ) => pluginMedia.writePlaylist(
-    pluginId,
-    stringValue(libraryId, "libraryId"),
-    stringValue(name, "name"),
-    playlistContent(content)
-  ));
-  ipcMain.handle(IPC.pluginsHermesHudStatus, (_event, pluginId: string) => {
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.writePlaylist(
+      pluginId,
+      stringValue(libraryId, "libraryId"),
+      stringValue(name, "name"),
+      playlistContent(content)
+    );
+  });
+  ipcMain.handle(IPC.pluginsHermesHudStatus, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.status();
   });
-  ipcMain.handle(IPC.pluginsHermesHudOpen, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudOpen, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.open();
   });
-  ipcMain.handle(IPC.pluginsHermesHudClose, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudClose, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.close();
   });
@@ -747,7 +833,10 @@ export function registerIpc({
     return shell.openExternal(safeGithubUrl(value));
   });
 
-  ipcMain.handle(IPC.terminalList, () => terminals.list());
+  ipcMain.handle(IPC.terminalList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.list();
+  });
   ipcMain.handle(IPC.terminalReadBuffer, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof id !== "string") throw new Error("Terminal session ID is required.");
@@ -766,12 +855,30 @@ export function registerIpc({
     if (!isMainRenderer(event, getMainWindow)) return;
     terminals.input(id, data);
   });
-  ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
+  ipcMain.on(IPC.terminalResize, (event, id: string, cols: number, rows: number) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
     terminals.resize(id, cols, rows);
   });
-  ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
-  ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
-  ipcMain.handle(IPC.terminalSetRestore, (_event, id: string, restore: boolean) => terminals.setRestore(id, restore));
+  ipcMain.on(IPC.terminalBounds, (event, id: string, bounds: SessionBounds) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
+    terminals.setBounds(id, bounds);
+  });
+  ipcMain.handle(IPC.terminalRename, (event, id: string, title: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.rename(id, title);
+  });
+  ipcMain.handle(IPC.terminalSetRestore, (event, id: string, restore: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.setRestore(id, restore);
+  });
+  ipcMain.handle(IPC.terminalResolveGitRisk, (event, reportId: unknown, action: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof reportId !== "string" || reportId.length > 64) throw new Error("Git warning id is invalid.");
+    if (action !== "neutralize" && action !== "keep") throw new Error("Git warning action is invalid.");
+    return terminals.resolveGitRisk(reportId, action);
+  });
   ipcMain.handle(IPC.terminalDispose, (event, id: string, options?: { keepEnvironmentData?: unknown }) => {
     assertMainRenderer(event, getMainWindow);
     // Environment data is kept unless the person explicitly chose Remove.
@@ -779,25 +886,10 @@ export function registerIpc({
   });
   // Fire-and-forget, like the other stream-reporting channels: a malformed
   // report is ignored rather than rejecting into the renderer.
-  ipcMain.on(IPC.terminalSetVisible, (_event, id: unknown, visible: unknown) => {
-    if (typeof id !== "string" || typeof visible !== "boolean") return;
+  ipcMain.on(IPC.terminalSetVisible, (event, id: unknown, visible: unknown) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string" || typeof visible !== "boolean") return;
     terminals.setVisible(id, visible);
   });
-
-  const observeMainWindow = createWindowStateObserver<BrowserWindow>((window, state) => {
-    if (!window.isDestroyed()) window.webContents.send(IPC.windowState, state);
-  });
-  observeMainWindow(getMainWindow());
-
-  ipcMain.on(IPC.windowMinimize, (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
-  ipcMain.handle(IPC.windowToggleMaximize, (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window) return readWindowState(null);
-    window.isMaximized() ? window.unmaximize() : window.maximize();
-    return readWindowState(window);
-  });
-  ipcMain.on(IPC.windowClose, (event) => BrowserWindow.fromWebContents(event.sender)?.close());
-  ipcMain.handle(IPC.windowGetState, (event) => readWindowState(BrowserWindow.fromWebContents(event.sender)));
 
   ipcMain.handle(IPC.updaterCheck, (event) => {
     assertMainRenderer(event, getMainWindow);
@@ -807,8 +899,6 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     updater.install();
   });
-
-  return observeMainWindow;
 }
 
 function isCanvasNavigationPointerBindingInput(

@@ -55,6 +55,8 @@ export class PluginMediaService {
   private readonly authorize: AuthorizePlugin;
   private readonly libraries = new Map<string, StoredLibrary>();
   private writeQueue = Promise.resolve();
+  /** Plugins being uninstalled: no grant of theirs may be stored until that ends. */
+  private readonly removing = new Set<string>();
 
   constructor(userDataPath: string, authorize: AuthorizePlugin) {
     this.registryPath = join(userDataPath, REGISTRY_FILE);
@@ -79,6 +81,9 @@ export class PluginMediaService {
     const rootPath = await realpath(selectedPath);
     const metadata = await stat(rootPath);
     if (!metadata.isDirectory()) throw new Error("The selected music library is not a directory.");
+    // The folder checks above take time (and the pick before them far longer): the plugin may have been
+    // uninstalled meanwhile, and its grant must not be stored after its grants were revoked.
+    this.assertGrantable(pluginId);
     const existing = [...this.libraries.values()].find((library) => (
       library.pluginId === pluginId && library.rootPath === rootPath
     ));
@@ -123,6 +128,21 @@ export class PluginMediaService {
     this.requireLibrary(pluginId, libraryId);
     this.libraries.delete(libraryId);
     await this.persist();
+  }
+
+  /** Uninstall starts: from now on the plugin's grant writes are refused, until endRemoval. */
+  beginRemoval(pluginId: string): void {
+    this.removing.add(pluginId);
+  }
+
+  /** Uninstall finished or failed. After a finished one the plugin is unknown, so authorization refuses it anyway. */
+  endRemoval(pluginId: string): void {
+    this.removing.delete(pluginId);
+  }
+
+  private assertGrantable(pluginId: string): void {
+    if (this.removing.has(pluginId)) throw new Error("The plugin is being uninstalled.");
+    this.authorize(pluginId, "media:library");
   }
 
   async revokeAll(pluginId: string): Promise<void> {

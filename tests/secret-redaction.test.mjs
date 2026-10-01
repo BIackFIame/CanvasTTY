@@ -115,6 +115,22 @@ test("registry: a held value is removed also when wrapping split it across box l
   assert.equal(registry.redact(`x ${launch}`), `x ${launch}`);
 });
 
+test("registry: a value added again stays masked when an owner is full; only the least recently added one goes", (t) => {
+  const warnings = [];
+  t.mock.method(console, "warn", (message) => warnings.push(String(message)));
+  const registry = new SecretRedactionRegistry();
+  const value = (index) => `custom-value-${String(index).padStart(4, "0")}-qwertyuiop`;
+  registry.add("vault", Array.from({ length: 64 }, (_, index) => value(index)));
+  // The first key is read again (still in use), then a new one arrives.
+  registry.add("vault", [value(0)]);
+  registry.add("vault", [value(64)]);
+  assert.equal(registry.redact(`a ${value(0)} b`).includes(value(0)), false, "the key still in use stays masked");
+  assert.equal(registry.redact(`a ${value(64)} b`).includes(value(64)), false);
+  assert.equal(registry.redact(`a ${value(1)} b`).includes(value(1)), true, "the least recently added one was dropped");
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0].includes("qwertyuiop"), false, "the log never names a value");
+});
+
 test("registry: generic shapes without a held value, including keys the terminal wrapped over lines", () => {
   const registry = new SecretRedactionRegistry();
   const unknown = ["Zp8Rk2Wq", "5Tn9Xm3V", "b7Lc4Hd1", "Gs6Jf0Ay"].join("");

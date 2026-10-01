@@ -1,5 +1,10 @@
 export const ORCHESTRATION_MCP_SERVER_NAME: string;
 export const MAX_ORCHESTRATION_PAYLOAD_BYTES: number;
+export const AGENT_PROVIDER_IDS: readonly string[];
+export const MAX_AGENT_WAIT_SECONDS: number;
+export const DEFAULT_AGENT_WAIT_SECONDS: number;
+export const REASONING_EFFORT_IDS: readonly string[];
+export function unknownProviderMessage(value: unknown): string;
 
 export interface McpToolDefinition {
   name: string;

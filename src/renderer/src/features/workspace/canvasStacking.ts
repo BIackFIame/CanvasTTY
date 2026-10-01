@@ -12,6 +12,58 @@ export function reconcileCanvasLayerOrder(
   return next.length === current.length && next.every((id, index) => id === current[index]) ? current : next;
 }
 
+/** The ids of `current` that are still live; `current` itself when none is gone (no state change). */
+export function keepLiveIds(current: ReadonlySet<string>, live: ReadonlySet<string>): ReadonlySet<string> {
+  for (const id of current) {
+    if (!live.has(id)) return new Set([...current].filter((candidate) => live.has(candidate)));
+  }
+  return current;
+}
+
+/** Drops, in place, the entries of a per-id cache whose id is no longer live. */
+export function pruneToLive(cache: Map<string, unknown>, live: ReadonlySet<string>): void {
+  for (const id of cache.keys()) {
+    if (!live.has(id)) cache.delete(id);
+  }
+}
+
+/** The layout snap targets are taken from: fixed targets (home, regions), every window, and each card's window. */
+export interface SnapLayout {
+  fixed: readonly SessionBounds[];
+  windows: readonly SessionBounds[];
+  byLayer: ReadonlyMap<string, SessionBounds>;
+}
+
+/**
+ * Per card a getter that stays the same function across renders and builds that card's snap targets (the fixed
+ * targets and every other window) only when called: once, when the card's drag or resize starts. A render, a pan
+ * or a neighbour's move builds no list and changes no card prop, so N cards cost nothing per render instead of N
+ * lists of N. `read` returns the latest layout.
+ */
+export function snapTargetGetters(read: () => SnapLayout): {
+  forLayer(layerId: string): () => SessionBounds[];
+  prune(live: ReadonlySet<string>): void;
+} {
+  const getters = new Map<string, () => SessionBounds[]>();
+  return {
+    forLayer(layerId) {
+      let getter = getters.get(layerId);
+      if (!getter) {
+        getter = () => {
+          const { fixed, windows, byLayer } = read();
+          const self = byLayer.get(layerId);
+          return [...fixed, ...windows.filter((candidate) => candidate !== self)];
+        };
+        getters.set(layerId, getter);
+      }
+      return getter;
+    },
+    prune(live) {
+      pruneToLive(getters, live);
+    }
+  };
+}
+
 export function bringCanvasLayerToFront(current: readonly string[], id: string): string[] {
   if (!current.includes(id) || current.at(-1) === id) return [...current];
   return [...current.filter((candidate) => candidate !== id), id];

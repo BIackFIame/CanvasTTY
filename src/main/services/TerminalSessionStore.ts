@@ -12,9 +12,14 @@ import type {
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
 import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
 const TERMINAL_SESSION_STORE_VERSION = 2;
-const MAX_PERSISTED_SESSIONS = 64;
+/**
+ * A bound against a damaged or hostile file, far above what a canvas holds: every open card is saved (a cap that cut
+ * the newest cards lost them on the next restore). Records are counted after validation.
+ */
+const MAX_PERSISTED_SESSIONS = 1_024;
 /** Opaque plugin-owned JSON (launch options, environment refs) is capped per value. */
 export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
@@ -49,6 +54,11 @@ export interface PersistedTerminalSession {
   environmentChoice?: SessionEnvironmentChoice;
   /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
   ownerPluginId?: string;
+  /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
+  model?: string;
+  effort?: ReasoningEffort;
+  /** An isolated session ran since then and its repositories were not audited yet, or a report is still open. */
+  gitAuditSince?: number;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
@@ -70,25 +80,96 @@ const EMPTY_STATE: PersistedTerminalSessionState = {
   sessions: []
 };
 
+/**
+ * Why the saved cards could not be read. `newer`: a later CanvasTTY wrote the file; `unreadable`: it could not be
+ * read at all (permissions, I/O). Both leave the file as it is: nothing is written over it for the rest of this
+ * run. `corrupt`: it is not a card list; it was kept beside the file (`backupPath`) and a fresh file is used.
+ */
+export type SessionStoreProblem =
+  | { kind: "newer" | "unreadable"; backupPath: null }
+  | { kind: "corrupt"; backupPath: string | null };
+
+/** How the store replaces its file; tests pass a rename that fails the way Windows does. */
+export interface SessionStoreFileOptions {
+  rename?: (from: string, to: string) => Promise<void>;
+  platform?: NodeJS.Platform;
+}
+
+// Windows refuses to replace a file another handle has open (a reader, an indexer, antivirus) with EPERM, EACCES or
+// EBUSY; the handle goes away within moments. Retrying for about a second keeps a save from being dropped.
+const WINDOWS_TRANSIENT_RENAME_CODES = new Set(["EPERM", "EACCES", "EBUSY"]);
+const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 20, 40, 80, 160, 320, 400];
+
+export async function replaceFile(
+  from: string,
+  to: string,
+  { rename: move = rename, platform = process.platform }: SessionStoreFileOptions = {}
+): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await move(from, to);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      const delay = WINDOWS_RENAME_RETRY_DELAYS_MS[attempt];
+      if (platform !== "win32" || !code || !WINDOWS_TRANSIENT_RENAME_CODES.has(code) || delay === undefined) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
+}
+
 export class TerminalSessionStore {
   readonly filePath: string;
   private value: PersistedTerminalSessionState = structuredClone(EMPTY_STATE);
   private writeQueue = Promise.resolve();
+  private problem: SessionStoreProblem | null = null;
+  private readonly fileOptions: SessionStoreFileOptions;
 
-  constructor(userDataPath: string, fileName = "terminal-sessions.json") {
+  constructor(userDataPath: string, fileName = "terminal-sessions.json", fileOptions: SessionStoreFileOptions = {}) {
     this.filePath = join(userDataPath, fileName);
+    this.fileOptions = fileOptions;
+  }
+
+  /** What went wrong reading the saved cards at load(), or null. */
+  get loadProblem(): SessionStoreProblem | null {
+    return this.problem ? { ...this.problem } : null;
   }
 
   async load(): Promise<PersistedTerminalSession[]> {
+    let text: string;
     try {
-      const parsed = JSON.parse(await readFile(this.filePath, "utf8")) as unknown;
-      this.value = normalizePersistedTerminalSessions(parsed);
-      if (JSON.stringify(parsed) !== JSON.stringify(this.value)) await this.persist();
+      text = await readFile(this.filePath, "utf8");
     } catch (error) {
       if (!isMissingFile(error)) {
-        console.warn("CanvasTTY terminal window state could not be loaded; an empty state is used.", error);
+        this.problem = { kind: "unreadable", backupPath: null };
+        console.warn("CanvasTTY terminal window state could not be read; it is left as it is and not saved over this run.", error);
       }
+      return this.get();
     }
+    let parsed: unknown;
+    try { parsed = JSON.parse(text) as unknown; } catch { parsed = undefined; }
+    const version = parsed && typeof parsed === "object" ? (parsed as { version?: unknown }).version : undefined;
+    if (typeof version === "number" && Number.isInteger(version) && version > TERMINAL_SESSION_STORE_VERSION) {
+      // A later CanvasTTY's cards: this build cannot read them and must not replace them with its own.
+      this.problem = { kind: "newer", backupPath: null };
+      console.warn(`CanvasTTY terminal window state was written by a newer version (${version}); it is left as it is and not saved over this run.`);
+      return this.get();
+    }
+    if (!isReadableState(parsed)) {
+      const backupPath = `${this.filePath}.corrupt-${Date.now()}`;
+      try {
+        await rename(this.filePath, backupPath);
+        this.problem = { kind: "corrupt", backupPath };
+        console.warn(`CanvasTTY terminal window state could not be parsed; it was kept as ${backupPath} and an empty state is used.`);
+      } catch (error) {
+        // Not even set aside: leave it alone instead of writing over it.
+        this.problem = { kind: "unreadable", backupPath: null };
+        console.warn("CanvasTTY terminal window state could not be parsed or set aside; it is left as it is.", error);
+      }
+      return this.get();
+    }
+    this.value = normalizePersistedTerminalSessions(parsed);
+    if (JSON.stringify(parsed) !== JSON.stringify(this.value)) await this.persist();
     return this.get();
   }
 
@@ -113,15 +194,17 @@ export class TerminalSessionStore {
   }
 
   private persist(): Promise<void> {
+    // The file on disk is one this build could not read: keep it (the cards of this run live in memory only).
+    if (this.problem && this.problem.kind !== "corrupt") return this.writeQueue;
     const snapshot = `${JSON.stringify(this.value, null, 2)}\n`;
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
     this.writeQueue = this.writeQueue.catch(() => undefined).then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 });
       try {
         await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-        await rename(temporaryPath, this.filePath);
+        await replaceFile(temporaryPath, this.filePath, this.fileOptions);
       } catch (error) {
-        // A failed rename (a locked file on Windows) must not leave the temp file behind.
+        // A rename that still fails (a file locked for longer on Windows) must not leave the temp file behind.
         await unlink(temporaryPath).catch(() => undefined);
         throw error;
       }
@@ -135,7 +218,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -166,7 +249,10 @@ export function persistedTerminalSession(
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
-    ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {})
+    ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
+    ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+    ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
   };
 }
 
@@ -180,7 +266,11 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
 
   const sessions: PersistedTerminalSession[] = [];
   const ids = new Set<string>();
-  for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS)) {
+  for (const value of source.sessions.slice(0, MAX_PERSISTED_SESSIONS * 4)) {
+    if (sessions.length >= MAX_PERSISTED_SESSIONS) {
+      console.warn(`CanvasTTY saves at most ${MAX_PERSISTED_SESSIONS} terminal windows; the rest are not restored.`);
+      break;
+    }
     if (!value || typeof value !== "object") continue;
     // codexThreadId: the v1 name of threadId (Codex only).
     const session = value as Partial<PersistedTerminalSession> & { codexThreadId?: unknown };
@@ -239,7 +329,14 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(options ? { options } : {}),
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
-      ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {})
+      ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0
+        ? { gitAuditSince: session.gitAuditSince } : {}),
+      // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
+      ...(session.provider !== "terminal" && session.model !== undefined && launchModelProblem(session.provider as ProviderId, session.model) === null
+        ? { model: session.model } : {}),
+      ...(session.provider !== "terminal" && session.effort !== undefined && launchEffortProblem(session.provider as ProviderId, session.effort) === null
+        ? { effort: session.effort } : {})
     });
     ids.add(session.id);
   }
@@ -318,6 +415,13 @@ function isFiniteSize(value: unknown): value is Size {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/** A v1 or v2 card list (its records are checked one by one when normalized). */
+function isReadableState(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as { version?: unknown; sessions?: unknown };
+  return (state.version === 1 || state.version === TERMINAL_SESSION_STORE_VERSION) && Array.isArray(state.sessions);
 }
 
 function isMissingFile(error: unknown): boolean {

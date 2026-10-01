@@ -79,6 +79,8 @@ interface RuntimeLease {
   provider: Exclude<ProviderId, "terminal">;
   tokenDigest: Buffer;
   activeTurnId: string | null;
+  /** Turn ids this session already reported (bounded, oldest dropped): a late start of one of them is stale. */
+  seenTurnIds: Set<string>;
   latest: RuntimeLifecycleSignal | null;
   captureResult: boolean;
   answerCaptureGrantExpiresAt: number | null;
@@ -274,6 +276,7 @@ export class RuntimeGateway {
       provider,
       tokenDigest: tokenDigest(capabilityToken),
       activeTurnId: null,
+      seenTurnIds: new Set(),
       latest: null,
       captureResult: captureResultOrGrantExpiresAt === true,
       answerCaptureGrantExpiresAt: provider === "codex"
@@ -293,9 +296,14 @@ export class RuntimeGateway {
     return this.leases.get(terminalSessionId)?.latest?.state ?? null;
   }
 
-  revokeTerminalSession(terminalSessionId: string): void {
+  /**
+   * Ends a session's lease. A launch's own cleanup passes its capability token, so a cleanup that runs
+   * late (after the card was relaunched under the same id) cannot revoke the newer launch's lease.
+   */
+  revokeTerminalSession(terminalSessionId: string, capabilityToken?: string): void {
     const lease = this.leases.get(terminalSessionId);
     if (!lease) return;
+    if (capabilityToken !== undefined && !tokenMatches(capabilityToken, lease.tokenDigest)) return;
     lease.tokenDigest.fill(0);
     this.leases.delete(terminalSessionId);
     for (const check of lease.checks) check.abort();
@@ -462,13 +470,19 @@ export class RuntimeGateway {
     }
 
     if (message.turnId && isTurnStart(message.event)) {
+      // Each hook runs on its own connection, so a start of an earlier turn can arrive after the next turn began;
+      // it must not make that newer turn's events look stale.
+      if (message.turnId !== lease.activeTurnId && lease.seenTurnIds.has(message.turnId)) return null;
       lease.activeTurnId = message.turnId;
+      rememberTurn(lease, message.turnId);
     } else if (
       message.turnId
       && lease.activeTurnId
       && message.turnId !== lease.activeTurnId
     ) {
       return null;
+    } else if (message.turnId) {
+      rememberTurn(lease, message.turnId);
     }
     const signal: RuntimeLifecycleSignal = {
       state: message.state,
@@ -569,8 +583,11 @@ export class RuntimeGateway {
     let size = 0;
     let oversized = Number.isFinite(declared) && declared > MAX_HOOK_INPUT_BYTES;
     const chunks: Buffer[] = [];
+    // Once per request: an input found oversized while it streams completes at once, and again at its "end".
+    let completed = false;
     const complete = (): void => {
-      if (response.headersSent) return;
+      if (completed || response.headersSent) return;
+      completed = true;
       let input: unknown = null;
       if (!oversized) {
         try {
@@ -588,7 +605,15 @@ export class RuntimeGateway {
       } catch {
         delivery = null;
       }
-      finish(200, oversized);
+      // An oversized body is still being sent: answer once it has arrived (read and dropped), so the connection is
+      // closed after it rather than reset under the sender, which would lose the answer (ECONNRESET).
+      if (oversized && !request.complete) {
+        request.resume();
+        request.once("end", () => finish(200, true));
+        request.once("close", () => finish(200, true));
+      } else {
+        finish(200, oversized);
+      }
       this.deliverLater(delivery);
     };
     if (oversized) return complete();
@@ -741,6 +766,14 @@ function boundedText(value: string, limit: number): string {
 }
 
 /** What leaves the gateway, whatever the handler said: never an allow of cut input. */
+const MAX_SEEN_TURNS = 64;
+
+function rememberTurn(lease: RuntimeLease, turnId: string): void {
+  lease.seenTurnIds.delete(turnId);
+  lease.seenTurnIds.add(turnId);
+  while (lease.seenTurnIds.size > MAX_SEEN_TURNS) lease.seenTurnIds.delete(lease.seenTurnIds.values().next().value!);
+}
+
 function enforceDecision(request: RuntimePermissionRequest, decision: RuntimePermissionDecision): RuntimePermissionDecision {
   if (decision.behavior === "allow" && request.truncated) return { behavior: "ask" };
   const message = typeof decision.message === "string" ? decision.message.slice(0, PERMISSION_GATE.messageChars) : "";
@@ -788,6 +821,11 @@ function isAnswerCaptureCheck(value: unknown): value is Record<string, unknown> 
   return isRecord(value) && value.type === "answer-capture-check";
 }
 
+/** The turn-end events that carry a final answer: a Stop hook, or OpenCode's own session.idle (its plugin reads it). */
+function isResultEvent(provider: unknown, event: unknown): boolean {
+  return event === "Stop" || (provider === "opencode" && event === "session.idle");
+}
+
 function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
   if (!isRecord(value)) throw new Error("Runtime message must be an object.");
   const keys = Object.keys(value).filter((key) => key !== "lastAssistantMessage").sort();
@@ -823,7 +861,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     throw new Error("Runtime threadId is invalid.");
   }
   if (value.result !== undefined && (
-    value.state !== "idle" || value.event !== "Stop" || !isRecord(value.result)
+    value.state !== "idle" || !isResultEvent(value.provider, value.event) || !isRecord(value.result)
     || Object.keys(value.result).sort().join(",") !== "text,truncated"
     || typeof value.result.text !== "string" || value.result.text.length > MAX_RESULT_CHARS
     || typeof value.result.truncated !== "boolean"

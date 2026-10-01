@@ -55,7 +55,8 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
   private readonly gateway: RuntimeGateway;
   private readonly providers: ProviderRuntimeLaunchAdapters;
   /** Running sessions and whether each got the decision hook. */
-  private readonly activeSessions = new Map<string, boolean>();
+  /** Live launches by card id; the entry object is the launch identity a late cleanup checks against. */
+  private readonly activeSessions = new Map<string, { decisions: boolean }>();
   private coreHooksEnabled: boolean;
   private readonly wantsDecisions: AgentRuntimeBridgeOptions["wantsDecisions"];
   private readonly decisionBudgetMs: AgentRuntimeBridgeOptions["decisionBudgetMs"];
@@ -93,10 +94,11 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
       prepared = this.providers.prepare(input.provider, input.terminalSessionId, this.coreHooksEnabled, decisions, budgetMs,
         httpHookBase ?? undefined);
     } catch (error) {
-      if (capability) this.gateway.revokeTerminalSession(input.terminalSessionId);
+      if (capability) this.gateway.revokeTerminalSession(input.terminalSessionId, capability.capabilityToken);
       throw error;
     }
-    this.activeSessions.set(input.terminalSessionId, decisions);
+    const launch = { decisions };
+    this.activeSessions.set(input.terminalSessionId, launch);
     let cleaned = false;
     return {
       args: prepared.args,
@@ -119,11 +121,12 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
       cleanup: () => {
         if (cleaned) return;
         cleaned = true;
-        this.activeSessions.delete(input.terminalSessionId);
+        // A relaunch under the same card id owns the entry and the lease now; leave both to it.
+        if (this.activeSessions.get(input.terminalSessionId) === launch) this.activeSessions.delete(input.terminalSessionId);
         try {
           prepared.releaseConfiguration();
         } finally {
-          this.gateway.revokeTerminalSession(input.terminalSessionId);
+          if (capability) this.gateway.revokeTerminalSession(input.terminalSessionId, capability.capabilityToken);
         }
       }
     };
@@ -151,7 +154,7 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
     this.coreHooksEnabled = next;
     if (next) return;
     // A session with the decision hook keeps its lease: its protection must not silently stop.
-    for (const [terminalSessionId, decisions] of this.activeSessions) {
+    for (const [terminalSessionId, { decisions }] of this.activeSessions) {
       if (!decisions) this.gateway.revokeTerminalSession(terminalSessionId);
     }
   }

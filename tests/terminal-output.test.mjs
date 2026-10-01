@@ -75,27 +75,58 @@ test("snapshot and batched live output join exactly once across startup, trimmin
   assert.equal(replay.join(""), snapshot.buffer + "tail");
 });
 
-test("unmount or a failed snapshot releases the subscription and never writes a late reply", async () => {
-  for (const fail of [false, true]) {
-    let listener;
-    let unsubscribed = 0;
-    let errors = 0;
-    const written = [];
-    const pending = Promise.withResolvers();
-    const dispose = attachTerminalOutput({
-      onData(callback) { listener = callback; return () => { unsubscribed++; }; },
-      readBuffer: () => pending.promise
-    }, "id", (chunk) => written.push(chunk), () => { errors++; });
-    listener({ id: "id", data: "pending", outputOffset: 7 });
-    if (fail) pending.reject(new Error("snapshot unavailable"));
-    else {
-      dispose();
-      pending.resolve({ buffer: "pending", outputOffset: 7 });
-    }
-    await new Promise((resolve) => setImmediate(resolve));
-    listener({ id: "id", data: "late", outputOffset: 11 });
-    assert.deepEqual(written, []);
-    assert.equal(unsubscribed, 1);
-    assert.equal(errors, fail ? 1 : 0);
-  }
+test("unmount releases the subscription and never writes a late reply", async () => {
+  let listener;
+  let unsubscribed = 0;
+  let errors = 0;
+  const written = [];
+  const pending = Promise.withResolvers();
+  const dispose = attachTerminalOutput({
+    onData(callback) { listener = callback; return () => { unsubscribed++; }; },
+    readBuffer: () => pending.promise
+  }, "id", (chunk) => written.push(chunk), () => { errors++; });
+  listener({ id: "id", data: "pending", outputOffset: 7 });
+  dispose();
+  pending.resolve({ buffer: "pending", outputOffset: 7 });
+  await new Promise((resolve) => setImmediate(resolve));
+  listener({ id: "id", data: "late", outputOffset: 11 });
+  assert.deepEqual(written, []);
+  assert.equal(unsubscribed, 1);
+  assert.equal(errors, 0);
+});
+
+test("a failed snapshot is reported and the card keeps receiving live output", async () => {
+  let listener;
+  let unsubscribed = 0;
+  const events = [];
+  const pending = Promise.withResolvers();
+  const dispose = attachTerminalOutput({
+    onData(callback) { listener = callback; return () => { unsubscribed++; }; },
+    readBuffer: () => pending.promise
+  }, "id", (chunk) => events.push(chunk), () => { events.push("<error>"); });
+  // Output queued while the snapshot was pending starts mid-stream; it is all
+  // the card will ever have of that range, so it is written after the notice.
+  listener({ id: "id", data: "queued", outputOffset: 106 });
+  pending.reject(new Error("snapshot unavailable"));
+  await new Promise((resolve) => setImmediate(resolve));
+  listener({ id: "id", data: " live", outputOffset: 111 });
+  listener({ id: "other", data: "foreign", outputOffset: 7 });
+  assert.deepEqual(events, ["<error>", "queued", " live"]);
+  assert.equal(unsubscribed, 0);
+  dispose();
+  listener({ id: "id", data: " gone", outputOffset: 116 });
+  assert.deepEqual(events, ["<error>", "queued", " live"]);
+  assert.equal(unsubscribed, 1);
+});
+
+test("a failed snapshot with nothing queued accepts the first live event whole", async () => {
+  let listener;
+  const events = [];
+  attachTerminalOutput({
+    onData(callback) { listener = callback; return () => {}; },
+    readBuffer: () => Promise.reject(new Error("snapshot unavailable"))
+  }, "id", (chunk) => events.push(chunk), () => { events.push("<error>"); });
+  await new Promise((resolve) => setImmediate(resolve));
+  listener({ id: "id", data: "first", outputOffset: 505 });
+  assert.deepEqual(events, ["<error>", "first"]);
 });

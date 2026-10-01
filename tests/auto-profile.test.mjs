@@ -21,8 +21,10 @@ import { AUTO_MODE, hasAutoMode } from "../src/shared/autoMode.ts";
 
 const at = { x: 0, y: 0 };
 const cli = (provider) => ({ state: "available", provider, executable: `/bin/${provider}`, launcher: "native", environment: {}, checked: [] });
+// The launch as it is built on Linux unless a test names the platform: Claude's own sandbox exists on macOS and Linux
+// only, so what auto adds depends on it (the Windows case is asserted on its own).
 const launch = (provider, profile, args = [], options = {}) =>
-  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, ...options }).args;
+  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, platform: "linux", ...options }).args;
 const settingsOf = (args) => args.flatMap((arg, index) => args[index - 1] === "--settings" ? [JSON.parse(arg)] : []);
 
 const waitFor = async (predicate, timeoutMs = 6_000) => {
@@ -41,12 +43,17 @@ function registry() {
 function spawner(calls) {
   return (command, args, options) => {
     const data = [];
+    const exits = [];
     const written = [];
-    calls.push({ command, args, options, written, print: (text) => data.forEach((listener) => listener(text)) });
+    calls.push({
+      command, args, options, written,
+      print: (text) => data.forEach((listener) => listener(text)),
+      exit: (exitCode = 0) => exits.forEach((listener) => listener({ exitCode }))
+    });
     return {
       pid: 41_000 + calls.length, process: command, write(text) { written.push(text); }, resize() {}, kill() {}, pause() {}, resume() {},
       onData(listener) { data.push(listener); return { dispose() {} }; },
-      onExit() { return { dispose() {} }; }
+      onExit(listener) { exits.push(listener); return { dispose() {} }; }
     };
   };
 }
@@ -65,7 +72,7 @@ async function pipelineAnswering(t, answer, extra = {}) {
   const requests = [];
   const pipeline = new LaunchPipeline({
     contributors: () => [{ pluginId: "p.accounts", pluginName: "Accounts", serviceId: "svc", secrets: false,
-      launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }] }, ...extra }],
+      launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }], delegable: true }, ...extra }],
     call: async (_pluginId, _serviceId, _method, params) => { requests.push(params); return typeof answer === "function" ? answer(params) : answer; },
     secret: async () => null,
     runsRoot,
@@ -74,10 +81,22 @@ async function pipelineAnswering(t, answer, extra = {}) {
   return { pipeline, requests };
 }
 
-test("auto exists only where the CLI has a native auto mode; normal and YOLO are unchanged", () => {
+test("auto exists only where the CLI has a native auto mode (OpenCode: a per-run permission config); normal and YOLO are unchanged", () => {
   assert.deepEqual(Object.keys(AUTO_MODE).sort(), ["claude", "codex", "grok"]);
-  for (const provider of ["qwen", "opencode", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
-  assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode; use the normal profile/u);
+  for (const provider of ["qwen", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
+  assert.equal(hasAutoMode("opencode"), true);
+  assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode of its own; its auto runs only inside CanvasTTY's agent isolation/u);
+  // A CLI without an auto mode of its own gets its approval bypass as auto, only inside the isolation layer.
+  assert.deepEqual(launch("qwen", "auto", [], { isolated: true }), ["--yolo"]);
+  assert.deepEqual(launch("cursor", "auto", [], { isolated: true }), ["--force"]);
+  // Accept-edits and plan, where the CLI has them.
+  assert.deepEqual(launch("codex", "acceptEdits"), ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "plan"), ["--sandbox", "read-only", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("grok", "plan"), ["--permission-mode", "plan"]);
+  assert.deepEqual(launch("claude", "plan"), ["--permission-mode", "plan"]);
+  assert.deepEqual(launch("cursor", "plan"), ["--mode", "plan"]);
+  assert.deepEqual(launch("opencode", "plan"), ["--agent", "plan"]);
+  assert.deepEqual(launch("cursor", "yolo"), ["--force"], "cursor-agent's bypass is --force");
   // Normal adds no permission flag and no sandbox.
   assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["--no-daemon", "-c", "x=1"]);
   assert.deepEqual(launch("claude", "normal"), []);
@@ -93,11 +112,25 @@ test("auto: Codex --approve-for-me (its workspace-write sandbox), Claude auto wi
   assert.deepEqual(args.slice(0, 2), ["--permission-mode", "auto"]);
   assert.equal(args.filter((arg) => arg === "--settings").length, 1, "Claude keeps only the last --settings");
   const [settings] = settingsOf(args);
-  assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false });
+  assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false });
   assert.equal(settings.hooks.Stop[0].hooks[0].command, "/hook", "CanvasTTY's hooks survive");
   assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:11434");
   // Without other settings the sandbox is its own inline --settings.
-  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { platform: "darwin" })), settingsOf(launch("claude", "auto")), "macOS: the same sandbox");
+  // Claude Code has no sandbox on Windows: auto there is its auto mode alone.
+  assert.deepEqual(launch("claude", "auto", [], { platform: "win32" }), ["--permission-mode", "auto"]);
+  // Inside CanvasTTY's isolation layer Claude's own sandbox cannot start (macOS refuses a sandbox in a sandbox): left out.
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), []);
+  assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto"]);
+  // Codex inside the layer: its own seatbelt cannot start in ours, so it is off, never bypassed; approvals stay.
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true }),
+    ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request", "-c", 'approvals_reviewer="auto_review"']);
+  assert.deepEqual(launch("codex", "normal", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "acceptEdits", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true, thirdPartyModel: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.ok(!launch("codex", "auto", [], { isolated: true }).includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.deepEqual(launch("codex", "auto"), ["--approve-for-me"], "outside the layer Codex keeps its own sandbox");
 });
 
 test("a third-party model turns auto into accept-edits, sandbox kept; other profiles ignore the mark", () => {
@@ -115,6 +148,25 @@ test("plugins cannot pass auto's flags, replace Codex's hooks or their trust", (
   }
   assert.equal(coreOwnedLaunchArgument("codex", "model_provider=\"ollama\""), false);
   assert.equal(coreOwnedLaunchArgument("codex", "projects={\"/p\"={trust_level=\"trusted\"}}"), false);
+});
+
+test("launch arguments are judged by their flags and config keys, not by words inside a value", () => {
+  // Permission-changing flags and config keys stay refused, in every spelling.
+  for (const [provider, argument] of [
+    ["codex", "--dangerously-bypass-approvals-and-sandbox"], ["codex", "approval_policy=\"never\""], ["codex", "sandbox_mode=danger-full-access"],
+    ["codex", "--config=approval_policy=never"], ["codex", "-capproval_policy=never"], ["codex", "sandbox_workspace_write.network_access=true"],
+    ["codex", "--sandbox"], ["codex", "-a"], ["codex", "exec"], ["grok", "--dangerously-skip-permissions"], ["grok", "--permission-mode"],
+    ["grok", "--some-bypass-flag"], ["claude", "--allowedTools"], ["qwen", "-y"]
+  ]) assert.equal(coreOwnedLaunchArgument(provider, argument), true, `${provider} ${argument}`);
+  // A context plugin's rule text that mentions those words is a value, not a setting.
+  const rule = "Never run with --dangerously-skip-permissions; approval_policy stays on-request and nothing may bypass the sandbox_mode.";
+  for (const provider of ["codex", "grok", "claude", "qwen"]) {
+    assert.equal(coreOwnedLaunchArgument(provider, rule), false, provider);
+  }
+  for (const argument of ["developer_instructions=\"Do not use --dangerously-bypass-approvals-and-sandbox\"", "--config=instructions=never bypass approval_policy",
+    "model=\"gpt-6\"", "--rules", "Rule: approval_policy=never is not allowed here."]) {
+    assert.equal(coreOwnedLaunchArgument("codex", argument), false, argument);
+  }
 });
 
 test("the contribution's thirdPartyModel is checked, merged, allowed in a policy, and handed to plugins with trustedFolder", async (t) => {
@@ -237,12 +289,13 @@ test("a Codex subagent in (or below) the person's orchestrator folder is trusted
   const trust = (args) => args.filter((arg, index) => args[index - 1] === "-c" && arg.startsWith("projects="));
   control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: site });
   control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: docs });
-  control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: elsewhere });
+  // A folder outside the person's folder is refused outright: no subagent works there.
+  assert.throws(() => control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: elsewhere }), /only inside this project's folder/u);
   terminals.create({ provider: "codex", profile: "normal", cwd: site, position: at });
   assert.deepEqual(calls.slice(1).map((call) => trust(call.args)), [
     [`projects={${JSON.stringify(site)}={trust_level="trusted"}}`],
     [`projects={${JSON.stringify(docs)}={trust_level="trusted"}}`],
-    [], []
+    []
   ]);
   // Plugins learn the folder for a subagent (a Claude account home can mark it), never for a top-level card.
   control.spawn({ parentSessionId: orchestrator.id, provider: "claude", cwd: docs, launchOptions: { "p.accounts": { on: true } } });
@@ -271,6 +324,36 @@ test("Claude's «✳» title is idle, and a hooked card's title defers to its ho
   assert.equal(status(), "working", "the title still reports a turn starting");
 });
 
+test("a restarted Claude card reads its new process's title until that process's own hooks report", async (t) => {
+  const { terminals, calls } = manager(t);
+  const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: at });
+  const status = () => terminals.list().find((session) => session.id === card.id).status;
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[0].exit(0);
+  await waitFor(() => terminals.list().find((session) => session.id === card.id).exitCode !== null);
+  terminals.restart(card.id);
+  assert.equal(calls.length, 2);
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "idle", "the previous process's hooks say nothing about this one");
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
+  calls[1].print("\u001b]0;✳ Claude Code\u0007");
+  assert.equal(status(), "needs_approval", "once this process's hooks report, the title defers to them again");
+});
+
+test("a restarted card has no answer or turn from its previous conversation", async (t) => {
+  const { terminals, calls } = manager(t);
+  const card = terminals.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: at });
+  await terminals.deliverInput(card.id, "do it\r");
+  terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "working" });
+  terminals.recordAnswer(card.id, { text: "the old answer", truncated: false });
+  assert.deepEqual(terminals.turnProgress(card.id), { promptSent: true, turnStartedSincePrompt: true });
+  calls[0].exit(0);
+  await waitFor(() => terminals.list().find((session) => session.id === card.id).exitCode !== null);
+  terminals.restart(card.id);
+  assert.equal(terminals.answer(card.id), null, "the old conversation's answer is not this one's");
+  assert.deepEqual(terminals.turnProgress(card.id), { promptSent: false, turnStartedSincePrompt: false });
+});
+
 test("a declined Claude prompt ends idle; a hook after the answer keeps its state", async (t) => {
   const { terminals, calls } = manager(t);
   const card = terminals.create({ provider: "claude", profile: "normal", cwd: process.cwd(), position: at });
@@ -288,4 +371,13 @@ test("a declined Claude prompt ends idle; a hook after the answer keeps its stat
   terminals.applyProviderSignal(card.id, { kind: "lifecycle", state: "needs_approval" });
   await new Promise((resolve) => setTimeout(resolve, 3_300));
   assert.equal(status(), "needs_approval");
+});
+
+test("every open card is saved, not only the first 64; a broken record does not take a valid one's place", () => {
+  const record = (index) => ({ id: `11111111-1111-4111-8111-${String(index).padStart(12, "0")}`, provider: "codex", profile: "normal", title: `t${index}`,
+    titleCustomized: false, cwd: process.cwd(), position: at, size: { width: 800, height: 600 } });
+  const many = Array.from({ length: 100 }, (_, index) => record(index));
+  assert.equal(normalizePersistedTerminalSessions({ version: 2, sessions: many }).sessions.length, 100);
+  const broken = [{ id: "nope" }, ...Array.from({ length: 64 }, (_, index) => record(index))];
+  assert.equal(normalizePersistedTerminalSessions({ version: 2, sessions: broken }).sessions.length, 64);
 });

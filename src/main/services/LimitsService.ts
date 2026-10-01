@@ -102,6 +102,14 @@ export class LimitsService {
     return structuredClone(await this.inFlight);
   }
 
+  /**
+   * The last snapshot a read produced, however old, without starting one: no process, file or network access.
+   * Null before the first read finished (or after the provider CLIs changed).
+   */
+  peek(): LimitsSnapshot | null {
+    return this.cache ? structuredClone(this.cache.value) : null;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;

@@ -20,6 +20,8 @@
 
 `node-pty` 会在对应平台的 GitHub runner 上重新构建，因此 Linux、Windows 和 macOS 的包使用的都是各自平台的原生模块。一个系统的包绝不会被换个名字冒充另一个系统的构建。
 
+原生智能体 helper `canvastty-helper`（Go，仅标准库，无 cgo）由 `npm run build:helpers` 为目标平台构建，并以 `resources/helpers` 打包。它在 macOS 和 Linux 上运行智能体的 MCP 服务器与 hook；Windows 默认仍使用内置的 JavaScript helper，`CANVASTTY_HELPERS=node` 可在任何系统上强制使用它们。
+
 ## 仅保存在本地的用户数据
 
 | 数据 | 位置与生命周期 |
@@ -46,6 +48,17 @@
 
 脱敏后的百分比、窗口元数据、时间戳以及明确的不可用原因可以通过 IPC 传递。原始的服务商响应、bearer 请求头、cookie 和凭据文件则不允许。Runtime 插件机密属于独立的可选边界：只有 manifest 声明 `secrets` 时，机密才会通过所属 sandbox 的请求路径传递，并通过 Electron `safeStorage` 加密保存。
 
+## 智能体防护层
+
+智能体按自己的模式工作；CanvasTTY 的各层位于其外部，作为安静的安全网：项目内的常规工作不会增加提问，只拦截危险操作并给出简短原因。
+
+- **启动模式**：自动（默认）、手动、接受编辑、计划、绕过，仅在 CLI 支持时提供。绕过由用户按 CLI 确认，在主进程中检查，绝不交给子智能体，并且仍处于下列各层之内。
+- **基础保护**（hooks）为有 hooks 的智能体拒绝提权、`curl | sh`、磁盘命令以及项目外的写入；它检查命令，不是沙箱。
+- **委派规则**：子智能体的权限不超过其编排者（绝不为 YOLO），只在项目文件夹内工作，并受用户设定的深度和数量限制；智能体无法更改设置、防护、配置档或隔离。
+- **智能体隔离**（macOS 使用 sandbox-exec，Linux 使用 bubblewrap）：只能写入项目、自身临时目录和其 CLI 的目录；密钥和令牌不可读；其他进程、应用和守护进程不可达；无法建立时拒绝启动。网络不受限制；Windows 暂无此层，子智能体在那里以手动模式运行。详见 [agent-orchestration.md](agent-orchestration.md)。
+
+**Git 审计。** 隔离的智能体会话结束、被关闭或在退出后恢复时，CanvasTTY 会检查其文件夹下 git 目录发生变化的仓库。如果 git 现在会在隔离外运行某些东西（`core.hooksPath`、filter 或 diff 驱动、`fsmonitor`、hook 文件、`info/attributes`），会出现一条列出具体变化的通知；**Neutralize** 删除这些键并停用这些文件，**Keep as is** 保持不变。它不会撤销项目内的其他文件改动。
+
 ## 仓库防护
 
 ```bash
@@ -63,6 +76,8 @@ npm test
 npm install
 npm run package
 ```
+
+构建原生 helper 需要 Go 1.21 或更高版本；没有 Go 时构建会打印警告，包中只含 JavaScript helper（`CANVASTTY_REQUIRE_NATIVE_HELPERS=1` 会把这种情况变成错误，发布构建即如此）。
 
 `npm run package` 会为当前操作系统生成未打包的应用目录。各平台的脚本用于生成安装包：
 

@@ -20,6 +20,8 @@ Download artifacts only from the repository's [GitHub Releases](https://github.c
 
 `node-pty` is rebuilt on the matching GitHub runner, so Linux, Windows, and macOS packages receive a native module for their own operating system. A package from one OS is never relabeled as another OS build.
 
+The native agent helper `canvastty-helper` (Go, standard library only, no cgo) is built for the target by `npm run build:helpers` and packaged as `resources/helpers`. It runs the agents' MCP servers and hooks on macOS and Linux; Windows keeps the bundled JavaScript helpers by default, and `CANVASTTY_HELPERS=node` forces them anywhere.
+
 ## Local-only user data
 
 | Data | Location and lifetime |
@@ -46,6 +48,25 @@ Provider credentials are read only in the trusted main process when a source-bac
 
 Sanitized percentages, window metadata, timestamps, and explicit unavailable reasons may cross IPC. Raw provider responses, bearer headers, cookies, and credential files may not. Runtime-plugin secrets are a separate opt-in boundary: they cross only the owning sandbox's request path when its manifest declares `secrets` and are encrypted at rest through Electron `safeStorage`.
 
+## Agent protection layers
+
+Agents work in their own mode; CanvasTTY's layers sit outside it as a quiet safety net that adds no prompts for ordinary work in the project and stops what is dangerous, with a short reason the agent can act on.
+
+**Launch modes.** Auto (the default), Manual, Accept edits, Plan and Bypass, offered only where the CLI supports them. Auto is the CLI's own auto mode where it has one (Claude Code's classifier, Codex's reviewer, Grok's classifier), CanvasTTY's per-run rules for OpenCode (your own deny and ask rules still win), and for a CLI without one its approval bypass, only inside agent isolation. Bypass is the person's choice per CLI, acknowledged once, checked in the main process, never given to a subagent, and still inside the layers below. In Manual the CLI follows its own configuration; when that configuration skips approvals, the card says so.
+
+| Layer | Guarantees | Does not guarantee |
+| --- | --- | --- |
+| The agent's own permission system | What its CLI promises in the chosen mode (Claude Code, Codex, OpenCode, Grok…). | Anything the CLI's own classifier or reviewer lets through. |
+| Base protection (hooks) | Denies elevation, pipes into a shell, disk commands, fork bombs, writes and deletes outside the project and access to CanvasTTY's private data, before the tool call runs, for agents whose CLI has hooks (Claude Code, Codex, Qwen Code, OpenCode). A decision plugin's "ask" is shown by Claude Code; for a CLI that cannot ask it is a deny with the reason. | It reads commands; code that hides what it does, or a CLI without hooks, is not covered. It is a guard, not a sandbox. |
+| Delegation rules | A subagent never gets more than its orchestrator (never YOLO), works only in its orchestrator's project folder, within the depth and count limits the person set; orchestrators get a control connection of their own; no agent-facing tool changes settings, protection, profiles, trust or isolation; plugin launch options from an agent only where the plugin declared them delegable. | What a plugin the person trusted does with its own permissions. |
+| Agent isolation (OS layer) | On macOS (sandbox-exec) and Linux (bubblewrap), for subagents, plugin-started agents and every agent not in Manual: the whole process tree writes only in the project, its own temporary folder and its CLI's own folders; keys, other CLIs' credentials and CanvasTTY's tokens are unreadable; no other process, app, Apple event, preference write, launchd job or foreign Unix socket (Docker, tmux, SSH agent) is reachable. Fails closed. | Network is not restricted. Linux cannot filter Unix sockets, only hide the user runtime folder. The CLI's own sandbox cannot run inside the layer on macOS, so it is switched off there (approvals unchanged) and commands can use the network. A Claude launch may rewrite the login keychain file to save a refreshed sign-in, so it could also damage that file (other items stay behind their own access lists). Windows has no layer yet: subagents run in Manual there unless the person turns isolation off. |
+
+Isolation keeps approval configuration read-only, including OpenCode's project and custom config files and its `agent`/`agents` directories. CLI state and caches remain writable. A moved CLI home is refused if its real path overlaps host credentials or private CanvasTTY data; a selected account folder below `account-homes` remains available. Credential exclusions use the host environment captured before launch contributions, even if the launch changes `HOME`.
+
+OpenCode Auto inspects only regular local config files of at most 1 MiB. An existing source that cannot be inspected adds no Auto allowances. A launch contributor's uninspectable config is refused; only absent optional directory candidates are skipped. JSONC comments and trailing commas are parsed without changing quoted strings.
+
+**Git audit.** When an isolated agent session ends, is closed or is restored after a quit, CanvasTTY checks the repositories under its folder whose git folder changed. If git would now run something outside isolation (a `core.hooksPath`, a filter or diff driver, `fsmonitor`, a hook file, `info/attributes`), a notice lists exactly what changed; **Neutralize** removes those keys and disables those files, **Keep as is** leaves them. It does not undo other file changes inside the project.
+
 ## Repository guards
 
 ```bash
@@ -63,6 +84,8 @@ No scanner is perfect. Never commit a live secret “temporarily.” If one reac
 npm install
 npm run package
 ```
+
+The build needs Go 1.21 or newer for the native helper; without Go it prints a warning and the package ships only the JavaScript helpers (`CANVASTTY_REQUIRE_NATIVE_HELPERS=1` makes that an error, as in release builds).
 
 `npm run package` creates an unpacked app for the current OS. Platform scripts create installers:
 

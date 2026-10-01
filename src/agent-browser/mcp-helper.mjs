@@ -440,31 +440,42 @@ export function formatToolResult(result) {
     return errorToolResult({ code: "BRIDGE_UNAVAILABLE", message: "Browser returned no result.", retryable: true });
   }
   const content = [];
-  const screenshot = screenshotContent(result.data);
+  const image = imageOf(result.data);
+  const screenshot = image && image.bytes <= MAX_IMAGE_CONTENT_BYTES
+    ? { type: "image", data: image.encoded, mimeType: image.mimeType }
+    : null;
   if (screenshot) content.push(screenshot);
   const resource = artifactContent(result.data);
   if (resource) content.push(resource);
-  content.push({ type: "text", text: canonicalStringify(summarizeResult(result, Boolean(screenshot))) });
+  // An image over the limit is never sent as text either (the whole answer would be too large to send): a note says
+  // what was left out.
+  const placeholder = screenshot
+    ? "<returned as MCP image content>"
+    : image ? `<omitted: the ${image.bytes}-byte image is over the ${MAX_IMAGE_CONTENT_BYTES}-byte limit>` : null;
+  content.push({ type: "text", text: canonicalStringify(summarizeResult(result, placeholder)) });
   return { content, isError: result.ok !== true };
 }
 
-function summarizeResult(result, hasImage) {
-  if (!hasImage || !result.data || typeof result.data !== "object") return result;
+const MAX_IMAGE_CONTENT_BYTES = 470_000;
+
+function summarizeResult(result, placeholder) {
+  if (!placeholder || !result.data || typeof result.data !== "object") return result;
   const data = { ...result.data };
   if (data.image && typeof data.image === "object") {
     data.image = {
       ...data.image,
-      ...(typeof data.image.data === "string" ? { data: "<returned as MCP image content>" } : {}),
-      ...(typeof data.image.base64 === "string" ? { base64: "<returned as MCP image content>" } : {})
+      ...(typeof data.image.data === "string" ? { data: placeholder } : {}),
+      ...(typeof data.image.base64 === "string" ? { base64: placeholder } : {})
     };
   } else if (typeof data.mimeType === "string") {
-    if (typeof data.data === "string") data.data = "<returned as MCP image content>";
-    if (typeof data.base64 === "string") data.base64 = "<returned as MCP image content>";
+    if (typeof data.data === "string") data.data = placeholder;
+    if (typeof data.base64 === "string") data.base64 = placeholder;
   }
   return { ...result, data };
 }
 
-function screenshotContent(data) {
+/** The image a result carries (PNG, JPEG or WebP, base64), with its size, or null. */
+function imageOf(data) {
   if (!data || typeof data !== "object") return null;
   const image = data.image && typeof data.image === "object" ? data.image : data;
   const encoded = typeof image.data === "string" ? image.data : image.base64;
@@ -472,8 +483,7 @@ function screenshotContent(data) {
     (image.mimeType !== "image/png" && image.mimeType !== "image/jpeg" && image.mimeType !== "image/webp")
     || typeof encoded !== "string"
   ) return null;
-  if (Buffer.byteLength(encoded, "utf8") > 470_000) return null;
-  return { type: "image", data: encoded, mimeType: image.mimeType };
+  return { encoded, mimeType: image.mimeType, bytes: Buffer.byteLength(encoded, "utf8") };
 }
 
 function artifactContent(data) {

@@ -2,8 +2,9 @@ import { existsSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
-import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
-import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
+import { openCodeAutoEnvironment, openCodeYoloEnvironment } from "./openCodeConfig.ts";
+import { autoKind, CLAUDE_SANDBOX_SETTINGS, profileArguments, type LaunchProfile } from "../../shared/autoMode.ts";
+import { providerEffortArguments, providerModelArguments, type ReasoningEffort } from "../../shared/launchModel.ts";
 import {
   providerTerminalBatchCommandLine,
   windowsCommandPromptPath,
@@ -27,6 +28,20 @@ interface LaunchResolutionOptions {
   resumeThreadId?: string;
   /** A launch contributor runs the CLI on another model: "auto" becomes accept-edits (autoModeArguments). */
   thirdPartyModel?: boolean;
+  /** OpenCode "auto": CanvasTTY's base protection is on and its guard runs in this launch, so shell commands may run
+   *  without OpenCode asking (hard denies still deny). Without it, auto still asks for them. */
+  shellGuarded?: boolean;
+  /** The CLI's --model and reasoning effort for this run (launchModel.ts); checked again here. */
+  model?: string;
+  effort?: ReasoningEffort;
+  /**
+   * The launch runs inside CanvasTTY's isolation layer. macOS refuses a sandbox inside another one, so Claude Code's own
+   * sandbox block is left out there (its commands would all fail); the layer contains them instead. A CLI without an
+   * auto mode of its own gets its "auto" (its approval bypass) only here.
+   */
+  isolated?: boolean;
+  /** The folder the CLI runs in (OpenCode's project configuration is read from it). */
+  cwd?: string;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -55,19 +70,36 @@ export function resolveTerminalLaunch(
   }
   if (providerCli.state === "unavailable") throw new Error(providerCli.diagnostic);
 
-  const launchEnvironment = profile === "yolo" && provider === "opencode"
-    ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
-    : undefined;
-  const auto = profile === "auto";
+  const kind = autoKind(provider);
+  const containedAuto = profile === "auto" && kind === "contained";
+  if (containedAuto && options.isolated !== true) {
+    throw new Error(`${provider} has no auto mode of its own; its auto runs only inside CanvasTTY's agent isolation.`);
+  }
+  const launchEnvironment = provider !== "opencode" ? undefined
+    : profile === "yolo" ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
+      : profile === "auto" || profile === "acceptEdits" ? openCodeAutoEnvironment({ ...environment, ...providerCli.environment }, {
+        // Accept-edits: edits run, every shell command asks.
+        shellGuarded: profile === "auto" && options.shellGuarded === true,
+        ...(options.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...(options.cwd ? { cwd: options.cwd } : {})
+      })
+        : undefined;
+  // Claude Code's own sandbox where CanvasTTY's layer does not run (and the CLI has one on this platform).
+  const claudeSandbox = provider === "claude" && (profile === "auto" || profile === "acceptEdits") && options.isolated !== true
+    && (platform === "darwin" || platform === "linux");
   const providerArgs = [
     ...(provider === "codex" && agentBrowserArgs.includes("-c") ? ["--no-daemon"] : []),
-    ...(profile === "yolo" && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
-    ...(auto ? autoModeArguments(provider, options.thirdPartyModel === true) : []),
+    ...((profile === "yolo" || containedAuto) && provider !== "opencode" ? DANGEROUS_ARGUMENTS[provider] : []),
+    ...(provider === "codex" && options.isolated === true && profile !== "yolo"
+      ? codexInsideIsolation(profile, options.thirdPartyModel === true)
+      : profile !== "normal" && profile !== "yolo" && !containedAuto ? profileArguments(provider, profile, options.thirdPartyModel === true) : []),
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
-    // Its sandbox for "auto" joins the same one.
+    // Its sandbox joins the same one.
     ...(provider === "claude"
-      ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
+      ? mergeClaudeInlineSettings(claudeSandbox ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
       : agentBrowserArgs),
+    ...providerModelArguments(provider, options.model),
+    ...providerEffortArguments(provider, options.effort),
     ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {
@@ -117,6 +149,21 @@ export function resolveTerminalLaunch(
     args: providerTerminalBatchCommandLine(providerCli.executable, providerArgs),
     environment: combinedEnvironment
   };
+}
+
+/**
+ * Codex inside CanvasTTY's isolation layer. macOS refuses a sandbox inside another one, so Codex's own seatbelt could
+ * not start and every command would fail once before being re-requested. The layer already confines the files, so
+ * Codex runs with its own sandbox off (`-s danger-full-access`, never the bypass flag) and the same approvals as the
+ * mode outside the layer: auto keeps `--approve-for-me`'s reviewer (`approvals_reviewer="auto_review"`,
+ * `approval_policy="on-request"`, verified with `codex debug prompt-input` under a fake HOME: `--approve-for-me` itself
+ * refuses to be combined with `--sandbox`); accept-edits and normal keep on-request; plan is read-only through the
+ * layer (the project is not writable in plan).
+ */
+export function codexInsideIsolation(profile: LaunchProfile, thirdPartyModel: boolean): string[] {
+  const base = ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"];
+  if (profile === "auto" && !thirdPartyModel) return [...base, "-c", 'approvals_reviewer="auto_review"'];
+  return base;
 }
 
 function resolveResumeArguments(
@@ -205,9 +252,9 @@ const DANGEROUS_ARGUMENTS: Record<Exclude<ProviderId, "terminal" | "opencode">, 
   // pi 0.85.1 has no permission system, so it has no auto-approve flag. `-a, --approve`
   // only skips its one prompt (trust project-local settings for this run).
   pi: ["--approve"],
-  // The Cursor CLI follows Claude Code conventions; its permission bypass is the
-  // same flag Claude Code documents.
-  cursor: ["--dangerously-skip-permissions"],
+  // cursor-agent rejects Claude Code's --dangerously-skip-permissions; its own
+  // bypass is `-f, --force` ("Force allow commands unless explicitly denied").
+  cursor: ["--force"],
   // Measured on @minimax-ai/code 0.5.1: the CLI has no permission bypass flag.
   // Permission modes (default/auto/bypassPermissions/off) are settings.json and
   // TUI state (/permission, Alt+M) only, so YOLO launches the stock CLI.
@@ -335,17 +382,26 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 const CORE_OWNED_FLAGS = new Set<string>([
   ...Object.values(DANGEROUS_ARGUMENTS).flat().filter((argument) => argument.startsWith("-")),
   "--full-auto", "--approve-for-me", "--ask-for-approval", "--sandbox", "--permission-mode", "--approval-mode",
+  // cursor-agent: --force/-f skip approvals, --approve-mcps approves every MCP server; Grok's --always-approve.
+  "--force", "--approve-mcps", "--always-approve", "--auto", "--agent", "--mode", "--plan", "--yolo",
   "--continue", "--resume", "--session", "--last", "--conversation", "--fork-session"
 ]);
 const CORE_OWNED_SHORT_FLAGS: Partial<Record<ProviderId, string[]>> = {
   claude: ["-c", "-r"],
-  cursor: ["-c", "-r"],
+  cursor: ["-c", "-r", "-f"],
   qwen: ["-c", "-r", "-y"],
   opencode: ["-c", "-s"],
   codex: ["-a", "-s"]
 };
-// `-c hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust); `approvals_reviewer` is auto's.
-const CORE_OWNED_WORDS = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|bypass|^hooks[.=]/i;
+// Config keys (`-c key=value`, `--config=key=value`, or a `key=value` argument that is a `-c` value) that decide
+// approvals or the sandbox. `hooks.…` would replace CanvasTTY's own Codex hooks (and their per-run trust);
+// `approvals_reviewer` is auto's. Only the key is read: a value is the plugin's text (a rule that mentions
+// these words is not a setting).
+const CORE_OWNED_CONFIG_KEY = /dangerously|approval_policy|approvals_reviewer|sandbox_mode|sandbox_workspace_write|bypass|^hooks(?:\.|$)/i;
+/** A flag whose own name asks to skip approvals, whatever the agent calls it. */
+const CORE_OWNED_FLAG_WORDS = /dangerously|bypass/i;
+/** `key=value` as a config override writes it: a dotted key of plain name characters, then `=`. */
+const CONFIG_PAIR = /^([A-Za-z0-9_][A-Za-z0-9_.-]*)=/;
 const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
   codex: ["resume", "fork", "exec"]
 };
@@ -373,8 +429,18 @@ export function coreOwnedLaunchArgument(provider: ProviderId, argument: string):
     if (equals && !inline) return true;
     if (inline && claudeCoreSettingsKey(inline)) return true;
   }
-  return CORE_OWNED_FLAGS.has(flag)
-    || Boolean(CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag))
-    || Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument))
-    || CORE_OWNED_WORDS.test(argument);
+  if (argument.startsWith("-")) {
+    if (CORE_OWNED_FLAGS.has(flag) || CORE_OWNED_SHORT_FLAGS[provider]?.includes(flag) || CORE_OWNED_FLAG_WORDS.test(flag)) return true;
+    // A config override written into the flag itself: `--config=key=value`, `-ckey=value`.
+    const inlineConfig = argument.startsWith("--config=") ? argument.slice("--config=".length)
+      : /^-c[^=-]/u.test(argument) ? argument.slice(2) : null;
+    return inlineConfig !== null && coreOwnedConfigPair(inlineConfig);
+  }
+  return Boolean(CORE_OWNED_SUBCOMMANDS[provider]?.includes(argument)) || coreOwnedConfigPair(argument);
+}
+
+/** A `key=value` argument whose key is core-owned; any other text (a rule, a prompt) is the plugin's own. */
+function coreOwnedConfigPair(argument: string): boolean {
+  const key = CONFIG_PAIR.exec(argument)?.[1];
+  return key !== undefined && CORE_OWNED_CONFIG_KEY.test(key);
 }

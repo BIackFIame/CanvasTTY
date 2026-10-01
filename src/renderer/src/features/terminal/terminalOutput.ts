@@ -1,4 +1,5 @@
 import type { CanvasTTYApi, TerminalDataEvent } from "../../../../shared/contracts.ts";
+import { createSurfaceGate, type SurfaceGate } from "../workspace/surfaceLifecycle.ts";
 
 /**
  * Bounded one-line marker for output the card never received. The producer's
@@ -22,6 +23,7 @@ export function attachTerminalOutput(
 ): () => void {
   let disposed = false;
   let outputOffset: number | undefined;
+  let liveOnly = false;
   const queuedLiveOutput: TerminalDataEvent[] = [];
   const writeLive = (event: TerminalDataEvent): void => {
     const start = event.outputOffset - event.data.length;
@@ -35,6 +37,9 @@ export function attachTerminalOutput(
   };
   const unsubscribe = api.onData((event) => {
     if (disposed || event.id !== id) return;
+    // Without history there is nothing to join against, so the first live
+    // event defines where this card's output begins.
+    if (outputOffset === undefined && liveOnly) outputOffset = event.outputOffset - event.data.length;
     if (outputOffset === undefined) queuedLiveOutput.push(event);
     else writeLive(event);
   }, id);
@@ -52,8 +57,28 @@ export function attachTerminalOutput(
     queuedLiveOutput.length = 0;
   }).catch((error: unknown) => {
     if (disposed) return;
-    dispose();
+    // Missing history must not also cost the live stream: report the failure,
+    // keep the subscription and continue from the oldest output still queued.
     onError(error);
+    if (disposed) return;
+    liveOnly = true;
+    const first = queuedLiveOutput[0];
+    if (first) outputOffset = first.outputOffset - first.data.length;
+    for (const event of queuedLiveOutput) writeLive(event);
+    queuedLiveOutput.length = 0;
   });
   return dispose;
+}
+
+/**
+ * The terminal card's side of the surface lifecycle: a live card receives terminalData, a suspended one
+ * does not. The main process keeps appending to scrollback while a card is suspended and replays the
+ * missed suffix, once, when it turns live again (TerminalManager.setVisible); attachTerminalOutput drops
+ * anything the card already wrote by absolute offset, so nothing is lost or written twice.
+ */
+export function createTerminalDeliveryGate(
+  api: Pick<CanvasTTYApi["terminal"], "setVisible">,
+  id: string
+): SurfaceGate {
+  return createSurfaceGate((live) => api.setVisible(id, live));
 }
