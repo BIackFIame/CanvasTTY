@@ -4,6 +4,7 @@ import { mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } fro
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
   CanvasMaterial,
+  MaterialCreateResult,
   MaterialFailure,
   MaterialOrigin,
   MaterialResult,
@@ -28,12 +29,15 @@ import {
   emptyMaterialState,
   MATERIAL_STATE_VERSION,
   normalizeMaterialState,
-  type StoredMaterial
+  type StoredMaterial,
+  type StoredVersion
 } from "./materialState.ts";
 import { DirectoryWatchSet, nodeWatchFactory, type WatchFactory } from "./materialWatch.ts";
+import { MaterialBlobError, MaterialBlobs } from "./MaterialBlobs.ts";
 
 const MAX_PATHS_PER_ADD = 64;
 const MAX_NAME = 255;
+const MATERIAL_CAPTURE_MAX_BYTES = 32 * 1024 * 1024;
 const PERSIST_DELAY_MS = 250;
 const REFRESH_DELAY_MS = 150;
 const POLL_INTERVAL_MS = 10_000;
@@ -61,10 +65,20 @@ interface LiveState {
   movedTo: string | null;
 }
 
+interface MaterialCaptureInput {
+  bytes: Uint8Array;
+  name: string;
+  mimeType: string;
+  origin: MaterialOrigin;
+  point: Point;
+  natural?: Size | null;
+}
+
 export class MaterialService {
   private readonly options: MaterialServiceOptions;
   private readonly root: string;
   private readonly statePath: string;
+  private readonly blobs: MaterialBlobs;
   private readonly materials = new Map<string, StoredMaterial>();
   private readonly live = new Map<string, LiveState>();
   private readonly watchers: DirectoryWatchSet;
@@ -81,6 +95,7 @@ export class MaterialService {
     this.options = options;
     this.root = join(options.userDataPath, "materials");
     this.statePath = join(this.root, "state.json");
+    this.blobs = new MaterialBlobs(join(this.root, "versions"));
     this.watchers = new DirectoryWatchSet(options.watchFactory ?? nodeWatchFactory, (ids) => this.scheduleRefresh(ids));
   }
 
@@ -94,9 +109,14 @@ export class MaterialService {
     }
     if (!this.options.persist()) state = emptyMaterialState();
     for (const material of state.materials) {
-      if (material.path === null) continue;
+      if (material.path === null && material.versions.length === 0) continue;
+      const versions: StoredVersion[] = [];
+      for (const version of material.versions) if (await this.blobs.has(version.sha256)) versions.push(version);
+      material.versions = versions;
+      if (material.path === null && versions.length === 0) continue;
       this.materials.set(material.id, material);
     }
+    await this.collect();
     for (const material of this.materials.values()) {
       await this.refreshLive(material);
       this.watchers.track(material.id, material.path);
@@ -197,6 +217,48 @@ export class MaterialService {
     });
   }
 
+  addCapture(input: MaterialCaptureInput): Promise<MaterialCreateResult> {
+    return this.serial(async () => {
+      if (this.materials.size >= MATERIAL_LIMIT) return failure("material-limit");
+      let blob;
+      try {
+        blob = await this.blobs.writeFromBytes(input.bytes, MATERIAL_CAPTURE_MAX_BYTES, this.availableBytes());
+      } catch (error) {
+        return failure(blobFailure(error));
+      }
+      const type = materialType(input.name);
+      const createdAt = this.now();
+      const size = materialCardSize(type.kind, input.natural ?? null);
+      const [placed] = materialsAtPoint([size], finitePoint(input.point));
+      const material: StoredMaterial = {
+        id: randomUUID(),
+        kind: type.kind,
+        name: displayName(input.name),
+        mimeType: input.mimeType,
+        position: placed.position,
+        size,
+        path: null,
+        identity: null,
+        origin: input.origin,
+        createdAt,
+        versions: [{
+          id: randomUUID(),
+          number: 1,
+          sha256: blob.sha256,
+          byteSize: blob.byteSize,
+          mimeType: input.mimeType,
+          createdAt,
+          reason: "capture"
+        }],
+        nextVersion: 2
+      };
+      this.materials.set(material.id, material);
+      await this.refreshLive(material);
+      this.changed();
+      return { ok: true, materialId: material.id };
+    });
+  }
+
   setBounds(id: string, bounds: unknown): void {
     const material = this.materials.get(id);
     if (!material || !isBounds(bounds)) return;
@@ -271,9 +333,15 @@ export class MaterialService {
       const url = new URL(request.url);
       if (url.protocol !== `${MATERIAL_SCHEME}:`) return textResponse("Unsupported protocol.", 400);
       const material = this.materials.get(decodeURIComponent(url.hostname));
-      if (!material || material.path === null) return textResponse("Material is unavailable.", 404);
+      if (!material) return textResponse("Material is unavailable.", 404);
       const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
       if (parts[0] === "live" && parts.length === 1) {
+        if (material.path === null) {
+          const latest = material.versions.at(-1);
+          return latest
+            ? await streamFile(request, this.blobs.pathOf(latest.sha256), latest.mimeType, RESPONSE_HEADERS)
+            : textResponse("Material is unavailable.", 404);
+        }
         const resolved = await realpath(material.path);
         const info = await stat(resolved);
         if (resolved !== material.path || !info.isFile()) return textResponse("Material is unavailable.", 404);
@@ -299,6 +367,7 @@ export class MaterialService {
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
     this.watchers.close();
     await this.flush();
+    if (!this.options.persist()) await this.blobs.collect(new Set());
   }
 
   private scheduleRefresh(ids: readonly string[]): void {
@@ -324,7 +393,7 @@ export class MaterialService {
   private async refreshLive(material: StoredMaterial, forceRevision = false): Promise<boolean> {
     const previous = this.live.get(material.id);
     const next = material.path === null
-      ? { state: "unreadable" as const, signature: null, byteSize: null, modifiedAt: null, revision: 1, movedTo: null }
+      ? captureLive(material)
       : await inspectWorkingFile(material, previous);
     const changedContent = next.signature !== (previous?.signature ?? null);
     const revision = previous
@@ -406,6 +475,22 @@ export class MaterialService {
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
+  }
+
+  private availableBytes(): number {
+    return Number.MAX_SAFE_INTEGER;
+  }
+
+  private async collect(): Promise<void> {
+    await this.blobs.collect(this.referencedHashes());
+  }
+
+  private referencedHashes(): Set<string> {
+    const hashes = new Set<string>();
+    for (const material of this.materials.values()) {
+      for (const version of material.versions) hashes.add(version.sha256);
+    }
+    return hashes;
   }
 }
 
@@ -522,6 +607,26 @@ function isBounds(value: unknown): value is SessionBounds {
   const { position, size } = value as Partial<SessionBounds>;
   return Boolean(position && size)
     && [position!.x, position!.y, size!.width, size!.height].every((entry) => typeof entry === "number" && Number.isFinite(entry));
+}
+
+function captureLive(material: StoredMaterial): InspectedLive {
+  const latest = material.versions.at(-1);
+  return {
+    state: latest ? "ready" : "unreadable",
+    signature: latest?.sha256 ?? null,
+    byteSize: latest?.byteSize ?? null,
+    modifiedAt: latest?.createdAt ?? null,
+    revision: latest?.number ?? 1,
+    movedTo: null
+  };
+}
+
+function blobFailure(error: unknown): MaterialFailure {
+  if (error instanceof MaterialBlobError) {
+    if (error.code === "too-large") return "too-large";
+    if (error.code === "quota") return "quota";
+  }
+  return "unreadable";
 }
 
 function failure(reason: MaterialFailure): { ok: false; reason: MaterialFailure } {

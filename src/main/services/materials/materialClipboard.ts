@@ -1,5 +1,6 @@
 import { isAbsolute, posix, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { MaterialFailure, MaterialRejectionReason } from "../../../shared/contracts.ts";
 import { MATERIAL_LIMIT } from "../../../shared/materials.ts";
 
 export const CLIPBOARD_TEXT_PATH_LIMIT = 16;
@@ -36,6 +37,12 @@ function listedPaths(paths: readonly string[], absolute = isAbsolute): string[] 
 function isRemote(path: string, platform: NodeJS.Platform): boolean {
   if (platform === "win32") return /^[\\/]{2}/.test(path);
   return platform === "darwin" && /^\/(?:net|Network)\//.test(path);
+}
+
+export function captureRejection(reason: MaterialFailure): MaterialRejectionReason {
+  if (reason === "material-limit") return "limit";
+  if (reason === "quota" || reason === "too-large") return reason;
+  return "unreadable";
 }
 
 function decodeXml(value: string): string {

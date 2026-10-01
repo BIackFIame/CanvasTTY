@@ -50,7 +50,8 @@ export type MaterialFailureKey =
   | "materialFailureUnreadable"
   | "materialFailureNotAFile"
   | "materialFailureKindMismatch"
-  | "materialFailureAlreadyOnCanvas";
+  | "materialFailureAlreadyOnCanvas"
+  | "materialFailureMaterialLimit";
 
 export function materialFailureKey(reason: MaterialFailure): MaterialFailureKey | null {
   switch (reason) {
@@ -61,16 +62,19 @@ export function materialFailureKey(reason: MaterialFailure): MaterialFailureKey 
     case "not-a-file": return "materialFailureNotAFile";
     case "kind-mismatch": return "materialFailureKindMismatch";
     case "already-on-canvas": return "materialFailureAlreadyOnCanvas";
+    case "material-limit": return "materialFailureMaterialLimit";
     default: return null;
   }
 }
 
-export type MaterialRejectionKey = "materialsNotAFile" | "materialsUnreadable" | "materialsLimit" | "materialsEmptyClipboard";
+export type MaterialRejectionKey = "materialsNotAFile" | "materialsUnreadable" | "materialsLimit" | "materialsQuota" | "materialsTooLarge" | "materialsEmptyClipboard";
 
 export function materialRejectionKey(reason: MaterialRejectionReason): MaterialRejectionKey {
   switch (reason) {
     case "not-a-file": return "materialsNotAFile";
     case "limit": return "materialsLimit";
+    case "quota": return "materialsQuota";
+    case "too-large": return "materialsTooLarge";
     case "empty-clipboard": return "materialsEmptyClipboard";
     default: return "materialsUnreadable";
   }

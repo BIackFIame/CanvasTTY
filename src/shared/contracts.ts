@@ -298,7 +298,7 @@ export interface MaterialsSnapshot {
   materials: CanvasMaterial[];
 }
 
-export type MaterialRejectionReason = "not-a-file" | "unreadable" | "limit" | "empty-clipboard";
+export type MaterialRejectionReason = "not-a-file" | "unreadable" | "limit" | "quota" | "too-large" | "empty-clipboard";
 
 export interface MaterialRejection {
   name: string;
@@ -319,9 +319,12 @@ export type MaterialFailure =
   | "not-a-file"
   | "kind-mismatch"
   | "already-on-canvas"
+  | "material-limit"
   | "cancelled";
 
 export type MaterialResult = { ok: true } | { ok: false; reason: MaterialFailure };
+
+export type MaterialCreateResult = { ok: true; materialId: string } | { ok: false; reason: MaterialFailure };
 
 export interface CameraState extends Point {
   zoom: number;

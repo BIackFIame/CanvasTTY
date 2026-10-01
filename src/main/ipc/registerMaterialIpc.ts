@@ -3,7 +3,7 @@ import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type { MaterialsAddResult, Point } from "../../shared/contracts.ts";
 import { IPC } from "../../shared/contracts.ts";
 import type { MaterialService } from "../services/materials/MaterialService";
-import { fileUrlPaths, plistPaths, textPaths, windowsFileNames } from "../services/materials/materialClipboard.ts";
+import { captureRejection, fileUrlPaths, plistPaths, textPaths, windowsFileNames } from "../services/materials/materialClipboard.ts";
 import { isId } from "../services/materials/materialState.ts";
 import { assertMainRenderer } from "./registerIpc";
 
@@ -93,10 +93,19 @@ async function pickFiles(event: IpcMainInvokeEvent, multiple: boolean): Promise<
 async function pasteFromClipboard(materials: MaterialService, point: unknown): Promise<MaterialsAddResult> {
   const paths = clipboardPaths();
   if (paths.length > 0) return materials.addPaths(paths, point);
-  if (!clipboard.readImage().isEmpty()) {
-    return { added: [], existing: [], rejected: [{ name: "clipboard", reason: "empty-clipboard" }] };
-  }
-  return { added: [], existing: [], rejected: [{ name: "clipboard", reason: "empty-clipboard" }] };
+  const image = clipboard.readImage();
+  if (image.isEmpty()) return { added: [], existing: [], rejected: [{ name: "clipboard", reason: "empty-clipboard" }] };
+  const created = await materials.addCapture({
+    bytes: image.toPNG(),
+    name: `clipboard-${timestamp(new Date())}.png`,
+    mimeType: "image/png",
+    origin: { kind: "clipboard" },
+    point: point as Point,
+    natural: image.getSize()
+  });
+  return created.ok
+    ? { added: [created.materialId], existing: [], rejected: [] }
+    : { added: [], existing: [], rejected: [{ name: "clipboard", reason: captureRejection(created.reason) }] };
 }
 
 function clipboardPaths(): string[] {
@@ -118,6 +127,11 @@ function safeRead<T = string>(read: () => T, fallback = "" as T): T {
   } catch {
     return fallback;
   }
+}
+
+function timestamp(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
 function requireId(value: unknown): string {
