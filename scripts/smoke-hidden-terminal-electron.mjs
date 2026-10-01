@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { electronSmokeLaunchBlockReason } from "./lib/electron-smoke-launch-guard.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const require = createRequire(join(REPO, "package.json"));
@@ -22,6 +23,11 @@ const TEMP_ROOT = process.platform === "win32" ? tmpdir() : "/tmp";
 const SUCCESS_MARKER = benchmark ? "CANVASTTY_HIDDEN_RENDERER_BENCH_OK" : "CANVASTTY_HIDDEN_DOM_PROBE_OK";
 
 if (typeof electron === "string") {
+  const launchBlockReason = electronSmokeLaunchBlockReason(process.platform, process.env);
+  if (launchBlockReason) {
+    console.error(launchBlockReason);
+    process.exit(1);
+  }
   const userData = await mkdtemp(join(TEMP_ROOT, "cth-"));
   const childEnv = { ...process.env };
   delete childEnv.ELECTRON_RUN_AS_NODE;
