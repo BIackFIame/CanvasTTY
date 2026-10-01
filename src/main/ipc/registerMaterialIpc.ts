@@ -15,27 +15,26 @@ interface MaterialIpcDependencies {
 }
 
 export function registerMaterialIpc({ materials, getMainWindow }: MaterialIpcDependencies): void {
-  const trusted = (event: IpcMainInvokeEvent): void => assertMainRenderer(event, getMainWindow);
 
   ipcMain.handle(IPC.materialsSnapshot, (event) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     return materials.snapshot();
   });
 
   ipcMain.handle(IPC.materialsAddPaths, (event, paths: unknown, point: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     if (!Array.isArray(paths)) throw new Error("File paths are required.");
     return materials.addPaths(paths, point);
   });
 
   ipcMain.handle(IPC.materialsPick, async (event, point: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     const paths = await pickFiles(event, true);
     return paths.length === 0 ? emptyResult() : materials.addPaths(paths, point);
   });
 
   ipcMain.handle(IPC.materialsPaste, (event, point: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     return pasteFromClipboard(materials, point);
   });
 
@@ -58,25 +57,25 @@ export function registerMaterialIpc({ materials, getMainWindow }: MaterialIpcDep
   });
 
   ipcMain.handle(IPC.materialsRemove, (event, id: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     return materials.remove(requireId(id));
   });
 
   ipcMain.handle(IPC.materialsReveal, (event, id: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     const location = materials.location(requireId(id));
     if (location) shell.showItemInFolder(location);
   });
 
   ipcMain.handle(IPC.materialsRelink, async (event, id: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     const materialId = requireId(id);
     const [path] = await pickFiles(event, false);
     return path ? materials.relink(materialId, path) : { ok: false, reason: "cancelled" };
   });
 
   ipcMain.handle(IPC.materialsAcceptMove, (event, id: unknown) => {
-    trusted(event);
+    assertMainRenderer(event, getMainWindow);
     return materials.acceptMove(requireId(id));
   });
 }
