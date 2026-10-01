@@ -9,6 +9,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { AGENT_HELPERS_ENV, agentHelperLaunches, isOwnLifecycleHookText, nativeHelperPath } from "../src/main/services/agentHelpers.ts";
 import { ProviderRuntimeLaunchAdapters } from "../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts";
@@ -59,7 +60,9 @@ test("CanvasTTY recognizes its own lifecycle hook commands in either form", () =
   assert.equal(isOwnLifecycleHookText("my-own-hook.sh"), false);
 });
 
-test("the launch writes native hook commands (the gate fails closed), and they run through /bin/sh against the real gateway", { skip: SKIP_NATIVE }, async (t) => {
+test("the launch writes native hook commands (the gate fails closed), and they run through /bin/sh against the real gateway", {
+  skip: process.platform === "win32" ? "This launch integration invokes POSIX /bin/sh and uses POSIX hook command quoting." : SKIP_NATIVE
+}, async (t) => {
   const base = await realpath(await mkdtemp("/tmp/ctty-nh-"));
   t.after(() => rm(base, { recursive: true, force: true }));
   const hook = { command: NATIVE, args: ["hook"] };
@@ -130,7 +133,7 @@ test("the launch writes native hook commands (the gate fails closed), and they r
 });
 
 test("Grok's hook file written with the native helper is recovered as CanvasTTY's own", { skip: SKIP_NATIVE }, async (t) => {
-  const base = await realpath(await mkdtemp("/tmp/ctty-nh-grok-"));
+  const base = await realpath(await mkdtemp(join(tmpdir(), "ctty-nh-grok-")));
   t.after(() => rm(base, { recursive: true, force: true }));
   const options = {
     helper: { command: NATIVE, args: ["hook"] }, runtimeDirectory: join(base, "r"), openCodePluginPath: "/opt/CanvasTTY/opencode-plugin.mjs",
@@ -138,7 +141,7 @@ test("Grok's hook file written with the native helper is recovered as CanvasTTY'
   };
   new ProviderRuntimeLaunchAdapters(options).prepare("grok", "g1", true, false);
   const path = join(base, "grok", "hooks", "canvastty-runtime-hooks.json");
-  assert.match(await readFile(path, "utf8"), /canvastty-helper' 'hook'/u);
+  assert.match(await readFile(path, "utf8"), /canvastty-helper(?:\.exe)?/u);
   // A crash left the file behind: the next start removes it instead of refusing it as someone else's.
   new ProviderRuntimeLaunchAdapters(options).recoverConfigurations();
   assert.equal(existsSync(path), false);
