@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { otherSpellings } from "../onDiskPath.ts";
+import { openCodeConfigPaths } from "../inspectedConfig.ts";
 
 /**
  * The folders one isolated agent may write, the ones it may not read, and the sockets it may connect to. Pure: the
@@ -17,6 +18,8 @@ export interface IsolationPathInput {
   sessionTemp: string;
   /** The agent's launch environment (HOME, XDG_*, CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, CanvasTTY's socket addresses). */
   env: Readonly<Record<string, string | undefined>>;
+  /** Host environment captured before launch contributors; credentials there stay hidden if HOME moves. */
+  hostEnvironment?: Readonly<Record<string, string | undefined>>;
   /** CanvasTTY's userData folder. */
   userDataPath: string;
   /** The session id, for its own plugin launch files and its own control grant. */
@@ -38,6 +41,8 @@ export interface IsolationPaths {
   creatableFolders: string[];
   /** Inside writable folders, still not writable: the repository's git config, the CLIs' own permission settings. */
   protectedWrites: string[];
+  /** Permission-bearing agent directories; empty directories are neutral, unlike a fabricated build.md. */
+  protectedDirectories?: string[];
   /** The project's git hook folders: only `*.sample` files may be written there (what `git init` creates). */
   gitHooks: string[];
   /**
@@ -176,10 +181,23 @@ function realish(path: string): string {
 export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const home = input.env.HOME && isAbsolute(input.env.HOME) ? input.env.HOME : "/nonexistent-home";
   const xdg = xdgFolders(input.env, home);
+  const hostEnv = input.hostEnvironment ?? input.env;
+  const hostHome = hostEnv.HOME && isAbsolute(hostEnv.HOME) ? hostEnv.HOME : home;
+  const hostXdg = xdgFolders(hostEnv, hostHome);
+  // One launch may name the same source in several phases. Canonicalize it once, without a stale cross-run cache.
+  const spellingCache = new Map<string, string[]>();
+  const pathSpellings = (path: string): string[] => {
+    let found = spellingCache.get(path);
+    if (!found) { found = spellings(path); spellingCache.set(path, found); }
+    return found;
+  };
+  const all = (paths: readonly string[]): string[] => [...new Set(paths.flatMap(pathSpellings))];
   const own = providerFolders(input.provider, input.env, home);
   // A launch that moved its CLI home into CanvasTTY's account homes (an accounts plugin) or elsewhere: that folder is
   // its own state too. Only this CLI's own variables: another CLI's (inherited from the person's shell) is that CLI's.
-  const movedHomes = movedProviderHomes(input.provider, input.env);
+  const movedHomes = input.provider === "opencode" && input.env.OPENCODE_CONFIG_DIR
+    ? [resolve(input.cwd, input.env.OPENCODE_CONFIG_DIR)]
+    : movedProviderHomes(input.provider, input.env);
   const ownFolders = [...own.folders, ...movedHomes];
   // Other CLIs' credentials where they are by default and where the launch environment moved them (their own home
   // variables, XDG_*): an exported GROK_HOME is where Grok's sign-in really is.
@@ -197,7 +215,32 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const privateData = privateAppData(input.userDataPath);
   const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
   const project = input.cwd;
-  const all = (paths: readonly string[]): string[] => [...new Set(paths.flatMap(spellings))];
+  const trustedOwn = providerFolders(input.provider, {}, hostHome);
+  const trustedOthers = AGENT_PROVIDERS.filter((provider) => provider !== input.provider).flatMap((provider) => {
+    const defaults = providerFolders(provider, {}, hostHome);
+    const configured = providerFolders(provider, hostEnv, hostHome);
+    return [...defaults.folders, ...defaults.files, ...configured.folders, ...configured.files,
+      ...movedProviderHomes(provider, hostEnv), ...movedProviderHomes(provider, hostEnv, CONFIG_FILE_VARIABLES)];
+  }).filter((path) => ![...trustedOwn.folders, ...trustedOwn.files].includes(path) && !hides(path));
+  const sensitive = all([...sensitiveHomeFolders(home, xdg.config), ...sensitiveHomeFolders(hostHome, hostXdg.config), ...trustedOthers]);
+  const privateSpellings = privateData.map((path) => ({ path, spellings: pathSpellings(path) }));
+  const grantSpellings = all(grants);
+  const accountRoot = join(input.userDataPath, "account-homes");
+  const accountSpellings = pathSpellings(accountRoot);
+  // Never re-allow a broad or aliased provider home over credentials. Account homes and this run's own
+  // prepared files remain available, but only below their granted root; the root itself is never an account.
+  for (const folder of ownFolders) {
+    const candidates = pathSpellings(folder);
+    const overlaps = (paths: readonly string[]): boolean => candidates.some((candidate) => paths.some((path) => isWithin(candidate, path) || isWithin(path, candidate)));
+    if (overlaps(sensitive)) throw new Error(`CLI home ${folder} overlaps protected host credentials.`);
+    for (const hidden of privateSpellings) {
+      if (!overlaps(hidden.spellings)) continue;
+      const withinGrant = candidates.every((candidate) => grantSpellings.some((grant) => isWithin(candidate, grant)));
+      const ownAccount = hidden.path === accountRoot && candidates.every((candidate) => accountSpellings.some((base) => candidate !== base && isWithin(candidate, base)));
+      if (!withinGrant && !ownAccount) throw new Error(`CLI home ${folder} overlaps protected CanvasTTY data.`);
+    }
+  }
+  const configSources = input.provider === "opencode" ? openCodeConfigPaths(input.env, input.cwd) : { jsonFiles: [], agentDirectories: [] };
   const socketFolders = [
     ...Object.entries(input.env)
       .filter(([name, value]) => /^CANVASTTY_.*_ADDRESS$/u.test(name) && typeof value === "string" && isAbsolute(value))
@@ -223,11 +266,12 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       ...(existsSync(join(project, ".git", "config")) ? [join(project, ".git", "config"), join(project, ".git", "config.lock")] : []),
       ...(input.provider === "codex" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
       ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
-      ...(input.provider === "opencode" ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(xdg.config, "opencode", name)) : [])
+      ...configSources.jsonFiles
     ]),
+    protectedDirectories: all(configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")])),
     gitHooks: all([join(project, ".git", "hooks")]),
     projectRoots: input.readOnlyProject ? [] : all([project]),
-    unreadable: all([...sensitiveHomeFolders(home, xdg.config), ...others, ...privateData]),
+    unreadable: all([...sensitive, ...others, ...privateData]),
     readableAgain: all([...grants, ...movedHomes]),
     socketFolders: all(socketFolders),
     // The temporary folder a launch's own folder lives in (sessionTemp is <temp root>/ctty-iso-…/tmp), and /tmp: where

@@ -161,3 +161,29 @@ test("bubblewrap (real): the agent cannot create the CLI's permission file but c
   assert.equal(await readFile(join(w.home, ".codex", "sessions", "s.jsonl"), "utf8"), "state\n");
   assert.equal(existsSync(join(w.home, "escape.txt")), false);
 });
+
+test("OpenCode custom permission sources are read-only without creating an empty build agent", posixHost, async (t) => {
+  const w = await freshHome(t);
+  const custom = join(w.home, "accounts", "opencode");
+  await mkdir(custom, { recursive: true });
+  const explicit = join(w.project, "custom.jsonc");
+  await writeFile(explicit, '{"permission":{"edit":"deny"}}');
+  const host = new LinuxHostPaths();
+  const layer = linux(w, host);
+  const extra = { OPENCODE_CONFIG_DIR: custom, OPENCODE_CONFIG: explicit };
+  const first = wrapIn(layer, w, "opencode", extra);
+  const second = wrapIn(layer, w, "opencode", extra);
+  for (const file of [join(custom, "opencode.json"), join(custom, "opencode.jsonc"), explicit, join(w.project, "opencode.jsonc"),
+    join(w.project, ".opencode", "agent", "build.md"),
+    join(custom, "agent", "build.md"), join(custom, "agents", "build.md")]) {
+    assert.equal(persistsWrite(first.args, file), false, file);
+  }
+  assert.equal(persistsWrite(first.args, join(custom, "sessions", "state.json")), true, "ordinary state remains writable");
+  assert.equal(existsSync(join(custom, "agent", "build.md")), false, "no empty build agent is introduced");
+  assert.equal(existsSync(join(custom, "agent")), true, "an empty read-only directory prevents creation");
+  first.cleanup();
+  assert.equal(existsSync(join(custom, "agent")), true, "concurrent launch still holds it");
+  second.cleanup();
+  assert.equal(existsSync(join(custom, "agent")), false, "empty temporary directory is released");
+  assert.equal(await readFile(explicit, "utf8"), '{"permission":{"edit":"deny"}}', "person config is preserved");
+});

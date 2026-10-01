@@ -21,6 +21,8 @@ export interface AgentIsolationOptions {
   userDataPath: string;
   /** The person's setting (Settings → Agents → Agent isolation). */
   enabled: () => boolean;
+  /** Environment before plugin contributions; copied when the layer is constructed. */
+  hostEnvironment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   /** Where each launch's own folder is made; the system temporary folder by default. */
   tempRoot?: string;
@@ -82,12 +84,14 @@ export interface WrappedLaunch {
 export class AgentIsolation {
   private readonly options: AgentIsolationOptions;
   private readonly platform: NodeJS.Platform;
+  private readonly hostEnvironment: Readonly<Record<string, string | undefined>>;
   private bubblewrap: string | null | undefined;
   private readonly linuxHostPaths: LinuxHostPaths;
 
   constructor(options: AgentIsolationOptions) {
     this.options = options;
     this.platform = options.platform ?? process.platform;
+    this.hostEnvironment = { ...(options.hostEnvironment ?? process.env) };
     this.bubblewrap = options.bubblewrapPath;
     this.linuxHostPaths = options.linuxHostPaths ?? new LinuxHostPaths();
   }
@@ -167,6 +171,7 @@ export class AgentIsolation {
         cwd,
         sessionTemp: temp,
         env: launch.env,
+        hostEnvironment: this.hostEnvironment,
         userDataPath: this.options.userDataPath,
         sessionId: launch.sessionId,
         ...(launch.grantedPrivate ? { grantedPrivate: launch.grantedPrivate } : {}),
