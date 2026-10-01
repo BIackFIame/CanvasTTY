@@ -31,7 +31,8 @@ async function lifecycleEvent(event, decisions) {
   // A call a plugin allowed is answered for every session of this OpenCode (subagents included).
   if (event.type === "permission.asked" && await decisions.permissionAsked(properties)) return;
 
-  if (event.type === "session.created") {
+  // A resumed root session emits updates, not a second creation event.
+  if (event.type === "session.created" || (!rootSessionId && event.type === "session.updated")) {
     const session = info ?? properties;
     if (session.parentID || session.parentId) return;
     rootSessionId = stringField(session.id, sessionId);

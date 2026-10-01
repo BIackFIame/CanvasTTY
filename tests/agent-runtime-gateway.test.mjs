@@ -389,6 +389,40 @@ test("OpenCode question dialogs report needs-input and resume working afterward"
   ]);
 });
 
+test("OpenCode resumed sessions bind from native updates before status events, while child updates remain isolated", POSIX_RUNTIME_GATEWAY_TEST, async t => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (_, signal) => signals.push(signal) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const capability = gateway.registerSession("terminal-resumed-opencode", "opencode");
+  const previous = Object.fromEntries(Object.values(AGENT_RUNTIME_ENV).map(key => [key, process.env[key]]));
+  const previousEnabled = process.env.CANVASTTY_LIFECYCLE_HOOKS_ENABLED;
+  for (const [key, value] of Object.entries(capability)) {
+    if (AGENT_RUNTIME_ENV[key]) process.env[AGENT_RUNTIME_ENV[key]] = value;
+  }
+  process.env.CANVASTTY_LIFECYCLE_HOOKS_ENABLED = "1";
+  t.after(() => {
+    for (const [key, value] of Object.entries({ ...previous, CANVASTTY_LIFECYCLE_HOOKS_ENABLED: previousEnabled })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const { CanvasTTYLifecycle } = await import("../src/agent-runtime/opencode-plugin.mjs?resumed-history-test");
+  const plugin = await CanvasTTYLifecycle();
+  const id = "ses_resumed123";
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id: "ses_child123", parentID: id } } } });
+  assert.equal(signals.length, 0);
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id } } } });
+  await plugin.event({ event: { type: "session.status", properties: { sessionID: id, status: { type: "busy" } } } });
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id: "ses_other123" } } } });
+  await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses_other123", status: { type: "idle" } } } });
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: id } } });
+  assert.deepEqual(signals.map(s => [s.state, s.event]), [
+    ["idle", "session.updated"], ["working", "session.status:busy"], ["idle", "session.idle"]
+  ]);
+  assert.equal(signals[0].threadId, id);
+});
+
 function message(capability, state, event, turnId) {
   return {
     v: RUNTIME_PROTOCOL_VERSION,
