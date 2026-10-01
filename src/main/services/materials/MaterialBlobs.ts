@@ -4,11 +4,12 @@ import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { SHA256_PATTERN } from "./materialState.ts";
 
-const SHA256_FILE = /^[a-f0-9]{64}$/;
 const TEMP_PREFIX = ".tmp-";
+const READ_FILE_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
 
-export type MaterialBlobErrorCode = "too-large" | "quota" | "unreadable";
+type MaterialBlobErrorCode = "too-large" | "quota" | "unreadable";
 
 export class MaterialBlobError extends Error {
   readonly code: MaterialBlobErrorCode;
@@ -19,9 +20,26 @@ export class MaterialBlobError extends Error {
   }
 }
 
-export interface StoredBlob {
+interface StoredBlob {
   sha256: string;
   byteSize: number;
+}
+
+export async function fileDigest(path: string, maxBytes: number): Promise<string | null> {
+  const flags = READ_FILE_FLAGS;
+  let handle;
+  try {
+    handle = await open(path, flags);
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) return null;
+    const hash = createHash("sha256");
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk as Buffer);
+    return hash.digest("hex");
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 
 export class MaterialBlobs {
@@ -32,11 +50,11 @@ export class MaterialBlobs {
   }
 
   pathOf(sha256: string): string {
-    if (!SHA256_FILE.test(sha256)) throw new MaterialBlobError("unreadable", "Unknown version.");
+    if (!SHA256_PATTERN.test(sha256)) throw new MaterialBlobError("unreadable", "Unknown version.");
     return join(this.root, sha256);
   }
 
-  async ensureRoot(): Promise<void> {
+  private async ensureRoot(): Promise<void> {
     await mkdir(this.root, { recursive: true, mode: 0o700 });
   }
 
@@ -66,7 +84,7 @@ export class MaterialBlobs {
   }
 
   async writeFromFile(source: string, maxBytes: number, available: number): Promise<StoredBlob> {
-    const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+    const flags = READ_FILE_FLAGS;
     let handle;
     try {
       handle = await open(source, flags);
@@ -93,7 +111,7 @@ export class MaterialBlobs {
         }
       });
       try {
-        await pipeline(handle.createReadStream({ autoClose: false }), meter, createWriteStream(temporary, { mode: 0o600 }));
+        await pipeline(handle.createReadStream({ autoClose: false }), meter, createWriteStream(temporary, { mode: 0o600, flush: true }));
       } catch (error) {
         await rm(temporary, { force: true });
         throw error instanceof MaterialBlobError ? error : new MaterialBlobError("unreadable", "The file cannot be read.");
@@ -108,7 +126,7 @@ export class MaterialBlobs {
     if (bytes.byteLength > maxBytes) throw new MaterialBlobError("too-large", "The content is too large to keep.");
     await this.ensureRoot();
     const temporary = join(this.root, `${TEMP_PREFIX}${randomUUID()}`);
-    await writeFile(temporary, bytes, { mode: 0o600 });
+    await writeFile(temporary, bytes, { mode: 0o600, flush: true });
     return this.commit(temporary, createHash("sha256").update(bytes).digest("hex"), bytes.byteLength, available);
   }
 
@@ -120,7 +138,7 @@ export class MaterialBlobs {
       return;
     }
     await Promise.all(entries
-      .filter((entry) => entry.startsWith(TEMP_PREFIX) || (SHA256_FILE.test(entry) && !referenced.has(entry)))
+      .filter((entry) => entry.startsWith(TEMP_PREFIX) || (SHA256_PATTERN.test(entry) && !referenced.has(entry)))
       .map((entry) => rm(join(this.root, entry), { force: true }).catch(() => undefined)));
   }
 
