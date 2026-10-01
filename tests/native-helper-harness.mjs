@@ -26,9 +26,7 @@ export function nativeHelperBinary() {
 }
 
 export const NATIVE = nativeHelperBinary();
-export const SKIP_NATIVE = process.platform === "win32"
-  ? "Unix sockets."
-  : NATIVE ? false : "canvastty-helper is not built for this computer (npm run build:helpers -- --host).";
+export const SKIP_NATIVE = NATIVE ? false : "canvastty-helper is not built for this computer (npm run build:helpers -- --host).";
 
 export const IMPLEMENTATIONS = Object.freeze([
   {
@@ -50,11 +48,19 @@ export const IMPLEMENTATIONS = Object.freeze([
 export const root = mkdtempSync(join(tmpdir(), "canvastty-native-"));
 process.on("exit", () => rmSync(root, { recursive: true, force: true }));
 let serial = 0;
-export const socketPath = () => join(root, `s${serial++}.sock`);
+/** An endpoint understood by Node's net server and both helper implementations on this host. */
+export const socketPath = () => process.platform === "win32"
+  ? `\\\\.\\pipe\\canvastty-native-${process.pid}-${serial++}`
+  : join(root, `s${serial++}.sock`);
 
 /** Only what a helper needs: PATH and the runner's (fake) HOME, never the person's environment. */
 export function baseEnvironment(extra = {}) {
-  return { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? root, ...extra };
+  return {
+    PATH: process.env.PATH ?? (process.platform === "win32" ? "C:\\Windows\\System32" : "/usr/bin:/bin"),
+    HOME: root,
+    ...(process.platform === "win32" && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {}),
+    ...extra
+  };
 }
 
 /** Runs one short-lived helper to its end: stdin written whole, stdout collected. */
@@ -85,7 +91,7 @@ export async function limited(jobs, limit = 4) {
 }
 
 /**
- * A Unix socket server that records each connection's lines (raw text) and hands every parsed line to
+ * A local socket server that records each connection's lines (raw text) and hands every parsed line to
  * `onLine(connection, message, raw)`. `connection.send(value | string)` writes a line.
  */
 export async function lineServer(onLine = () => undefined, onConnection = () => undefined) {

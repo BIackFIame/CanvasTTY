@@ -15,7 +15,7 @@ import { AGENT_BROWSER_ENV } from "../src/main/services/agent-browser/protocol.t
 import { OrchestrationBridge } from "../src/main/services/agent-browser/OrchestrationBridge.ts";
 import { OrchestrationGateway } from "../src/main/services/agent-browser/OrchestrationGateway.ts";
 import {
-  IMPLEMENTATIONS, SKIP_NATIVE, baseEnvironment, delay, lineServer, outputHasId, root, startMcp
+  IMPLEMENTATIONS, SKIP_NATIVE, baseEnvironment, delay, lineServer, outputHasId, root, socketPath, startMcp
 } from "./native-helper-harness.mjs";
 
 const OPTIONS = { skip: SKIP_NATIVE, timeout: 60_000 };
@@ -78,7 +78,7 @@ async function scenario(kind, { makeGateway, env = {}, script }) {
   const transcripts = [];
   for (const implementation of IMPLEMENTATIONS) {
     const gateway = makeGateway ? await makeGateway() : null;
-    const address = gateway?.path ?? join(root, "no-gateway.sock");
+    const address = gateway?.path ?? socketPath();
     const environment = kind === "browser" ? browserEnvironment(address, env) : orchestrationEnvironment(address, env);
     const helper = startMcp(implementation[kind], environment);
     try {
