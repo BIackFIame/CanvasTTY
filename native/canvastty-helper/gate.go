@@ -14,6 +14,7 @@ import (
 )
 
 const failClosedMessage = "CanvasTTY safety check unavailable: this tool call was not run. Retry it, or ask the person how to proceed."
+const maxPermissionJSONNesting = 256
 
 type gateDecision struct {
 	behavior    string
@@ -49,7 +50,7 @@ func decideGate(failClosed bool) *jsObject {
 	if identity == nil || over {
 		return unavailable()
 	}
-	input, err := jsonParse(raw)
+	input, err := jsonParseWithMaxNesting(raw, maxPermissionJSONNesting)
 	if err != nil {
 		return unavailable()
 	}
