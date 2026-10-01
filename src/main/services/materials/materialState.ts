@@ -47,8 +47,8 @@ export interface StoredVersion {
 }
 
 export interface StoredFileIdentity {
-  dev: number;
-  ino: number;
+  dev: string;
+  ino: string;
 }
 
 export interface StoredMaterial {
@@ -258,8 +258,12 @@ function normalizeVersions(value: unknown): StoredVersion[] {
 }
 
 function normalizeIdentity(value: unknown): StoredFileIdentity | null {
-  if (!isRecord(value) || !isFiniteNumber(value.dev) || !isFiniteNumber(value.ino)) return null;
+  if (!isRecord(value) || !isFileNumber(value.dev) || !isFileNumber(value.ino)) return null;
   return { dev: value.dev, ino: value.ino };
+}
+
+function isFileNumber(value: unknown): value is string {
+  return typeof value === "string" && /^\d{1,20}$/.test(value);
 }
 
 export function normalizeOrigin(value: unknown): MaterialOrigin | null {

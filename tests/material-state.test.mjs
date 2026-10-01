@@ -13,7 +13,7 @@ function material(overrides = {}) {
     position: { x: 10, y: 20 },
     size: { width: 400, height: 300 },
     path: "/work/site/hero.png",
-    identity: { dev: 1, ino: 2 },
+    identity: { dev: "1", ino: "2" },
     origin: null,
     createdAt: 1,
     versions: [],

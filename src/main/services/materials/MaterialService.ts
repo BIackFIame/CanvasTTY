@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants, type Stats } from "node:fs";
-import { mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
+import { constants, type BigIntStats, type Stats } from "node:fs";
+import { lstat, mkdir, open, readdir, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import type {
   CanvasMaterial,
@@ -44,6 +44,7 @@ import {
   normalizeAnchor,
   restoreMaterialState,
   REMARK_LIMIT,
+  type StoredFileIdentity,
   type StoredMaterial,
   type StoredVersion
 } from "./materialState.ts";
@@ -193,7 +194,7 @@ export class MaterialService {
         return result;
       }
       const fresh: StoredMaterial[] = [];
-      const infos = new Map<string, Stats>();
+      const infos = new Map<string, BigIntStats>();
       if (paths.length > MATERIAL_LIMIT) {
         result.rejected.push({ name: `+${paths.length - MATERIAL_LIMIT}`, reason: "limit" });
       }
@@ -204,10 +205,10 @@ export class MaterialService {
           continue;
         }
         let resolved: string;
-        let info: Stats;
+        let info: BigIntStats;
         try {
           resolved = await realpath(candidate);
-          info = await stat(resolved);
+          info = await stat(resolved, { bigint: true });
         } catch {
           result.rejected.push({ name, reason: "unreadable" });
           continue;
@@ -236,7 +237,7 @@ export class MaterialService {
           position: { x: 0, y: 0 },
           size: materialCardSize(kind, natural),
           path: resolved,
-          identity: { dev: Number(info.dev), ino: Number(info.ino) },
+          identity: fileIdentity(info),
           origin: null,
           createdAt: this.now(),
           versions: [],
@@ -424,39 +425,44 @@ export class MaterialService {
   }
 
   relink(id: string, candidate: unknown): Promise<MaterialResult> {
-    return this.serial(async () => {
-      const material = this.materials.get(id);
-      if (!material || material.path === null) return failure("unavailable");
-      if (typeof candidate !== "string" || !isAbsolute(candidate) || candidate.includes("\0")) return failure("unreadable");
-      let resolved: string;
-      let info: Stats;
-      try {
-        resolved = await realpath(candidate);
-        info = await stat(resolved);
-      } catch {
-        return failure("unreadable");
-      }
-      if (!info.isFile()) return failure("not-a-file");
-      const other = this.findByPath(resolved);
-      if (other && other.id !== id) return failure("already-on-canvas");
-      const name = displayName(candidate);
-      const type = materialType(basename(resolved));
-      const kind = type.kind === "image" ? "image" : "file";
-      if (kind !== material.kind) return failure("kind-mismatch");
-      material.path = resolved;
-      material.name = name;
-      material.mimeType = kind === "image" ? type.mimeType : "application/octet-stream";
-      material.identity = { dev: Number(info.dev), ino: Number(info.ino) };
-      this.watchers.track(id, resolved);
-      await this.refreshLive(material, true);
-      this.changed();
-      return { ok: true };
-    });
+    return this.serial(() => this.relinkTo(id, candidate, false));
   }
 
   acceptMove(id: string): Promise<MaterialResult> {
-    const movedTo = this.live.get(id)?.movedTo;
-    return movedTo ? this.relink(id, movedTo) : Promise.resolve(failure("unavailable"));
+    return this.serial(async () => {
+      const movedTo = this.live.get(id)?.movedTo;
+      return movedTo ? this.relinkTo(id, movedTo, true) : failure("unavailable");
+    });
+  }
+
+  private async relinkTo(id: string, candidate: unknown, sameFileOnly: boolean): Promise<MaterialResult> {
+    const material = this.materials.get(id);
+    if (!material || material.path === null) return failure("unavailable");
+    if (typeof candidate !== "string" || !isAbsolute(candidate) || candidate.includes("\0")) return failure("unreadable");
+    let resolved: string;
+    let info: BigIntStats;
+    try {
+      resolved = await realpath(candidate);
+      info = await stat(resolved, { bigint: true });
+    } catch {
+      return failure("unreadable");
+    }
+    if (!info.isFile()) return failure("not-a-file");
+    if (sameFileOnly && (resolved !== candidate || !sameFile(info, material.identity))) return failure("unreadable");
+    const other = this.findByPath(resolved);
+    if (other && other.id !== id) return failure("already-on-canvas");
+    const name = displayName(candidate);
+    const type = materialType(basename(resolved));
+    const kind = type.kind === "image" ? "image" : "file";
+    if (kind !== material.kind) return failure("kind-mismatch");
+    material.path = resolved;
+    material.name = name;
+    material.mimeType = kind === "image" ? type.mimeType : "application/octet-stream";
+    material.identity = fileIdentity(info);
+    this.watchers.track(id, resolved);
+    await this.refreshLive(material, true);
+    this.changed();
+    return { ok: true };
   }
 
   async protocolResponse(request: Request): Promise<Response> {
@@ -758,15 +764,21 @@ export class MaterialService {
 
 interface InspectedLive extends Omit<LiveState, "revision"> {
   revision: number;
-  identity?: { dev: number; ino: number };
+  identity?: StoredFileIdentity;
 }
 
 async function inspectWorkingFile(material: StoredMaterial, previous: LiveState | undefined): Promise<InspectedLive> {
   const path = material.path!;
   try {
     const resolved = await realpath(path);
-    const info = await stat(resolved);
-    if (resolved !== path || !info.isFile()) return unavailable("unreadable", previous);
+    const info = await stat(resolved, { bigint: true });
+    if (!info.isFile()) return unavailable("unreadable", previous);
+    if (resolved !== path) {
+      const entry = await lstat(path).catch(() => null);
+      return entry?.isFile() && sameFile(info, material.identity)
+        ? { ...unavailable("moved", previous), movedTo: resolved }
+        : unavailable("unreadable", previous);
+    }
     return {
       state: "ready",
       signature: signatureOf(info),
@@ -774,7 +786,7 @@ async function inspectWorkingFile(material: StoredMaterial, previous: LiveState 
       modifiedAt: Number(info.mtimeMs),
       revision: 1,
       movedTo: null,
-      identity: { dev: Number(info.dev), ino: Number(info.ino) }
+      identity: fileIdentity(info)
     };
   } catch (error) {
     if (!isMissing(error)) return unavailable("unreadable", previous);
@@ -786,15 +798,8 @@ async function inspectWorkingFile(material: StoredMaterial, previous: LiveState 
 async function renamedTo(material: StoredMaterial, previous: LiveState | undefined): Promise<string | null> {
   if (!material.identity) return null;
   if (previous?.state === "moved" && previous.movedTo) {
-    try {
-      const info = await stat(previous.movedTo);
-      if (info.isFile() && Number(info.ino) === material.identity.ino && Number(info.dev) === material.identity.dev) {
-        return previous.movedTo;
-      }
-    } catch {
-      return null;
-    }
-    return null;
+    const info = await stat(previous.movedTo, { bigint: true }).catch(() => null);
+    return info?.isFile() && sameFile(info, material.identity) ? previous.movedTo : null;
   }
   if (previous && previous.state !== "ready") return null;
   return findRenamed(dirname(material.path!), material.identity);
@@ -811,7 +816,7 @@ function unavailable(state: MaterialState, previous: LiveState | undefined): Ins
   };
 }
 
-async function findRenamed(directory: string, identity: { dev: number; ino: number }): Promise<string | null> {
+async function findRenamed(directory: string, identity: StoredFileIdentity): Promise<string | null> {
   let entries: string[];
   try {
     entries = await readdir(directory);
@@ -821,10 +826,8 @@ async function findRenamed(directory: string, identity: { dev: number; ino: numb
   for (const entry of entries.slice(0, RENAME_SCAN_LIMIT)) {
     const candidate = join(directory, entry);
     try {
-      const info = await stat(candidate);
-      if (info.isFile() && Number(info.ino) === identity.ino && Number(info.dev) === identity.dev) {
-        return await realpath(candidate) === candidate ? candidate : null;
-      }
+      const info = await stat(candidate, { bigint: true });
+      if (info.isFile() && sameFile(info, identity)) return await realpath(candidate) === candidate ? candidate : null;
     } catch {
       continue;
     }
@@ -848,8 +851,16 @@ async function readImageDimensions(path: string): Promise<Size | null> {
   }
 }
 
-function signatureOf(info: Stats): string {
-  return `${info.size}:${info.mtimeMs}:${info.ino}`;
+function signatureOf(info: BigIntStats): string {
+  return `${info.size}:${info.mtimeNs}:${info.ino}`;
+}
+
+function fileIdentity(info: BigIntStats): StoredFileIdentity {
+  return { dev: String(info.dev), ino: String(info.ino) };
+}
+
+function sameFile(info: BigIntStats, identity: StoredFileIdentity | null): boolean {
+  return identity !== null && String(info.dev) === identity.dev && String(info.ino) === identity.ino;
 }
 
 function displayName(path: string): string {

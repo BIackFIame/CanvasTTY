@@ -48,6 +48,30 @@ test("dropped files become cards at the drop point; folders, missing and relativ
   });
 });
 
+test("file identity is stored as exact dev/ino strings and survives a rename", async () => {
+  await withMaterials(async ({ work, service, watch, userData }) => {
+    const hero = join(work, "hero.png");
+    const moved = join(work, "hero-moved.png");
+    await writeFile(hero, pngBytes(4, 4));
+    await service.addPaths([hero], { x: 0, y: 0 });
+    await service.flush();
+    const identity = JSON.parse(await readFile(join(userData, "materials/state.json"), "utf8")).materials[0].identity;
+    assert.equal(typeof identity.dev, "string");
+    assert.equal(typeof identity.ino, "string");
+    assert.match(identity.dev, /^\d+$/);
+    assert.match(identity.ino, /^\d+$/);
+
+    await rename(hero, moved);
+    watch.fire(work);
+    await until(() => only(service).state, (state) => state === "moved");
+    await service.acceptMove(only(service).id);
+    await service.flush();
+    const after = JSON.parse(await readFile(join(userData, "materials/state.json"), "utf8")).materials[0];
+    assert.equal(after.name, "hero-moved.png");
+    assert.deepEqual(after.identity, identity);
+  });
+});
+
 test("files past the canvas limit in one drop are reported, not dropped silently", async () => {
   await withMaterials(async ({ work, service }) => {
     const files = [];
