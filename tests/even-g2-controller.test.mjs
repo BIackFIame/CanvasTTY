@@ -791,6 +791,37 @@ test("six digits establish SRP keys but terminal access still requires desktop a
   assert.equal((await post("/g2/pair-start", { public: ephemeral.public })).status, 403);
 });
 
+test("closing drains queued pairing diagnostics before fixture storage is removed", async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  const log = join(f.directory, "even-g2-pairing.log");
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  // Hold the real file write behind an earlier queue item, regardless of filesystem speed.
+  f.controller.diagnosticsWrite = f.controller.diagnosticsWrite.then(() => blocked);
+  const before = f.controller.diagnosticsWrite;
+  let closing;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  try {
+    await f.call("/g2/discover");
+    t.mock.timers.tick(1_000);
+    assert.notEqual(f.controller.diagnosticsWrite, before, "the request queued a real log write");
+    let closed = false;
+    closing = f.controller.close().then(() => { closed = true; });
+    await new Promise(setImmediate);
+    assert.equal(closed, false, "close must wait while the diagnostics write is held");
+    release();
+    await closing;
+    assert.match(await readFile(log, "utf8"), /GET \/g2\/discover HTTP 200/u);
+    await rm(f.directory, { recursive: true, force: true });
+  } finally {
+    release();
+    await closing;
+    await f.controller.diagnosticsWrite;
+    t.mock.timers.reset();
+  }
+});
+
 test("real HTTP client pairs with six digits, rejects wrong PIN and waits for Mac approval", async (t) => {
   const { connectionFromCode, localFetcher } = await import("../integrations/even-g2/src/local-fetch.mjs");
   const { pairComputer } = await import("../integrations/even-g2/src/connect.mjs");
