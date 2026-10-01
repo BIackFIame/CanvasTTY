@@ -822,6 +822,10 @@ async function loadApplicationSurface(window: BrowserWindow): Promise<void> {
     } else {
       await window.loadFile(join(__dirname, "../renderer/index.html"));
     }
+    // Mouse4 is a supported application shortcut, but Chromium also treats it
+    // as History Back. Remove the startup screen from this WebContents history
+    // once the application surface is ready.
+    window.webContents.navigationHistory.clear();
   } catch (error) {
     // Closing during the load is a normal exit, not a failed startup.
     if (!shellWindowGone(window)) throw error;

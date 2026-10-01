@@ -47,6 +47,7 @@ import {
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
 import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutput";
 import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
+import { limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
 import {
   constrainResize,
   snapMove,
@@ -252,7 +253,9 @@ function TerminalCardView({
   const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
   const summaryMode = summaryScale > 1;
   const webglScaleAllowed = useCameraSelector(camera, (current) => current.zoom <= WEBGL_MAX_SCALE);
-  const terminalBackground = terminalTheme(palette, pixelSkinTheme).background;
+  const terminalColors = terminalTheme(palette, pixelSkinTheme);
+  const terminalBackground = terminalColors.background;
+  const terminalForeground = terminalColors.foreground;
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
@@ -302,6 +305,9 @@ function TerminalCardView({
       fontSize: 14,
       lineHeight: 1.2,
       scrollback: 5_000,
+      // Keep the reader's scrollback position while their live input is echoed
+      // into the pinned row below it.
+      scrollOnUserInput: false,
       allowTransparency: true,
       // Search decorations (highlighting every match and reporting the match
       // count) are proposed API in xterm; without this flag findNext throws and
@@ -331,6 +337,52 @@ function TerminalCardView({
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(webLinksAddon);
     terminal.open(host);
+    const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
+    const pinnedInput = document.createElement("div");
+    pinnedInput.className = "terminal-card__pinned-input";
+    pinnedInput.hidden = true;
+    pinnedInput.setAttribute("aria-hidden", "true");
+    host.append(pinnedInput);
+    let pinnedRows = 0;
+    const updatePinnedInput = (): void => {
+      const completePinned = pinnedTerminalInput(terminal.buffer.active);
+      const maxPinnedRows = Math.max(1, Math.floor(host.clientHeight / (14 * 1.2) / 2));
+      const pinned = completePinned ? limitPinnedTerminalInput(completePinned, maxPinnedRows) : null;
+      const nextRows = pinned?.rows.length ?? 0;
+      pinnedInput.hidden = pinned === null;
+      host.classList.toggle("terminal-card__surface--pinned-input", pinned !== null);
+      if (pinned) {
+        host.style.setProperty("--pinned-input-height", `calc(${nextRows} * 1.2em)`);
+        pinnedInput.style.left = `${screen?.offsetLeft ?? 0}px`;
+        pinnedInput.style.width = `${screen?.clientWidth ?? host.clientWidth}px`;
+        pinnedInput.style.setProperty("--pinned-terminal-columns", String(terminal.cols));
+        pinnedInput.style.setProperty("--pinned-row-count", String(nextRows));
+        pinnedInput.replaceChildren(...pinned.rows.map((text, rowIndex) => {
+          const row = document.createElement("div");
+          row.className = "terminal-card__pinned-input-row";
+          row.textContent = text;
+          if (rowIndex === pinned.cursorRow) {
+            const cursorColumn = Math.min(pinned.cursorColumn, Math.max(0, terminal.cols - 1));
+            row.classList.add("terminal-card__pinned-input-row--cursor");
+            row.dataset.cursorColumn = String(cursorColumn);
+            row.style.setProperty("--pinned-cursor-column", String(cursorColumn));
+          }
+          return row;
+        }));
+      } else {
+        host.style.removeProperty("--pinned-input-height");
+        pinnedInput.replaceChildren();
+        pinnedInput.style.removeProperty("--pinned-terminal-columns");
+        pinnedInput.style.removeProperty("--pinned-row-count");
+      }
+      if (nextRows !== pinnedRows) {
+        pinnedRows = nextRows;
+        requestAnimationFrame(() => fitRef.current?.());
+      }
+    };
+    const pinnedScroll = terminal.onScroll(updatePinnedInput);
+    const pinnedCursor = terminal.onCursorMove(updatePinnedInput);
+    const pinnedOutput = terminal.onWriteParsed(updatePinnedInput);
     setOscTitle(null);
     const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
     const restoreSelectionRedraws = skipEmptySelectionRedraws(terminal);
@@ -341,7 +393,10 @@ function TerminalCardView({
       lastReportedGrid = grid;
       window.canvasTTY.terminal.resize(session.id, cols, rows);
     };
-    const resize = terminal.onResize(({ cols, rows }) => reportGrid(cols, rows));
+    const resize = terminal.onResize(({ cols, rows }) => {
+      reportGrid(cols, rows);
+      updatePinnedInput();
+    });
     const pool = webglContextPool();
     const unsubscribe = attachTerminalOutput(
       window.canvasTTY.terminal,
@@ -461,7 +516,6 @@ function TerminalCardView({
         .catch(() => undefined);
       return false;
     });
-    const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const detachMouseCoordinateAdapter = screen
       ? attachTerminalMouseCoordinateAdapter(
         screen,
@@ -518,6 +572,12 @@ function TerminalCardView({
       unsubscribe();
       resizeObserver.disconnect();
       input.dispose();
+      pinnedScroll.dispose();
+      pinnedCursor.dispose();
+      pinnedOutput.dispose();
+      host.classList.remove("terminal-card__surface--pinned-input");
+      host.style.removeProperty("--pinned-input-height");
+      pinnedInput.remove();
       titleChange.dispose();
       searchResults.dispose();
       searchAddonRef.current = null;
@@ -964,6 +1024,7 @@ function TerminalCardView({
         "--summary-scale": summaryScale,
         "--summary-content-width": `${Math.max(0, ((pixelSurfaceBounds ? pixelSurfaceBounds.right - pixelSurfaceBounds.left : size.width) - 72) / summaryScale)}px`,
         "--terminal-background": terminalBackground,
+        "--terminal-foreground": terminalForeground,
         "--pixel-skin-left-inset": `${pixelSurfaceBounds?.left ?? 28}px`,
         "--pixel-skin-right-inset": `${size.width - (pixelSurfaceBounds?.right ?? (size.width - 28))}px`,
         "--pixel-skin-top-inset": `${pixelSurfaceBounds?.top ?? 70}px`,
