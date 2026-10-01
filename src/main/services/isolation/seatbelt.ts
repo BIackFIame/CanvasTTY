@@ -56,8 +56,9 @@ export function seatbeltProfile(paths: IsolationPaths): string {
   if (paths.projectRoots.length > 0) {
     lines.push(`(deny file-write*${paths.projectRoots.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/(.*/)?\\.git/info/attributes$`)})`).join("")})`);
   }
-  if (paths.protectedWrites.length > 0) {
-    lines.push(`(deny file-write*${paths.protectedWrites.map((path) => ` (subpath ${quote(path)})`).join("")})`);
+  const protectedPaths = [...paths.protectedWrites, ...(paths.protectedDirectories ?? [])];
+  if (protectedPaths.length > 0) {
+    lines.push(`(deny file-write*${protectedPaths.map((path) => ` (subpath ${quote(path)})`).join("")})`);
   }
   lines.push(
     "(deny signal)",

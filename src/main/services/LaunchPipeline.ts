@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   LaunchProfileId,
   PluginLaunchFieldOptions,
@@ -13,6 +12,7 @@ import type {
 import { claudeCoreSettingsKey, coreOwnedLaunchArgument, parseInlineSettings } from "./terminalLaunch.ts";
 import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
+import { MAX_INSPECTED_CONFIG_BYTES, parseJsonc, readInspectedFile } from "./inspectedConfig.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
 export interface LaunchContributor {
@@ -286,7 +286,7 @@ export class LaunchPipeline {
       const forbidden = contributedArgs.find((argument) => coreOwnedLaunchArgument(context.provider, argument));
       if (forbidden) return refuse(`${name} added ${forbidden.slice(0, 60)}, which only CanvasTTY may pass.`);
       // A configuration a CLI reads from the environment or an argument may not decide its approvals either.
-      const widening = permissionConfigProblem(context.provider, contribution);
+      const widening = permissionConfigProblem(context.provider, contribution, context.cwd);
       if (widening) return refuse(`${name} ${widening}`);
       let filesDirectory: string | null = null;
       if (contribution.files.length > 0) {
@@ -475,10 +475,10 @@ function permissionKey(value: unknown, depth = 0): string | null {
   return null;
 }
 
-/** JSON with // and /* comments (JSONC), or null. */
+/** JSONC, or null when malformed. */
 function parseConfigText(text: string): unknown {
-  try { return JSON.parse(text); } catch { /* maybe JSONC */ }
-  try { return JSON.parse(text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/(^|[^:"\\])\/\/.*$/gmu, "$1")); } catch { return null; }
+  const parsed = parseJsonc(text);
+  return parsed.ok ? parsed.value : null;
 }
 
 /**
@@ -487,38 +487,19 @@ function parseConfigText(text: string): unknown {
  * person's profile). A file must be one of the contribution's own launch files or a readable file; one CanvasTTY
  * cannot read and check is refused. Returns the problem as text.
  */
-const MAX_CONFIG_FILE_BYTES = 1024 * 1024;
-
-/**
- * A plugin-named configuration file, read on the launch path (the main thread): only a regular file of at most 1 MB.
- * It is opened without blocking and checked before reading, so a FIFO or a device cannot hold the app. Null otherwise.
- */
-function readConfigFile(path: string): string | null {
-  let fd: number | null = null;
-  try {
-    fd = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
-    const info = fstatSync(fd);
-    if (!info.isFile() || info.size > MAX_CONFIG_FILE_BYTES) return null;
-    return readFileSync(fd, "utf8");
-  } catch {
-    return null;
-  } finally {
-    if (fd !== null) closeSync(fd);
-  }
-}
-
-export function permissionConfigProblem(provider: ProviderId, contribution: Pick<Contribution, "env" | "args" | "files">): string | null {
-  const fromFile = (value: string): { text: string } | { problem: string } => {
+export function permissionConfigProblem(provider: ProviderId, contribution: Pick<Contribution, "env" | "args" | "files">, cwd?: string): string | null {
+  const fromFile = (value: string): { kind: "text"; text: string } | { kind: "absent" } | { kind: "uninspectable" } => {
     if (value.startsWith(`${LAUNCH_FILES_TOKEN}/`)) {
       const file = contribution.files.find((candidate) => candidate.relPath === value.slice(LAUNCH_FILES_TOKEN.length + 1));
-      return file ? { text: file.content } : { problem: `names a launch file it did not write (${value.slice(0, 80)}).` };
+      return file ? { kind: "text", text: file.content } : { kind: "absent" };
     }
-    const text = readConfigFile(value);
-    return text !== null ? { text } : { problem: `hands the CLI a configuration file CanvasTTY cannot check (${value.slice(0, 80)}).` };
+    const file = readInspectedFile(resolve(cwd ?? process.cwd(), value), MAX_INSPECTED_CONFIG_BYTES);
+    if (file.kind === "text") return file;
+    return file;
   };
   const check = (label: string, text: string): string | null => {
     const parsed = parseConfigText(text);
-    if (parsed === null || typeof parsed !== "object") return `hands the CLI ${label} that is not a JSON object.`;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return `hands the CLI ${label} that is not a JSON object.`;
     const key = permissionKey(parsed);
     return key ? `sets ${key} in ${label}, which decides approvals; only the person's profile does.` : null;
   };
@@ -529,16 +510,17 @@ export function permissionConfigProblem(provider: ProviderId, contribution: Pick
     const file = contribution.env.OPENCODE_CONFIG;
     if (file !== undefined) {
       const read = fromFile(file);
-      if ("problem" in read) return read.problem;
+      if (read.kind !== "text") return `hands the CLI a configuration file CanvasTTY cannot check (${file.slice(0, 80)}).`;
       const problem = check("its OpenCode configuration (OPENCODE_CONFIG)", read.text);
       if (problem) return problem;
     }
     const folder = contribution.env.OPENCODE_CONFIG_DIR;
     if (folder !== undefined) {
-      for (const name of ["opencode.json", "opencode.jsonc", "config.json"]) {
-        const path = folder.startsWith(`${LAUNCH_FILES_TOKEN}/`) ? `${folder}/${name}` : join(folder, name);
+      for (const name of ["opencode.json", "opencode.jsonc"]) {
+        const path = folder.startsWith(`${LAUNCH_FILES_TOKEN}/`) ? `${folder}/${name}` : resolve(cwd ?? process.cwd(), folder, name);
         const read = fromFile(path);
-        if ("problem" in read) continue;
+        if (read.kind === "absent") continue;
+        if (read.kind === "uninspectable") return `hands the CLI a configuration file CanvasTTY cannot check (${path.slice(0, 80)}).`;
         const problem = check(`its OpenCode configuration (OPENCODE_CONFIG_DIR/${name})`, read.text);
         if (problem) return problem;
       }
@@ -555,7 +537,7 @@ export function permissionConfigProblem(provider: ProviderId, contribution: Pick
       }
       if (file !== undefined) {
         const read = fromFile(file);
-        if ("problem" in read) return read.problem;
+        if (read.kind !== "text") return `hands the CLI a configuration file CanvasTTY cannot check (${file.slice(0, 80)}).`;
         const problem = check("its Kimi --config-file", read.text);
         if (problem) return problem;
       }

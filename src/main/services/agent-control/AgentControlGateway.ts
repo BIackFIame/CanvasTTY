@@ -169,7 +169,9 @@ export class AgentControlGateway {
     try {
       const endpoint = await this.openEndpoint();
       this.endpoint = endpoint;
-      return await this.writeDiscovery(endpoint);
+      const connection = await this.writeDiscovery(endpoint);
+      await this.refreshSessionGrants(endpoint);
+      return connection;
     } catch (error) {
       // Leave nothing listening and no dead transport behind, so a later start() can succeed.
       await this.closeEndpoint();
@@ -231,6 +233,27 @@ export class AgentControlGateway {
     return connection;
   }
 
+  /** Repoint surviving session grants without changing their capabilities, tokens or controller identities. */
+  private async refreshSessionGrants(endpoint: string): Promise<void> {
+    for (const [key, grant] of this.grants) {
+      const connection = join(grant.folder, "connection.json");
+      const temporary = `${connection}.${randomBytes(8).toString("hex")}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
+          endpoint, tokenFile: join(grant.folder, `token-${this.instanceId}`), pid: process.pid, scope: "session" }, null, 2) + "\n",
+        { mode: 0o600, flag: "wx" });
+        // A card may close while the file write is in flight. Never recreate or republish its withdrawn grant.
+        if (this.closed || this.grants.get(key) !== grant) continue;
+        await rename(temporary, connection);
+      } catch (error) {
+        if (!this.closed && this.grants.get(key) === grant) throw error;
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    }
+    if (this.closed) throw new Error("Agent control is shutting down.");
+  }
+
   private async closeEndpoint(): Promise<void> {
     const server = this.server;
     const transport = this.windows;
@@ -238,6 +261,7 @@ export class AgentControlGateway {
     this.server = null;
     this.windows = null;
     this.socketDirectory = null;
+    this.endpoint = null;
     if (transport) await transport.close().catch(() => undefined);
     if (server) await closeServer(server);
     if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
@@ -247,6 +271,7 @@ export class AgentControlGateway {
   private handleTransportFatal(transport: WindowsPipeHostTransport): void {
     if (this.windows !== transport) return;
     this.windows = null;
+    this.endpoint = null;
     for (const socket of this.sockets) socket.destroy();
     this.scheduleTransportRestart();
   }

@@ -53,7 +53,7 @@ export function bubblewrapArguments(
     if (exists(path)) args.push(seen.has(path) ? "--bind" : "--ro-bind", path, path);
   }
   // Last, over every bind above (a rebound home included): the read-only files and the project's git hooks.
-  for (const path of [...paths.gitHooks, ...paths.protectedWrites]) {
+  for (const path of [...paths.gitHooks, ...(paths.protectedDirectories ?? []), ...paths.protectedWrites]) {
     const kind = exists(path);
     if (kind) args.push("--ro-bind", path, path);
   }
@@ -61,7 +61,7 @@ export function bubblewrapArguments(
   // but could be created inside a writable folder cannot be protected here. The caller puts a neutral placeholder
   // there first (LinuxHostPaths); if one is still missing, the launch is refused rather than left unprotected.
   // A `.lock` sibling needs no mount: the rename over the read-only file it guards fails anyway.
-  for (const path of paths.protectedWrites) {
+  for (const path of [...paths.protectedWrites, ...(paths.protectedDirectories ?? [])]) {
     if (path.endsWith(".lock") || exists(path)) continue;
     if (creatableInside(path, [...seen], exists)) {
       throw new Error(`${path} would be writable for the agent (it does not exist yet, so it cannot be mounted read-only).`);
