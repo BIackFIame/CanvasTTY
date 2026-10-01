@@ -1,3 +1,4 @@
+import { availableProfiles, type LaunchProfile } from "../../shared/autoMode.ts";
 import type { AgentProviderId, LimitsSnapshot, PluginLaunchField, ProviderLimitsSnapshot } from "../../shared/contracts.ts";
 import { AGENT_PROVIDERS, PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
 import { PROVIDER_LABELS } from "../../shared/providerCatalog.ts";
@@ -32,7 +33,9 @@ export interface ProviderDirectoryEntry {
   model: { supported: boolean; format: string; known?: string[]; knownAt?: number };
   /** spawn_agent.effort levels this CLI takes; absent when it takes none. */
   efforts?: string[];
-  /** Plugin launch options it accepts (spawn_agent.launchOptions), by plugin. */
+  /** The profiles a subagent of it can get here (spawn_agent.profile, never above the orchestrator's own). */
+  profiles?: LaunchProfile[];
+  /** Plugin launch options it accepts (spawn_agent.launchOptions), by plugin that lets an orchestrator choose them. */
   launchOptions?: Array<{ pluginId: string; plugin: string; fields: Array<{ key: string; kind: PluginLaunchField["kind"]; choices?: string[] }> }>;
 }
 
@@ -53,10 +56,12 @@ export interface ProviderDirectorySources {
   /** The models this provider's CLI listed (cached; must not wait for the CLI). */
   models?(provider: AgentProviderId): { models: string[]; checkedAt: number } | null;
   /** Launch options trusted plugins declared (PluginManager.launchContributors). */
-  launchContributors?(): Array<{ pluginId: string; pluginName: string; launch: { appliesTo?: AgentProviderId[]; fields: PluginLaunchField[] } }>;
+  launchContributors?(): Array<{ pluginId: string; pluginName: string; launch: { appliesTo?: AgentProviderId[]; fields: PluginLaunchField[]; delegable?: boolean } }>;
+  /** CanvasTTY's agent isolation can contain an agent here (a CLI without an auto of its own gets auto only inside it). */
+  containment?(): boolean;
 }
 
-const NOTE = "Pass one of these ids as spawn_agent.provider. Prefer available providers whose signIn is \"ok\"; "
+const NOTE = "Pass one of these ids as spawn_agent.provider; profiles lists the spawn_agent.profile values it takes here (never more than this session's own). Prefer available providers whose signIn is \"ok\"; "
   + "\"unknown\" only means CanvasTTY has not read it yet. If the person names a model, pass it as spawn_agent.model "
   + "in the provider's model.format (model.known lists what its CLI reported, when CanvasTTY has that list; otherwise pass the "
   + "model id the CLI accepts). Do not search the filesystem for agent CLIs or their configuration.";
@@ -69,7 +74,9 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
   try { limits = sources.limits(); } catch { limits = null; }
   const byProvider = new Map<string, ProviderLimitsSnapshot>((limits?.providers ?? []).map((entry) => [entry.provider, entry]));
   let contributors: ReturnType<NonNullable<ProviderDirectorySources["launchContributors"]>> = [];
-  try { contributors = sources.launchContributors?.() ?? []; } catch { contributors = []; }
+  try { contributors = (sources.launchContributors?.() ?? []).filter((contributor) => contributor.launch.delegable === true); } catch { contributors = []; }
+  let containment = false;
+  try { containment = sources.containment?.() === true; } catch { containment = false; }
   const providers = AGENT_PROVIDERS.map((id): ProviderDirectoryEntry => {
     const capabilities = PROVIDER_CAPABILITIES[id];
     let cli: "available" | "unavailable" | null;
@@ -112,6 +119,7 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
         ...(known && known.models.length > 0 ? { known: known.models, knownAt: known.checkedAt } : {})
       },
       ...(efforts.length > 0 ? { efforts: [...efforts] } : {}),
+      profiles: availableProfiles(id, containment).filter((profile) => profile !== "yolo"),
       ...(options.length > 0 ? { launchOptions: options } : {})
     };
   });

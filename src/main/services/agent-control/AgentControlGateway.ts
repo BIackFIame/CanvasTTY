@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdirSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
@@ -11,7 +12,8 @@ import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
 import { CONTROL_PROVIDERS, controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
-import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
+import { isLaunchProfile } from "../../../shared/autoMode.ts";
+import { LaunchRefusal } from "../launchRefusal.ts";
 import { MAX_PIXEL_SKIN_ARCHIVE_BYTES, type PixelSkinPackRegistry } from "../PixelSkinPackRegistry.ts";
 import type { SettingsStore } from "../SettingsStore.ts";
 import { listProviderDirectory, type ProviderDirectory } from "../providerDirectory.ts";
@@ -42,7 +44,7 @@ const HTTP_REQUEST_LINE = /^[A-Z]{3,10} \S{1,4096} HTTP\/\d(?:\.\d)?\r?$/;
 const SECRET = /^[a-f0-9]{64}$/;
 
 interface TerminalPort {
-  create(request: CreateSessionRequest, options?: { captureResult?: boolean }): SessionSnapshot;
+  create(request: CreateSessionRequest, options?: { captureResult?: boolean; origin?: "control" }): SessionSnapshot;
   listMetadata(): SessionMetadata[];
   readBuffer(id: string): TerminalBufferSnapshot;
   inputChecked(id: string, text: string): boolean;
@@ -55,8 +57,23 @@ interface TerminalPort {
   dispose?(id: string): void;
 }
 
+/** Who sent a request: the person's own automation (the app-wide token) or one orchestrator session (its grant). */
+type ControlScope = { kind: "person" } | { kind: "session"; sessionId: string };
+
+/** What an orchestrator's control CLI asks for when it creates a worker: a subagent of that orchestrator. */
+export interface SubagentSpawn {
+  parentSessionId: string;
+  provider: AgentProviderId;
+  cwd: string;
+  title?: string;
+  profile?: unknown;
+  model?: string;
+  effort?: ReasoningEffort;
+}
+
 interface ControlRequest {
   v: 1;
+  scope?: ControlScope;
   id: string;
   instanceId: string;
   token: string;
@@ -104,6 +121,12 @@ export interface AgentControlGatewayOptions {
   providers?(): ProviderDirectory;
   /** Called after the Windows pipe host was restarted and connection.json names the new endpoint. */
   onTransportRestarted?(connectionPath: string): void;
+  /**
+   * Creates a worker for an orchestrator's own control connection as its subagent, under every delegation rule
+   * (AgentControlService.spawn: profile at most the orchestrator's, never YOLO, folder inside its project, the
+   * person's limits). Without it an orchestrator's connection cannot create workers.
+   */
+  spawnSubagent?(request: SubagentSpawn): Promise<SessionMetadata>;
 }
 
 class ControlError extends Error {
@@ -121,6 +144,9 @@ export class AgentControlGateway {
   private readonly sockets = new Set<AgentGatewaySocket>();
   private readonly receipts = new Map<string, { digest: string; result: Promise<unknown>; settled: boolean }>();
   private readonly busy = new Set<string>();
+  // Orchestrator sessions' own control connections: token digest -> the session and its private folder.
+  private readonly grants = new Map<string, { sessionId: string; folder: string; digest: Buffer }>();
+  private endpoint: string | null = null;
   private server: Server | null = null;
   private windows: WindowsPipeHostTransport | null = null;
   private socketDirectory: string | null = null;
@@ -137,7 +163,10 @@ export class AgentControlGateway {
     this.starting = true;
     try {
       const endpoint = await this.openEndpoint();
-      return await this.writeDiscovery(endpoint);
+      this.endpoint = endpoint;
+      const connection = await this.writeDiscovery(endpoint);
+      await this.refreshSessionGrants(endpoint);
+      return connection;
     } catch (error) {
       // Leave nothing listening and no dead transport behind, so a later start() can succeed.
       await this.closeEndpoint();
@@ -199,6 +228,27 @@ export class AgentControlGateway {
     return connection;
   }
 
+  /** Repoint surviving session grants without changing their capabilities, tokens or controller identities. */
+  private async refreshSessionGrants(endpoint: string): Promise<void> {
+    for (const [key, grant] of this.grants) {
+      const connection = join(grant.folder, "connection.json");
+      const temporary = `${connection}.${randomBytes(8).toString("hex")}.tmp`;
+      try {
+        await writeFile(temporary, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
+          endpoint, tokenFile: join(grant.folder, `token-${this.instanceId}`), pid: process.pid, scope: "session" }, null, 2) + "\n",
+        { mode: 0o600, flag: "wx" });
+        // A card may close while the file write is in flight. Never recreate or republish its withdrawn grant.
+        if (this.closed || this.grants.get(key) !== grant) continue;
+        await rename(temporary, connection);
+      } catch (error) {
+        if (!this.closed && this.grants.get(key) === grant) throw error;
+      } finally {
+        await rm(temporary, { force: true }).catch(() => undefined);
+      }
+    }
+    if (this.closed) throw new Error("Agent control is shutting down.");
+  }
+
   private async closeEndpoint(): Promise<void> {
     const server = this.server;
     const transport = this.windows;
@@ -206,6 +256,7 @@ export class AgentControlGateway {
     this.server = null;
     this.windows = null;
     this.socketDirectory = null;
+    this.endpoint = null;
     if (transport) await transport.close().catch(() => undefined);
     if (server) await closeServer(server);
     if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
@@ -215,6 +266,7 @@ export class AgentControlGateway {
   private handleTransportFatal(transport: WindowsPipeHostTransport): void {
     if (this.windows !== transport) return;
     this.windows = null;
+    this.endpoint = null;
     for (const socket of this.sockets) socket.destroy();
     this.scheduleTransportRestart();
   }
@@ -234,9 +286,50 @@ export class AgentControlGateway {
     this.restartTimer.unref?.();
   }
 
+  /**
+   * A private control connection for one orchestrator session: its own descriptor, token and controller file in a
+   * folder of its own. Requests with it act as that orchestrator: `create` makes its subagents under every delegation
+   * rule, and nothing that changes CanvasTTY's settings is available. The app-wide descriptor (the person's own
+   * automation) is never handed to an agent. Replaces the session's previous grant; null while the endpoint is off.
+   */
+  grantSession(sessionId: string): string | null {
+    if (this.closed || !this.endpoint || typeof sessionId !== "string" || !sessionId) return null;
+    this.revokeSession(sessionId);
+    const root = join(this.options.userDataPath, "agent-control", "sessions");
+    const folder = join(root, randomBytes(12).toString("hex"));
+    const token = randomBytes(32).toString("hex");
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      chmodSync(root, 0o700);
+      mkdirSync(folder, { mode: 0o700 });
+      writeFileSync(join(folder, `token-${this.instanceId}`), token, { flag: "wx", mode: 0o600 });
+      // The controller identity is fixed for the grant, so the CLI never has to write next to its descriptor.
+      writeFileSync(join(folder, "controller.json"), JSON.stringify({ v: 1, controller: randomBytes(32).toString("hex"), instanceId: this.instanceId }) + "\n", { flag: "wx", mode: 0o600 });
+      const connection = join(folder, "connection.json");
+      writeFileSync(connection, JSON.stringify({ v: 1, service: "canvastty-agent-control", instanceId: this.instanceId,
+        endpoint: this.endpoint, tokenFile: join(folder, `token-${this.instanceId}`), pid: process.pid, scope: "session" }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
+      const digest = tokenDigest(token);
+      this.grants.set(digest.toString("hex"), { sessionId, folder, digest });
+      return connection;
+    } catch {
+      rmSync(folder, { recursive: true, force: true });
+      return null;
+    }
+  }
+
+  /** Withdraws a session's control connection (its card closed, restarted or the endpoint stopped). */
+  revokeSession(sessionId: string): void {
+    for (const [key, grant] of this.grants) {
+      if (grant.sessionId !== sessionId) continue;
+      this.grants.delete(key);
+      rmSync(grant.folder, { recursive: true, force: true });
+    }
+  }
+
   observe(channel: string, payload: unknown): void {
     if (channel === IPC.terminalRemoved) {
       const id = (payload as { id: string }).id;
+      this.revokeSession(id);
       const owned = this.sessions.get(id);
       if (owned) {
         this.sessions.delete(id);
@@ -283,6 +376,9 @@ export class AgentControlGateway {
     for (const socket of this.sockets) socket.destroy();
     for (const owned of this.sessions.values()) { await owned.ready; owned.terminal.dispose(); }
     this.sessions.clear();
+    for (const grant of this.grants.values()) rmSync(grant.folder, { recursive: true, force: true });
+    this.grants.clear();
+    this.endpoint = null;
     await this.closeEndpoint();
     // Retain inert discovery/diagnostic records; a new app instance gets a new token and instanceId.
   }
@@ -355,12 +451,19 @@ export class AgentControlGateway {
       || !["create", "list", "providers", "status", "screen", "send", "result", "interrupt", "choose", "dismiss",
         "skin-list", "skin-install", "skin-select"].includes(String(value.method))
       || !record(value.params)) throw new Error("Invalid envelope");
-    if (!tokenMatches(value.token, this.tokenHash)) throw new Error("Invalid credential");
-    return value as unknown as ControlRequest;
+    let scope: ControlScope | null = tokenMatches(value.token, this.tokenHash) ? { kind: "person" } : null;
+    if (!scope) {
+      for (const grant of this.grants.values()) {
+        if (tokenMatches(value.token, grant.digest)) { scope = { kind: "session", sessionId: grant.sessionId }; break; }
+      }
+    }
+    if (!scope) throw new Error("Invalid credential");
+    return { ...(value as unknown as ControlRequest), scope };
   }
 
   private async dispatch(request: ControlRequest): Promise<unknown> {
-    const owner = hash(request.controller);
+    // One orchestrator owns everything its connection creates, whatever client file its commands use.
+    const owner = request.scope?.kind === "session" ? hash(`session:${request.scope.sessionId}`) : hash(request.controller);
     const mutating = ["create", "send", "interrupt", "choose", "dismiss", "skin-install", "skin-select"].includes(request.method);
     if (!mutating) return this.perform(owner, request);
     const key = `${owner}:${request.id}`;
@@ -398,14 +501,17 @@ export class AgentControlGateway {
   private async perform(owner: string, request: ControlRequest): Promise<unknown> {
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
     const params = request.params;
+    const agent = request.scope?.kind === "session" ? request.scope.sessionId : null;
     if (request.method === "skin-list" || request.method === "skin-install" || request.method === "skin-select") {
+      // An agent's connection changes nothing of CanvasTTY's own: settings, themes, protection are the person's.
+      if (agent) throw new ControlError("NOT_ALLOWED", "An agent's control connection cannot change CanvasTTY's settings or themes; only the person can, in the app.");
       return this.performSkinOperation(request.method, params);
     }
+    if (request.method === "create" && agent) return this.createSubagent(owner, agent, params);
     if (request.method === "create") {
       fields(params, ["provider", "cwd", "title", "profile", "model", "effort"]);
       if (!isControlProvider(params.provider)) throw new ControlError("INVALID_PARAMS", `Unknown agent provider. Run the providers command to see which agents CanvasTTY can launch; provider must be one of: ${CONTROL_PROVIDERS.join(", ")}.`);
-      if (!isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an explicit normal, yolo or auto launch profile.");
-      if (params.profile === "auto" && !hasAutoMode(params.provider)) throw new ControlError("INVALID_PARAMS", `${params.provider} has no auto mode; use profile normal.`);
+      if (!isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an explicit launch profile: auto, normal, acceptEdits, plan or yolo.");
       const provider = params.provider;
       const capabilities = controlCapabilities(provider);
       const requestedCwd = string(params.cwd, 4096, "cwd");
@@ -424,10 +530,16 @@ export class AgentControlGateway {
       if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
       if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
-      const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
-        ...(params.model !== undefined ? { model: params.model as string } : {}),
-        ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}),
-        position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
+      let session: SessionSnapshot;
+      try {
+        session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
+          ...(params.model !== undefined ? { model: params.model as string } : {}),
+          ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}),
+          position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result, origin: "control" });
+      } catch (error) {
+        if (error instanceof LaunchRefusal) throw new ControlError("REFUSED", error.message);
+        throw error;
+      }
       try {
         const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
         const snapshot = this.options.terminals.readBuffer(session.id);
@@ -538,6 +650,45 @@ export class AgentControlGateway {
       }
       return { sessionId: id, turnId: request.id, resultRevisionBefore: owned.resultRevision, delivery: "written-to-pty" };
     } finally { this.busy.delete(id); }
+  }
+
+  /** `create` on an orchestrator's own connection: a subagent of that orchestrator, under every delegation rule. */
+  private async createSubagent(owner: string, parentSessionId: string, params: Record<string, unknown>): Promise<unknown> {
+    fields(params, ["provider", "cwd", "title", "profile", "model", "effort"]);
+    if (!isControlProvider(params.provider)) throw new ControlError("INVALID_PARAMS", `Unknown agent provider. Run the providers command to see which agents CanvasTTY can launch; provider must be one of: ${CONTROL_PROVIDERS.join(", ")}.`);
+    if (params.profile === "yolo") throw new ControlError("REFUSED", "YOLO (bypass) is never given to a subagent. Omit --profile to get this session's profile, or pass auto, normal, acceptEdits or plan.");
+    if (!this.options.spawnSubagent) throw new ControlError("NOT_SUPPORTED", "This CanvasTTY cannot create subagents through the control endpoint; use the canvastty_agents spawn_agent tool.");
+    if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
+    if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
+    const provider = params.provider;
+    const cwd = string(params.cwd, 4096, "cwd");
+    const title = params.title === undefined ? undefined : string(params.title, 80, "title");
+    const problem = (params.model !== undefined ? launchModelProblem(provider, params.model) : null)
+      ?? (params.effort !== undefined ? launchEffortProblem(provider, params.effort) : null);
+    if (problem) throw new ControlError("INVALID_PARAMS", `${problem} Run the providers command for what ${provider} takes.`);
+    let session: SessionMetadata;
+    try {
+      session = await this.options.spawnSubagent({ parentSessionId, provider, cwd,
+        ...(title !== undefined ? { title } : {}),
+        ...(params.profile !== undefined ? { profile: params.profile } : {}),
+        ...(params.model !== undefined ? { model: params.model as string } : {}),
+        ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}) });
+    } catch (error) {
+      throw new ControlError("REFUSED", error instanceof Error ? error.message : "The subagent was not created.");
+    }
+    if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
+    const capabilities = controlCapabilities(provider);
+    try {
+      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+      const snapshot = this.options.terminals.readBuffer(session.id);
+      this.sessions.set(session.id, { owner, startedAt: session.startedAt, terminal,
+        ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
+        outputOffset: snapshot.outputOffset, resultRevision: 0, turn: null, completedTurn: null });
+    } catch (error) {
+      this.options.terminals.dispose?.(session.id);
+      throw error;
+    }
+    return { session: this.redactMetadata(session), capabilities };
   }
 
   private redact(text: string): string {

@@ -196,7 +196,7 @@ Up to 8 fields; `kind` is `boolean`, `select` (1–16 options) or `text` (at mos
 
 A `select` with `"optionsFrom": "service"` also lists choices the service offers, such as its own accounts. When the launcher opens, CanvasTTY asks the service `canvastty.launch.options` `{ provider, fields: [keys] }` and waits at most 3 s; the answer `{ "<key>": [{ value, label }] }` adds up to 64 choices per field after the declared ones (which stay required and are all the launcher shows when the service does not answer). Because such a list can change after a card was saved, its value is accepted as any text up to 200 characters without control characters, and `canvastty.launch.prepare` must check it and refuse a value it no longer knows.
 
-Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked). While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
+Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's, but only to a plugin whose `launch` declares `"delegable": true` (its options are safe for an agent to choose; without it only the person chooses them, and `list_providers` does not list them); a plugin tool can hand them out (for example the account it picked). Whatever a contribution adds is checked the same way for every launch: no permission, sandbox, hook or bypass flags, and no configuration the CLI reads that sets approvals (an OpenCode `OPENCODE_CONFIG` file or `OPENCODE_CONFIG_DIR`, `OPENCODE_PERMISSION`, Kimi's `--config`/`--config-file`); a file CanvasTTY cannot read and check is refused. While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
 
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
@@ -247,10 +247,13 @@ An environment is where a card runs: a git worktree, a container, a remote host.
     "kind": "worktree", "label": "Git worktree",
     "description": "A branch in its own folder",
     "appliesTo": ["terminal", "claude"],
-    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }],
+    "keeps": { "launch": true }
   }]
 }]
 ```
+
+`keeps` declares what of CanvasTTY's protection reaches the agent there: `launch` (the launch's arguments and environment reach the agent unchanged, so CanvasTTY's hooks and the profile's per-run settings work), `isolated` (the agent does not run on this computer's files: a container or a remote host) and `confines` (the environment itself confines the agent to the project). Undeclared means no: any profile but normal is refused without `launch`, and the card says that base protection does not reach the agent there. An `isolated` environment is not wrapped in CanvasTTY's agent isolation again (the card names the environment's own boundary); any other runs inside it, with the environment's folder as the project.
 
 CanvasTTY keeps the card, the PTY, the saved record and the restore order; the service answers five host-only requests (surfaces cannot send them):
 

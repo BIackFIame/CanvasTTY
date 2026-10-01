@@ -344,7 +344,9 @@ test("a decide budget above the supervisor's 15 s request default is honored thr
   ]);
   assert.equal(withinBudget.behavior, "deny", "an answer after 16 s within an 18 s budget is kept");
   assert.match(withinBudget.message, /denied after 16000 ms/u);
-  assert.equal(pastBudget.behavior, "ask", "an answer after its 16 s budget is a timeout's ask");
+  // A timeout is an ask; Codex cannot ask from its hook, so for it that ask is a deny with the reason, never a run.
+  assert.equal(pastBudget.behavior, "deny", "an answer after its 16 s budget is a timeout's ask, and Codex cannot ask");
+  assert.match(pastBudget.message, /(did not answer in time|could not answer).*codex cannot ask the person from here/su);
   // The supervisor's bound is the manifest's maximum, and the session gate's deadlines stay longer than it.
   assert.equal(MAX_HOST_CALL_TIMEOUT_MS, MAX_DECIDE_TIMEOUT_MS);
   const gate = permissionGateTimings(MAX_DECIDE_TIMEOUT_MS);

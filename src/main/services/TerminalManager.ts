@@ -61,7 +61,11 @@ import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
-import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
+import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
+import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
+import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
+import { LaunchRefusal } from "./launchRefusal.ts";
+import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
@@ -137,8 +141,17 @@ interface ManagedSession {
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
-  "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">;
+  "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">
+  & Partial<Pick<EnvironmentRegistry, "keeps">>;
 type LaunchOutcome = "launched" | "failed" | "superseded";
+/** Why a launch did not start: the CLI is missing, or a launch rule refused it. */
+interface LaunchFailure { diagnostic: string; exitCode?: number }
+/**
+ * Who asked for a card: the person (launcher, restore), a person-owned automation through the control endpoint, a
+ * plugin service, or an orchestrator (a subagent). Only the person may start YOLO without a prior acknowledgement,
+ * and never for a subagent.
+ */
+export type LaunchOrigin = "person" | "control" | "plugin" | "subagent";
 
 interface PlannedSpawn {
   command: string;
@@ -235,6 +248,16 @@ export class TerminalManager {
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
   private controlConnection: ControlConnection | null = null;
+  // The operating-system isolation layer (null: none configured, e.g. in unit tests).
+  private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null = null;
+  // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
+  private readonly isolationCleanups = new Map<string, () => void>();
+  // Plugin owners of cards being created (before the card exists), so their first launch counts as delegated.
+  private readonly startingOwners = new Map<string, string>();
+  // What a card's first launch found in its CLI's own configuration, before the card exists.
+  private readonly pendingConfiguredModes = new Map<string, { mode: string; source: string }>();
+  // Whether the person acknowledged YOLO for a CLI (Settings: acknowledgedDangerousProfiles); unset allows it.
+  private yoloAcknowledged: (provider: ProviderId) => boolean = () => true;
   // Set and cleared around a single synchronous session emit (see emitSession):
   // the main process reads it from its emit callback to tell a failure that is
   // merely re-derived state from one the user just caused.
@@ -254,6 +277,21 @@ export class TerminalManager {
     this.agentRuntime = agentRuntime;
     this.spawnPty = spawnPty;
     this.lifecycleHooksEnabled = lifecycleHooksEnabled;
+  }
+
+  /** The operating-system isolation layer around delegated and non-manual agents (isolation/AgentIsolation.ts). */
+  configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null): void {
+    this.isolation = isolation;
+  }
+
+  /** The layer can contain an agent here now (what a "contained" auto needs). */
+  containment(): boolean {
+    try { return this.isolation?.containment() === true; } catch { return false; }
+  }
+
+  /** Whether the person acknowledged YOLO for a CLI; read at every YOLO launch that is not the person's own click. */
+  configureYoloAcknowledgement(acknowledged: (provider: ProviderId) => boolean): void {
+    this.yoloAcknowledged = (provider) => { try { return acknowledged(provider) === true; } catch { return false; } };
   }
 
   configureOrchestration(coordinator: OrchestrationLaunchCoordinator | null): void {
@@ -303,7 +341,8 @@ export class TerminalManager {
       provider: session.metadata.provider,
       role: session.metadata.role ?? "agent",
       cwd: launched?.cwd ?? session.metadata.cwd,
-      configDirs: launched?.configDir ? [launched.configDir] : []
+      configDirs: launched?.configDir ? [launched.configDir] : [],
+      profile: session.metadata.profile
     };
   }
 
@@ -511,9 +550,17 @@ export class TerminalManager {
 
   create(
     request: CreateSessionRequest,
-    control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number } = {}
+    control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string } = {}
   ): SessionSnapshot {
-    assertCreateRequest(request);
+    assertCreateRequest(request, this.containment());
+    const origin: LaunchOrigin = request.role === "subagent" ? "subagent" : control.origin ?? "person";
+    if (request.profile === "yolo" && request.provider !== "terminal") {
+      // YOLO is the person's decision, made in the launcher for that CLI; nothing else starts it on their behalf.
+      if (origin === "subagent") throw new LaunchRefusal("YOLO (bypass) is never given to a subagent.");
+      if (!this.yoloAcknowledged(request.provider)) {
+        throw new LaunchRefusal(`YOLO for ${request.provider} was not acknowledged by the person. They choose it once in CanvasTTY's launcher; ${origin === "plugin" ? "a plugin" : origin === "control" ? "the control endpoint" : "a launch"} cannot start it before that.`);
+      }
+    }
     // A typed path (an orchestrator's spawn_agent, the control CLI) may spell the folder in another Unicode form
     // than the disk does; the CLI would then see its own project as a foreign folder.
     request = { ...request, cwd: onDiskPath(request.cwd) };
@@ -538,9 +585,15 @@ export class TerminalManager {
       throw new Error("Parent terminal session does not exist.");
     }
 
+    const delegated = origin === "subagent" || control.ownerPluginId !== undefined;
     const launchOptions = this.launchPipeline
-      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions)
+      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions, origin === "subagent" ? { delegated: true } : undefined)
       : request.launchOptions === undefined ? undefined : failWith("Plugin launch options are not available.");
+    // The isolation layer decides before anything starts: a subagent without it runs in normal, a launch that
+    // needs it and cannot have it is refused.
+    const decision = this.decideIsolation(request.provider, request.profile, delegated, null);
+    if (decision.refuse) throw new LaunchRefusal(decision.refuse);
+    if (decision.profile !== request.profile) request = { ...request, profile: decision.profile };
     const environmentChoice = this.environments
       ? this.environments.normalizeChoice(request.provider, request.environment) ?? null
       : request.environment === undefined ? null : failWith("Plugin environments are not available.");
@@ -562,13 +615,15 @@ export class TerminalManager {
       startedAt: Date.now(),
       exitCode: null,
       failureDetails: null,
-      ...modelChoice
+      ...modelChoice,
+      ...(decision.isolation ? { isolation: decision.isolation } : {})
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
     this.startingModels.set(id, modelChoice);
+    if (control.ownerPluginId !== undefined) this.startingOwners.set(id, control.ownerPluginId);
     let launched: ReturnType<TerminalManager["spawnProcess"]> | { process: null; agentBrowser: null; agentRuntime: null; agentOrchestration: null; failure: null };
     try {
       launched = awaitMeasuredGrid || contributed
@@ -578,8 +633,12 @@ export class TerminalManager {
           control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
     } finally {
       this.startingModels.delete(id);
+      this.startingOwners.delete(id);
     }
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
+    const configured = this.pendingConfiguredModes.get(id);
+    this.pendingConfiguredModes.delete(id);
+    if (configured) metadata.configuredMode = configured;
 
     const session: ManagedSession = {
       metadata,
@@ -603,7 +662,8 @@ export class TerminalManager {
       captureResult: control.captureResult === true,
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
-        ...(environmentChoice ? { environmentChoice } : {})
+        ...(environmentChoice ? { environmentChoice } : {}),
+        ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
       },
       launchToken: 0,
       launchCleanup: null,
@@ -1019,6 +1079,7 @@ export class TerminalManager {
     this.hiddenSinceOffset.delete(id);
     this.launchContexts.delete(id);
     this.redaction.clear(`session:${id}`);
+    this.releaseIsolation(id);
     session.launchToken += 1;
     void session.launchCleanup?.().catch(() => undefined);
     session.launchCleanup = null;
@@ -1055,8 +1116,14 @@ export class TerminalManager {
   }
 
   private restorePersistedSession(step: RestoreStep, resumed?: { ok: true } | { ok: false; reason: string }): void {
-    const descriptor = step.record;
+    let descriptor = step.record;
     if (this.sessions.has(descriptor.id)) return;
+    // A saved subagent never comes back with more than its orchestrator may give (whatever its record says).
+    if (descriptor.role === "subagent") {
+      const parent = descriptor.parentSessionId ? this.sessions.get(descriptor.parentSessionId) : undefined;
+      const ceiling = profileCeiling(parent?.metadata.profile ?? "auto");
+      if (PROFILE_RANK[descriptor.profile] > PROFILE_RANK[ceiling]) descriptor = { ...descriptor, profile: ceiling };
+    }
     const metadata: SessionMetadata = {
       id: descriptor.id,
       revision: 0,
@@ -1315,16 +1382,30 @@ export class TerminalManager {
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
     agentRuntime: PreparedAgentRuntimePtyLaunch | null;
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
-    failure: UnavailableProviderCli | null;
+    failure: LaunchFailure | null;
   } {
+    const none = { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null };
+    const decision = this.launchIsolation(id, provider, profile, role, null);
+    if (decision.refuse) return { ...none, failure: { diagnostic: `Launch refused: ${decision.refuse}`, exitCode: 1 } };
+    profile = decision.profile;
     const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution,
-      this.personTrustedFolder(parentSessionId, cwd));
+      this.personTrustedFolder(parentSessionId, cwd), false, decision.apply);
     if ("failure" in planned) {
-      return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: planned.failure };
+      return { ...none, failure: planned.failure };
+    }
+    this.noteConfiguredMode(id, provider, profile, planned.env, planned.cwd);
+    let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
+    if (decision.apply) {
+      try {
+        spawn = this.wrapIsolated(id, provider, profile, planned);
+      } catch (error) {
+        planned.cleanup();
+        return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
+      }
     }
     try {
-      const process = this.spawnPty(planned.command, planned.args, {
-        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: planned.env
+      const process = this.spawnPty(spawn.command, spawn.args, {
+        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
       this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
       return {
@@ -1336,8 +1417,74 @@ export class TerminalManager {
       };
     } catch (error) {
       planned.cleanup();
+      this.releaseIsolation(id);
       throw error;
     }
+  }
+
+  /** In the manual profile the CLI's own configuration decides: the card says when it skips approvals. */
+  private noteConfiguredMode(id: string, provider: ProviderId, profile: LaunchProfile, env: Record<string, string>, cwd: string): void {
+    const found = profile === "normal" && provider !== "terminal" ? configuredMode(provider, env, cwd) : null;
+    const target = this.sessions.get(id)?.metadata;
+    if (target) {
+      if (found) target.configuredMode = found;
+      else delete target.configuredMode;
+    } else if (found) {
+      this.pendingConfiguredModes.set(id, found);
+    }
+  }
+
+  /** Delegated: a subagent, or a card a plugin started (not the person). */
+  private isDelegated(id: string, role: SessionRole): boolean {
+    return role === "subagent" || Boolean(this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id));
+  }
+
+  private decideIsolation(provider: ProviderId, profile: LaunchProfile, delegated: boolean, environment: { isolated: boolean; label: string } | null): IsolationDecision {
+    if (!this.isolation) return { apply: false, profile };
+    return this.isolation.decide({ provider, profile, delegated, environment });
+  }
+
+  /**
+   * The isolation decision for one launch (the setting may have changed since the card was made); the card shows it,
+   * and a subagent whose layer is gone runs in normal from now on.
+   */
+  private launchIsolation(id: string, provider: ProviderId, profile: LaunchProfile, role: SessionRole,
+    environment: { isolated: boolean; label: string } | null): IsolationDecision {
+    const decision = this.decideIsolation(provider, profile, this.isDelegated(id, role), environment);
+    const metadata = this.sessions.get(id)?.metadata;
+    if (metadata && !decision.refuse) {
+      if (decision.isolation) metadata.isolation = decision.isolation;
+      else delete metadata.isolation;
+      metadata.profile = decision.profile;
+    }
+    return decision;
+  }
+
+  /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
+  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }): { command: string; args: string[]; env: Record<string, string> } {
+    if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
+    if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
+    const grant = controlGrantFolder(planned.env);
+    const wrapped = this.isolation.wrap({
+      sessionId: id,
+      provider,
+      cwd: planned.cwd,
+      command: planned.command,
+      args: planned.args,
+      env: planned.env,
+      profile,
+      ...(grant ? { grantedPrivate: [grant] } : {})
+    });
+    this.releaseIsolation(id);
+    this.isolationCleanups.set(id, wrapped.cleanup);
+    return { command: wrapped.command, args: wrapped.args, env: wrapped.env };
+  }
+
+  private releaseIsolation(id: string): void {
+    const cleanup = this.isolationCleanups.get(id);
+    if (!cleanup) return;
+    this.isolationCleanups.delete(id);
+    try { cleanup(); } catch { /* its folder is gone already */ }
   }
 
   /** Everything a launch needs short of the PTY, so an environment can wrap it first. */
@@ -1352,8 +1499,9 @@ export class TerminalManager {
     answerCaptureGrantExpiresAt: number | undefined,
     contribution: LaunchContribution | null,
     trustedFolder?: string,
-    environmentWrapped = false
-  ): PlannedSpawn | { failure: UnavailableProviderCli } {
+    environmentWrapped = false,
+    isolated = false
+  ): PlannedSpawn | { failure: LaunchFailure } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") return { failure: providerCli };
     // What decides whether Claude's lifecycle hooks may go over HTTP (ClaudeHttpHooks.ts): where and how it runs.
@@ -1415,7 +1563,7 @@ export class TerminalManager {
           : { ...browserEnvironment, ...runtimeEnvironment }),
         ...orchestrationEnvironment,
         // Orchestrators alone learn where the control descriptor and CLI are.
-        ...controlEnvironment(role, this.controlConnection)
+        ...controlEnvironment(role, this.controlConnection, id)
       };
       // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
       if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
@@ -1433,7 +1581,9 @@ export class TerminalManager {
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
         ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {}),
-        ...(agentRuntime?.decisions === true && this.baseProtectionOn() ? { shellGuarded: true } : {}),
+        ...(agentRuntime?.decisions === true && this.baseProtectionOn() && !environmentWrapped ? { shellGuarded: true } : {}),
+        ...(isolated ? { isolated: true } : {}),
+        cwd,
         ...this.launchModelOf(id)
       });
       const session = this.sessions.get(id);
@@ -1638,11 +1788,28 @@ export class TerminalManager {
       void contribution?.cleanup().catch(() => undefined);
     };
 
-    // 4. The host spawns the PTY; an environment only rewrites what is spawned.
-    let planned: PlannedSpawn | { failure: UnavailableProviderCli };
+    // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
+    const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+    if (environment && keeps.launch !== true && metadata.profile !== "normal") {
+      dropContribution();
+      return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
+    }
+    const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
+      environment ? { isolated: keeps.isolated === true, label: environment.label } : null);
+    if (decision.refuse) {
+      dropContribution();
+      return refuse(decision.refuse);
+    }
+    if (environment && keeps.launch !== true) {
+      metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
+        reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
+    }
+
+    // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
+    let planned: PlannedSpawn | { failure: LaunchFailure };
     try {
-      planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment));
+      planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
     } catch (error) {
       dropContribution();
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
@@ -1657,6 +1824,7 @@ export class TerminalManager {
       planned.cleanup();
       dropContribution();
     };
+    this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
     let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
     if (environment && environments) {
       if (typeof planned.args === "string") {
@@ -1688,6 +1856,14 @@ export class TerminalManager {
       spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
         env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
     }
+    if (decision.apply) {
+      try {
+        spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
+      } catch (error) {
+        abandon();
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+    }
     let process: IPty;
     try {
       process = this.spawnPty(spawn.command, spawn.args, {
@@ -1695,6 +1871,7 @@ export class TerminalManager {
       });
     } catch (error) {
       abandon();
+      this.releaseIsolation(id);
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
       return "failed";
     }
@@ -1767,6 +1944,7 @@ export class TerminalManager {
 
   private recordExit(id: string, current: ManagedSession, exitCode: number): void {
     this.flushOutput(id, current);
+    this.releaseIsolation(id);
     current.metadata.exitCode = exitCode;
     current.metadata.status = exitCode === 0 ? "done" : "failed";
     current.metadata.failureDetails = exitCode === 0
@@ -1864,9 +2042,9 @@ function failWith(message: string): never {
   throw new Error(message);
 }
 
-function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProviderCli): void {
+function applyLaunchFailure(metadata: SessionMetadata, failure: LaunchFailure): void {
   metadata.status = "failed";
-  metadata.exitCode = 127;
+  metadata.exitCode = failure.exitCode ?? 127;
   metadata.failureDetails = failure.diagnostic;
 }
 
@@ -1953,10 +2131,14 @@ function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown
   };
 }
 
-function assertCreateRequest(request: CreateSessionRequest): void {
+function assertCreateRequest(request: CreateSessionRequest, containment: boolean): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
   if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
-  if (request.profile === "auto" && !hasAutoMode(request.provider)) throw new Error(`${request.provider} has no auto mode; use the normal profile.`);
+  if (!profileAvailable(request.provider, request.profile, containment) && !(request.provider === "terminal" && request.profile === "yolo")) {
+    throw new LaunchRefusal(request.profile === "auto"
+      ? `${request.provider} has no auto mode of its own, and CanvasTTY's agent isolation, which its auto needs, is not available here; use the normal profile.`
+      : `${request.provider} has no ${request.profile} mode; use the normal profile.`);
+  }
   if (request.role === "orchestrator" && request.provider === "terminal") throw new Error("A plain terminal cannot be an orchestrator.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");
   if (!isPoint(request.position)) throw new Error("Session position is invalid.");

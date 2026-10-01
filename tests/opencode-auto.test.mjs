@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
-import { openCodeAutoEnvironment } from "../src/main/services/openCodeConfig.ts";
+import { openCodeAutoEnvironment, openCodePersonRules } from "../src/main/services/openCodeConfig.ts";
 import { resolveTerminalLaunch } from "../src/main/services/terminalLaunch.ts";
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
@@ -68,4 +68,32 @@ test("OpenCode auto lets shell commands run without asking only while base prote
   assert.equal((await launchOpenCode(t, { decisions: true, baseProtection: false })).permission.bash, "ask", "base protection off: ask");
   assert.equal((await launchOpenCode(t, { decisions: false, baseProtection: true })).permission.bash, "ask", "no guard installed: ask");
   assert.equal((await launchOpenCode(t, { decisions: true, baseProtection: true, profile: "normal" })).permission, undefined, "normal: no auto rules");
+});
+
+test("OpenCode auto treats an existing uninspectable FIFO as unknown and grants no Auto permissions", { skip: process.platform === "win32" }, async (t) => {
+  const { mkdir } = await import("node:fs/promises");
+  const { spawnSync } = await import("node:child_process");
+  const home = await mkdtemp(join(tmpdir(), "ctty-opencode-fifo-auto-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const configDir = join(home, ".config", "opencode");
+  await mkdir(configDir, { recursive: true });
+  assert.equal(spawnSync("mkfifo", [join(configDir, "opencode.json")]).status, 0);
+  const env = { HOME: home };
+  const person = openCodePersonRules(env, home);
+  assert.equal(person.unknown, true);
+  const result = JSON.parse(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: home }).OPENCODE_CONFIG_CONTENT);
+  assert.deepEqual(result.agent.build.permission, {});
+});
+
+test("OpenCode Auto keeps ancestor restrictions when the working directory is more than 64 levels deep", () => {
+  const root = join(tmpdir(), "ctty-deep-config-project");
+  const cwd = join(root, ...Array.from({ length: 70 }, () => "nested"));
+  const environment = { HOME: join(tmpdir(), "ctty-deep-config-home") };
+  const readFile = (path) => path === join(root, "opencode.json")
+    ? '{"permission":{"bash":"deny"}}' : null;
+  const person = openCodePersonRules(environment, cwd, readFile);
+  assert.equal(person.unknown, false);
+  assert.equal(person.top.bash, "deny");
+  const config = JSON.parse(openCodeAutoEnvironment(environment, { cwd, readFile, shellGuarded: true }).OPENCODE_CONFIG_CONTENT);
+  assert.equal(config.agent.build.permission.bash, "deny");
 });

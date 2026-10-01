@@ -263,6 +263,7 @@ const api: CanvasTTYApi = {
   },
   window: {
     isMacOS: process.platform === "darwin",
+    platform: process.platform,
     minimize: () => ipcRenderer.send(IPC.windowMinimize),
     toggleMaximize: () => ipcRenderer.invoke(IPC.windowToggleMaximize),
     close: () => ipcRenderer.send(IPC.windowClose),

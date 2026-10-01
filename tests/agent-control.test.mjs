@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "
 import { EventEmitter } from "node:events";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import test from "node:test";
 import { controlRequest, parseArguments, runCli } from "../scripts/canvastty-control.mjs";
@@ -210,10 +210,26 @@ test("agent control brings the Windows pipe host back after it fails and republi
   t.after(() => gateway.close());
   const connection = await gateway.start();
   assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-0$/);
+  const grant = gateway.grantSession("orchestrator-one");
+  assert.ok(grant);
+  const before = JSON.parse(await readFile(grant, "utf8"));
+  const token = await readFile(before.tokenFile, "utf8");
+  const controllerPath = join(dirname(grant), "controller.json");
+  const controller = await readFile(controllerPath, "utf8");
+  const revoked = gateway.grantSession("orchestrator-closed");
   transports[0].emit("fatal", new Error("host exited"));
+  assert.equal(gateway.grantSession("while-offline"), null, "no dead endpoint is handed out");
+  gateway.revokeSession("orchestrator-closed");
   t.mock.timers.tick(500);
   assert.equal(await republished, connection);
   assert.match(JSON.parse(await readFile(connection, "utf8")).endpoint, /agent-1$/);
+  const after = JSON.parse(await readFile(grant, "utf8"));
+  assert.match(after.endpoint, /agent-1$/, "the same session descriptor follows the recovered host");
+  assert.equal(after.scope, "session");
+  assert.equal(after.tokenFile, before.tokenFile);
+  assert.equal(await readFile(after.tokenFile, "utf8"), token);
+  assert.equal(await readFile(controllerPath, "utf8"), controller);
+  await assert.rejects(readFile(revoked), { code: "ENOENT" }, "revoked grants are not recreated");
   await gateway.close();
   transports[1].emit("fatal", new Error("late"));
   t.mock.timers.tick(10_000);
@@ -669,21 +685,18 @@ test("cancel disposes the subagent and plain terminals are not agents", async ()
   terminals.disposeAll();
 });
 
-test("a parent cannot exceed the subagent fan-out cap", () => {
+test("a parent cannot exceed the person's live-subagent limit, nor the card cap", () => {
   const { terminals, control } = serviceFixture();
-  const parent = terminals.create({
-    provider: "codex",
-    cwd: process.cwd(),
-    profile: "normal",
-    position: { x: 0, y: 0 }
-  });
-  for (let index = 0; index < 16; index += 1) {
-    control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
-  }
-  assert.throws(
-    () => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
-    /16 subagents/u
-  );
+  const parent = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 8; index += 1) control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => control.spawn({ parentSessionId: parent.id, provider: "omp", cwd: process.cwd() }),
+    /already runs 8 live subagents, its limit \(Settings → Agents/u);
+  terminals.disposeAll();
+
+  const wide = new AgentControlService(terminals, { limits: () => ({ maxDepth: 2, maxSubagents: 32 }) });
+  const other = terminals.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 } });
+  for (let index = 0; index < 16; index += 1) wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() });
+  assert.throws(() => wide.spawn({ parentSessionId: other.id, provider: "omp", cwd: process.cwd() }), /16 subagent cards/u);
   terminals.disposeAll();
 });
 

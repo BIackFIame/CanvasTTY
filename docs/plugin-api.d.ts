@@ -292,6 +292,8 @@ export interface CanvasTTYEnvironmentKind {
   appliesTo?: CanvasTTYProviderId[];
   /** At most 8 launcher fields; values reach `prepare` only. */
   fields?: CanvasTTYLaunchField[];
+  /** What of CanvasTTY's protection reaches the agent there; undeclared means no (see docs/plugins.md). */
+  keeps?: { launch?: boolean; isolated?: boolean; confines?: boolean };
 }
 
 /** Opaque to CanvasTTY: saved with the card (at most 4 KB of JSON) and handed back unchanged. */
@@ -366,6 +368,8 @@ export interface CanvasTTYServiceLaunch {
   /** Also asked before every launch of these agents where the person did not choose the plugin (`chosen: false`);
    * such an answer may only refuse, and no answer refuses too. */
   policy?: boolean;
+  /** An orchestrator may choose these options for its subagents (spawn_agent launchOptions); otherwise only the person. */
+  delegable?: boolean;
 }
 
 export type CanvasTTYLaunchField =

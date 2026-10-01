@@ -21,8 +21,10 @@ import { AUTO_MODE, hasAutoMode } from "../src/shared/autoMode.ts";
 
 const at = { x: 0, y: 0 };
 const cli = (provider) => ({ state: "available", provider, executable: `/bin/${provider}`, launcher: "native", environment: {}, checked: [] });
+// The launch as it is built on Linux unless a test names the platform: Claude's own sandbox exists on macOS and Linux
+// only, so what auto adds depends on it (the Windows case is asserted on its own).
 const launch = (provider, profile, args = [], options = {}) =>
-  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, ...options }).args;
+  resolveTerminalLaunch(provider, profile, args, { providerCli: cli(provider), environment: {}, platform: "linux", ...options }).args;
 const settingsOf = (args) => args.flatMap((arg, index) => args[index - 1] === "--settings" ? [JSON.parse(arg)] : []);
 
 const waitFor = async (predicate, timeoutMs = 6_000) => {
@@ -65,7 +67,7 @@ async function pipelineAnswering(t, answer, extra = {}) {
   const requests = [];
   const pipeline = new LaunchPipeline({
     contributors: () => [{ pluginId: "p.accounts", pluginName: "Accounts", serviceId: "svc", secrets: false,
-      launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }] }, ...extra }],
+      launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }], delegable: true }, ...extra }],
     call: async (_pluginId, _serviceId, _method, params) => { requests.push(params); return typeof answer === "function" ? answer(params) : answer; },
     secret: async () => null,
     runsRoot,
@@ -78,7 +80,18 @@ test("auto exists only where the CLI has a native auto mode (OpenCode: a per-run
   assert.deepEqual(Object.keys(AUTO_MODE).sort(), ["claude", "codex", "grok"]);
   for (const provider of ["qwen", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
   assert.equal(hasAutoMode("opencode"), true);
-  assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode; use the normal profile/u);
+  assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode of its own; its auto runs only inside CanvasTTY's agent isolation/u);
+  // A CLI without an auto mode of its own gets its approval bypass as auto, only inside the isolation layer.
+  assert.deepEqual(launch("qwen", "auto", [], { isolated: true }), ["--yolo"]);
+  assert.deepEqual(launch("cursor", "auto", [], { isolated: true }), ["--force"]);
+  // Accept-edits and plan, where the CLI has them.
+  assert.deepEqual(launch("codex", "acceptEdits"), ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "plan"), ["--sandbox", "read-only", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("grok", "plan"), ["--permission-mode", "plan"]);
+  assert.deepEqual(launch("claude", "plan"), ["--permission-mode", "plan"]);
+  assert.deepEqual(launch("cursor", "plan"), ["--mode", "plan"]);
+  assert.deepEqual(launch("opencode", "plan"), ["--agent", "plan"]);
+  assert.deepEqual(launch("cursor", "yolo"), ["--force"], "cursor-agent's bypass is --force");
   // Normal adds no permission flag and no sandbox.
   assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["--no-daemon", "-c", "x=1"]);
   assert.deepEqual(launch("claude", "normal"), []);
@@ -94,11 +107,25 @@ test("auto: Codex --approve-for-me (its workspace-write sandbox), Claude auto wi
   assert.deepEqual(args.slice(0, 2), ["--permission-mode", "auto"]);
   assert.equal(args.filter((arg) => arg === "--settings").length, 1, "Claude keeps only the last --settings");
   const [settings] = settingsOf(args);
-  assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false });
+  assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false });
   assert.equal(settings.hooks.Stop[0].hooks[0].command, "/hook", "CanvasTTY's hooks survive");
   assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:11434");
   // Without other settings the sandbox is its own inline --settings.
-  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { platform: "darwin" })), settingsOf(launch("claude", "auto")), "macOS: the same sandbox");
+  // Claude Code has no sandbox on Windows: auto there is its auto mode alone.
+  assert.deepEqual(launch("claude", "auto", [], { platform: "win32" }), ["--permission-mode", "auto"]);
+  // Inside CanvasTTY's isolation layer Claude's own sandbox cannot start (macOS refuses a sandbox in a sandbox): left out.
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), []);
+  assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto"]);
+  // Codex inside the layer: its own seatbelt cannot start in ours, so it is off, never bypassed; approvals stay.
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true }),
+    ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request", "-c", 'approvals_reviewer="auto_review"']);
+  assert.deepEqual(launch("codex", "normal", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "acceptEdits", [], { isolated: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.deepEqual(launch("codex", "auto", [], { isolated: true, thirdPartyModel: true }), ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request"]);
+  assert.ok(!launch("codex", "auto", [], { isolated: true }).includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.deepEqual(launch("codex", "auto"), ["--approve-for-me"], "outside the layer Codex keeps its own sandbox");
 });
 
 test("a third-party model turns auto into accept-edits, sandbox kept; other profiles ignore the mark", () => {
@@ -257,12 +284,13 @@ test("a Codex subagent in (or below) the person's orchestrator folder is trusted
   const trust = (args) => args.filter((arg, index) => args[index - 1] === "-c" && arg.startsWith("projects="));
   control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: site });
   control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: docs });
-  control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: elsewhere });
+  // A folder outside the person's folder is refused outright: no subagent works there.
+  assert.throws(() => control.spawn({ parentSessionId: orchestrator.id, provider: "codex", cwd: elsewhere }), /only inside this project's folder/u);
   terminals.create({ provider: "codex", profile: "normal", cwd: site, position: at });
   assert.deepEqual(calls.slice(1).map((call) => trust(call.args)), [
     [`projects={${JSON.stringify(site)}={trust_level="trusted"}}`],
     [`projects={${JSON.stringify(docs)}={trust_level="trusted"}}`],
-    [], []
+    []
   ]);
   // Plugins learn the folder for a subagent (a Claude account home can mark it), never for a top-level card.
   control.spawn({ parentSessionId: orchestrator.id, provider: "claude", cwd: docs, launchOptions: { "p.accounts": { on: true } } });

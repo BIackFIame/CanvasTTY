@@ -181,7 +181,18 @@ export function hookOutput(provider, decision) {
       }
     };
   }
-  if (provider !== "claude") return null;
+  if (provider !== "claude") {
+    // Only Claude Code can put a question in front of the person. For any other CLI an ask that reached this far (the
+    // gateway could not get an answer in time) would silently let the call run: it is stopped instead.
+    if (decision.behavior !== "ask") return null;
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${decision.message || "CanvasTTY could not check this tool call in time."} This agent cannot ask the person from here, so it was not run; tell the person what you want to do and let them decide.`
+      }
+    };
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

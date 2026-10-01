@@ -13,6 +13,8 @@ import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { coreOwnedLaunchArgument, mergeClaudeInlineSettings } from "../src/main/services/terminalLaunch.ts";
 
+const CLAUDE_HAS_SANDBOX = process.platform === "darwin" || process.platform === "linux";
+
 const cwd = process.cwd();
 const at = { x: 0, y: 0 };
 const HOOKS = { showStatusInTerminalTab: true, hooks: { Stop: [{ hooks: [{ type: "command", command: "/core/hook stop" }] }] } };
@@ -122,7 +124,8 @@ test("Normal and Auto: one effective --settings keeps CanvasTTY's hooks (and Aut
       const [settings] = settingsOf(args);
       assert.deepEqual(settings.hooks, HOOKS.hooks, `${profile}: CanvasTTY's hooks stay`);
       assert.deepEqual(settings.env, ROUTE.env);
-      if (profile === "auto") assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false });
+      // Auto adds Claude Code's own sandbox where Claude has one (macOS, Linux); this launch runs on the test's host.
+      if (profile === "auto" && CLAUDE_HAS_SANDBOX) assert.deepEqual(settings.sandbox, { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false });
       else assert.equal(settings.sandbox, undefined);
     }
     for (const answer of [

@@ -74,11 +74,14 @@ test("list_providers reads the CLI registry, the cached sign-in state and plugin
     cli: (provider) => (provider === "cursor" ? "unavailable" : "available"),
     limits: () => { limitReads += 1; return limits; },
     launchContributors: () => [
-      { pluginId: "canvastty.accounts", pluginName: "Accounts", launch: { appliesTo: ["grok", "codex"], fields: [
+      { pluginId: "canvastty.accounts", pluginName: "Accounts", launch: { appliesTo: ["grok", "codex"], delegable: true, fields: [
         { key: "account", label: "Account", kind: "select", optionsFrom: "service", options: [{ value: "a", label: "A" }] },
         { key: "mode", label: "Mode", kind: "select", options: [{ value: "fast", label: "Fast" }] }
-      ] } }
-    ]
+      ] } },
+      // Only the person chooses these: an orchestrator does not even see them.
+      { pluginId: "p.private", pluginName: "Private", launch: { fields: [{ key: "x", label: "X", kind: "text" }] } }
+    ],
+    containment: () => true
   }, ["canvastty-accounts__list_routes", "canvastty-accounts__other"]);
   assert.equal(limitReads, 1);
   assert.deepEqual(directory.providers.map((entry) => entry.id), [...AGENT_PROVIDERS]);
@@ -97,7 +100,9 @@ test("list_providers reads the CLI registry, the cached sign-in state and plugin
   assert.deepEqual(by.grok.launchOptions, [{ pluginId: "canvastty.accounts", plugin: "Accounts", fields: [
     { key: "account", kind: "select" }, { key: "mode", kind: "select", choices: ["fast"] }
   ] }]);
-  assert.equal(by.claude.launchOptions, undefined);
+  assert.equal(by.claude.launchOptions, undefined, "a plugin that did not declare its options delegable is not listed");
+  assert.deepEqual(by.codex.profiles, ["auto", "normal", "acceptEdits", "plan"], "never YOLO for a subagent");
+  assert.deepEqual(by.qwen.profiles, ["auto", "normal"], "a contained auto where isolation runs");
   assert.deepEqual(directory.launchOptionTools, ["canvastty-accounts__list_routes"]);
   assert.match(directory.note, /canvastty-accounts__list_routes/u);
   assert.match(directory.note, /Do not search the filesystem/u);

@@ -148,7 +148,11 @@ const FALLBACK_SETTINGS: AppSettings = {
   agentChatHistoryExpandMode: "hover",
   agentChatHistorySearchAgents: "current",
   agentChatHistorySearchSessions: "filtered",
-  agentControlEnabled: false
+  agentControlEnabled: false,
+  agentIsolation: "on",
+  orchestrationMaxDepth: 2,
+  orchestrationMaxSubagents: 8,
+  defaultLaunchProfile: "auto"
 };
 
 const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {

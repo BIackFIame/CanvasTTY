@@ -5,16 +5,28 @@ import type {
   SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
+import { realpathSync } from "node:fs";
+import { isAbsolute, resolve } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
-import { hasAutoMode } from "../../shared/autoMode.ts";
+import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import type { TerminalManager } from "./TerminalManager.ts";
+import { onDiskPath, otherSpellings } from "./onDiskPath.ts";
+import { LaunchRefusal } from "./launchRefusal.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
 
-// Roadmap F1 preview: a programmatic parent must not be able to fan out
-// without bound. The real budgets setting arrives with resource management;
-// until then this hard cap is the only backstop.
+// Cards one parent may have in total, live or exited (the live limit is the person's setting).
 const MAX_CHILDREN_PER_PARENT = 16;
+/** Defaults of the person's limits (Settings → Agents). */
+export const DEFAULT_DELEGATION_LIMITS: DelegationLimits = { maxDepth: 2, maxSubagents: 8 };
+
+export interface DelegationLimits {
+  /** Levels of subagents below a top-level orchestrator (its children are level 1). */
+  maxDepth: number;
+  /** Live subagents below one top-level orchestrator, all levels together. */
+  maxSubagents: number;
+}
 const MAX_OBSERVE_CHARS = 8_192;
 // An exited agent's reason is in its last screen lines (OpenCode: "Error: Unexpected server error" for an unknown model).
 const MAX_EXIT_WINDOW_CHARS = 16_384;
@@ -77,6 +89,10 @@ export interface AgentWaitTiming {
 export interface AgentControlOptions {
   /** waitFor timing; tests shorten it. */
   waitTiming?: AgentWaitTiming;
+  /** The person's delegation limits (Settings → Agents), read at every spawn. */
+  limits?: () => DelegationLimits;
+  /** CanvasTTY's isolation layer can contain an agent on this computer now (a "contained" auto needs it). */
+  containment?: () => boolean;
 }
 
 /** The longest wait one call may ask for (wait_for_agent's timeoutSeconds maximum). */
@@ -138,15 +154,28 @@ export class AgentControlService {
 
     const children = this.children(parent.id);
     if (children.length >= MAX_CHILDREN_PER_PARENT) {
-      throw new Error(`Session ${parent.id} already has ${MAX_CHILDREN_PER_PARENT} subagents.`);
+      throw new DelegationRefusal(`Session ${parent.id} already has ${MAX_CHILDREN_PER_PARENT} subagent cards; cancel_agent the finished ones first.`);
     }
-
-    const profile = subagentProfile(parent.profile, request.provider, request.profile);
-    if ("error" in profile) throw new Error(profile.error);
+    const lineage = this.lineage(parent.id);
+    const root = lineage.at(-1)!;
+    // What the request asks for first (its folder, its profile), then the person's limits.
+    const cwd = subagentFolder(root.cwd, parent.cwd, request.cwd);
+    if ("error" in cwd) throw new DelegationRefusal(cwd.error);
+    const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
+    if ("error" in profile) throw new DelegationRefusal(profile.error);
+    const limits = this.limits();
+    // The parent is at level lineage.length - 1 below its top-level agent; the new card one further down.
+    if (lineage.length > limits.maxDepth) {
+      throw new DelegationRefusal(`Subagents may nest at most ${limits.maxDepth} level${limits.maxDepth === 1 ? "" : "s"} deep below the agent the person started; this one would be level ${lineage.length}. The person sets this limit in Settings → Agents.`);
+    }
+    const live = this.descendants(root.id).filter((session) => session.exitCode === null).length;
+    if (live >= limits.maxSubagents) {
+      throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
+    }
     const cascade = children.length;
     const created = this.terminals.create({
       provider: request.provider,
-      cwd: request.cwd,
+      cwd: cwd.cwd,
       profile: profile.profile,
       position: {
         x: parent.position.x + CHILD_POSITION_STEP.x * (cascade + 1),
@@ -158,10 +187,15 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    }, RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {});
+    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt")
       .then(() => this.terminals.getMetadata(created.id) ?? created);
+  }
+
+  /** The profile a subagent of this parent gets for this request (what spawn will use), or why it gets none. */
+  profileFor(parentSessionId: string, provider: AgentProviderId, requested?: unknown): { profile: LaunchProfile; inherited: boolean } | { error: string } {
+    return subagentProfile(this.requireSession(parentSessionId).profile, provider, requested, this.containment());
   }
 
   /** Validates at once (throws); resolves once the text reached the agent, and rejects when it did not. */
@@ -184,6 +218,48 @@ export class AgentControlService {
     return this.terminals.listMetadata()
       .filter((session) => session.parentSessionId === parentSessionId)
       .sort((a, b) => a.startedAt - b.startedAt);
+  }
+
+  /** The session, its parent, and so on up to the agent the person started (last). */
+  lineage(sessionId: string): SessionMetadata[] {
+    const byId = new Map(this.terminals.listMetadata().map((session) => [session.id, session]));
+    const chain: SessionMetadata[] = [];
+    for (let current = byId.get(sessionId); current && chain.length < 64; current = current.parentSessionId ? byId.get(current.parentSessionId) : undefined) {
+      if (chain.includes(current)) break;
+      chain.push(current);
+    }
+    if (chain.length === 0) throw new Error("Terminal session does not exist.");
+    return chain;
+  }
+
+  /** Every card below this one, at any depth. */
+  descendants(sessionId: string): SessionMetadata[] {
+    const all = this.terminals.listMetadata();
+    const found: SessionMetadata[] = [];
+    const queue = [sessionId];
+    const seen = new Set(queue);
+    while (queue.length > 0) {
+      const id = queue.shift()!;
+      for (const session of all) {
+        if (session.parentSessionId !== id || seen.has(session.id)) continue;
+        seen.add(session.id);
+        found.push(session);
+        queue.push(session.id);
+      }
+    }
+    return found;
+  }
+
+  private limits(): DelegationLimits {
+    try {
+      const limits = this.options.limits?.();
+      if (limits && Number.isInteger(limits.maxDepth) && Number.isInteger(limits.maxSubagents)) return limits;
+    } catch { /* the defaults */ }
+    return DEFAULT_DELEGATION_LIMITS;
+  }
+
+  private containment(): boolean {
+    try { return this.options.containment?.() === true; } catch { return false; }
   }
 
   /** True when sessionId is parentSessionId itself or any of its descendants. */
@@ -348,32 +424,70 @@ export class AgentControlService {
   }
 }
 
+/** A delegation rule refused the request; the text says why, for the orchestrator to adapt instead of retrying. */
+export class DelegationRefusal extends LaunchRefusal {
+  constructor(message: string) {
+    super(message);
+    this.name = "DelegationRefusal";
+  }
+}
+
 /**
- * The launch profile of a subagent. Asked for: "normal", or "auto" where its CLI has an auto mode. Not asked for: its
- * orchestrator's, so a person who runs the orchestrator in auto is not asked about every step of its subagents; an
- * auto the subagent's CLI lacks becomes normal. YOLO is never given to a subagent here: core allows it only for an
- * isolated environment (a worktree or container the person chose), which spawn_agent cannot pick, so a YOLO
- * orchestrator's subagents run in auto where their CLI has it, otherwise normal.
+ * The launch profile of a subagent: never more than its orchestrator's (plan < normal < acceptEdits < auto < yolo),
+ * never YOLO. Asked for: that profile, when its CLI has it and it is not above the orchestrator's. Not asked for: the
+ * orchestrator's, or the next lower one its CLI has, so a person who runs the orchestrator in auto is not asked about
+ * every step of its subagents. `containment`: CanvasTTY's isolation layer runs here (a CLI without an auto mode of its
+ * own gets auto only inside it).
  */
 export function subagentProfile(
-  parent: LaunchProfileId,
+  parent: LaunchProfile,
   provider: AgentProviderId,
-  requested?: unknown
-): { profile: LaunchProfileId; inherited: boolean } | { error: string } {
+  requested?: unknown,
+  containment = false
+): { profile: LaunchProfile; inherited: boolean } | { error: string } {
+  const ceiling = profileCeiling(parent);
   if (requested !== undefined) {
-    if (requested === "normal") return { profile: "normal", inherited: false };
-    if (requested === "auto") {
-      return hasAutoMode(provider)
-        ? { profile: "auto", inherited: false }
-        : { error: `${provider} has no auto mode; use profile normal.` };
-    }
     if (requested === "yolo") {
-      return { error: "YOLO is not available for subagents: it needs an isolated environment the person chose. Use profile auto (where the provider has it) or normal." };
+      return { error: "YOLO (bypass) is never given to a subagent. Use profile auto or a lower one; the person alone launches agents in YOLO." };
     }
-    return { error: "profile must be normal or auto." };
+    if (!isLaunchProfile(requested)) return { error: "profile must be auto, normal, acceptEdits or plan." };
+    if (PROFILE_RANK[requested] > PROFILE_RANK[ceiling]) {
+      return { error: `This orchestrator runs in the ${parent} profile, so its subagents get at most ${ceiling}; ${requested} would give a subagent more than its orchestrator. Only the person can launch an agent with more.` };
+    }
+    if (!profileAvailable(provider, requested, containment)) {
+      return { error: requested === "auto"
+        ? `${provider} has no auto mode of its own, and CanvasTTY's agent isolation is not available here to contain it; use profile normal.`
+        : `${provider} has no ${requested} mode; call list_providers for the profiles it takes.` };
+    }
+    return { profile: requested, inherited: false };
   }
-  const wanted = parent === "yolo" ? "auto" : parent;
-  return { profile: wanted === "auto" && !hasAutoMode(provider) ? "normal" : wanted, inherited: true };
+  const order: LaunchProfile[] = ["auto", "acceptEdits", "normal", "plan"];
+  const start = order.indexOf(ceiling);
+  const profile = order.slice(start < 0 ? 0 : start).find((candidate) => profileAvailable(provider, candidate, containment)) ?? "normal";
+  return { profile, inherited: true };
+}
+
+/**
+ * Where a subagent may work: its orchestrator's project folder (the folder the person chose for the agent it
+ * descends from) or a folder inside it, compared as real paths in the spelling the disk uses (NFC and NFD name the
+ * same folder on macOS). A relative folder is taken from the orchestrator's own folder.
+ */
+export function subagentFolder(projectRoot: string, parentCwd: string, requested: unknown): { cwd: string } | { error: string } {
+  if (typeof requested !== "string" || requested.trim().length === 0) return { error: "cwd is required: a folder inside this project." };
+  const wanted = onDiskPath(isAbsolute(requested) ? requested : resolve(parentCwd, requested));
+  const real = (path: string): string | null => {
+    for (const spelling of [path, ...otherSpellings(path)]) {
+      try { return realpathSync.native(spelling); } catch { /* the next spelling */ }
+    }
+    return null;
+  };
+  const root = real(onDiskPath(projectRoot));
+  const folder = real(wanted);
+  if (!folder) return { error: `The folder ${requested} does not exist. A subagent works in this project's folder (${projectRoot}) or a folder inside it.` };
+  if (!root || !(isPathInside(root, folder) || isPathInside(root.normalize("NFC"), folder.normalize("NFC")))) {
+    return { error: `A subagent works only inside this project's folder (${projectRoot}); ${requested} is outside it. Only the person can start an agent in another folder.` };
+  }
+  return { cwd: folder };
 }
 
 /** Sleeps, or rejects with an AbortError as soon as `signal` aborts. */

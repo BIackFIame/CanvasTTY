@@ -55,7 +55,7 @@ async function fixture(t) {
   const pipeline = new LaunchPipeline({
     contributors: () => [
       { pluginId: "p.accounts", pluginName: "Accounts", serviceId: "svc", secrets: false,
-        launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }] } },
+        launch: { fields: [{ key: "on", label: "On", kind: "boolean", default: true }], delegable: true } },
       { pluginId: "p.policy", pluginName: "Policy", serviceId: "svc", secrets: false, launch: { policy: true, appliesTo: ["codex"], fields: [] } }
     ],
     call: (pluginId, _serviceId, _method, params) => new Promise((resolve) => pending.push({ pluginId, params, answer: resolve })),

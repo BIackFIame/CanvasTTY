@@ -99,7 +99,7 @@ test("the setting is exposed in Settings → Agents, honoured by the main proces
   assert.match(main, /applyAgentControlSetting\(settings\.get\(\)\.agentControlEnabled\)/);
   assert.match(main, /await applyAgentControlSetting\(next\.agentControlEnabled\)/);
   assert.match(main, /process\.argv\.includes\("--agent-control"\) \|\| process\.env\.CANVASTTY_AGENT_CONTROL === "1"/);
-  assert.match(main, /terminalManager\.setControlConnection\(\{ connectionPath: connection, cliPath: agentControlCliPath \}\)/);
+  assert.match(main, /terminalManager\.setControlConnection\(\{ connectionPath: connection, cliPath: agentControlCliPath,\s+grant: \(sessionId\) => gateway\.grantSession\(sessionId\) \}\)/);
   assert.match(main, /terminalManager\?\.setControlConnection\(null\)/);
   assert.match(main, /join\(process\.resourcesPath, "agent-control", "canvastty-control\.mjs"\)/);
   assert.match(main, /join\(app\.getAppPath\(\), "scripts", "canvastty-control\.mjs"\)/);
