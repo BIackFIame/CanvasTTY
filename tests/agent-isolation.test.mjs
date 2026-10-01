@@ -358,3 +358,17 @@ test("a launch HOME nested inside another provider's host home cannot expose its
     sessionId: "nested-host-home"
   }), /protected host credentials/u);
 });
+
+test("deep nonexistent descendants cannot conceal a credential symlink alias", { skip: process.platform === "win32" }, async (t) => {
+  const w = await world(t);
+  const credentialHome = join(w.home, ".codex");
+  await mkdir(credentialHome, { recursive: true });
+  const alias = join(w.base, "deep-credential-alias");
+  await symlink(credentialHome, alias);
+  assert.throws(() => isolationPaths({
+    provider: "claude", cwd: w.project, sessionTemp: w.temp,
+    userDataPath: w.userData, sessionId: "deep-alias",
+    env: { HOME: join(alias, ...Array.from({ length: 130 }, () => "x")) },
+    hostEnvironment: w.env
+  }), /protected host credentials/u);
+});
