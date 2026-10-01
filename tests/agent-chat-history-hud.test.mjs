@@ -43,8 +43,10 @@ function find(node, predicate, found = []) {
 const rows = tree => find(tree, node => node.props?.className?.startsWith("agent-chat-history__item"));
 
 test("collapsing a project preserves only its open conversations and focuses their terminals", () => {
-  const items = ["working", "idle", "exited", "historical"].map(id => ({
-    id, provider: "omp", cwd: "/project", title: id, lastActivityAt: Date.now()
+  const now = Date.now();
+  // Explicit activity order must not depend on clock ticks while building the fixture.
+  const items = ["working", "idle", "exited", "historical"].map((id, index) => ({
+    id, provider: "omp", cwd: "/project", title: id, lastActivityAt: now - index
   }));
   const sessions = items.slice(0, 3).map((item, index) => ({
     id: `terminal-${item.id}`, provider: "omp", threadId: item.id, cwd: "/project",
