@@ -117,7 +117,7 @@ test("OpenCode environment permission follows file and inline top-level rules wh
   const file = { permission: { edit: "allow", bash: { "git push *": "deny" } } };
   const inline = { permission: { edit: "allow", bash: { "git push *": "allow", "npm publish *": "ask" } } };
   const env = {
-    OPENCODE_CONFIG: "/person/opencode.json",
+    OPENCODE_CONFIG: join(tmpdir(), "person", "opencode.json"),
     OPENCODE_CONFIG_CONTENT: JSON.stringify(inline),
     OPENCODE_PERMISSION: JSON.stringify({ edit: "deny", bash: { "git push *": "ask" } })
   };
@@ -134,7 +134,7 @@ test("OpenCode environment permission follows file and inline top-level rules wh
   const fileAgent = { agent: { build: { permission: { edit: "deny", bash: { "git push *": "deny" } } } } };
   const agentInline = { agent: { build: { permission: { read: "ask", bash: { "git status *": "ask" } } } } };
   const agentsEnv = {
-    OPENCODE_CONFIG: "/person/agent.json",
+    OPENCODE_CONFIG: join(tmpdir(), "person", "agent.json"),
     OPENCODE_CONFIG_CONTENT: JSON.stringify(agentInline),
     OPENCODE_PERMISSION: JSON.stringify({ edit: "ask", read: "deny", bash: "allow" })
   };
@@ -203,7 +203,7 @@ test("OpenCode auto and accept-edits reject scalar deny or ask instead of leavin
 test("OpenCode auto preserves permission patterns named __proto__ through file, inline, and environment merges", () => {
   const permission = JSON.parse('{"edit":{"__proto__":"deny"},"bash":{"__proto__":"ask"}}');
   const configurations = [
-    { environment: { OPENCODE_CONFIG: "/person/opencode.json" }, files: [{ permission }] },
+    { environment: { OPENCODE_CONFIG: join(tmpdir(), "person", "opencode.json") }, files: [{ permission }] },
     { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission }) }, files: [] },
     { environment: { OPENCODE_PERMISSION: JSON.stringify(permission) }, files: [] }
   ];
@@ -225,7 +225,7 @@ test("OpenCode auto preserves numeric pattern decisions that cannot follow its w
       for (const tool of ["edit", "bash"]) {
         const permission = { [tool]: { [pattern]: action } };
         const configurations = [
-          { environment: { OPENCODE_CONFIG: "/person/opencode.json" }, files: [{ permission }], inline: {} },
+          { environment: { OPENCODE_CONFIG: join(tmpdir(), "person", "opencode.json") }, files: [{ permission }], inline: {} },
           { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ permission }) }, files: [], inline: { permission } },
           { environment: { OPENCODE_CONFIG_CONTENT: JSON.stringify({ agent: { build: { permission } } }) },
             files: [], inline: { agent: { build: { permission } } } },
@@ -358,7 +358,7 @@ test("OpenCode Auto preserves later directory JSON over earlier build-agent fron
 });
 
 test("OpenCode Auto treats ambiguous or throwing injected config reads as unknown", () => {
-  const env = { OPENCODE_CONFIG: "/person/config.json" };
+  const env = { OPENCODE_CONFIG: join(tmpdir(), "person", "config.json") };
   const thrown = openCodePersonRules(env, undefined, () => { throw new Error("read failed"); });
   assert.equal(thrown.unknown, true);
   const result = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => { throw new Error("read failed"); } }));
@@ -414,7 +414,7 @@ test("a plugin cannot hand OpenCode or Kimi a configuration that decides approva
     /sets permission in its OpenCode configuration/u);
   const agentRule = [{ relPath: "o.json", content: JSON.stringify({ agent: { build: { permission: { bash: "allow" } } } }) }];
   assert.match(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: "{launchFiles}/o.json" }, args: [], files: agentRule }), /permission/u);
-  assert.match(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: "/nonexistent/o.json" }, args: [], files: [] }), /cannot check/u);
+  assert.match(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: join(tmpdir(), "nonexistent", "o.json") }, args: [], files: [] }), /cannot check/u);
   assert.match(permissionConfigProblem("opencode", { env: { OPENCODE_PERMISSION: "{\"*\":\"allow\"}" }, args: [], files: [] }), /OPENCODE_PERMISSION/u);
   assert.equal(permissionConfigProblem("kimi", { env: {}, args: ["--config", JSON.stringify({ models: { m: { provider: "p", max_context_size: 1 } } })], files: [] }), null);
   assert.match(permissionConfigProblem("kimi", { env: {}, args: ["--config", JSON.stringify({ default_yolo: true })], files: [] }), /default_yolo/u);
