@@ -107,3 +107,6 @@ jobs:
         run: npm run package:mac
       - name: Smoke-test packaged macOS CLI resolution
         run: npm run smoke:cli-resolution:mac
+      - name: Smoke-test browser input on macOS
+        timeout-minutes: 2
+        run: npm run smoke:browser
