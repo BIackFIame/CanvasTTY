@@ -32,9 +32,15 @@ import {
   tokenMatches
 } from "../gatewaySocket.ts";
 
-import { WindowsPipeHostTransport, type AgentGatewaySocket } from "./WindowsPipeHostTransport.ts";
+import {
+  WindowsPipeHostTransport,
+  type AgentGatewaySocket,
+  type WindowsPipeHostTransportOptions
+} from "./WindowsPipeHostTransport.ts";
 
 const CAPABILITY_TTL_MS = 60_000;
+const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
+const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
 
 interface CapabilityLease {
   connectionId: string;
@@ -61,7 +67,9 @@ interface Connection {
 
 export interface OrchestrationGatewayOptions {
   runtimeDirectory: string;
+  platform?: NodeJS.Platform;
   windowsHostPath?: string;
+  windowsPipeHostFactory?: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
   handler: OrchestrationCommandHandler;
   capabilityTtlMs?: number;
   heartbeatIntervalMs?: number;
@@ -75,7 +83,9 @@ export class OrchestrationGateway {
   private readonly connections = new Set<Connection>();
   private readonly handler: OrchestrationCommandHandler;
   private readonly runtimeDirectory: string;
+  private readonly platform: NodeJS.Platform;
   private readonly windowsHostPath: string | undefined;
+  private readonly windowsPipeHostFactory: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
   private windowsTransport: WindowsPipeHostTransport | null = null;
   private readonly capabilityTtlMs: number;
   private readonly heartbeatIntervalMs: number;
@@ -85,12 +95,24 @@ export class OrchestrationGateway {
   private ownedRuntimeDirectory: string | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
+  private starting: Promise<void> | null = null;
+  /** Bumped by stop(): a start() still opening the socket then knows it was stopped. */
+  private generation = 0;
+  private restartTimer: NodeJS.Timeout | null = null;
+  private restartAttempts = 0;
+  private restartToken = 0;
+  private recovering = false;
+  /** The start caller (or recovery attempt) that currently owns a shared in-flight start. */
+  private startIntent = 0;
   private enabled = true;
 
   constructor(options: OrchestrationGatewayOptions) {
     this.handler = options.handler;
     this.runtimeDirectory = options.runtimeDirectory;
+    this.platform = options.platform ?? process.platform;
     this.windowsHostPath = options.windowsHostPath;
+    this.windowsPipeHostFactory = options.windowsPipeHostFactory
+      ?? ((transportOptions) => new WindowsPipeHostTransport(transportOptions));
     this.capabilityTtlMs = options.capabilityTtlMs ?? CAPABILITY_TTL_MS;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? ORCHESTRATION_HEARTBEAT_INTERVAL_MS;
     this.heartbeatExpiryMs = options.heartbeatExpiryMs ?? ORCHESTRATION_HEARTBEAT_EXPIRY_MS;
@@ -108,30 +130,80 @@ export class OrchestrationGateway {
 
   setEnabled(enabled: boolean): void {
     this.enabled = Boolean(enabled);
-    if (this.enabled) return;
+    if (this.enabled) {
+      if (this.recovering && !this.running) this.scheduleTransportRestart();
+      return;
+    }
+    this.pauseTransportRestart();
     for (const connection of [...this.connections]) this.closeConnection(connection, "revoked");
     for (const lease of [...this.leases.values()]) this.expireLease(lease);
   }
 
-  async start(): Promise<void> {
-    if (this.running) return;
-    if (process.platform === "win32") {
+  /**
+   * Starts listening once: a second start() while the first is still opening the socket waits for it, and a stop()
+   * meanwhile wins (the opened socket is closed again and start() leaves the gateway stopped).
+   */
+  start(): Promise<void> {
+    if (this.running) {
+      // The listener can become live before its recovery continuation settles. A caller
+      // arriving in that window owns the completed start and invalidates that continuation.
+      if (this.recovering) {
+        this.startIntent += 1;
+        this.cancelTransportRestart();
+      }
+      return Promise.resolve();
+    }
+    // A deliberate start supersedes a recovery that is waiting for backoff.
+    if (this.restartTimer !== null) this.cancelTransportRestart();
+    const intent = ++this.startIntent;
+    const recovering = this.recovering;
+    return this.beginStart().then(() => {
+      if (intent !== this.startIntent) return;
+      this.recovering = false;
+      this.restartAttempts = 0;
+    }, (error) => {
+      if (intent === this.startIntent && recovering && this.enabled) this.scheduleTransportRestart();
+      throw error;
+    });
+  }
+
+  private beginStart(): Promise<void> {
+    this.starting ??= this.open(this.generation).finally(() => { this.starting = null; });
+    return this.starting;
+  }
+
+  private async open(generation: number): Promise<void> {
+    if (this.platform === "win32") {
       if (!this.windowsHostPath) throw new Error("Orchestration requires the current-user Windows pipe host.");
-      const transport = new WindowsPipeHostTransport({ hostPath: this.windowsHostPath });
+      const transport = this.windowsPipeHostFactory({
+        hostPath: this.windowsHostPath,
+        platform: this.platform,
+        parentPid: process.pid
+      });
       this.windowsTransport = transport;
       transport.on("fatal", () => {
-        void this.stop().catch((error) => console.warn("Orchestration pipe host shutdown failed.", error));
+        this.handleTransportFatal(transport, generation);
       });
+      let endpoint: string;
       try {
-        const endpoint = await transport.start((socket) => this.accept(socket));
-        if (this.windowsTransport !== transport) throw new Error("Orchestration is shutting down.");
-        this.socketEndpoint = endpoint;
+        endpoint = await transport.start((socket) => this.accept(socket));
       } catch (error) {
         await transport.close();
-        this.windowsTransport = null;
+        if (this.windowsTransport === transport) this.windowsTransport = null;
         this.socketEndpoint = null;
         throw error;
       }
+      if (generation !== this.generation) {
+        // stop() ran while the pipe host started: close it again and leave the gateway stopped.
+        await transport.close();
+        if (this.windowsTransport === transport) this.windowsTransport = null;
+        return;
+      }
+      if (this.windowsTransport !== transport) {
+        await transport.close();
+        throw new Error("The Windows orchestration pipe host failed during startup.");
+      }
+      this.socketEndpoint = endpoint;
     } else {
       // Unix domain sockets cap at ~104 path bytes (macOS); fall back to a short
       // current-user directory exactly like the browser gateway does.
@@ -144,8 +216,16 @@ export class OrchestrationGateway {
         endpoint = join(runtimeDirectory, "orchestration.sock");
       }
       await makePrivateDirectory(runtimeDirectory, { recursive: true });
+      if (generation !== this.generation) return;
       this.socketEndpoint = endpoint;
       await listenOnEndpoint(this.server, endpoint);
+      if (generation !== this.generation) {
+        // stop() ran while the socket opened: it closed nothing that was listening yet, so close it here.
+        await closeServer(this.server);
+        await removeEndpoint(endpoint, this.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+        if (this.socketEndpoint === endpoint) this.socketEndpoint = null;
+        return;
+      }
     }
     this.running = true;
     this.heartbeatTimer = setInterval(() => this.sweepConnections(), this.heartbeatIntervalMs);
@@ -153,6 +233,10 @@ export class OrchestrationGateway {
   }
 
   async stop(): Promise<void> {
+    this.generation += 1;
+    this.startIntent += 1;
+    this.cancelTransportRestart();
+    if (this.starting) await this.starting.catch(() => undefined);
     if (this.heartbeatTimer !== null) {
       clearInterval(this.heartbeatTimer);
       this.heartbeatTimer = null;
@@ -163,12 +247,93 @@ export class OrchestrationGateway {
     this.windowsTransport = null;
     if (transport) await transport.close();
     await closeServer(this.server);
-    if (this.socketEndpoint !== null && process.platform !== "win32") {
+    if (this.socketEndpoint !== null && this.platform !== "win32") {
       await removeEndpoint(this.socketEndpoint, this.ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
     }
     this.socketEndpoint = null;
     this.ownedRuntimeDirectory = null;
     this.running = false;
+  }
+
+  private handleTransportFatal(transport: WindowsPipeHostTransport, generation: number): void {
+    // A late event from an old host, or one superseded by explicit stop(), cannot affect a successor.
+    if (this.windowsTransport !== transport || generation !== this.generation) return;
+    const wasRunning = this.running;
+    this.windowsTransport = null;
+    this.socketEndpoint = null;
+    this.running = false;
+    if (this.heartbeatTimer !== null) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    for (const connection of [...this.connections]) this.closeConnection(connection, "closed");
+    // Capabilities are one-run leases. A restarted listener only serves newly launched orchestrators.
+    for (const lease of [...this.leases.values()]) this.expireLease(lease);
+    void transport.close().catch((error) => console.warn("Orchestration pipe host shutdown failed.", error));
+
+    // A fatal during the initial start is reported to that caller. Automatic recovery starts only
+    // after this gateway has served at least one successful start.
+    if (!wasRunning && !this.recovering) return;
+    this.recovering = true;
+    if (this.enabled && !this.starting) this.scheduleTransportRestart();
+  }
+
+  private scheduleTransportRestart(): void {
+    if (!this.enabled || this.restartTimer !== null || !this.recovering) return;
+    if (this.restartAttempts >= MAX_TRANSPORT_RESTART_ATTEMPTS) {
+      this.recovering = false;
+      return;
+    }
+    const delay = TRANSPORT_RESTART_BASE_DELAY_MS * 2 ** this.restartAttempts;
+    const token = this.restartToken;
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (token !== this.restartToken || !this.enabled || !this.recovering) return;
+      this.restartAttempts += 1;
+      void this.restartTransport(token);
+    }, delay);
+    this.restartTimer.unref?.();
+  }
+
+  private async restartTransport(token: number): Promise<void> {
+    if (token !== this.restartToken || !this.enabled) return;
+    const intent = ++this.startIntent;
+    try {
+      await this.beginStart();
+      // A deliberate start or a newer recovery attempt now owns the shared start promise.
+      if (intent !== this.startIntent) return;
+      if (token !== this.restartToken || !this.enabled) {
+        const transport = this.windowsTransport;
+        this.windowsTransport = null;
+        this.socketEndpoint = null;
+        this.running = false;
+        if (this.heartbeatTimer !== null) {
+          clearInterval(this.heartbeatTimer);
+          this.heartbeatTimer = null;
+        }
+        for (const connection of [...this.connections]) this.closeConnection(connection, "closed");
+        for (const lease of [...this.leases.values()]) this.expireLease(lease);
+        if (transport) await transport.close();
+        if (this.recovering && this.enabled) this.scheduleTransportRestart();
+        return;
+      }
+      this.recovering = false;
+      this.restartAttempts = 0;
+    } catch {
+      if (intent === this.startIntent && token === this.restartToken && this.enabled) this.scheduleTransportRestart();
+    }
+  }
+
+  private pauseTransportRestart(): void {
+    this.restartToken += 1;
+    if (this.restartTimer !== null) clearTimeout(this.restartTimer);
+    this.restartTimer = null;
+  }
+
+  private cancelTransportRestart(): void {
+    this.pauseTransportRestart();
+    this.restartAttempts = 0;
+    this.recovering = false;
   }
 
   /** Called at orchestrator PTY launch; the token is one-use with a short TTL. */
