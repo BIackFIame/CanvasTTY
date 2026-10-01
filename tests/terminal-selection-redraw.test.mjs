@@ -57,3 +57,34 @@ test("the guard matches the xterm build the app bundles and every card installs 
   assert.match(card, /const restoreSelectionRedraws = skipEmptySelectionRedraws\(terminal\);/u);
   assert.match(card, /restoreSelectionRedraws\(\);\r?\n\s+terminal\.dispose\(\);/u);
 });
+
+
+test("paused selections track their latest state and repaint once on resume, even without output", () => {
+  const { terminal, service, calls } = fakeTerminal();
+  Object.assign(service, { _isPaused: true, _needsSelectionRefresh: false, _needsFullRefresh: false });
+  skipEmptySelectionRedraws(terminal);
+  service.handleSelectionChanged([0, 1], [5, 1], false);
+  service.handleSelectionChanged([0, 0], [5, 0], true);
+  assert.equal(calls.length, 0, "hidden scrolling never reaches the DOM renderer");
+  assert.deepEqual(service._selectionState, { start: [0, 0], end: [5, 0], columnSelectMode: true });
+  service._needsFullRefresh = false;
+  service.handleSelectionChanged(undefined, undefined, false);
+  assert.equal(calls.length, 0);
+  assert.deepEqual(service._selectionState, { start: undefined, end: undefined, columnSelectMode: false });
+  assert.equal(service._needsFullRefresh, true, "clearing without output requests a resume frame");
+  assert.equal(service._needsSelectionRefresh, true, "the resume frame applies the final selection");
+  service._isPaused = false;
+  service.handleSelectionChanged([1, 2], [4, 2], false);
+  assert.deepEqual(calls, [[[1, 2], [4, 2], false]], "visible selection changes still reach the renderer");
+});
+
+test("a paused service without the resume flags retains its original selection behavior", () => {
+  const { terminal, service, calls } = fakeTerminal();
+  service._isPaused = true;
+  const restore = skipEmptySelectionRedraws(terminal);
+  service.handleSelectionChanged([0, 1], [5, 1], false);
+  assert.equal(calls.length, 1);
+  restore();
+  service.handleSelectionChanged(undefined, undefined, false);
+  assert.equal(calls.length, 2);
+});

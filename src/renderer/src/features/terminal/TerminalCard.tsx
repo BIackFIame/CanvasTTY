@@ -608,9 +608,17 @@ function TerminalCardView({
   }, [session.id]);
   useEffect(() => {
     deliveryGate.current?.set(lifecycle);
-    // A suspended card also stops its cursor blink timer; nothing else in xterm runs without output.
+    // The suspended surface hides xterm's screen so its IntersectionObserver pauses painting;
+    // output still advances the parser and scrollback. Keep the host's geometry for fitting.
     const terminal = terminalRef.current;
-    if (terminal) terminal.options.cursorBlink = surfaceIsLive(lifecycle);
+    if (!terminal) return;
+    const live = surfaceIsLive(lifecycle);
+    terminal.options.cursorBlink = live;
+    if (live) {
+      // A terminal first opened while suspended may not have measured its cells yet.
+      const frame = requestAnimationFrame(() => fitRef.current?.());
+      return () => cancelAnimationFrame(frame);
+    }
   }, [session.id, lifecycle]);
 
   useEffect(() => {
@@ -1048,7 +1056,7 @@ function TerminalCardView({
         </div>
         {!pixelControls && terminalActions}
       </header>
-      <div className="terminal-card__surface" ref={terminalHost} />
+      <div className="terminal-card__surface" data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost} />
       {pixelSkinTheme && (
         <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}
           width={size.width} height={size.height} detail={pixelDetail} surfaceBounds={pixelSurfaceBounds ?? undefined} />

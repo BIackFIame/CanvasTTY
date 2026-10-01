@@ -27,7 +27,7 @@
 - **智能体隔离。** 操作系统层（macOS 用 `sandbox-exec`，Linux 用 bubblewrap）包裹子智能体、插件启动的智能体以及所有非 Manual 模式的智能体：只能写入项目、本次启动的临时目录和其 CLI 自己的目录；密钥、其他 CLI 的凭据和 CanvasTTY 的 token 不可读；无法建立时拒绝启动。Windows 暂无隔离层，子智能体在那里以 Manual 运行。关闭隔离需由用户主动选择。
 - **Git 审计。** 隔离会话结束后，CanvasTTY 会检查它触及的仓库中是否有会在隔离外运行程序的 git 设置和文件，并提供 **Neutralize** 或 **Keep as is**。
 - **原生智能体 helper。** `canvastty-helper`（Go）在 macOS 和 Linux 上运行 MCP 服务器、权限检查和生命周期 hook；Windows 默认仍使用 JavaScript helper，`CANVASTTY_HELPERS=node` 可在任何系统上强制使用它们。从源码构建需要 Go 1.21 或更高版本（`npm run build:helpers`）；没有 Go 时使用 JavaScript helper。
-- **性能。** 只打包主进程和 preload 实际加载的内容，内置皮肤改用 AVIF；画布镜头放在 React 之外；屏幕外的 DOM 终端不再在滚动时重建，HOME 上隐藏的卡片不再接收输出；窗口在服务启动的同时加载，Settings 按需加载；隐藏的浏览器标签页、无人可见的插件帧以及关闭的 Settings 停止轮询。
+- **性能。** 只打包主进程和 preload 实际加载的内容，内置皮肤改用 AVIF；画布镜头放在 React 之外；屏幕外的 DOM 终端不再在滚动时重建；摘要模式和 HOME 编辑中隐藏的终端停止绘制并推迟选区重绘，解析器仍按有界批次接收完整输出以保留终端状态和历史；窗口在服务启动的同时加载，Settings 按需加载；隐藏的浏览器标签页、无人可见的插件帧以及关闭的 Settings 停止轮询。
 - **修复。** 两轮缺陷排查：编排工具在早期 gateway 竞争后可恢复，浏览器操作在重连后不再重复，重启的智能体不再返回上一段对话的答案，保存所有打开的卡片（而不只是前 64 张），并发创建时 32 个会话的上限依然有效，过大的截图替换为说明，`git worktree add` 指向其他仓库时被判定为写入。
 - `get_agent_result` 和 `wait_for_agent` 现在以 `answer` 返回 OpenCode 或 Codex 子 agent 的最终回复，而不是只给编排者全屏 TUI 的原始末尾输出。OpenCode 的回复由 CanvasTTY 插件在回合结束（`session.idle`）时从会话最后一条 assistant 消息读取，Codex 的来自其 Stop hook；最多 4,096 个字符并保留结尾，与其他 agent 输出一样遮蔽，只保存在内存中，下一回合开始时清除。只有子 agent 会捕获，普通卡片不会。`get_agent_result` 还会报告 `status`（回合结束后为 idle；CLI 打开期间 `state` 保持 running）。
 - 当编排者以「自动」运行时，子 agent 不再每一步都询问人。`spawn_agent` 支持可选的 `profile`（`auto`、`normal`、`acceptEdits` 或 `plan`）；不传时子 agent 继承编排者的配置（其 CLI 没有自动模式时为「普通」，YOLO 编排者的子 agent 以「自动」或「普通」运行：YOLO 需要 `spawn_agent` 无法选择的隔离环境）。回答（`profile`、`profileInherited`）、`list_agents` 和卡片会显示实际得到的配置。control CLI 的 `create --profile` 仍是其 worker 的对应方式。

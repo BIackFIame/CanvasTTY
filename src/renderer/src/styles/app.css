@@ -451,6 +451,9 @@ button { border: 0; }
 .terminal-card__surface { height: calc(100% - var(--card-header-height)); padding: 0; user-select: text; background: var(--terminal-background, #202430); }
 .terminal-card--grok .terminal-card__surface { padding: 6px 8px 8px; }
 .terminal-card__surface .xterm { height: 100%; }
+/* xterm observes its screen's intersection, which visibility:hidden alone does not change.
+   Keep the surface and terminal geometry while suspending the screen's renderer. */
+.terminal-card__surface[data-suspended="true"] .xterm-screen { display: none; }
 .terminal-card__surface .xterm-viewport { background-color: var(--terminal-background, #202430); }
 .terminal-card__summary { position: absolute; inset: var(--card-header-height) 0 0; width: 100%; height: calc(100% - var(--card-header-height)); display: none; align-items: center; justify-content: center; overflow: hidden; padding: 0; color: white; background: var(--terminal-background, #202430); cursor: zoom-in; text-align: left; }
 .terminal-card__summary[data-focus-activation="off"] { cursor: pointer; }

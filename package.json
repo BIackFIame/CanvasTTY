@@ -42,7 +42,9 @@
     "predev": "npm run build:even && npm run build:mobile",
     "build:speech": "node scripts/build-companion-speech.mjs",
     "build:helpers": "node scripts/build-native-helpers.mjs",
-    "pack:even": "npm run pack --workspace integrations/even-g2"
+    "pack:even": "npm run pack --workspace integrations/even-g2",
+    "smoke:terminal-hidden": "node scripts/smoke-hidden-terminal-electron.mjs",
+    "bench:terminal-hidden-renderer": "node scripts/smoke-hidden-terminal-electron.mjs --benchmark"
   },
   "dependencies": {
     "@xterm/headless": "6.0.0",
