@@ -12,13 +12,16 @@ export function attentionSessions(sessions: readonly SessionSnapshot[]): Session
 }
 
 /**
- * Whether the attention panel is rendered in the given overlay corner. Only the
- * panel's own visibility setting and placement matter: OS notifications
- * (`attentionNotifications`) are a separate channel and never hide the HUD.
+ * Whether the non-empty attention panel is rendered in the given overlay corner.
+ * OS notifications (`attentionNotifications`) are a separate channel and never
+ * decide whether the HUD is visible.
  */
 export function attentionQueueRenderedAt(
   settings: Pick<AppSettings, "attentionQueueVisible" | "attentionQueuePlacement">,
-  placement: CanvasOverlayPlacement
+  placement: CanvasOverlayPlacement,
+  attentionCount: number
 ): boolean {
-  return settings.attentionQueueVisible && settings.attentionQueuePlacement === placement;
+  return attentionCount > 0
+    && settings.attentionQueueVisible
+    && settings.attentionQueuePlacement === placement;
 }
