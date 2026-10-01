@@ -346,6 +346,8 @@ test("TerminalCard routes its renderer through the pool and frees the context on
   assert.match(card, /pool\.register\(session\.id,/);
   assert.match(card, /webglContextPool\(\)\.contextLost\(session\.id\)/);
   assert.match(card, /WEBGL_lose_context/);
+  assert.match(card, /data-renderer-transition/);
+  assert.match(card, /requestAnimationFrame\(/);
   assert.doesNotMatch(card, /if \(focused && !summaryMode && zoom <= WEBGL_MAX_SCALE\) enableWebgl/);
   const canvas = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
   // Every camera move (the store's listener, no React render) and every layout change tells the pool.
