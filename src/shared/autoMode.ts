@@ -39,8 +39,14 @@ export const AUTO_MODE: Readonly<Partial<Record<ProviderId, AutoModeFlags>>> = O
  */
 export const CLAUDE_SANDBOX_SETTINGS = Object.freeze({ enabled: true, autoAllowBashIfSandboxed: false });
 
+/**
+ * Agents whose "auto" is a per-run permission configuration instead of a flag: OpenCode (1.18) has no auto flag, so its
+ * auto profile is an inline OPENCODE_CONFIG_CONTENT (openCodeAutoEnvironment in openCodeConfig.ts).
+ */
+export const CONFIG_AUTO_MODE: ReadonlySet<ProviderId> = new Set<ProviderId>(["opencode"]);
+
 export function hasAutoMode(provider: ProviderId): boolean {
-  return AUTO_MODE[provider] !== undefined;
+  return AUTO_MODE[provider] !== undefined || CONFIG_AUTO_MODE.has(provider);
 }
 
 /**
@@ -49,6 +55,7 @@ export function hasAutoMode(provider: ProviderId): boolean {
  * classifier is not a safety boundary. Accept-edits keeps the sandbox.
  */
 export function autoModeArguments(provider: ProviderId, thirdPartyModel: boolean): string[] {
+  if (CONFIG_AUTO_MODE.has(provider)) return [];
   const flags = AUTO_MODE[provider];
   if (!flags) throw new Error(`${provider} has no auto mode; use the normal profile.`);
   return [...(thirdPartyModel ? flags.acceptEdits : flags.auto)];

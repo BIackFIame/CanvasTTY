@@ -367,6 +367,7 @@ test("unauthenticated, garbage and HTTP requests get the same guidance and a clo
   // The guidance names the way in and nothing about the protocol, the token or where anything lives.
   assert.match(CONTROL_REFUSAL_MESSAGE, /Orchestrator role/u);
   assert.match(CONTROL_REFUSAL_MESSAGE, /canvastty_agents tools/u);
+  assert.match(CONTROL_REFUSAL_MESSAGE, /list_providers/u);
   assert.doesNotMatch(CONTROL_REFUSAL_MESSAGE, /token|instanceId|controller|\.sock|connection\.json|agent-control|ndjson|json/iu);
   assert.equal(f.calls.length, 0);
 });
@@ -719,4 +720,41 @@ test("an orchestrator tool call looks its sessions up by id: no other card's scr
 
   assert.deepEqual(copied, [child.id, child.id], "only the observed card's own scrollback is read, and no list() snapshot of every card");
   terminals.disposeAll();
+});
+
+test("the providers command lists what CanvasTTY can create and an unknown provider points to it", localSocket, async (t) => {
+  const f = await fixture(t, { providers: () => ({ providers: [{ id: "opencode", name: "OpenCode", installed: true, available: true,
+    signIn: "unknown", subagent: true, orchestrator: true }], note: "n" }) });
+  const listed = await f.request("providers");
+  assert.deepEqual(listed.providers.map((entry) => entry.id), ["opencode"]);
+  await assert.rejects(f.request("providers", { extra: 1 }), (e) => e.code === "INVALID_PARAMS");
+  await assert.rejects(f.request("create", { provider: "glm", profile: "yolo", cwd: f.root }),
+    (e) => e.code === "INVALID_PARAMS" && /providers command/u.test(e.message) && /opencode/u.test(e.message));
+  const cli = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath, "providers"]);
+  assert.equal(cli.result.providers[0].id, "opencode");
+  await assert.rejects(runCli(["providers", "extra"]), /Unexpected or missing positional/u);
+});
+
+test("create passes a model and effort to the worker's CLI and refuses ones it cannot take", localSocket, async (t) => {
+  const f = await fixture(t);
+  const cli = await runCli(["--connection", f.connectionPath, "--client-file", f.clientPath, "create", "--cwd", f.root,
+    "--model", "gpt-5.5", "--effort", "high"]);
+  assert.equal(cli.result.session.model, "gpt-5.5");
+  assert.equal(cli.result.session.effort, "high");
+  const args = f.calls.at(-1).args;
+  assert.ok(args.includes("--model") && args.includes("gpt-5.5"));
+  assert.ok(args.includes("model_reasoning_effort=\"high\""));
+  await assert.rejects(f.request("create", { provider: "codex", profile: "yolo", cwd: f.root, effort: "max" }),
+    (e) => e.code === "INVALID_PARAMS" && /codex takes effort/u.test(e.message) && /providers command/u.test(e.message));
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "glm" }),
+    (e) => e.code === "INVALID_PARAMS" && /provider\/model/u.test(e.message));
+});
+
+test("create refuses a model the worker's CLI does not list, naming the closest", localSocket, async (t) => {
+  const f = await fixture(t, { checkModel: async (provider, model) => provider === "opencode" && model !== "zai/glm-5.3-flash"
+    ? "opencode does not list the model \"nosuch/model\". Closest: zai/glm-5.3-flash. Call list_providers for the models it lists." : null });
+  const before = f.calls.length;
+  await assert.rejects(f.request("create", { provider: "opencode", profile: "yolo", cwd: f.root, model: "nosuch/model" }),
+    (e) => e.code === "INVALID_PARAMS" && /does not list the model/u.test(e.message) && /Run the providers command/u.test(e.message));
+  assert.equal(f.calls.length, before);
 });

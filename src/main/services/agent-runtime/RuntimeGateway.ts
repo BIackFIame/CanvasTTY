@@ -788,6 +788,11 @@ function isAnswerCaptureCheck(value: unknown): value is Record<string, unknown> 
   return isRecord(value) && value.type === "answer-capture-check";
 }
 
+/** The turn-end events that carry a final answer: a Stop hook, or OpenCode's own session.idle (its plugin reads it). */
+function isResultEvent(provider: unknown, event: unknown): boolean {
+  return event === "Stop" || (provider === "opencode" && event === "session.idle");
+}
+
 function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
   if (!isRecord(value)) throw new Error("Runtime message must be an object.");
   const keys = Object.keys(value).filter((key) => key !== "lastAssistantMessage").sort();
@@ -823,7 +828,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     throw new Error("Runtime threadId is invalid.");
   }
   if (value.result !== undefined && (
-    value.state !== "idle" || value.event !== "Stop" || !isRecord(value.result)
+    value.state !== "idle" || !isResultEvent(value.provider, value.event) || !isRecord(value.result)
     || Object.keys(value.result).sort().join(",") !== "text,truncated"
     || typeof value.result.text !== "string" || value.result.text.length > MAX_RESULT_CHARS
     || typeof value.result.truncated !== "boolean"

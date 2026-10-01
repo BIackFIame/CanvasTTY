@@ -44,6 +44,8 @@ import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
+import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
+import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService } from "./services/BrowserService";
@@ -450,6 +452,8 @@ async function initializeServices(): Promise<void> {
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
+        // A subagent's final answer (Codex Stop hook, OpenCode plugin) for get_agent_result and wait_for_agent.
+        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result);
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
           evenG2?.answer(
@@ -553,6 +557,8 @@ async function initializeServices(): Promise<void> {
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureRedaction(redaction);
   terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
+  // OpenCode's auto profile runs shell commands without asking only while base protection guards them.
+  terminalManager.configureBaseProtection(() => settings.get().baseProtectionEnabled);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
   agentChatHistory = new AgentChatHistoryService(settings, providerClis, terminalManager, hermesHomeDirectory);
@@ -585,6 +591,18 @@ async function initializeServices(): Promise<void> {
     }
   });
 
+  // list_providers: the CLI registry resolved at startup, the last usage read (never started from here) and the
+  // launch options trusted plugins declared.
+  const providerModels = new ProviderModelCatalog(providerClis);
+  // OpenCode with a model it does not list fails with only "Unexpected server error": refuse it up front.
+  terminalManager.configureModelCheck((provider, model) => provider === "terminal" ? null : providerModels.unknownModelCached(provider, model));
+  const providerDirectorySources: ProviderDirectorySources = {
+    cli: (provider) => providerClis?.get(provider).state ?? null,
+    models: (provider) => providerModels.peek(provider),
+    checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
+    limits: () => limitsService?.peek() ?? null,
+    launchContributors: () => pluginManager?.launchContributors() ?? []
+  };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.
@@ -595,7 +613,7 @@ async function initializeServices(): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined,
-    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools)
+    handler: new ScopedOrchestrationHandler(new AgentControlService(terminalManager), pluginTools, providerDirectorySources)
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
@@ -641,6 +659,10 @@ async function initializeServices(): Promise<void> {
       onSettingsChanged: (updated) => {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.settingsChanged, updated);
       },
+      // The CLI's create takes no plugin launch options, so none are listed.
+      providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits,
+        models: providerDirectorySources.models }),
+      checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
       windowsHostPath });
     agentControl = gateway;
     try {

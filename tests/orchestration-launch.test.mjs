@@ -31,7 +31,7 @@ test("codex gains a second orchestration -c table only when provided", () => {
   assert.equal(full.length, 4);
   assert.match(full[1], /mcp_servers\.canvastty_browser/u);
   assert.match(full[3], /mcp_servers\.canvastty_agents/u);
-  assert.match(full[3], /enabled_tools=\[.?"spawn_agent/u);
+  assert.match(full[3], /enabled_tools=\[.?"list_providers","spawn_agent/u);
 });
 
 test("the stdio helper advertises orchestration tools and forwards calls", async () => {
@@ -49,7 +49,7 @@ test("the stdio helper advertises orchestration tools and forwards calls", async
   assert.equal(initialized.result.serverInfo.name, "canvastty_agents");
 
   const listed = await dispatch({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.equal(listed.result.tools.length, 6);
+  assert.equal(listed.result.tools.length, 8);
 
   const spawned = await dispatch({
     jsonrpc: "2.0",
@@ -61,8 +61,7 @@ test("the stdio helper advertises orchestration tools and forwards calls", async
   assert.match(spawned.result.content[0].text, /agents/u);
   assert.deepEqual(calls, [{ tool: "list_agents", args: {} }]);
 
-  // The helper is a thin adapter: argument validation happens gateway-side,
-  // so a bridge error surfaces as an isError tool result.
+  // A bridge failure surfaces as an isError tool result.
   client.call = async () => {
     throw Object.assign(new Error("rejected"), { payload: { code: "INVALID_REQUEST", message: "rejected", retryable: false } });
   };
@@ -70,8 +69,17 @@ test("the stdio helper advertises orchestration tools and forwards calls", async
     jsonrpc: "2.0",
     id: 4,
     method: "tools/call",
-    params: { name: "spawn_agent", arguments: {} }
+    params: { name: "list_agents", arguments: {} }
   });
   assert.equal(failed.result.isError, true);
   assert.match(failed.result.content[0].text, /BRIDGE_UNAVAILABLE/u);
+  // Malformed core arguments are answered by the helper with their reason; the bridge would drop the connection.
+  const malformed = await dispatch({
+    jsonrpc: "2.0",
+    id: 5,
+    method: "tools/call",
+    params: { name: "spawn_agent", arguments: {} }
+  });
+  assert.equal(malformed.result.isError, true);
+  assert.match(malformed.result.content[0].text, /INVALID_REQUEST.*Missing required argument: provider/u);
 });

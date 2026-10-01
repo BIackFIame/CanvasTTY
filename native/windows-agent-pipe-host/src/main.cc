@@ -183,9 +183,9 @@ HANDLE CreateSecurePipe(const std::wstring& name, CurrentUserSecurity& security,
 }
 
 bool WaitForOverlapped(HANDLE handle, OVERLAPPED& overlapped, DWORD* transferred,
-                       HANDLE connection_close_event = nullptr) {
-  HANDLE waits[] = {overlapped.hEvent, g_shutdown_event, connection_close_event};
-  const DWORD count = connection_close_event == nullptr ? 2 : 3;
+                       HANDLE connection_close_event = nullptr, HANDLE drain_timer = nullptr) {
+  HANDLE waits[] = {overlapped.hEvent, g_shutdown_event, connection_close_event, drain_timer};
+  const DWORD count = connection_close_event == nullptr ? 2 : (drain_timer == nullptr ? 3 : 4);
   const DWORD status = WaitForMultipleObjects(count, waits, FALSE, INFINITE);
   if (status == WAIT_OBJECT_0) {
     return GetOverlappedResult(handle, &overlapped, transferred, FALSE) != FALSE;
@@ -199,12 +199,12 @@ bool WaitForOverlapped(HANDLE handle, OVERLAPPED& overlapped, DWORD* transferred
 
 bool FinishOverlapped(HANDLE handle, OVERLAPPED& overlapped, BOOL completed,
                       DWORD start_error, DWORD* transferred,
-                      HANDLE connection_close_event = nullptr) {
+                      HANDLE connection_close_event = nullptr, HANDLE drain_timer = nullptr) {
   if (completed) {
     return GetOverlappedResult(handle, &overlapped, transferred, FALSE) != FALSE;
   }
   if (start_error == ERROR_IO_PENDING) {
-    return WaitForOverlapped(handle, overlapped, transferred, connection_close_event);
+    return WaitForOverlapped(handle, overlapped, transferred, connection_close_event, drain_timer);
   }
   SetLastError(start_error);
   return false;
@@ -232,14 +232,19 @@ bool ConnectPipe(HANDLE pipe) {
 
 struct Connection {
   Connection(std::uint32_t new_id, HANDLE new_pipe)
-      : id(new_id), pipe(new_pipe), close_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)) {}
+      : id(new_id), pipe(new_pipe), close_event(CreateEventW(nullptr, TRUE, FALSE, nullptr)),
+        drain_timer(CreateWaitableTimerW(nullptr, TRUE, nullptr)) {}
   ~Connection() {
     if (close_event != nullptr) CloseHandle(close_event);
+    if (drain_timer != nullptr) CloseHandle(drain_timer);
   }
   std::uint32_t id;
   HANDLE pipe;
   HANDLE close_event;
+  HANDLE drain_timer;
   std::atomic<bool> closing{false};
+  // The parent asked to close: what it queued before is written first (a last error message), then the pipe closes.
+  std::atomic<bool> close_after_drain{false};
   std::atomic<int> active_workers{2};
   std::mutex write_mutex;
   std::mutex queue_mutex;
@@ -261,8 +266,13 @@ std::shared_ptr<Connection> FindConnection(std::uint32_t id) {
 }
 
 void MarkClosing(const std::shared_ptr<Connection>& connection) {
-  if (connection == nullptr || connection->closing.exchange(true)) return;
-  if (connection->close_event != nullptr) SetEvent(connection->close_event);
+  if (connection == nullptr) return;
+  {
+    // Changing the wait predicate under its mutex prevents a worker missing this notification.
+    std::scoped_lock lock(connection->queue_mutex);
+    if (connection->closing.exchange(true)) return;
+    if (connection->close_event != nullptr) SetEvent(connection->close_event);
+  }
   connection->queue_changed.notify_all();
 }
 
@@ -290,6 +300,8 @@ bool WriteConnection(const std::shared_ptr<Connection>& connection, const std::u
   if (connection->closing.load() || connection->pipe == INVALID_HANDLE_VALUE) return false;
   std::uint32_t offset = 0;
   while (offset < length) {
+    if (connection->closing.load() || WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0 ||
+        WaitForSingleObject(connection->drain_timer, 0) == WAIT_OBJECT_0) return false;
     OVERLAPPED overlapped{};
     overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (overlapped.hEvent == nullptr) return false;
@@ -298,7 +310,8 @@ bool WriteConnection(const std::shared_ptr<Connection>& connection, const std::u
         connection->pipe, payload + offset, length - offset, nullptr, &overlapped);
     const DWORD start_error = completed ? ERROR_SUCCESS : GetLastError();
     const bool success = FinishOverlapped(
-        connection->pipe, overlapped, completed, start_error, &written, connection->close_event);
+        connection->pipe, overlapped, completed, start_error, &written, connection->close_event,
+        connection->drain_timer);
     CloseHandle(overlapped.hEvent);
     if (!success || written == 0) return false;
     offset += written;
@@ -306,11 +319,58 @@ bool WriteConnection(const std::shared_ptr<Connection>& connection, const std::u
   return true;
 }
 
+// The same deadline covers both queued writes and waiting for the client to consume the pipe buffer.
+constexpr DWORD kCloseDrainMilliseconds = 2000;
+
+void CloseAfterDrain(const std::shared_ptr<Connection>& connection) {
+  if (connection == nullptr) return;
+  bool timer_started = false;
+  {
+    std::scoped_lock lock(connection->queue_mutex);
+    if (connection->closing.load() || connection->close_after_drain.load()) return;
+    connection->close_after_drain.store(true);
+    LARGE_INTEGER due{};
+    due.QuadPart = -static_cast<LONGLONG>(kCloseDrainMilliseconds) * 10'000;
+    timer_started = SetWaitableTimer(connection->drain_timer, &due, 0, nullptr, nullptr, FALSE) != FALSE;
+  }
+  if (!timer_started) MarkClosing(connection);
+  connection->queue_changed.notify_all();
+}
+
+bool FlushConnection(const std::shared_ptr<Connection>& connection) {
+  if (connection->closing.load() || WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0 ||
+      WaitForSingleObject(connection->drain_timer, 0) == WAIT_OBJECT_0) return false;
+
+  // WriteFile completing only means the bytes reached Windows' pipe buffer. DisconnectNamedPipe discards
+  // unread bytes; FlushFileBuffers waits until the client consumes them. It is synchronous even on this
+  // overlapped pipe, so run it on a dedicated, cancellable thread whose handle lives until join().
+  std::atomic<bool> cancel_requested{false};
+  bool flushed = false;
+  std::thread flusher([connection, &cancel_requested, &flushed]() {
+    if (!cancel_requested.load()) flushed = FlushFileBuffers(connection->pipe) != FALSE;
+  });
+  const HANDLE flush_thread = static_cast<HANDLE>(flusher.native_handle());
+  HANDLE waits[] = {flush_thread, g_shutdown_event, connection->close_event, connection->drain_timer};
+  const DWORD status = WaitForMultipleObjects(4, waits, FALSE, INFINITE);
+  if (status != WAIT_OBJECT_0) {
+    cancel_requested.store(true);
+    // Cancellation can race with the thread starting FlushFileBuffers. Retry until the thread exits:
+    // an ERROR_NOT_FOUND before it starts must not leave the later synchronous call blocked forever.
+    do {
+      CancelSynchronousIo(flush_thread);
+      // The pipe was opened for overlapped I/O; also cancel any request still attached to its handle.
+      CancelIoEx(connection->pipe, nullptr);
+    } while (WaitForSingleObject(flush_thread, 10) == WAIT_TIMEOUT);
+  }
+  flusher.join();
+  return flushed && !cancel_requested.load();
+}
+
 bool EnqueueWrite(const std::shared_ptr<Connection>& connection, const std::uint8_t* payload,
                   std::uint32_t length) {
   if (connection == nullptr || connection->closing.load()) return false;
   std::scoped_lock lock(connection->queue_mutex);
-  if (connection->closing.load() ||
+  if (connection->closing.load() || connection->close_after_drain.load() ||
       connection->queued_write_bytes + length > kMaxQueuedWriteBytes) {
     return false;
   }
@@ -332,9 +392,19 @@ void WriteClient(const std::shared_ptr<Connection>& connection) {
       connection->queue_changed.wait(lock, [&]() {
         return connection->closing.load() ||
                WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0 ||
-               !connection->write_queue.empty();
+               !connection->write_queue.empty() || connection->close_after_drain.load();
       });
-      if (connection->closing.load() || WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0) {
+      if (connection->closing.load() || WaitForSingleObject(g_shutdown_event, 0) == WAIT_OBJECT_0 ||
+          WaitForSingleObject(connection->drain_timer, 0) == WAIT_OBJECT_0) {
+        lock.unlock();
+        MarkClosing(connection);
+        break;
+      }
+      if (connection->write_queue.empty()) {
+        // Drain the Windows buffer too, before signalling the reader to finish and disconnecting the pipe.
+        lock.unlock();
+        FlushConnection(connection);
+        MarkClosing(connection);
         break;
       }
       payload = std::move(connection->write_queue.front());
@@ -360,7 +430,8 @@ void ReadClient(const std::shared_ptr<Connection>& connection) {
         connection->pipe, buffer.data(), static_cast<DWORD>(buffer.size()), nullptr, &overlapped);
     const DWORD start_error = completed ? ERROR_SUCCESS : GetLastError();
     const bool success = FinishOverlapped(
-        connection->pipe, overlapped, completed, start_error, &bytes_read, connection->close_event);
+        connection->pipe, overlapped, completed, start_error, &bytes_read, connection->close_event,
+        connection->drain_timer);
     CloseHandle(overlapped.hEvent);
     if (!success || bytes_read == 0) break;
     if (!SendFrame(FrameType::kData, connection->id, buffer.data(), bytes_read)) {
@@ -377,7 +448,7 @@ void StartClient(HANDLE pipe) {
   std::uint32_t id = g_next_connection_id.fetch_add(1);
   if (id == 0) id = g_next_connection_id.fetch_add(1);
   auto connection = std::make_shared<Connection>(id, pipe);
-  if (connection->close_event == nullptr) {
+  if (connection->close_event == nullptr || connection->drain_timer == nullptr) {
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
     SignalShutdown();
@@ -487,13 +558,15 @@ class InputFrameDecoder {
     const auto connection = FindConnection(connection_id);
     if (type == FrameType::kDestroy) {
       if (payload_length != 0) return ProtocolFailure();
-      MarkClosing(connection);
+      // A write queued just before (an error message for the client) is delivered, not dropped.
+      CloseAfterDrain(connection);
       return true;
     }
     if (type == FrameType::kWrite) {
       if (payload_length == 0) return true;
       if (!EnqueueWrite(connection, payload, payload_length)) {
-        MarkClosing(connection);
+        // A late frame after destroy is ignored; it must not cancel the final writes already draining.
+        if (connection == nullptr || !connection->close_after_drain.load()) MarkClosing(connection);
       }
       return true;
     }

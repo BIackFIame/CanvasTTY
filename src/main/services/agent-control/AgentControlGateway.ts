@@ -6,14 +6,16 @@ import { basename, isAbsolute, join } from "node:path";
 import { lazyRequire } from "../../lazyRequire.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
-import type { AppSettings, CreateSessionRequest, PixelSkinApertures, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
+import type { AgentProviderId, AppSettings, CreateSessionRequest, PixelSkinApertures, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
 import { IPC } from "../../../shared/contracts.ts";
 import type { RuntimeLifecycleSignal } from "../agent-runtime/RuntimeGateway.ts";
 import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-browser/WindowsPipeHostTransport.ts";
-import { controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
+import { CONTROL_PROVIDERS, controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { hasAutoMode, isLaunchProfile } from "../../../shared/autoMode.ts";
 import { MAX_PIXEL_SKIN_ARCHIVE_BYTES, type PixelSkinPackRegistry } from "../PixelSkinPackRegistry.ts";
 import type { SettingsStore } from "../SettingsStore.ts";
+import { listProviderDirectory, type ProviderDirectory } from "../providerDirectory.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../../shared/launchModel.ts";
 
 // Headless terminals are created on demand; the module loads with the first one.
 const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
@@ -34,7 +36,7 @@ const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
  * What a caller that is not CanvasTTY's control CLI reads (an unauthenticated, malformed or HTTP request): why it
  * was refused and what to do instead. Stable, and free of protocol details, file names and paths.
  */
-export const CONTROL_REFUSAL_MESSAGE = "CanvasTTY refused this request: this endpoint only accepts requests from sessions CanvasTTY itself launched as orchestrators, and guessing its protocol will not work. If you are an agent and need other agents, ask the person to start you from CanvasTTY's launcher with the Orchestrator role: you will then get the canvastty_agents tools (spawn_agent, list_routes, wait_for_agent and the rest).";
+export const CONTROL_REFUSAL_MESSAGE = "CanvasTTY refused this request: this endpoint only accepts requests from sessions CanvasTTY itself launched as orchestrators, and guessing its protocol will not work. If you are an agent and need other agents, ask the person to start you from CanvasTTY's launcher with the Orchestrator role: you will then get the canvastty_agents tools: call list_providers to see which agents CanvasTTY can launch, then spawn_agent, wait_for_agent and get_agent_result. Do not search the filesystem for agent CLIs or their configuration.";
 /** An HTTP request line (curl, a browser, an HTTP/2 preface): answered with a minimal 403 instead of NDJSON. */
 const HTTP_REQUEST_LINE = /^[A-Z]{3,10} \S{1,4096} HTTP\/\d(?:\.\d)?\r?$/;
 const SECRET = /^[a-f0-9]{64}$/;
@@ -57,7 +59,7 @@ interface ControlRequest {
   instanceId: string;
   token: string;
   controller: string;
-  method: "create" | "list" | "status" | "screen" | "send" | "result" | "interrupt" | "choose" | "dismiss"
+  method: "create" | "list" | "providers" | "status" | "screen" | "send" | "result" | "interrupt" | "choose" | "dismiss"
     | "skin-list" | "skin-install" | "skin-select";
   params: Record<string, unknown>;
 }
@@ -94,6 +96,10 @@ export interface AgentControlGatewayOptions {
   windowsPipeHostFactory?: (options: { hostPath: string; platform: NodeJS.Platform; parentPid: number }) => WindowsPipeHostTransport;
   /** Receipts kept for request-id replay (default 4096); the oldest settled ones are dropped first. */
   maxReceipts?: number;
+  /** Why a worker's model would not start (its CLI lists models and not this one), or null. */
+  checkModel?(provider: AgentProviderId, model: string): Promise<string | null>;
+  /** What `providers` answers: the agent providers this CanvasTTY can create workers for (cached state only). */
+  providers?(): ProviderDirectory;
   /** Called after the Windows pipe host was restarted and connection.json names the new endpoint. */
   onTransportRestarted?(connectionPath: string): void;
 }
@@ -344,7 +350,7 @@ export class AgentControlGateway {
       || value.v !== 1 || typeof value.id !== "string" || !ID.test(value.id)
       || value.instanceId !== this.instanceId || typeof value.token !== "string" || !SECRET.test(value.token)
       || typeof value.controller !== "string" || !SECRET.test(value.controller)
-      || !["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss",
+      || !["create", "list", "providers", "status", "screen", "send", "result", "interrupt", "choose", "dismiss",
         "skin-list", "skin-install", "skin-select"].includes(String(value.method))
       || !record(value.params)) throw new Error("Invalid envelope");
     if (!tokenMatches(value.token, this.tokenHash)) throw new Error("Invalid credential");
@@ -394,8 +400,9 @@ export class AgentControlGateway {
       return this.performSkinOperation(request.method, params);
     }
     if (request.method === "create") {
-      fields(params, ["provider", "cwd", "title", "profile"]);
-      if (!isControlProvider(params.provider) || !isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an agent provider (codex, claude, qwen, kimi, opencode, hermes, grok, omp, pi) and an explicit normal, yolo or auto launch profile.");
+      fields(params, ["provider", "cwd", "title", "profile", "model", "effort"]);
+      if (!isControlProvider(params.provider)) throw new ControlError("INVALID_PARAMS", `Unknown agent provider. Run the providers command to see which agents CanvasTTY can launch; provider must be one of: ${CONTROL_PROVIDERS.join(", ")}.`);
+      if (!isLaunchProfile(params.profile)) throw new ControlError("INVALID_PARAMS", "Specify an explicit normal, yolo or auto launch profile.");
       if (params.profile === "auto" && !hasAutoMode(params.provider)) throw new ControlError("INVALID_PARAMS", `${params.provider} has no auto mode; use profile normal.`);
       const provider = params.provider;
       const capabilities = controlCapabilities(provider);
@@ -404,10 +411,20 @@ export class AgentControlGateway {
       const cwd = await realpath(requestedCwd).catch(() => { throw new ControlError("INVALID_PARAMS", "Project directory does not exist."); });
       if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
       const title = params.title === undefined ? undefined : string(params.title, 80, "title");
+      const modelProblem = (params.model !== undefined ? launchModelProblem(provider, params.model) : null)
+        ?? (params.effort !== undefined ? launchEffortProblem(provider, params.effort) : null);
+      if (modelProblem) throw new ControlError("INVALID_PARAMS", `${modelProblem} Run the providers command for what ${provider} takes.`);
+      if (params.model !== undefined) {
+        let unknown: string | null = null;
+        try { unknown = await this.options.checkModel?.(provider, params.model as string) ?? null; } catch { unknown = null; }
+        if (unknown) throw new ControlError("INVALID_PARAMS", unknown.replace("Call list_providers", "Run the providers command"));
+      }
       if (!this.options.lifecycleEnabled()) throw new ControlError("LIFECYCLE_DISABLED", "Enable agent lifecycle hooks before creating controlled sessions.");
       if (this.sessions.size >= MAX_SESSIONS) throw new ControlError("LIMIT_REACHED", "At most 32 controlled sessions are available per app instance.");
       // Result capture is a Codex-only hook; the manager refuses it for anyone else.
       const session = this.options.terminals.create({ provider, profile: params.profile, cwd, title,
+        ...(params.model !== undefined ? { model: params.model as string } : {}),
+        ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}),
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
       const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
@@ -417,6 +434,10 @@ export class AgentControlGateway {
       this.sessions.set(session.id, owned);
       const { buffer: _buffer, ...metadata } = session;
       return { session: metadata, capabilities };
+    }
+    if (request.method === "providers") {
+      fields(params, []);
+      return this.options.providers?.() ?? listProviderDirectory({ cli: () => null, limits: () => null });
     }
     if (request.method === "list") {
       fields(params, []);

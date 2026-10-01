@@ -2,8 +2,9 @@ import { existsSync } from "node:fs";
 import { posix, win32 } from "node:path";
 import type { ProviderId, ShortcutBindings } from "../../shared/contracts.ts";
 import { normalizeThreadId } from "../../agent-runtime/runtime-protocol.mjs";
-import { openCodeYoloEnvironment } from "./openCodeConfig.ts";
+import { openCodeAutoEnvironment, openCodeYoloEnvironment } from "./openCodeConfig.ts";
 import { autoModeArguments, CLAUDE_SANDBOX_SETTINGS, type LaunchProfile } from "../../shared/autoMode.ts";
+import { providerEffortArguments, providerModelArguments, type ReasoningEffort } from "../../shared/launchModel.ts";
 import {
   providerTerminalBatchCommandLine,
   windowsCommandPromptPath,
@@ -27,6 +28,12 @@ interface LaunchResolutionOptions {
   resumeThreadId?: string;
   /** A launch contributor runs the CLI on another model: "auto" becomes accept-edits (autoModeArguments). */
   thirdPartyModel?: boolean;
+  /** OpenCode "auto": CanvasTTY's base protection is on and its guard runs in this launch, so shell commands may run
+   *  without OpenCode asking (hard denies still deny). Without it, auto still asks for them. */
+  shellGuarded?: boolean;
+  /** The CLI's --model and reasoning effort for this run (launchModel.ts); checked again here. */
+  model?: string;
+  effort?: ReasoningEffort;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -55,9 +62,13 @@ export function resolveTerminalLaunch(
   }
   if (providerCli.state === "unavailable") throw new Error(providerCli.diagnostic);
 
-  const launchEnvironment = profile === "yolo" && provider === "opencode"
-    ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
-    : undefined;
+  const launchEnvironment = provider !== "opencode" ? undefined
+    : profile === "yolo" ? openCodeYoloEnvironment({ ...environment, ...providerCli.environment })
+      : profile === "auto" ? openCodeAutoEnvironment({ ...environment, ...providerCli.environment }, {
+        shellGuarded: options.shellGuarded === true,
+        ...(options.thirdPartyModel ? { thirdPartyModel: true } : {})
+      })
+        : undefined;
   const auto = profile === "auto";
   const providerArgs = [
     ...(provider === "codex" && agentBrowserArgs.includes("-c") ? ["--no-daemon"] : []),
@@ -68,6 +79,8 @@ export function resolveTerminalLaunch(
     ...(provider === "claude"
       ? mergeClaudeInlineSettings(auto ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
       : agentBrowserArgs),
+    ...providerModelArguments(provider, options.model),
+    ...providerEffortArguments(provider, options.effort),
     ...(options.resumePrevious ? resolveResumeArguments(provider, options.resumeThreadId) : [])
   ];
   const combinedEnvironment = {

@@ -52,6 +52,10 @@ import {
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
+import { onDiskPath } from "./onDiskPath.ts";
+import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
@@ -99,6 +103,12 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
+  /** Turns the agent started (its status became working) since launch. */
+  turnStarts?: number;
+  /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
+  promptTurnMark?: number;
+  /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
+  answer?: { text: string; truncated: boolean; at: number };
   /**
    * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
    * and owning plugin carried into the saved record.
@@ -211,6 +221,12 @@ export class TerminalManager {
   private redaction = new SecretRedactionRegistry();
   // Where each running card was actually started (an environment may move it) and its agent config folder.
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
+  // Whether base protection is on (Settings → Agents); OpenCode's auto profile lets shell commands run without asking
+  // only then. Unknown counts as off.
+  private baseProtectionOn: () => boolean = () => false;
+  // The model and effort of a card whose first launch runs before the card is registered (create, restore).
+  private readonly startingModels = new Map<string, LaunchModelChoice>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
   // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
@@ -315,6 +331,15 @@ export class TerminalManager {
     if (!session || session.extras.ownerPluginId === pluginId) return;
     session.extras.ownerPluginId = pluginId;
     this.schedulePersistence();
+  }
+
+  /** Refuses a model its CLI does not list (the cached listing only; none cached allows it). */
+  configureModelCheck(check: (provider: ProviderId, model: string) => string | null): void {
+    this.modelCheck = check;
+  }
+
+  configureBaseProtection(enabled: () => boolean): void {
+    this.baseProtectionOn = () => { try { return enabled() === true; } catch { return false; } };
   }
 
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
@@ -444,6 +469,22 @@ export class TerminalManager {
     return { cols: session.cols, rows: session.rows };
   }
 
+  /**
+   * Whether a submitted prompt was delivered to the session (through deliverInput) and whether a turn has started since
+   * then; null when the session does not exist.
+   */
+  turnProgress(id: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const mark = session.promptTurnMark;
+    return { promptSent: mark !== undefined, turnStartedSincePrompt: mark !== undefined && (session.turnStarts ?? 0) > mark };
+  }
+
+  /** The session's output offset without copying its scrollback; null when it does not exist. */
+  outputOffset(id: string): number | null {
+    return this.sessions.get(id)?.outputOffset ?? null;
+  }
+
   readBuffer(id: string): TerminalBufferSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
@@ -467,13 +508,22 @@ export class TerminalManager {
     control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number } = {}
   ): SessionSnapshot {
     assertCreateRequest(request);
+    // A typed path (an orchestrator's spawn_agent, the control CLI) may spell the folder in another Unicode form
+    // than the disk does; the CLI would then see its own project as a foreign folder.
+    request = { ...request, cwd: onDiskPath(request.cwd) };
     const threadId = request.resumeThreadId === undefined ? undefined : normalizeThreadId(request.provider, request.resumeThreadId);
     if (request.resumeThreadId !== undefined && (!threadId || !canResumeThreadById(request.provider) || request.environment)) {
       throw new Error("Invalid local conversation resume request.");
     }
     const resume: ResumeRequest = threadId ? { threadId } : null;
-    if (control.captureResult && request.provider !== "codex") {
-      throw new Error("Result capture requires a Codex session.");
+    const modelChoice = launchModelChoice(request.provider, request.model, request.effort);
+    if (modelChoice.model !== undefined) {
+      let unknown: string | null = null;
+      try { unknown = this.modelCheck(request.provider, modelChoice.model); } catch { unknown = null; }
+      if (unknown) throw new Error(unknown);
+    }
+    if (control.captureResult && !RESULT_CAPTURE_PROVIDERS.has(request.provider)) {
+      throw new Error("Result capture requires a Codex or OpenCode session.");
     }
     assertDirectory(request.cwd);
 
@@ -505,17 +555,24 @@ export class TerminalManager {
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
-      failureDetails: null
+      failureDetails: null,
+      ...modelChoice
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
-    const launched = awaitMeasuredGrid || contributed
-      ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
-        control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    this.startingModels.set(id, modelChoice);
+    let launched: ReturnType<TerminalManager["spawnProcess"]> | { process: null; agentBrowser: null; agentRuntime: null; agentOrchestration: null; failure: null };
+    try {
+      launched = awaitMeasuredGrid || contributed
+        ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
+        : this.spawnProcess(id, request.provider, request.profile, request.cwd,
+          INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
+          control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    } finally {
+      this.startingModels.delete(id);
+    }
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
 
     const session: ManagedSession = {
@@ -731,9 +788,11 @@ export class TerminalManager {
         ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
         : "The session has already exited." };
     }
-    return this.inputChecked(id, data)
-      ? { delivered: true }
-      : { delivered: false, reason: "The terminal no longer accepts input." };
+    // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
+    const mark = session.turnStarts ?? 0;
+    if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
+    if (data.endsWith("\r")) session.promptTurnMark = mark;
+    return { delivered: true };
   }
 
   private wakeLaunchWaiters(session: ManagedSession): void {
@@ -830,12 +889,33 @@ export class TerminalManager {
     }
 
     const nextStatus = signal.state;
+    // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
+    if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
+    // A new turn: the previous answer is no longer this turn's.
+    if (nextStatus === "working") session.answer = undefined;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
     if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
+  }
+
+  /**
+   * Keeps the final answer a result-capturing session reported with its turn's end (the Codex Stop hook, the OpenCode
+   * plugin's session.idle); read back masked by answer(). In memory only, never saved.
+   */
+  recordAnswer(id: string, result: { text: string; truncated: boolean }): void {
+    const session = this.sessions.get(id);
+    if (!session?.captureResult || typeof result?.text !== "string") return;
+    session.answer = { text: result.text, truncated: result.truncated === true, at: Date.now() };
+  }
+
+  /** The last final answer (masked), or null when none was reported since the current turn started. */
+  answer(id: string): { text: string; truncated: boolean; at: number } | null {
+    const answer = this.sessions.get(id)?.answer;
+    if (!answer) return null;
+    return { ...answer, text: this.redactSecretsTail(answer.text, answer.text.length + 1) };
   }
 
   setLifecycleHooksEnabled(enabled: boolean): void {
@@ -976,7 +1056,9 @@ export class TerminalManager {
       exitCode: null,
       failureDetails: null,
       ...(step.note ? { restoreNote: step.note } : {}),
-      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {})
+      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
+      ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
+      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {})
     };
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
@@ -1043,7 +1125,11 @@ export class TerminalManager {
       && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
     if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
-        const launched = this.spawnProcess(
+        this.startingModels.set(descriptor.id, { ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+          ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}) });
+        let launched: ReturnType<TerminalManager["spawnProcess"]>;
+        try {
+          launched = this.spawnProcess(
           descriptor.id,
           descriptor.provider,
           descriptor.profile,
@@ -1056,7 +1142,10 @@ export class TerminalManager {
           undefined,
           null,
           descriptor.parentSessionId
-        );
+          );
+        } finally {
+          this.startingModels.delete(descriptor.id);
+        }
         process = launched.process;
         agentBrowser = launched.agentBrowser;
         agentRuntime = launched.agentRuntime;
@@ -1302,7 +1391,7 @@ export class TerminalManager {
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
-      const providerEnvironment = {
+      const providerEnvironment: Record<string, string> = {
         ...(provider === "opencode"
           ? mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment)
           : { ...browserEnvironment, ...runtimeEnvironment }),
@@ -1310,6 +1399,8 @@ export class TerminalManager {
         // Orchestrators alone learn where the control descriptor and CLI are.
         ...controlEnvironment(role, this.controlConnection)
       };
+      // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
+      if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
@@ -1323,7 +1414,9 @@ export class TerminalManager {
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
-        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {})
+        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...(agentRuntime?.decisions === true && this.baseProtectionOn() ? { shellGuarded: true } : {}),
+        ...this.launchModelOf(id)
       });
       const session = this.sessions.get(id);
       if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
@@ -1339,7 +1432,8 @@ export class TerminalManager {
         command: launch.command,
         args: launch.args,
         cwd,
-        env: { ...baseEnvironment, ...launchEnvironment },
+        // The app's own PWD names another folder; a CLI that reads PWD must see where it runs.
+        env: { ...baseEnvironment, ...launchEnvironment, PWD: cwd },
         launchEnvironment,
         agentBrowser,
         agentRuntime,
@@ -1350,6 +1444,17 @@ export class TerminalManager {
       cleanup();
       throw error;
     }
+  }
+
+  /** The model and effort this card's launches ask the CLI for. */
+  private launchModelOf(id: string): LaunchModelChoice {
+    const starting = this.startingModels.get(id);
+    if (starting) return starting;
+    const metadata = this.sessions.get(id)?.metadata;
+    return {
+      ...(metadata?.model !== undefined ? { model: metadata.model } : {}),
+      ...(metadata?.effort !== undefined ? { effort: metadata.effort } : {})
+    };
   }
 
   /**
@@ -1562,7 +1667,8 @@ export class TerminalManager {
         return refuse(wrapped.reason);
       }
       this.addLaunchSecrets(session, wrapped.secrets);
-      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd, env: { ...planned.env, ...wrapped.env } };
+      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
+        env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
     }
     let process: IPty;
     try {
@@ -1808,6 +1914,26 @@ function assertDirectory(cwd: string): void {
 
 const SESSION_PROVIDERS = new Set<ProviderId>(CANVAS_LAUNCHER_ITEMS);
 const SESSION_ROLES = new Set<SessionRole>(["agent", "orchestrator", "subagent"]);
+
+type LaunchModelChoice = { model?: string; effort?: ReasoningEffort };
+
+/** The request's model and effort, checked for its CLI; a refusal names what that CLI takes. */
+function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown): LaunchModelChoice {
+  if (model === undefined && effort === undefined) return {};
+  if (provider === "terminal") throw new Error("A plain terminal has no model.");
+  if (model !== undefined) {
+    const problem = launchModelProblem(provider, model);
+    if (problem) throw new Error(problem);
+  }
+  if (effort !== undefined) {
+    const problem = launchEffortProblem(provider, effort);
+    if (problem) throw new Error(problem);
+  }
+  return {
+    ...(model !== undefined ? { model: model as string } : {}),
+    ...(effort !== undefined ? { effort: effort as ReasoningEffort } : {})
+  };
+}
 
 function assertCreateRequest(request: CreateSessionRequest): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");

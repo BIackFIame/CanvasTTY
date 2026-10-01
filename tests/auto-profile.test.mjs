@@ -74,9 +74,10 @@ async function pipelineAnswering(t, answer, extra = {}) {
   return { pipeline, requests };
 }
 
-test("auto exists only where the CLI has a native auto mode; normal and YOLO are unchanged", () => {
+test("auto exists only where the CLI has a native auto mode (OpenCode: a per-run permission config); normal and YOLO are unchanged", () => {
   assert.deepEqual(Object.keys(AUTO_MODE).sort(), ["claude", "codex", "grok"]);
-  for (const provider of ["qwen", "opencode", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
+  for (const provider of ["qwen", "kimi", "cursor", "terminal"]) assert.equal(hasAutoMode(provider), false, provider);
+  assert.equal(hasAutoMode("opencode"), true);
   assert.throws(() => launch("qwen", "auto"), /qwen has no auto mode; use the normal profile/u);
   // Normal adds no permission flag and no sandbox.
   assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["--no-daemon", "-c", "x=1"]);
