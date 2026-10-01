@@ -507,6 +507,9 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
   await waitFor(async () => (await saved(directory).catch(() => []))[0]?.environment?.ref?.box === "b-1");
   assert.equal((await saved(directory))[0].environmentChoice, undefined, "a prepared environment replaces the choice");
 
+  // Stop and flush the previous run before replacing its descriptor for the next startup.
+  await third.manager.shutdown();
+
   // A pending choice whose plugin is gone is held with the plugin's reason; Restart refuses, never runs locally.
   await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{
     ...record, environmentChoice: { pluginId: "gone.plugin", kind: "box" }
