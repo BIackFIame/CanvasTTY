@@ -118,6 +118,25 @@ test("plugins cannot pass auto's flags, replace Codex's hooks or their trust", (
   assert.equal(coreOwnedLaunchArgument("codex", "projects={\"/p\"={trust_level=\"trusted\"}}"), false);
 });
 
+test("launch arguments are judged by their flags and config keys, not by words inside a value", () => {
+  // Permission-changing flags and config keys stay refused, in every spelling.
+  for (const [provider, argument] of [
+    ["codex", "--dangerously-bypass-approvals-and-sandbox"], ["codex", "approval_policy=\"never\""], ["codex", "sandbox_mode=danger-full-access"],
+    ["codex", "--config=approval_policy=never"], ["codex", "-capproval_policy=never"], ["codex", "sandbox_workspace_write.network_access=true"],
+    ["codex", "--sandbox"], ["codex", "-a"], ["codex", "exec"], ["grok", "--dangerously-skip-permissions"], ["grok", "--permission-mode"],
+    ["grok", "--some-bypass-flag"], ["claude", "--allowedTools"], ["qwen", "-y"]
+  ]) assert.equal(coreOwnedLaunchArgument(provider, argument), true, `${provider} ${argument}`);
+  // A context plugin's rule text that mentions those words is a value, not a setting.
+  const rule = "Never run with --dangerously-skip-permissions; approval_policy stays on-request and nothing may bypass the sandbox_mode.";
+  for (const provider of ["codex", "grok", "claude", "qwen"]) {
+    assert.equal(coreOwnedLaunchArgument(provider, rule), false, provider);
+  }
+  for (const argument of ["developer_instructions=\"Do not use --dangerously-bypass-approvals-and-sandbox\"", "--config=instructions=never bypass approval_policy",
+    "model=\"gpt-6\"", "--rules", "Rule: approval_policy=never is not allowed here."]) {
+    assert.equal(coreOwnedLaunchArgument("codex", argument), false, argument);
+  }
+});
+
 test("the contribution's thirdPartyModel is checked, merged, allowed in a policy, and handed to plugins with trustedFolder", async (t) => {
   const context = { sessionId: "s", provider: "claude", profile: "auto", role: "agent", cwd: "/p", restoring: false, resume: false,
     options: { "p.accounts": { on: true } }, environment: null };

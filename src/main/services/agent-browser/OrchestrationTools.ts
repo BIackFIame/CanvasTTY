@@ -62,7 +62,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         case "spawn_agent":
           return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
-          return await this.send(sessionId, request.arguments);
+          return await this.send(sessionId, request.arguments, signal);
         case "observe_agent":
           return this.observe(sessionId, request.arguments);
         case "get_agent_result":
@@ -175,13 +175,20 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     };
   }
 
-  private async send(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async send(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     this.requireOwned(orchestratorId, args.sessionId as string);
-    await this.control.send(
-      args.sessionId as string,
-      args.prompt as string,
-      args.submit === undefined ? true : Boolean(args.submit)
-    );
+    try {
+      await this.control.send(
+        args.sessionId as string,
+        args.prompt as string,
+        args.submit === undefined ? true : Boolean(args.submit),
+        signal
+      );
+    } catch (error) {
+      if (signal?.aborted) throw canceledError();
+      throw error;
+    }
+    if (signal?.aborted) throw canceledError();
     return { sessionId: args.sessionId as string, sent: true };
   }
 

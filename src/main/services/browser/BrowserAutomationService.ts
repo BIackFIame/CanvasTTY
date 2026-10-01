@@ -540,13 +540,17 @@ export class BrowserAutomationService {
     return point;
   }
 
+  /**
+   * Types into an element. `typed` is false when a JavaScript dialog opened while the element was being focused or
+   * selected (its focus handler raised it), so no text was inserted.
+   */
   async type(
     tabId: string,
     revision: number,
     ref: BrowserElementRef | string | undefined,
     text: string | undefined,
     signal?: AbortSignal
-  ): Promise<BrowserPointerResult> {
+  ): Promise<{ point: BrowserPointerResult; typed: boolean }> {
     if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > 64 * 1024) {
       throw new BrowserKernelError("PAYLOAD_TOO_LARGE", "Browser input text exceeds 64 KB.");
     }
@@ -555,7 +559,7 @@ export class BrowserAutomationService {
     const focused = await this.commandAllowDialog(session, "DOM.focus", {
       backendNodeId: entry.value.backendNodeId
     });
-    if (!focused.completed) return point;
+    if (!focused.completed) return { point, typed: false };
     const resolved = await this.command<{ object?: { objectId?: string } }>(session, "DOM.resolveNode", {
       backendNodeId: entry.value.backendNodeId
     });
@@ -566,10 +570,11 @@ export class BrowserAutomationService {
         functionDeclaration: "function(){if(this instanceof HTMLInputElement||this instanceof HTMLTextAreaElement){this.focus();this.select();}}",
         silent: true
       });
-      if (!selected.completed) return point;
+      if (!selected.completed) return { point, typed: false };
     }
+    // A dialog raised by the page's input handler comes after the text went in.
     await this.commandAllowDialog(session, "Input.insertText", { text });
-    return point;
+    return { point, typed: true };
   }
 
   async select(

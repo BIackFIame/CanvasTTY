@@ -51,6 +51,8 @@ interface TerminalPort {
   geometry(id: string): { cols: number; rows: number };
   /** Masks plugin launch secrets in text handed to a controller. */
   redactSecrets?(text: string): string;
+  /** Closes a card (a create whose setup failed must not leave one running without its controller). */
+  dispose?(id: string): void;
 }
 
 interface ControlRequest {
@@ -426,12 +428,18 @@ export class AgentControlGateway {
         ...(params.model !== undefined ? { model: params.model as string } : {}),
         ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}),
         position: { x: 1600, y: this.options.terminals.listMetadata().length * 470 } }, { captureResult: capabilities.result });
-      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
-      const snapshot = this.options.terminals.readBuffer(session.id);
-      const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
-        ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
-        outputOffset: snapshot.outputOffset, resultRevision: 0, turn: null, completedTurn: null };
-      this.sessions.set(session.id, owned);
+      try {
+        const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+        const snapshot = this.options.terminals.readBuffer(session.id);
+        const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
+          ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
+          outputOffset: snapshot.outputOffset, resultRevision: 0, turn: null, completedTurn: null };
+        this.sessions.set(session.id, owned);
+      } catch (error) {
+        // The card started but its controller never got it: close it, so a retry does not leave a second one.
+        this.options.terminals.dispose?.(session.id);
+        throw error;
+      }
       const { buffer: _buffer, ...metadata } = session;
       return { session: metadata, capabilities };
     }

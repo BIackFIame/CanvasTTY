@@ -54,6 +54,7 @@ type Terminals = Pick<
   | "dispose"
   | "rename"
   | "inputChecked"
+  | "redactSecrets"
 >;
 type SpeechPort = Pick<
   SpeechRecognizer,

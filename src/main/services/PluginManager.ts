@@ -199,6 +199,8 @@ export class PluginManager {
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
+  /** Plugin id -> tail of the install, module change, update and uninstall chain for that plugin. */
+  private readonly pluginOperations = new Map<string, Promise<void>>();
   private readonly storageWrites = new Map<string, Promise<void>>();
   private readonly downloadRepository: DownloadRepository;
   private readonly downloadFullRepository: DownloadRepository;
@@ -367,7 +369,7 @@ export class PluginManager {
     if (!pending) throw new Error("Plugin installation preview expired. Inspect the GitHub link again.");
     this.pending.delete(token);
 
-    const { preview, packageRoot, directory } = pending;
+    const { preview, directory } = pending;
     const modules = normalizeSelectedModules(
       preview.manifest,
       selectedModules ?? preview.manifest.modules?.filter((module) => module.defaultSelected).map((module) => module.id)
@@ -380,11 +382,23 @@ export class PluginManager {
       throw new Error("Plugin module selection is invalid.");
     }
     const destination = join(this.pluginRoot, preview.manifest.id);
+    // Two previews of the same repository can be installed at once. The existence check and the
+    // directory move run under the plugin's lock, so the second call sees the first one's entry
+    // instead of failing its move and then deleting the directory and entry the first one made.
+    return this.withPluginLock(preview.manifest.id, () => this.installPending(pending, modules, destination));
+  }
+
+  private async installPending(
+    { preview, packageRoot, directory }: PendingInstall,
+    modules: string[],
+    destination: string
+  ): Promise<InstalledPlugin> {
     if (this.plugins.has(preview.manifest.id)) {
       await rm(directory, { recursive: true, force: true });
       throw new Error(`Plugin ${preview.manifest.id} is already installed.`);
     }
 
+    let installed: InstalledPlugin | null = null;
     try {
       if (preview.manifest.modules?.length) {
         await materializeModularPackage(
@@ -398,7 +412,7 @@ export class PluginManager {
       } else {
         await rename(packageRoot, destination);
       }
-      const installed: InstalledPlugin = {
+      installed = {
         manifest: preview.manifest,
         sourceUrl: preview.sourceUrl,
         enabled: true,
@@ -412,7 +426,7 @@ export class PluginManager {
       await this.persistRegistry();
       return structuredClone(activePlugin(installed));
     } catch (error) {
-      this.plugins.delete(preview.manifest.id);
+      if (installed && this.plugins.get(preview.manifest.id) === installed) this.plugins.delete(preview.manifest.id);
       await rm(destination, { recursive: true, force: true });
       throw error;
     } finally {
@@ -654,7 +668,11 @@ export class PluginManager {
     return registrations;
   }
 
-  async setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+  setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+    return this.withPluginLock(pluginId, () => this.replaceModules(pluginId, selectedModules));
+  }
+
+  private async replaceModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
     if (!plugin.manifest.modules?.length) throw new Error("Plugin does not declare optional modules.");
     const selected = normalizeSelectedModules(plugin.manifest, selectedModules);
@@ -707,7 +725,11 @@ export class PluginManager {
     }
   }
 
-  async uninstall(pluginId: string): Promise<void> {
+  uninstall(pluginId: string): Promise<void> {
+    return this.withPluginLock(pluginId, () => this.removePlugin(pluginId));
+  }
+
+  private async removePlugin(pluginId: string): Promise<void> {
     const plugin = this.requirePlugin(pluginId);
     if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
@@ -918,7 +940,7 @@ export class PluginManager {
     const inFlight = this.updatingPlugins.get(pluginId);
     if (inFlight) return inFlight;
 
-    const update = this.performPluginUpdate(pluginId);
+    const update = this.withPluginLock(pluginId, () => this.performPluginUpdate(pluginId));
     this.updatingPlugins.set(pluginId, update);
     const clearInFlight = () => {
       if (this.updatingPlugins.get(pluginId) === update) this.updatingPlugins.delete(pluginId);
@@ -1049,6 +1071,22 @@ export class PluginManager {
     });
     this.versionsWrite = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  /**
+   * Runs one install, module change, update or uninstall of a plugin after the previous one for the
+   * same plugin id settles. Each of them moves the plugin directory aside and puts it back on
+   * failure, so two of them overlapping would restore or delete the other one's files.
+   */
+  private withPluginLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.pluginOperations.get(pluginId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.pluginOperations.set(pluginId, tail);
+    void tail.then(() => {
+      if (this.pluginOperations.get(pluginId) === tail) this.pluginOperations.delete(pluginId);
+    });
+    return result;
   }
 
   contribution(pluginId: string, contributionId: string): PluginContribution {

@@ -262,6 +262,40 @@ test("previews, installs, serves, stores, disables, and uninstalls a static pack
   }
 });
 
+test("parallel installs of one plugin keep the winner's files and registry entry", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-install-race-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    await manager.load();
+    const first = await manager.previewInstall("https://github.com/example/studio-kit");
+    const second = await manager.previewInstall("https://github.com/example/studio-kit");
+
+    const results = await Promise.allSettled([manager.install(first.token), manager.install(second.token)]);
+
+    assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
+    const rejected = results.find((result) => result.status === "rejected");
+    assert.match(rejected.reason.message, /already installed/);
+    assert.deepEqual(manager.list().map((plugin) => plugin.manifest.id), ["com.example.studio-kit"]);
+    await stat(join(userData, "plugins", "com.example.studio-kit", "widgets", "status.html"));
+    const asset = await manager.protocolResponse("canvastty-plugin://com.example.studio-kit/widgets/status.html");
+    assert.equal(asset.status, 200);
+
+    const reloaded = new PluginManager(userData, async () => undefined);
+    try {
+      await reloaded.load();
+      assert.deepEqual(reloaded.list().map((plugin) => plugin.manifest.id), ["com.example.studio-kit"]);
+    } finally {
+      await reloaded.dispose();
+    }
+  } finally {
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+  }
+});
+
 test("plugin lifecycle hooks require opt-in and revoke trust fail-closed", async () => {
   const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-hooks-"));
   const manager = new PluginManager(userData, async (_url, destination) => {

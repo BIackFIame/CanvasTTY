@@ -13,6 +13,8 @@ import { ORCHESTRATION_BRIDGE_PROTOCOL_VERSION } from "../src/main/services/agen
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 const writes = [];
+// On Windows the gateway listens through the current-user pipe host that CI builds before the tests
+// (npm run test:windows-pipe-host); elsewhere the option is ignored.
 const WINDOWS_PIPE_HOST = join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe");
 
 class TestClient {
@@ -642,3 +644,37 @@ test("reenabling during a replacement start lets recovery finish for new session
   assert.equal(gateway.registerOrchestrator({ terminalSessionId: "after-enable" }).address, "fake-pipe-1");
 });
 
+test("a send_to_agent canceled while its text waited delivers nothing and answers CANCELED", async () => {
+  const controller = new AbortController();
+  let received = null;
+  const control = {
+    status: (id) => id === "orchestrator-1" ? { role: "orchestrator", provider: "codex" } : { id, parentSessionId: "orchestrator-1", provider: "codex" },
+    send: async (_id, _text, _submit, signal) => {
+      received = signal;
+      controller.abort();
+      throw new Error("The text for agent child-1 was not delivered: The delivery was cancelled.");
+    }
+  };
+  const handler = new ScopedOrchestrationHandler(control);
+  handler.requireOwned = () => undefined;
+  await assert.rejects(
+    handler.execute("orchestrator-1", { id: "send-1", tool: "send_to_agent", arguments: { sessionId: "child-1", prompt: "hi" } }, controller.signal),
+    (error) => error.bridgeError?.code === "CANCELED" || error.code === "CANCELED"
+  );
+  assert.equal(received, controller.signal, "the signal reaches the delivery");
+});
+
+test("deliverInput with a cancelled signal writes nothing to the card", async () => {
+  const written = [];
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner([], { onWrite: (data) => written.push(data) }));
+  const card = terminals.create({ provider: "codex", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
+  const before = written.length;
+  const controller = new AbortController();
+  controller.abort();
+  const delivery = await terminals.deliverInput(card.id, "hello\r", undefined, controller.signal);
+  assert.equal(delivery.delivered, false);
+  assert.match(delivery.reason, /cancelled/u);
+  assert.equal(written.length, before);
+  assert.equal((await terminals.deliverInput(card.id, "hello\r")).delivered, true);
+  terminals.disposeAll();
+});

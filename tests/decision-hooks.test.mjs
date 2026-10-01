@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { AGENT_RUNTIME_ENV, OPENCODE_DECISIONS_ENV, RUNTIME_PROTOCOL_VERSION } from "../src/agent-runtime/runtime-protocol.mjs";
 import { buildRequest, hookOutput, parseDecision } from "../src/agent-runtime/permission-gate.mjs";
 import { createOpenCodeDecisions, guardedCall } from "../src/agent-runtime/opencode-decisions.mjs";
-import { DecisionHooks, mergeDecisions } from "../src/main/services/DecisionHooks.ts";
+import { DecisionHooks, TOO_LARGE_MESSAGE, mergeDecisions } from "../src/main/services/DecisionHooks.ts";
 import { RuntimeGateway } from "../src/main/services/agent-runtime/RuntimeGateway.ts";
 import { AgentRuntimeBridge } from "../src/main/services/agent-runtime/AgentRuntimeBridge.ts";
 import { ProviderRuntimeLaunchAdapters } from "../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts";
@@ -110,6 +110,38 @@ test("timeouts, errors and unreadable answers ask the person and never allow", a
     .decide("s1", request("Bash", { command: "ls" }), aborted.signal);
   aborted.abort();
   assert.equal((await pending).behavior, "ask");
+});
+
+test("cut input under base protection: a shell call, or a file write whose target is not visible, is denied, never let through", async () => {
+  const cut = (toolName, preview) => request(toolName, null, { truncated: true, toolInputPreview: preview });
+  const decisions = hooks();
+  for (const [toolName, preview] of [
+    ["Bash", "{\"command\":\"echo hi; sudo rm -rf / # " + "x".repeat(200)],
+    ["exec_command", "{\"cmd\":[\"bash\",\"-lc\",\"" + "x".repeat(200)],
+    ["Write", "{\"content\":\"" + "x".repeat(200)],
+    ["apply_patch", "{\"command\":\"*** Begin Patch\\n*** Add File: /etc/x"]
+  ]) {
+    const result = await decisions.decide("s1", cut(toolName, preview), live());
+    assert.equal(result.behavior, "deny", toolName);
+    assert.equal(result.message, TOO_LARGE_MESSAGE, toolName);
+  }
+  // A file write whose path is at the start of the preview is judged by that path, as before.
+  const inside = JSON.stringify({ file_path: join(project, "big.txt"), content: "x".repeat(300) }).slice(0, 200);
+  assert.equal((await decisions.decide("s1", cut("Write", inside), live())).behavior, "none");
+  // Tools the rules do not read, and base protection off, are unchanged.
+  assert.equal((await decisions.decide("s1", cut("Read", "{\"file_path\":"), live())).behavior, "none");
+  assert.equal((await hooks({ protect: false }).decide("s1", cut("Bash", "{\"command\":\"ls"), live())).behavior, "none");
+});
+
+test("a plugin list that cannot be read is the gateway's failure, not an empty list", async () => {
+  const failing = new DecisionHooks({
+    baseProtection: () => false, services: () => { throw new Error("plugins"); }, call: async () => null,
+    session: () => ({ provider: "codex", role: "agent", cwd: project, configDirs: [] }), home
+  });
+  await assert.rejects(failing.decide("s1", request("Bash", { command: "ls" }), live()));
+  assert.equal(failing.wanted("codex"), true, "the hook is installed when the list cannot be read");
+  assert.ok(failing.budgetMs("codex") > 0);
+  // A handler that throws is answered by the gateway as an ask marked unavailable (permission-gate-fail-closed tests).
 });
 
 test("appliesTo limits plugins; wanted() says whether a launch needs the hook", async () => {

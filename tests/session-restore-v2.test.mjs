@@ -137,6 +137,14 @@ test("the restore plan orders parents first and applies the per-card and shared-
   assert.deepEqual(reopen.map((step) => step.threadId),
     [undefined, CONVERSATION, undefined, undefined, CONVERSATION, undefined]);
   assert.deepEqual(planSessionRestore(records, "off", noEnvironment), []);
+  // Subagents whose parents point back at each other have no owner: none of that loop comes back.
+  const loop = planSessionRestore([
+    record("a", { role: "subagent", parentSessionId: "b" }), record("b", { role: "subagent", parentSessionId: "a" }),
+    record("c", { role: "subagent", parentSessionId: "a" }), record("self", { role: "subagent", parentSessionId: "self" }),
+    record("root", { role: "orchestrator" }), record("deep", { role: "subagent", parentSessionId: "mid" }),
+    record("mid", { role: "subagent", parentSessionId: "root" })
+  ], "continue", noEnvironment);
+  assert.deepEqual(loop.map((step) => step.record.id), ["root", "mid", "deep"]);
 });
 
 test("Continue resumes each card's own conversation and never shares the folder's latest one", async (t) => {

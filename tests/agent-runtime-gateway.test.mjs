@@ -117,6 +117,24 @@ test("RuntimeGateway rejects a wrong capability and ignores a stale turn complet
   assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
 });
 
+test("RuntimeGateway: a late start of an earlier turn does not take over from the newer turn", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const capability = gateway.registerSession("terminal-turns", "codex");
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-1"));
+  await send(capability.address, message(capability, "idle", "Stop", "turn-1"));
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-2"));
+  // Turn 1's start hook arrives late, on its own connection.
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-1"));
+  await send(capability.address, message(capability, "idle", "Stop", "turn-2"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(signals.map(({ signal }) => `${signal.state}:${signal.turnId}`), ["working:turn-1", "idle:turn-1", "working:turn-2", "idle:turn-2"]);
+  assert.equal(gateway.currentStatus("terminal-turns"), "idle");
+});
+
 test("RuntimeGateway propagates threadId for codex sessions with canonical UUID", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];

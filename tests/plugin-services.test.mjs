@@ -353,6 +353,43 @@ test("timeouts return errors, crashes restart with backoff, and repeated crashes
   await assert.rejects(instance.request("com.example.a", "probe", "ping", null), /not running/);
 });
 
+test("a host reply to a service that crashed is not delivered to its restarted process", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-service-stale-reply-"));
+  let releaseSlow;
+  const slowValue = new Promise((resolve) => { releaseSlow = resolve; });
+  let slowStarted;
+  const slowRequested = new Promise((resolve) => { slowStarted = resolve; });
+  const { instance } = supervisor({
+    host: {
+      storageGet: async (_pluginId, key) => {
+        if (key !== "slow") return "fast";
+        slowStarted();
+        return slowValue;
+      },
+      storageSet: async () => undefined,
+      emit: () => undefined
+    }
+  });
+  t.after(async () => { await instance.dispose(); await rm(root, { recursive: true, force: true }); });
+  await instance.sync([await specFor(root, "com.example.a", "probe", PROBE)]);
+  const hostReplies = () => instance.report("com.example.a").log.filter((entry) => entry.message.startsWith("host-reply"));
+
+  await instance.request("com.example.a", "probe", "host", { method: "storage.get", params: { key: "slow" } });
+  await slowRequested;
+  await assert.rejects(instance.request("com.example.a", "probe", "crash", null), /stopped/);
+  await waitFor(() => instance.report("com.example.a").services[0].state === "running");
+
+  releaseSlow("stale");
+  await slowValue;
+  // A later host request to the new process is answered after the stale reply would have been
+  // written, and the process logs replies in the order it reads them.
+  await instance.request("com.example.a", "probe", "host", { method: "storage.get", params: { key: "fast" } });
+  await waitFor(() => hostReplies().length > 0);
+  assert.equal(hostReplies().length, 1);
+  assert.match(hostReplies()[0].message, /"result":"fast"/);
+  assert.doesNotMatch(hostReplies()[0].message, /stale/);
+});
+
 test("an entry that changed after it was trusted never runs", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "canvastty-service-hash-"));
   const { instance } = supervisor();

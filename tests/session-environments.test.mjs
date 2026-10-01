@@ -185,6 +185,28 @@ test("prepare answers are validated and a timeout refuses", async () => {
   assert.match((await prepare(() => { throw new Error("boom"); })).reason, /could not prepare the environment: boom/u);
 });
 
+test("an environment prepared after its timeout is released, not left running", async () => {
+  let finish;
+  const { registry, requests } = registryFixture({
+    answers: { prepare: () => new Promise((resolve) => { finish = resolve; }), release: {} },
+    timeouts: { prepare: 20 }
+  });
+  const result = await registry.prepare({ sessionId: "s1", provider: "terminal", cwd, choice });
+  assert.equal(result.ok, false);
+  assert.ok(requests[0].budget > 20, "the plugin call itself may still answer after the launch gave up");
+  finish({ ref: { box: "late" }, label: "late box" });
+  await new Promise((resolve) => setImmediate(resolve));
+  const release = requests.find((request) => request.step === "release");
+  assert.deepEqual(release?.params, { sessionId: "s1", kind: "box", ref: { box: "late" }, keepData: false, reason: "closed" });
+  // A late refusal holds nothing to release.
+  let refuse;
+  const refused = registryFixture({ answers: { prepare: () => new Promise((resolve) => { refuse = resolve; }) }, timeouts: { prepare: 20 } });
+  await refused.registry.prepare({ sessionId: "s2", provider: "terminal", cwd, choice });
+  refuse({ refuse: "no" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(refused.requests.some((request) => request.step === "release"), false);
+});
+
 test("wrap output is validated: program, no shell string, env rules, secrets, cwd", async () => {
   const environment = { pluginId: PLUGIN, kind: "box", ref: {}, label: "box" };
   const request = { sessionId: "s1", provider: "terminal", secretEnvNames: [], takenEnv: new Set(["CTTY_CONTRIBUTED"]),
@@ -315,6 +337,28 @@ test("restore resumes environments first, then parents before children; stopped 
   // Restarting a stopped card asks the plugin to resume again, never runs it locally.
   const again = await managerFixture(lifetime, registryFixture({ answers: defaultAnswers({ resume: { stopped: { reason: "still gone" } } }) }).registry, { directory });
   assert.equal(again.calls.filter((call) => call.command !== process.execPath).length, 1);
+});
+
+test("a card that does not come back never resumes its environment; it is released, its data kept", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-env-orphan-"));
+  const lifetime = persistenceFixtureLifetime(t, directory);
+  const environment = (box) => ({ pluginId: PLUGIN, kind: "box", ref: { box }, label: `box ${box}` });
+  const base = { provider: "claude", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
+    position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true };
+  await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [
+    { ...base, id: "orphan", role: "subagent", parentSessionId: "gone-parent", environment: environment("o") },
+    { ...base, id: "skipped", restore: false, environment: environment("k") },
+    { ...base, id: "kept", environment: environment("p") }
+  ] }));
+  const { registry, requests } = registryFixture({ answers: defaultAnswers() });
+  const { manager } = await managerFixture(lifetime, registry, { directory });
+  const steps = (id) => requests.filter((request) => request.params.sessionId === id).map((request) => request.step);
+  assert.deepEqual(steps("orphan"), ["release"]);
+  assert.deepEqual(steps("skipped"), ["release"]);
+  assert.equal(requests.find((request) => request.params.sessionId === "orphan").params.keepData, true);
+  assert.deepEqual(steps("kept").slice(0, 1), ["resume"]);
+  assert.deepEqual(manager.list().map((session) => session.id), ["kept"]);
+  await manager.shutdown();
 });
 
 test("an exited card resumes its environment only when restarted", async (t) => {

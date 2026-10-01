@@ -19,6 +19,8 @@ type Port = {
   listMetadata(): SessionMetadata[];
   geometry(id: string): { cols: number; rows: number };
   readBuffer(id: string): { buffer: string; outputOffset: number };
+  /** The secret redaction registry's masking (the manager's `redactSecrets`). */
+  redactSecrets?(text: string): string;
 };
 interface Screen {
   /**
@@ -131,7 +133,7 @@ export class TerminalPresentation {
     if (turnId && screen.answerTurn === turnId) return;
     screen.answerTurn = turnId;
     screen.answerExpiresAt = expiresAt;
-    screen.lastAnswer = text.trim();
+    screen.lastAnswer = this.redact(text.trim());
     screen.authoritative = true;
     screen.sequence++;
     screen.turnPending = false;
@@ -150,6 +152,13 @@ export class TerminalPresentation {
     screen.turnPending = true;
     screen.busySeen = false;
   }
+  /**
+   * What leaves for the companion device is masked like any text handed out: the whole screen at once, so a key
+   * the terminal wrapped over two lines is still found (the registry tolerates the line break), before it is cut.
+   */
+  private redact(text: string): string {
+    return this.port.redactSecrets ? this.port.redactSecrets(text) : text;
+  }
   private async text(id: string, history = false): Promise<string> {
     const screen = this.parsed(id);
     await screen.ready;
@@ -166,11 +175,12 @@ export class TerminalPresentation {
         lines[lines.length - 1] += content;
       else lines.push(content);
     }
-    return lines
-      .map((line) => line.trimEnd())
-      .join("\n")
-      .trim()
-      .slice(history ? -32000 : -10000);
+    return this.redact(
+      lines
+        .map((line) => line.trimEnd())
+        .join("\n")
+        .trim(),
+    ).slice(history ? -32000 : -10000);
   }
   async read(id: string) {
     const session = this.port.listMetadata().find((s) => s.id === id);

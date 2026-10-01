@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -160,4 +160,36 @@ test("normalizePersistedTerminalSessions preserves cards with malformed or forei
   assert.equal(normalized.sessions[0].threadId, validUuid);
   assert.equal(normalized.sessions[1].threadId, undefined);
   assert.ok(normalized.sessions.slice(2).every((session) => session.threadId === undefined));
+});
+
+test("a save survives Windows refusing the rename while another handle has the file open", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-store-locked-"));
+  try {
+    let refusals = 3;
+    const attempts = [];
+    const lockedRename = async (from, to) => {
+      attempts.push(to);
+      if (refusals > 0) {
+        refusals -= 1;
+        throw Object.assign(new Error(`EPERM: operation not permitted, rename '${from}' -> '${to}'`), { code: "EPERM" });
+      }
+      await rename(from, to);
+    };
+    const store = new TerminalSessionStore(directory, "terminal-sessions.json", { rename: lockedRename, platform: "win32" });
+    await store.replace([descriptor]);
+    assert.equal(attempts.length, 4, "three refusals, then the rename goes through");
+    const saved = JSON.parse(await readFile(join(directory, "terminal-sessions.json"), "utf8"));
+    assert.deepEqual(saved.sessions.map((session) => session.id), [descriptor.id]);
+    assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+
+    // Elsewhere the same error is not a transient lock: it fails at once and leaves no temp file.
+    refusals = 1;
+    attempts.length = 0;
+    const posix = new TerminalSessionStore(directory, "terminal-sessions.json", { rename: lockedRename, platform: "linux" });
+    await assert.rejects(posix.replace([descriptor]), /EPERM/u);
+    assert.equal(attempts.length, 1);
+    assert.deepEqual((await readdir(directory)).filter((name) => name.endsWith(".tmp")), []);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

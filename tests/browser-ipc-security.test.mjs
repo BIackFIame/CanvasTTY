@@ -50,7 +50,34 @@ test("channels that change settings, plugins, secrets or terminals accept only t
     "terminalCreate",
     "terminalRestart",
     "terminalInput",
-    "terminalDispose"
+    "terminalDispose",
+    // Reads and window-level actions only the app's own renderer asks for.
+    "clipboardRead",
+    "clipboardWrite",
+    "settingsGet",
+    "dialogPickDirectory",
+    "dialogPickMedia",
+    "limitsGet",
+    "pluginsOpenCanvas",
+    "pluginsOpenWindow",
+    "pluginsStorageGet",
+    "pluginsStorageSet",
+    "pluginsMediaPickLibrary",
+    "pluginsMediaListLibraries",
+    "pluginsMediaScanLibrary",
+    "pluginsMediaRevokeLibrary",
+    "pluginsPlaylistsList",
+    "pluginsPlaylistsRead",
+    "pluginsPlaylistsWrite",
+    "pluginsHermesHudStatus",
+    "pluginsHermesHudOpen",
+    "pluginsHermesHudClose",
+    "terminalList",
+    "terminalResize",
+    "terminalBounds",
+    "terminalRename",
+    "terminalSetRestore",
+    "terminalSetVisible"
   ]) {
     const start = source.indexOf(`IPC.${channel},`);
     assert.notEqual(start, -1, `${channel} handler is registered`);

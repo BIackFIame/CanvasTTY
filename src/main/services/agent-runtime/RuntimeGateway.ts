@@ -79,6 +79,8 @@ interface RuntimeLease {
   provider: Exclude<ProviderId, "terminal">;
   tokenDigest: Buffer;
   activeTurnId: string | null;
+  /** Turn ids this session already reported (bounded, oldest dropped): a late start of one of them is stale. */
+  seenTurnIds: Set<string>;
   latest: RuntimeLifecycleSignal | null;
   captureResult: boolean;
   answerCaptureGrantExpiresAt: number | null;
@@ -274,6 +276,7 @@ export class RuntimeGateway {
       provider,
       tokenDigest: tokenDigest(capabilityToken),
       activeTurnId: null,
+      seenTurnIds: new Set(),
       latest: null,
       captureResult: captureResultOrGrantExpiresAt === true,
       answerCaptureGrantExpiresAt: provider === "codex"
@@ -462,13 +465,19 @@ export class RuntimeGateway {
     }
 
     if (message.turnId && isTurnStart(message.event)) {
+      // Each hook runs on its own connection, so a start of an earlier turn can arrive after the next turn began;
+      // it must not make that newer turn's events look stale.
+      if (message.turnId !== lease.activeTurnId && lease.seenTurnIds.has(message.turnId)) return null;
       lease.activeTurnId = message.turnId;
+      rememberTurn(lease, message.turnId);
     } else if (
       message.turnId
       && lease.activeTurnId
       && message.turnId !== lease.activeTurnId
     ) {
       return null;
+    } else if (message.turnId) {
+      rememberTurn(lease, message.turnId);
     }
     const signal: RuntimeLifecycleSignal = {
       state: message.state,
@@ -741,6 +750,14 @@ function boundedText(value: string, limit: number): string {
 }
 
 /** What leaves the gateway, whatever the handler said: never an allow of cut input. */
+const MAX_SEEN_TURNS = 64;
+
+function rememberTurn(lease: RuntimeLease, turnId: string): void {
+  lease.seenTurnIds.delete(turnId);
+  lease.seenTurnIds.add(turnId);
+  while (lease.seenTurnIds.size > MAX_SEEN_TURNS) lease.seenTurnIds.delete(lease.seenTurnIds.values().next().value!);
+}
+
 function enforceDecision(request: RuntimePermissionRequest, decision: RuntimePermissionDecision): RuntimePermissionDecision {
   if (decision.behavior === "allow" && request.truncated) return { behavior: "ask" };
   const message = typeof decision.message === "string" ? decision.message.slice(0, PERMISSION_GATE.messageChars) : "";

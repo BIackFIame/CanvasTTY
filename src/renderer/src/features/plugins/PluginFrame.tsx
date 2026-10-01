@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   InstalledPlugin,
   LimitsSnapshot,
@@ -14,6 +14,7 @@ import {
   pluginCanvasWheelInput,
   type PluginCanvasWheelInput
 } from "./pluginInputBridge";
+import { createFrameReplyGate } from "./frameReplies";
 import { isProviderId } from "../../../../shared/providerCatalog.ts";
 
 const storageListeners = new Map<string, Set<(key: string, value: unknown) => void>>();
@@ -60,10 +61,17 @@ export function PluginFrame({
   onError
 }: PluginFrameProps): React.JSX.Element {
   const frame = useRef<HTMLIFrameElement>(null);
+  // Tells which document a finished request belongs to, so a reload never receives an earlier reply.
+  const [replies] = useState(createFrameReplyGate);
   const entryUrl = useMemo(
     () => `canvastty-plugin://${plugin.manifest.id}/${encodeAssetPath(contribution.entry)}`,
     [contribution.entry, plugin.manifest.id]
   );
+  // The plugin the frame serves right now, read when a reply is ready; and a new document the moment the
+  // host points the frame elsewhere (during render, before the frame can load or ask anything).
+  const servedPlugin = useRef(plugin.manifest.id);
+  servedPlugin.current = plugin.manifest.id;
+  replies.showing(plugin.manifest.id, entryUrl);
 
   const context = useMemo(() => ({
     apiVersion: 1,
@@ -126,6 +134,7 @@ export function PluginFrame({
       if (message.type !== "request" || typeof message.requestId !== "string" || message.requestId.length > 80) return;
       if (typeof message.method !== "string" || message.method.length > 80) return;
 
+      const mayReply = replies.received(message.requestId, event.source, plugin.manifest.id);
       void handleRequest({
         plugin,
         method: message.method,
@@ -136,6 +145,7 @@ export function PluginFrame({
         canvasInstanceId,
         onOpenLauncher
       }).then((value) => {
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",
@@ -146,6 +156,7 @@ export function PluginFrame({
       }).catch((error: unknown) => {
         const description = safeError(error);
         onError(description);
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",
@@ -157,7 +168,7 @@ export function PluginFrame({
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onHoverChange, onOpenLauncher, plugin, sessions]);
+  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onHoverChange, onOpenLauncher, plugin, replies, sessions]);
 
   useEffect(() => {
     postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
@@ -191,6 +202,7 @@ export function PluginFrame({
       referrerPolicy="no-referrer"
       onFocus={onFocus}
       onLoad={() => {
+        replies.loaded();
         postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
         postCanvasInputPolicy(frame.current, captureCanvasWheelOverWidgets);
       }}

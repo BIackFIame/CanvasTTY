@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   clipBrowserViewportBounds,
-  normalizeBrowserViewportBounds
+  normalizeBrowserViewportBounds,
+  sameBrowserViewport
 } from "../src/main/services/browser/BrowserViewport.ts";
 
 test("browser viewport expands fractional edges instead of exposing compositor gaps", () => {
@@ -114,4 +115,16 @@ test("browser viewport contracts fractional trusted clip edges and rejects malfo
     surface: "native",
     clipBounds: { x: 0, y: Number.NaN, width: 800, height: 556 }
   }), null);
+});
+
+test("sub-pixel reports that round to the same placement are the same viewport; any real change is not", () => {
+  const at = (x, extra = {}) => normalizeBrowserViewportBounds({ x, y: 20.2, width: 300.4, height: 200.2, surface: "native",
+    clipBounds: { x: 0, y: 0, width: 1200, height: 800 }, canvasScale: 1, showAgentPresence: false, ...extra });
+  assert.equal(sameBrowserViewport(at(10.1), at(10.3)), true);
+  assert.equal(sameBrowserViewport(at(10.1), at(11.1)), false);
+  assert.equal(sameBrowserViewport(at(10.1), at(10.1, { canvasScale: 1.1 })), false);
+  assert.equal(sameBrowserViewport(at(10.1), at(10.1, { surface: "placeholder" })), false);
+  assert.equal(sameBrowserViewport(at(10.1), at(10.1, { clipBounds: undefined })), false);
+  assert.equal(sameBrowserViewport(at(10.1), at(10.1, { clipBounds: { x: 0, y: 0, width: 1200, height: 801 } })), false);
+  assert.equal(sameBrowserViewport(at(10.1), at(10.1, { showAgentPresence: true })), false);
 });

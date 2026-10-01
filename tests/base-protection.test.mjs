@@ -226,7 +226,13 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     ["curl -sc %/jar https://example.com", "write-outside"], ["curl -sD %/headers https://example.com", "write-outside"],
     ["wget -qo %/log https://example.com/x -O-", "write-outside"], ["env -C % rm -rf x", "delete-outside"],
     ["perl -pie 's/a/b/' %/f", "write-outside"], ["perl -i -- -e %/f", "write-outside"], ["rsync -t src/a.ts %/", "write-outside"],
-    ["find -f % -delete", "delete-outside"]
+    ["find -f % -delete", "delete-outside"],
+    // A folder named once in a shell variable of the same command, then used.
+    ["OUT=%; rm -rf \"$OUT\"", "delete-outside"], ["OUT=% && rm -rf ${OUT}/x", "delete-outside"], ["export OUT=%; rm -rf $OUT", "delete-outside"],
+    ["DEST=%; cp src/a.ts \"$DEST/a.ts\"", "write-outside"], ["OUT=/; OUT=%; rm -rf $OUT", "delete-outside"],
+    // tar's -C with the folder attached; git aliases and config values that run a shell command.
+    ["tar -xf a.tar -C%", "write-outside"], ["git -c alias.x='!rm -rf %' x", "delete-outside"],
+    ["git -c core.fsmonitor='rm -rf %' status", "delete-outside"]
   ];
   const OUT = [outside, "../elsewhere"];
   const IN = ["build", join(project, "build")];
@@ -247,8 +253,26 @@ test("wrapped and less common forms: the same deny as the plain command outside,
     "cp -t build src/a.ts", "tar -czf build/a.tgz -C src .", "tar -tzf a.tgz", "unzip -l a.zip", "unzip -o a.zip",
     "curl -fsSL https://example.com", "curl -fsSLO https://example.com/x.tgz", "curl -fsSLo build/x https://example.com/x && tar -xzf build/x -C build",
     "wget -qO- https://example.com", "wget -q https://example.com/x.tgz", "stdbuf -oL npm test", "if true; then echo hi; fi",
-    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts"
+    "for f in src/*.ts; do cat \"$f\"; done", "! grep -q x src/a.ts",
+    // A variable set to the project, then set again; one set only for its own command; one never set.
+    "OUT=/; OUT=build; rm -rf \"$OUT\"", "OUT=/ echo hi; rm -rf build", "git -c alias.st=status st", "git -c core.pager=less log"
   ]) assert.equal(rule(shell(command)), null, command);
+});
+
+test("a delete or move whose path comes from a variable or output CanvasTTY cannot resolve is denied as an unknown target", () => {
+  for (const command of [
+    "rm -rf \"$OUT\"", "rm -rf $BUILD_DIR/cache", "rm -r \"$(cat target.txt)\"", "rm \"$FILE\"", "rmdir \"$DIR\"",
+    "OUT=$(mktemp -d -p .); rm -rf \"$OUT\"", "mv \"$SRC\" build/", "mv build/a \"$DEST\"", "find \"$ROOT\" -delete",
+    "for f in $(ls); do rm -rf \"$f\"; done"
+  ]) assert.equal(rule(shell(command)), "unknown-target", command);
+  // Resolved variables, loop words and plain paths keep their ordinary reading.
+  for (const command of [
+    "OUT=build; rm -rf \"$OUT\"", "rm -rf build/cache", "for f in build dist; do rm -rf \"$f\"; done",
+    "for f in src/*.tmp; do rm \"$f\"; done", "rm -rf build", "mv src/a.ts src/b.ts", "echo \"$OUT\"", "cat \"$(ls)\""
+  ]) assert.equal(rule(shell(command)), null, command);
+  // A loop over a folder outside is the delete outside it.
+  assert.equal(rule(shell(`for f in build ${outside}; do rm -rf "$f"; done`)), "delete-outside");
+  assert.match(check("Bash", { command: "rm -rf \"$OUT\"" }).message, /cannot resolve/u);
 });
 
 test("curl and wget: every spelling of an output or side file, and --output-dir in either order, is judged where it lands", () => {

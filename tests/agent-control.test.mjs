@@ -162,6 +162,18 @@ test("request receipts are bounded without locking the gateway, and a refused re
   assert.equal(f.calls[0].pty.writes.length, 2);
 });
 
+test("a create whose controller setup fails closes the card instead of leaving it running unowned", localSocket, async (t) => {
+  const f = await fixture(t);
+  const geometry = f.terminals.geometry.bind(f.terminals);
+  f.terminals.geometry = () => { throw new Error("no geometry"); };
+  await assert.rejects(f.create("create-broken"));
+  assert.equal(f.calls.length, 1, "the card was started");
+  assert.deepEqual(f.terminals.listMetadata(), [], "and closed again");
+  f.terminals.geometry = geometry;
+  const { session } = await f.create("create-after-failure");
+  assert.deepEqual(f.terminals.listMetadata().map((card) => card.id), [session.id]);
+});
+
 test("a failed start leaves nothing listening, so the same gateway can start again", localSocket, async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-control-start-")));
   t.after(() => rm(root, { recursive: true, force: true }));

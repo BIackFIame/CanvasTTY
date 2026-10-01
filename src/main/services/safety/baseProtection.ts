@@ -10,7 +10,7 @@ import { analyzeAction, commandFromArgv, realish, type HardFacts, type PrivateDa
  * model: local rules only, no git, no network.
  */
 
-const BASE_DENY_RULES = ['app-private', 'elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside'] as const;
+const BASE_DENY_RULES = ['app-private', 'elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside', 'unknown-target'] as const;
 export type BaseDenyRule = typeof BASE_DENY_RULES[number];
 
 /** What the model reads: why the call was refused and what to do instead. */
@@ -22,7 +22,8 @@ const DENY_MESSAGES: Readonly<Record<BaseDenyRule, string>> = {
   disk: 'CanvasTTY blocked this command: it erases, formats or writes a disk directly. Do not do this; ask the person if disk changes are really needed.',
   'fork-bomb': 'CanvasTTY blocked this command: it would exhaust the computer\'s processes. Do not run it.',
   'delete-outside': 'CanvasTTY blocked this command: it deletes files outside the project folder (or the folder itself). Delete only inside the project; if something elsewhere must go, ask the person.',
-  'write-outside': 'CanvasTTY blocked this command: it writes outside the project folder. Keep changes inside the project; if a file elsewhere must change, ask the person.'
+  'write-outside': 'CanvasTTY blocked this command: it writes outside the project folder. Keep changes inside the project; if a file elsewhere must change, ask the person.',
+  'unknown-target': 'CanvasTTY blocked this command: it deletes or moves a path held in a shell variable or command output that CanvasTTY cannot resolve, so it cannot tell whether the path is inside the project folder. Write the path out, or set the variable in the same command to a path inside the project, and run it again.'
 };
 const TEMP_WRITE_MESSAGE = 'CanvasTTY blocked this command: it writes to the temporary folder (/tmp or $TMPDIR), which is outside the project folder. Make a scratch folder inside the project instead (for example ./tmp, added to .gitignore if needed) and use that; if a file elsewhere must change, ask the person.';
 
@@ -104,6 +105,7 @@ export function denyRule(facts: HardFacts): BaseDenyRule | null {
   if (facts.forkBomb) return 'fork-bomb';
   if (facts.deletesOutside) return 'delete-outside';
   if (facts.writesOutside) return 'write-outside';
+  if (facts.unknownTarget) return 'unknown-target';
   return null;
 }
 

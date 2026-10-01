@@ -61,6 +61,31 @@ export function generateCandidatePositions(
   size: Size,
   options: SessionPlacementOptions = {}
 ): Point[] {
+  return [...candidatePositions(homeBounds, size, options)];
+}
+
+/**
+ * The last candidate list and what it was built from: placing card after card near the same Home with the same
+ * size reuses it instead of building and sorting the lattice again.
+ */
+let lastCandidates: { key: string; points: readonly Point[] } | null = null;
+
+function candidatePositions(homeBounds: SessionBounds, size: Size, options: SessionPlacementOptions): readonly Point[] {
+  const key = [
+    homeBounds.position.x, homeBounds.position.y, homeBounds.size.width, homeBounds.size.height,
+    size.width, size.height, options.gap ?? DEFAULT_SESSION_GAP, options.margin ?? DEFAULT_SESSION_MARGIN, options.maxCandidates ?? 2000
+  ].join(",");
+  if (lastCandidates?.key === key) return lastCandidates.points;
+  const points = Object.freeze(buildCandidatePositions(homeBounds, size, options));
+  lastCandidates = { key, points };
+  return points;
+}
+
+function buildCandidatePositions(
+  homeBounds: SessionBounds,
+  size: Size,
+  options: SessionPlacementOptions
+): Point[] {
   const gap = options.gap ?? DEFAULT_SESSION_GAP;
   const margin = options.margin ?? DEFAULT_SESSION_MARGIN;
   const maxCandidates = options.maxCandidates ?? 2000;
@@ -131,7 +156,7 @@ export function findNearHomeSessionPosition(
   options: SessionPlacementOptions = {}
 ): Point {
   const gap = options.gap ?? DEFAULT_SESSION_GAP;
-  const candidates = generateCandidatePositions(homeBounds, size, options);
+  const candidates = candidatePositions(homeBounds, size, options);
 
   for (const candidate of candidates) {
     const candidateBounds: SessionBounds = { position: candidate, size };

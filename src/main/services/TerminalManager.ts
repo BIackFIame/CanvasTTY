@@ -62,7 +62,7 @@ import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
-import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
+import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
@@ -70,7 +70,7 @@ import {
   type PersistedSessionExtras,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
-import { chooseResume, planSessionRestore, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
+import { chooseResume, planSessionRestore, restorableRecords, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
 import {
   createProviderLifecycleParser,
@@ -356,14 +356,20 @@ export class TerminalManager {
       return;
     }
 
-    // Environments resume first; a card whose environment stopped comes back
-    // stopped with the plugin's reason and never runs locally instead.
+    // Environments resume first, only for cards that come back at all; a card whose environment stopped comes
+    // back stopped with the plugin's reason and never runs locally instead. A card that does not come back (not
+    // restored, or a subagent whose parent is gone) leaves the saved state now: its environment is released.
     const resumed = new Map<string, { ok: true } | { ok: false; reason: string }>();
     const environments = this.environments;
     if (environments) {
+      const restorable = new Set(restorableRecords(persisted, this.sessionRestoreMode, (id) => this.sessions.has(id)).map((record) => record.id));
       await Promise.all(persisted.map(async (record) => {
-        if (!record.environment || !record.restore || record.lastState !== "running") return;
-        if (!environments.available(record.environment)) return;
+        if (!record.environment || !environments.available(record.environment)) return;
+        if (!restorable.has(record.id)) {
+          if (!this.sessions.has(record.id)) await environments.release(record.environment, record.id, { keepData: true, reason: "closed" });
+          return;
+        }
+        if (record.lastState !== "running") return;
         resumed.set(record.id, await environments.resume(record.environment, record.id));
       }));
     }
@@ -757,16 +763,18 @@ export class TerminalManager {
    * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
    * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
    * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
-   * it never reaches a later launch of the card.
+   * it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing either.
    */
-  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS): Promise<InputDelivery> {
+  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
+    const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
+    if (signal?.aborted) return canceled;
     const session = this.sessions.get(id);
     if (!session) return { delivered: false, reason: "The session does not exist." };
     const epoch = session.launchEpoch;
     const deadline = Date.now() + waitMs;
     const waiting = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
       && session.metadata.exitCode === null && !session.process;
-    while (waiting()) {
+    while (waiting() && !signal?.aborted) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         return { delivered: false, reason: `The session did not start within ${Math.round(waitMs / 1000)} s.` };
@@ -776,11 +784,14 @@ export class TerminalManager {
         function wake(): void {
           clearTimeout(timer);
           session!.launchWaiters.delete(wake);
+          signal?.removeEventListener("abort", wake);
           resolve();
         }
         session.launchWaiters.add(wake);
+        signal?.addEventListener("abort", wake, { once: true });
       });
     }
+    if (signal?.aborted) return canceled;
     if (this.sessions.get(id) !== session) return { delivered: false, reason: "The session was closed before it started." };
     if (session.launchEpoch !== epoch) return { delivered: false, reason: "The session was restarted before it started." };
     if (session.metadata.exitCode !== null) {
@@ -994,6 +1005,13 @@ export class TerminalManager {
   dispose(id: string, options: { keepEnvironmentData?: boolean } = {}): void {
     const session = this.sessions.get(id);
     if (!session) return;
+    // A subagent belongs to its parent: closing the parent closes its subagents first (deepest first), so none keeps
+    // running without an owner. Quitting disposes every card anyway.
+    if (!this.quitting) {
+      for (const child of [...this.sessions.values()]) {
+        if (child.metadata.role === "subagent" && child.metadata.parentSessionId === id) this.dispose(child.metadata.id);
+      }
+    }
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
@@ -1422,8 +1440,8 @@ export class TerminalManager {
       if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
       // A plugin may add to the person's environment, never replace what the core sets for this launch.
       const contributedEnvironment = contribution?.env ?? {};
-      const collision = Object.keys(contributedEnvironment)
-        .find((key) => key in providerEnvironment || key in (launch.environment ?? {}));
+      const coreNames = new Set([...Object.keys(providerEnvironment), ...Object.keys(launch.environment ?? {})].map((key) => envKey(key)));
+      const collision = Object.keys(contributedEnvironment).find((key) => coreNames.has(envKey(key)));
       if (collision) {
         throw new Error(`Launch refused: ${contribution!.envSources[collision]} sets ${collision}, which CanvasTTY sets for this launch.`);
       }

@@ -6,7 +6,7 @@ import type {
   ProviderId,
   SessionEnvironmentChoice
 } from "../../shared/contracts.ts";
-import { errorText, isRecord, MAX_ENV, MAX_ENV_VALUE_BYTES, MAX_SECRET_ENV, stringMap } from "./LaunchPipeline.ts";
+import { envKey, errorText, isRecord, MAX_ENV, MAX_ENV_VALUE_BYTES, MAX_SECRET_ENV, stringMap } from "./LaunchPipeline.ts";
 import { MAX_PLUGIN_SLOT_BYTES, type PersistedEnvironmentRef } from "./TerminalSessionStore.ts";
 
 /** A trusted plugin service that provides session environments (PluginManager.environmentProviders). */
@@ -39,6 +39,12 @@ const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
   release: 10_000,
   describe: 3_000
 };
+
+/**
+ * How long a prepare that ran out of time may still answer: the plugin call itself keeps this budget (the host
+ * call maximum), so an environment it creates late is still heard of and released instead of left running.
+ */
+const PREPARE_LATE_BUDGET_MS = 60_000;
 
 /** What the host would spawn without an environment; `wrap` returns its replacement. */
 export interface EnvironmentLaunch {
@@ -130,6 +136,14 @@ export class EnvironmentRegistry {
       provider: request.provider,
       cwd: request.cwd,
       options: request.choice.options ?? {}
+    }, undefined, {
+      budgetMs: PREPARE_LATE_BUDGET_MS,
+      // The launch already failed as timed out and nothing holds this ref: release it, data included.
+      late: (value) => {
+        if (!isRecord(value) || value.refuse !== undefined || value.ref === undefined || !fitsSlot(value.ref)) return;
+        const environment = { pluginId: found.provider.pluginId, kind: request.choice.kind, ref: structuredClone(value.ref), label: plainText(value.label, MAX_LABEL) || request.choice.kind };
+        void this.release(environment, request.sessionId, { keepData: false, reason: "closed" });
+      }
     });
     if (!answer.ok) return answer;
     const value = answer.value;
@@ -223,9 +237,13 @@ export class EnvironmentRegistry {
     if (typeof secretEnv === "string") return invalid(secretEnv);
     const merged: Record<string, string> = {};
     const secrets: string[] = [];
+    const platform = this.dependencies.platform ?? process.platform;
+    const taken = new Set([...request.takenEnv].map((key) => envKey(key, platform)));
+    const seen = new Set<string>();
     for (const key of [...Object.keys(env), ...Object.keys(secretEnv)]) {
-      if (request.takenEnv.has(key)) return { ok: false, reason: `${name} sets ${key}, which CanvasTTY or a launch option already sets for this launch.` };
-      if (key in merged) return { ok: false, reason: `${name} sets ${key} twice.` };
+      if (taken.has(envKey(key, platform))) return { ok: false, reason: `${name} sets ${key}, which CanvasTTY or a launch option already sets for this launch.` };
+      if (seen.has(envKey(key, platform))) return { ok: false, reason: `${name} sets ${key} twice.` };
+      seen.add(envKey(key, platform));
       merged[key] = env[key] ?? "";
     }
     for (const [key, secretKey] of Object.entries(secretEnv)) {
@@ -279,18 +297,27 @@ export class EnvironmentRegistry {
     return provider && kind ? { provider, kind } : null;
   }
 
+  /**
+   * One plugin call within `timeoutMs`. With `lateAnswer`, the call itself may run for `budgetMs` and an answer that
+   * comes after the timeout goes to `late` (the caller has already been told it timed out).
+   */
   private async ask(
     provider: EnvironmentProvider,
     step: EnvironmentStep,
     params: unknown,
-    timeoutMs = this.timeouts[step]
+    timeoutMs = this.timeouts[step],
+    lateAnswer?: { budgetMs: number; late(value: unknown): void }
   ): Promise<{ ok: true; value: unknown } | { ok: false; reason: string }> {
     let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    const call = this.dependencies.call(provider.pluginId, provider.serviceId, `canvastty.environment.${step}`, params,
+      lateAnswer ? Math.max(timeoutMs, lateAnswer.budgetMs) : timeoutMs);
+    if (lateAnswer) call.then((value) => { if (timedOut) lateAnswer.late(value); }, () => undefined);
     try {
       const value = await Promise.race([
-        this.dependencies.call(provider.pluginId, provider.serviceId, `canvastty.environment.${step}`, params, timeoutMs),
+        call,
         new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => reject(new Error("timed out")), timeoutMs);
+          timer = setTimeout(() => { timedOut = true; reject(new Error("timed out")); }, timeoutMs);
         })
       ]);
       return { ok: true, value };

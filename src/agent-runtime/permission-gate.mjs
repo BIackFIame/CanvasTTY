@@ -83,7 +83,7 @@ export function identityFrom(env) {
   return identity.address && identity.terminalSessionId && identity.provider && identity.capabilityToken ? identity : null;
 }
 
-/** Reads the whole hook input; null when it is over the bound (the CLI then goes on as usual). */
+/** Reads the whole hook input; null when it is over the bound (a fail-closed gate then denies the call). */
 async function readInput() {
   const chunks = [];
   let size = 0;

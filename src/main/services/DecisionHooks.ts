@@ -61,6 +61,8 @@ type Verdict = "deny" | "ask" | "allow";
 interface Answer { verdict: Verdict | null; reason: string; service: DecisionService }
 
 const DECIDE_TIMEOUT_MS = DEFAULT_DECIDE_TIMEOUT_MS;
+/** Base protection's answer to a shell call, or a file write whose target it cannot see, cut before it was sent. */
+export const TOO_LARGE_MESSAGE = 'CanvasTTY blocked this tool call: its input is too large to check (over 40 KB), so base protection cannot see what it does. Split the work into smaller steps: keep commands short, and write long content with the file tool in parts.';
 const MAX_REASON = 500;
 const MAX_SERVICES = 8;
 
@@ -78,14 +80,16 @@ export class DecisionHooks {
     this.deps = deps;
   }
 
-  /** Whether a launch of this agent needs the decision hook at all. */
+  /** Whether a launch of this agent needs the decision hook at all. A plugin list that cannot be read counts as yes. */
   wanted(provider: AgentProviderId): boolean {
-    return this.protects() || this.applicable(provider).length > 0;
+    if (this.protects()) return true;
+    const services = this.applicable(provider);
+    return services === null || services.length > 0;
   }
 
   /** The longest wait a decision service of this agent asked for: the session's gate is sized for it at launch. */
   budgetMs(provider: AgentProviderId): number {
-    return Math.max(DECIDE_TIMEOUT_MS, ...this.applicable(provider).map((service) => this.timeoutFor(service)));
+    return Math.max(DECIDE_TIMEOUT_MS, ...(this.applicable(provider) ?? []).map((service) => this.timeoutFor(service)));
   }
 
   private timeoutFor(service: DecisionService): number {
@@ -108,8 +112,16 @@ export class DecisionHooks {
         ...(this.deps.privateData ? { privateData: this.deps.privateData } : {})
       });
       if (base) return { behavior: "deny", message: base.message };
+      // Cut input: the rules could not see the command, or where a file tool writes. Unchecked is not allowed.
+      if (request.truncated) {
+        const cut = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
+        if (cut.kind === "shell" || cut.kind === "edit" && cut.paths.length === 0) return { behavior: "deny", message: TOO_LARGE_MESSAGE };
+      }
     }
     const services = this.applicable(session.provider);
+    // The plugin list itself failed: that is the gateway's failure (the person is asked, or a fail-closed gate
+    // denies), never "no plugin has an opinion".
+    if (services === null) throw new Error("decision services unavailable");
     if (services.length === 0) return { behavior: "none" };
     const action = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
     const params: Omit<DecisionRequest, "budgetMs"> = {
@@ -136,9 +148,10 @@ export class DecisionHooks {
     try { return this.deps.baseProtection() !== false; } catch { return true; }
   }
 
-  private applicable(provider: AgentProviderId): DecisionService[] {
+  /** The decision services for this agent; null when the list could not be read. */
+  private applicable(provider: AgentProviderId): DecisionService[] | null {
     let services: DecisionService[];
-    try { services = this.deps.services(); } catch { return []; }
+    try { services = this.deps.services(); } catch { return null; }
     return services
       .filter((service) => !service.appliesTo || service.appliesTo.includes(provider))
       .slice(0, MAX_SERVICES);

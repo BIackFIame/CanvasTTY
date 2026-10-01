@@ -163,3 +163,31 @@ test("Windows pipe transport turns host pipe errors into a transport failure ins
     assert.equal(sockets[0].write(Buffer.from("late")), false);
   }
 });
+
+test("Windows pipe transport: a failed host that exits late does not end the host started after it", async () => {
+  const children = [fakeHost(), fakeHost()];
+  // The first host dies slowly: kill() does not exit it until the test says so.
+  children[0].kill = () => true;
+  let spawned = 0;
+  const transport = new WindowsPipeHostTransport({
+    platform: "win32",
+    hostPath: join(process.cwd(), "package.json"),
+    spawnHost: () => children[spawned++]
+  });
+  const fatal = [];
+  transport.on("fatal", (error) => fatal.push(error));
+  const ready = (child) => child.stdout.write(frame(protocol.hostToParent.ready, 0, Buffer.from("\\\\.\\pipe\\canvastty-agent-0123456789abcdef", "utf8")));
+  const first = transport.start(() => undefined);
+  ready(children[0]);
+  await first;
+  children[0].stdin.emit("error", Object.assign(new Error("write EPIPE"), { code: "EPIPE" }));
+  assert.equal(fatal.length, 1);
+
+  const second = transport.start(() => undefined);
+  ready(children[1]);
+  await second;
+  children[0].emit("exit", 1, null);
+  assert.equal(transport.isRunning, true, "the new host keeps running");
+  assert.equal(fatal.length, 1, "no failure is reported for the new host");
+  await transport.close();
+});

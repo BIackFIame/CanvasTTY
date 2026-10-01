@@ -91,6 +91,14 @@ const MAX_FILES = 16;
 const MAX_FILES_BYTES = 256 * 1024;
 const MAX_REASON = 240;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+/**
+ * How the operating system tells environment names apart: Windows ignores case (`Path` and `PATH` are one
+ * variable), so two spellings of one name must collide there.
+ */
+export function envKey(name: string, platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? name.toUpperCase() : name;
+}
+
 /** Names that steer CanvasTTY itself or the process loader, never a plugin's to set. */
 export const RESERVED_ENV = /^(?:CANVASTTY_|ELECTRON_|DYLD_|LD_)|^(?:NODE_OPTIONS|PATH|TERM|COLORTERM)$/i;
 
@@ -245,6 +253,11 @@ export class LaunchPipeline {
 
     const env: Record<string, string> = {};
     const envSources: Record<string, string> = {};
+    /**
+     * Who set each name, by how the operating system compares names (envKey). A Map, so a name like `constructor`
+     * is never mistaken for an inherited value.
+     */
+    const claimed = new Map<string, string>();
     const args: string[] = [];
     const secrets: string[] = [];
     let thirdPartyModel = false;
@@ -281,8 +294,9 @@ export class LaunchPipeline {
       }
       const expand = (value: string): string => filesDirectory ? value.split(LAUNCH_FILES_TOKEN).join(filesDirectory) : value;
       const claim = (key: string): string | null => {
-        const owner = envSources[key];
+        const owner = claimed.get(envKey(key));
         if (owner) return owner === name ? `${name} sets ${key} twice.` : `${owner} and ${name} both set ${key}.`;
+        claimed.set(envKey(key), name);
         envSources[key] = name;
         return null;
       };
@@ -444,7 +458,7 @@ export function stringMap(value: unknown, limit: number, field: string): Record<
   if (value === undefined) return {};
   if (!isRecord(value) || Object.keys(value).length > limit) return `${field} must be an object of at most ${limit} entries`;
   for (const [key, entry] of Object.entries(value)) {
-    if (!ENV_NAME.test(key)) return `${field} name ${key.slice(0, 40)} is invalid`;
+    if (!ENV_NAME.test(key) || key === "__proto__") return `${field} name ${key.slice(0, 40)} is invalid`;
     if (RESERVED_ENV.test(key)) return `${field} ${key} is reserved for CanvasTTY`;
     if (typeof entry !== "string") return `${field} ${key} must be text`;
   }
