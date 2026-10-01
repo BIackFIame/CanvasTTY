@@ -48,6 +48,7 @@ import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./t
 import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutput";
 import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
 import { limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
+import { terminalLinkTarget } from "./terminalLinkTarget";
 import {
   constrainResize,
   snapMove,
@@ -318,10 +319,10 @@ function TerminalCardView({
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
       linkHandler: {
-        activate: (event, uri) => {
+        activate: (event, uri, range) => {
           event.preventDefault();
           event.stopPropagation();
-          onOpenUrlRef.current(uri);
+          onOpenUrlRef.current(terminalLinkTarget(uri, range, terminal.buffer.active, terminal.cols));
         }
       }
     });
