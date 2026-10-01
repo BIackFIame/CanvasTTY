@@ -133,7 +133,7 @@ test("loading the application surface removes the startup page from browser hist
   const source = await readFile(mainPath, "utf8");
   const body = source.slice(
     source.indexOf("async function loadApplicationSurface"),
-    source.indexOf("async function loadApplication(")
+    source.indexOf("async function runStartupSmokes(")
   );
 
   assert.match(body, /navigationHistory\.clear\(\)/);

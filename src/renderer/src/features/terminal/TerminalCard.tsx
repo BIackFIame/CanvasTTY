@@ -47,7 +47,7 @@ import {
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
 import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutput";
 import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
-import { limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
+import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
 import { terminalLinkTarget } from "./terminalLinkTarget";
 import {
   constrainResize,
@@ -260,6 +260,10 @@ function TerminalCardView({
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
+  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, focused });
+  const lifecycleRef = useRef(lifecycle);
+  lifecycleRef.current = lifecycle;
+  const pinnedInputRefreshRef = useRef<(() => void) | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchOpenRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -345,7 +349,8 @@ function TerminalCardView({
     pinnedInput.setAttribute("aria-hidden", "true");
     host.append(pinnedInput);
     let pinnedRows = 0;
-    const updatePinnedInput = (): void => {
+    let pinnedFitFrame: number | null = null;
+    const renderPinnedInput = (): void => {
       const completePinned = pinnedTerminalInput(terminal.buffer.active);
       const maxPinnedRows = Math.max(1, Math.floor(host.clientHeight / (14 * 1.2) / 2));
       const pinned = completePinned ? limitPinnedTerminalInput(completePinned, maxPinnedRows) : null;
@@ -378,9 +383,20 @@ function TerminalCardView({
       }
       if (nextRows !== pinnedRows) {
         pinnedRows = nextRows;
-        requestAnimationFrame(() => fitRef.current?.());
+        if (pinnedFitFrame === null) pinnedFitFrame = requestAnimationFrame(() => {
+          pinnedFitFrame = null;
+          if (surfaceIsLive(lifecycleRef.current)) fitRef.current?.();
+        });
       }
     };
+    const pinnedRefresh = createPinnedInputRefresh({
+      isLive: () => surfaceIsLive(lifecycleRef.current),
+      refresh: renderPinnedInput,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (frame) => cancelAnimationFrame(frame)
+    });
+    const updatePinnedInput = pinnedRefresh.schedule;
+    pinnedInputRefreshRef.current = updatePinnedInput;
     const pinnedScroll = terminal.onScroll(updatePinnedInput);
     const pinnedCursor = terminal.onCursorMove(updatePinnedInput);
     const pinnedOutput = terminal.onWriteParsed(updatePinnedInput);
@@ -576,6 +592,9 @@ function TerminalCardView({
       pinnedScroll.dispose();
       pinnedCursor.dispose();
       pinnedOutput.dispose();
+      pinnedRefresh.dispose();
+      if (pinnedFitFrame !== null) cancelAnimationFrame(pinnedFitFrame);
+      if (pinnedInputRefreshRef.current === updatePinnedInput) pinnedInputRefreshRef.current = null;
       host.classList.remove("terminal-card__surface--pinned-input");
       host.style.removeProperty("--pinned-input-height");
       pinnedInput.remove();
@@ -657,7 +676,6 @@ function TerminalCardView({
   // The card's surface lifecycle: suspended while it draws no terminal (summary thumbnail, HOME editing).
   // Off-screen and minimized cards stay live on purpose: the main process can replay only its scrollback
   // ring (smaller than xterm's scrollback), so a long unattended stretch would cost the card real history.
-  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, focused });
   const deliveryGate = useRef<SurfaceGate | null>(null);
   useEffect(() => {
     const gate = createTerminalDeliveryGate(window.canvasTTY.terminal, session.id);
@@ -676,6 +694,7 @@ function TerminalCardView({
     const live = surfaceIsLive(lifecycle);
     terminal.options.cursorBlink = live;
     if (live) {
+      pinnedInputRefreshRef.current?.();
       // A terminal first opened while suspended may not have measured its cells yet.
       const frame = requestAnimationFrame(() => fitRef.current?.());
       return () => cancelAnimationFrame(frame);
