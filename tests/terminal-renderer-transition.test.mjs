@@ -26,34 +26,56 @@ function fixture({ render = true, reducedMotion = false } = {}) {
   });
   document.defaultView = window;
   let renders = new Set();
-  const terminal = {
-    rows: 24,
-    onRender(callback) { renders.add(callback); return { dispose() { renders.delete(callback); } }; },
-    refresh() { if (render) for (const callback of [...renders]) callback(); }
+  const makeClassList = (initial = []) => {
+    const values = new Set(initial);
+    return {
+      add(...names) { names.forEach(name => values.add(name)); },
+      [Symbol.iterator]() { return values[Symbol.iterator](); }
+    };
   };
   const snapshot = {
     ownerDocument: document,
-    isConnected: true,
+    isConnected: false,
     animation: null,
+    classList: makeClassList(),
+    style: {},
+    setAttribute() {},
+    querySelectorAll() { return []; },
     remove() { this.isConnected = false; },
     animate() {
       this.animation = { onfinish: null, canceled: false, cancel() { this.canceled = true; } };
       return this.animation;
     }
   };
-  const { start, cancel } = runInNewContext(stripTypeScriptTypes(`${transitionSource}
-    const onVisibilityChange = () => { if (document.hidden) restoreRendererTransition(); };
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    rendererTransitionRef.current = {
-      snapshot, frame: null, render: null,
-      fallback: window.setTimeout(restoreRendererTransition, 250),
-      animation: null,
-      visibilityCleanup: () => document.removeEventListener("visibilitychange", onVisibilityChange)
-    };
-    ({ start: () => revealRendererTransition(terminal, snapshot), cancel: restoreRendererTransition });`), {
+  const screen = {
+    offsetLeft: 0,
+    offsetTop: 0,
+    checkVisibility() { return true; },
+    querySelectorAll() { return []; },
+    cloneNode() { return snapshot; }
+  };
+  const element = {
+    dataset: { renderer: "dom" },
+    classList: makeClassList(),
+    querySelector() { return screen; },
+    append(node) { node.isConnected = true; }
+  };
+  const terminal = {
+    element,
+    rows: 24,
+    onRender(callback) { renders.add(callback); return { dispose() { renders.delete(callback); } }; },
+    refresh() { if (render) for (const callback of [...renders]) callback(); }
+  };
+  const { begin, reveal, cancel } = runInNewContext(stripTypeScriptTypes(`${transitionSource}
+    ({ begin: beginRendererTransition, reveal: revealRendererTransition, cancel: restoreRendererTransition });`), {
     useRef: () => ({ current: null }), snapshot, terminal, window, document,
     requestAnimationFrame: window.requestAnimationFrame, cancelAnimationFrame: window.cancelAnimationFrame
   });
+  const start = () => {
+    const transitionSnapshot = begin(terminal);
+    assert.equal(transitionSnapshot, snapshot);
+    reveal(terminal, transitionSnapshot);
+  };
   const advance = ms => {
     const until = now + ms;
     for (;;) {
