@@ -95,5 +95,5 @@ test("OpenCode Auto keeps ancestor restrictions when the working directory is mo
   assert.equal(person.unknown, false);
   assert.equal(person.top.bash, "deny");
   const config = JSON.parse(openCodeAutoEnvironment(environment, { cwd, readFile, shellGuarded: true }).OPENCODE_CONFIG_CONTENT);
-  assert.deepEqual(config.agent.build.permission.bash, { "*": "deny" });
+  assert.equal(config.agent.build.permission.bash, "deny");
 });

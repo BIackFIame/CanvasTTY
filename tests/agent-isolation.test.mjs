@@ -345,3 +345,16 @@ test("launch homes cannot reopen host credentials or private app data", async (t
   const own = isolationPaths({ ...input, env: { ...w.env, CLAUDE_CONFIG_DIR: ownAccount } });
   assert.ok(own.readableAgain.includes(ownAccount), "the selected account remains available");
 });
+
+test("a launch HOME nested inside another provider's host home cannot expose its credentials", () => {
+  const host = join(tmpdir(), "ctty-host-home-boundary");
+  assert.throws(() => isolationPaths({
+    provider: "claude",
+    cwd: join(tmpdir(), "ctty-home-boundary-project"),
+    sessionTemp: join(tmpdir(), "ctty-home-boundary-temp"),
+    env: { HOME: join(host, ".codex", "nested-home") },
+    hostEnvironment: { HOME: host },
+    userDataPath: join(tmpdir(), "ctty-home-boundary-data"),
+    sessionId: "nested-host-home"
+  }), /protected host credentials/u);
+});
