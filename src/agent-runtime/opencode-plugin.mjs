@@ -45,7 +45,7 @@ async function lifecycleEvent(event, decisions, client) {
     rootWorking = false;
     if (!rootSessionId) return;
     if (lifecycleEnabled) {
-      await reportLifecycle({ state: "idle", event: event.type, turnId: rootSessionId, threadId: rootSessionId });
+      await reportLifecycle({ state: "idle", event: event.type, threadId: rootSessionId });
     }
     runPluginHooks("session-start", event.type, event);
     return;
