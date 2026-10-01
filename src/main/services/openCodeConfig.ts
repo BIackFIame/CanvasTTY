@@ -91,8 +91,8 @@ export function openCodeYoloEnvironment(
  *   rules after theirs). Such a tool behaves exactly as without auto;
  * - for any other tool, auto's rules come first and the person's own rules for that tool (top-level and this run's
  *   agent.build, in their order) after them, so the person's rules still win;
- * - a config file that exists but cannot be read or parsed, or a parsed environment permission block with an
- *   unsupported shape, leaves every tool alone. Malformed OPENCODE_PERMISSION JSON is ignored, like OpenCode.
+ * - a config file that exists but cannot be read or parsed leaves every tool alone. Malformed OPENCODE_PERMISSION
+ *   JSON is ignored, like OpenCode; valid JSON with an unsupported permission shape stops auto or accept-edits.
  * Auto's rules: read, glob, grep, list allowed, except `.env` files (they ask, like OpenCode's default); edit (edit,
  * write, apply_patch) allowed; bash allowed only when `shellGuarded` (CanvasTTY's base protection is on and its guard
  * runs in this OpenCode), otherwise it asks. external_directory is not touched: a path outside the project still asks.
@@ -102,6 +102,9 @@ export function openCodeAutoEnvironment(
   environment: Readonly<Record<string, string | undefined>>,
   options: { shellGuarded: boolean; thirdPartyModel?: boolean; cwd?: string; readFile?: (path: string) => string | null; platform?: NodeJS.Platform }
 ): Record<string, string> {
+  if (parseEnvironmentPermission(environment[OPENCODE_PERMISSION]) === null) {
+    throw new Error("OPENCODE_PERMISSION must contain a permission object with allow, ask, or deny actions before CanvasTTY can use auto or accept-edits.");
+  }
   const config = parseInlineConfig(environment[OPENCODE_CONFIG_CONTENT]);
   const agents = objectField(config.agent, "agent");
   const build = objectField(agents.build, "agent.build");
@@ -203,12 +206,9 @@ export function openCodePersonRules(
       else inlineAgent = block;
     }
   }
-  const environmentPermission = environment[OPENCODE_PERMISSION];
-  if (environmentPermission) {
-    try {
-      take(JSON.parse(environmentPermission), "top");
-    } catch { /* OpenCode ignores malformed OPENCODE_PERMISSION JSON. */ }
-  }
+  const environmentPermission = parseEnvironmentPermission(environment[OPENCODE_PERMISSION]);
+  if (environmentPermission === null) unknown = true;
+  else if (environmentPermission !== undefined) top = mergeDeep(top, environmentPermission);
   return { top, fileAgent, inlineAgent, unknown };
 }
 
@@ -254,6 +254,15 @@ function permissionRules(block: PermissionBlock): Array<{ permission: string; pa
   return Object.entries(block).flatMap(([permission, rule]) => typeof rule === "string"
     ? [{ permission, pattern: "*", action: rule }]
     : Object.entries(rule).map(([pattern, action]) => ({ permission, pattern, action })));
+}
+
+/** Undefined means absent or malformed JSON; null means valid JSON with an unsupported permission shape.
+ * OpenCode merges this environment source raw, without its config schema's single-action normalization. */
+function parseEnvironmentPermission(raw: string | undefined): PermissionBlock | null | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return undefined; }
+  return isObject(parsed) ? permissionBlock(parsed) : null;
 }
 
 /** A permission value as OpenCode's schema reads it (a single action means every tool), or null when it is not one. */

@@ -5,8 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 import { openCodeAutoEnvironment, openCodePersonRules } from "../src/main/services/openCodeConfig.ts";
 import { permissionConfigProblem } from "../src/main/services/LaunchPipeline.ts";
-import { coreOwnedLaunchArgument } from "../src/main/services/terminalLaunch.ts";
+import { coreOwnedLaunchArgument, resolveTerminalLaunch } from "../src/main/services/terminalLaunch.ts";
 import { availableProfiles, BYPASS_CHANGES_NOTHING, profileAvailable } from "../src/shared/autoMode.ts";
+import { availableRegistry } from "./helpers/terminal.mjs";
 
 
 // OpenCode 1.18.33's decision for the build agent (agent.ts, permission/index.ts, core/util/wildcard.ts): its
@@ -147,25 +148,55 @@ test("OpenCode environment permission follows file and inline top-level rules wh
   assert.equal(decide([fileAgent], agentsResult, "read", "src/a.ts", agentsEnv), "ask", "inline build ask follows environment deny");
 });
 
-test("OpenCode auto ignores malformed environment JSON but adds nothing for a valid unsupported permission block", () => {
+test("OpenCode auto ignores malformed environment JSON and preserves its original bytes", () => {
   const inline = { agent: { build: { permission: { task: "deny" } } } };
-  for (const raw of ["", "{", '{ "edit": "deny", }']) {
+  for (const raw of ["", " ", "{", '{ "edit": "deny", }']) {
     const env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(inline), OPENCODE_PERMISSION: raw };
     assert.equal(openCodePersonRules(env, undefined, () => null).unknown, false);
-    const delta = openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null });
-    const result = inlineOf(delta);
-    assert.equal(decide([], result, "edit", "src/a.ts", env), "allow");
-    assert.equal(decide([], result, "bash", "ls", env), "allow");
-    assert.equal(result.agent.build.permission.task, "deny");
-    assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, raw, "malformed values are preserved for OpenCode to handle");
+    for (const shellGuarded of [true, false]) {
+      const delta = openCodeAutoEnvironment(env, { shellGuarded, readFile: () => null });
+      const result = inlineOf(delta);
+      assert.equal(decide([], result, "edit", "src/a.ts", env), "allow");
+      assert.equal(decide([], result, "bash", "ls", env), shellGuarded ? "allow" : "ask");
+      assert.equal(result.agent.build.permission.task, "deny");
+      assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, raw, "malformed values are preserved for OpenCode to handle");
+      assert.equal(Object.hasOwn(delta, "OPENCODE_PERMISSION"), false);
+    }
   }
-  // JSON can parse successfully without being a permission block. Avoid inventing grants when its meaning is unknown.
-  for (const value of [null, [], false, 1, { edit: "invalid" }, { bash: { "git push *": "invalid" } }]) {
+});
+
+test("OpenCode auto refuses valid JSON with an unsupported environment permission shape", () => {
+  const inline = { agent: { build: { permission: { task: "deny" } } } };
+  for (const value of ["allow", "ask", "deny", null, [], false, true, 1, { edit: "invalid" },
+    { bash: { "potential-secret-command": "invalid" } }]) {
     const env = { OPENCODE_CONFIG_CONTENT: JSON.stringify(inline), OPENCODE_PERMISSION: JSON.stringify(value) };
-    assert.equal(openCodePersonRules(env, undefined, () => null).unknown, true);
-    const delta = openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => null });
-    assert.deepEqual(inlineOf(delta).agent.build.permission, inline.agent.build.permission, "the original build rules stay intact and auto adds nothing");
-    assert.equal({ ...env, ...delta }.OPENCODE_PERMISSION, env.OPENCODE_PERMISSION);
+    const original = { ...env };
+    const rules = openCodePersonRules(env, undefined, () => null);
+    assert.equal(rules.unknown, true);
+    assert.deepEqual(rules.top, {}, "unsupported environment values are not normalized into wildcard rules");
+    for (const options of [{ shellGuarded: true }, { shellGuarded: false }, { shellGuarded: true, thirdPartyModel: true }]) {
+      assert.throws(() => openCodeAutoEnvironment(env, { ...options, readFile: () => null }), (error) => {
+        assert.match(error.message, /OPENCODE_PERMISSION must contain a permission object/u);
+        assert.equal(error.message.includes("potential-secret-command"), false, "the error does not echo environment content");
+        return true;
+      });
+    }
+    assert.deepEqual(env, original, "a refused launch leaves the original environment untouched");
+  }
+});
+
+test("OpenCode auto and accept-edits reject scalar deny or ask instead of leaving unguarded bash allowed", () => {
+  const providerCli = availableRegistry().get("opencode");
+  for (const action of ["deny", "ask"]) {
+    const env = { OPENCODE_PERMISSION: JSON.stringify(action) };
+    // OpenCode merges raw environment JSON rather than applying its config schema. A string becomes numeric
+    // character keys, not a wildcard. Previously treating it as a wildcard omitted auto's protective bash ask.
+    assert.equal(decide([], { agent: { build: { permission: {} } } }, "bash", "ls", env), "allow");
+    for (const profile of ["auto", "acceptEdits"]) {
+      assert.throws(() => resolveTerminalLaunch("opencode", profile, [], {
+        providerCli, environment: env, shellGuarded: false
+      }), /OPENCODE_PERMISSION must contain a permission object/u);
+    }
   }
 });
 
