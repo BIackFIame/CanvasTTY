@@ -23,6 +23,67 @@ async function jsonl(path, rows) {
   await writeFile(path, rows.map(row => JSON.stringify(row)).join("\n") + "\n");
   await utimes(path, at / 1000, at / 1000);
 }
+async function legacyConversation(home, cwd, sessionId, title = "") {
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, "kimi.json"), JSON.stringify({ work_dirs: [{ path: cwd }] }));
+  const dir = join(home, "sessions", createHash("md5").update(cwd).digest("hex"), sessionId);
+  await mkdir(dir, { recursive: true });
+  await jsonl(join(dir, "context.jsonl"), [{ role: "user", content: title || "Legacy prompt" }]);
+  if (title) await writeFile(join(dir, "state.json"), JSON.stringify({ custom_title: title }));
+}
+async function modernState(home, sessionId, fields = {}) {
+  const dir = join(home, "sessions", "wd_project", sessionId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "state.json"), JSON.stringify({
+    id: sessionId, version: 2, cwd: fields.cwd, title: fields.title || "Modern title",
+    createdAt: at - 1000, updatedAt: at, custom: {}, ...fields
+  }));
+}
+
+test("Kimi retains legacy conversations when the modern sessions store is empty", async t => {
+  const root = await directory(t);
+  const legacy = join(root, "legacy");
+  const modern = join(root, "modern");
+  await legacyConversation(legacy, root, id, "Legacy title");
+  await mkdir(join(modern, "sessions"), { recursive: true });
+  const result = await kimiHistory(legacy, modern).read(signal());
+  assert.deepEqual(result.items.map(item => item.id), [id]);
+});
+
+test("Kimi retains legacy conversations when modern records are excluded or invalid", async t => {
+  const root = await directory(t);
+  const legacy = join(root, "legacy");
+  const modern = join(root, "modern");
+  await legacyConversation(legacy, root, id, "Legacy title");
+  await modernState(modern, `session_${id}`, { custom: { child_session_kind: "child" } });
+  await modernState(modern, "session_22222222-2222-4222-8222-222222222222", { version: 1 });
+  const result = await kimiHistory(legacy, modern).read(signal());
+  assert.deepEqual(result.items.map(item => item.id), [id]);
+});
+
+test("Kimi prefers the native ID for migrated history and keeps distinct legacy chats with equal titles", async t => {
+  const root = await directory(t);
+  const legacy = join(root, "legacy");
+  const modern = join(root, "modern");
+  const otherId = "22222222-2222-4222-8222-222222222222";
+  await legacyConversation(legacy, root, id, "Same title");
+  await legacyConversation(legacy, root, otherId, "Same title");
+  await modernState(modern, `session_${id}`, {
+    title: "Migrated renamed title",
+    custom: { imported_from_kimi_cli: true, kimi_cli_session_id: id }
+  });
+  const result = await kimiHistory(legacy, modern).read(signal());
+  assert.deepEqual(result.items.map(item => item.id), [`session_${id}`, otherId]);
+  assert.equal(result.items[0].title, "Migrated renamed title");
+});
+
+test("Kimi accepts the native ses ID emitted by the legacy migrator", async t => {
+  const root = await directory(t);
+  const modern = join(root, "modern");
+  await modernState(modern, `ses_${id}`, { cwd: root, title: "Imported" });
+  const result = await kimiHistory(join(root, "missing-legacy"), modern).read(signal());
+  assert.deepEqual(result.items.map(item => item.id), [`ses_${id}`]);
+});
 
 test("OpenCode activity stays in milliseconds", async t => {
   const root = await directory(t);
@@ -33,6 +94,55 @@ test("OpenCode activity stays in milliseconds", async t => {
   db.close();
   const result = await sqliteHistory(path, "opencode", signal());
   assert.deepEqual(result.items, [{ provider: "opencode", id: "ses_abc123", title: "Project chat", cwd: root, lastActivityAt: at }]);
+});
+
+test("Kimi Code reads current session metadata, omits child sessions and prefers it over migrated legacy copies", async t => {
+  const root = await directory(t);
+  const legacy = join(root, "legacy");
+  const current = join(root, "current");
+  const currentId = `session_${id}`;
+  const session = join(current, "sessions", "wd_project", currentId);
+  await mkdir(session, { recursive: true });
+  await mkdir(legacy);
+  await writeFile(join(legacy, "kimi.json"), JSON.stringify({ work_dirs: [{ path: root }] }));
+  const migrated = join(legacy, "sessions", createHash("md5").update(root).digest("hex"), id);
+  await mkdir(migrated, { recursive: true });
+  await jsonl(join(migrated, "context.jsonl"), [{ role: "user", content: "Outdated legacy title" }]);
+  await writeFile(join(session, "state.json"), JSON.stringify({
+    id: currentId, version: 2, cwd: root, title: "Renamed current chat",
+    createdAt: at - 1000, updatedAt: at, custom: {}, agents: { main: { type: "main" } }
+  }));
+  const childId = "session_22222222-2222-4222-8222-222222222222";
+  const child = join(current, "sessions", "wd_project", childId);
+  await mkdir(child, { recursive: true });
+  await writeFile(join(child, "state.json"), JSON.stringify({
+    id: childId, version: 2, cwd: root, updatedAt: at, custom: { child_session_kind: "child", parent_session_id: currentId }
+  }));
+  const result = await kimiHistory(legacy, current).read(signal());
+  assert.deepEqual(result.items, [{ provider: "kimi", id: currentId, cwd: root, title: "Renamed current chat", lastActivityAt: at }]);
+  const launch = resolveTerminalLaunch("kimi", "normal", [], {
+    providerCli: { provider: "kimi", state: "available", executable: "/resolved/kimi", launcher: "native", environment: {} },
+    resumePrevious: true, resumeThreadId: currentId
+  });
+  assert.deepEqual(launch.args, ["--session", currentId]);
+});
+
+test("Kimi Code derives an unnamed chat's title from its last user prompt in the main agent wire log", async t => {
+  const root = await directory(t);
+  const currentId = `session_${id}`;
+  const session = join(root, "sessions", "wd_project", currentId);
+  await mkdir(join(session, "agents", "main"), { recursive: true });
+  await writeFile(join(session, "state.json"), JSON.stringify({
+    id: currentId, version: 2, cwd: root, updatedAt: at, custom: {}
+  }));
+  await jsonl(join(session, "agents", "main", "wire.jsonl"), [
+    { type: "profile.bind", systemPrompt: "x".repeat(80 * 1024) },
+    { type: "turn.prompt", agentId: "main", origin: { kind: "user" }, input: [{ type: "text", text: "First question" }] },
+    { type: "turn.prompt", agentId: "main", origin: { kind: "user" }, input: [{ type: "text", text: "Latest question" }] },
+    { type: "turn.prompt", agentId: "main", origin: { kind: "system" }, input: [{ type: "text", text: "Internal reminder" }] }
+  ]);
+  const result = await kimiHistory(join(root, "legacy"), root).read(signal());
+  assert.equal(result.items[0]?.title, "Latest question");
 });
 
 test("a complete metadata record exactly at the tail boundary is retained", async t => {
@@ -89,6 +199,7 @@ test("Kimi lists local workspaces with custom titles and excludes remote workspa
   await writeFile(join(dir, "state.json"), JSON.stringify({ custom_title: "Renamed" }));
   const result = await kimiHistory(root).read(signal());
   assert.deepEqual(result.items, [{ provider: "kimi", id, cwd: root, title: "Renamed", lastActivityAt: at }]);
+  assert.deepEqual(await kimiHistory(root, join(root, "absent-current-store")).read(signal()), result);
 });
 
 test("MiniMax extracts only metadata from the confirmed runtime store", async t => {

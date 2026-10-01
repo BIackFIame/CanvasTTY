@@ -27,7 +27,10 @@ async function fixture(t) {
   return root;
 }
 
-test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local socket", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+for (const [provider, threadId] of [
+  ["claude", "5f1c2a90-aa11-4b22-9c33-0d44e55f6677"],
+  ["kimi", "session_5f1c2a90-aa11-4b22-9c33-0d44e55f6677"]
+]) test(`RuntimeGateway accepts an authenticated ${provider} hook with its native session ID`, POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
@@ -35,7 +38,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
   t.after(() => gateway.close());
   assert.equal((await stat(address)).mode & 0o777, 0o600);
 
-  const capability = gateway.registerSession("terminal-one", "claude");
+  const capability = gateway.registerSession("terminal-one", provider);
   const helper = new URL("../src/agent-runtime/hook-helper.mjs", import.meta.url);
   const child = spawn(process.execPath, [helper.pathname, "working", "UserPromptSubmit"], {
     env: {
@@ -47,7 +50,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
     },
     stdio: ["pipe", "ignore", "pipe"]
   });
-  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one", session_id: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677" }));
+  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one", session_id: threadId }));
   const result = await childResult(child);
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(signals, [{
@@ -56,7 +59,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
       state: "working",
       event: "UserPromptSubmit",
       turnId: "turn-one",
-      threadId: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677"
+      threadId
     }
   }]);
   assert.equal(JSON.stringify(signals).includes("must stay local"), false);

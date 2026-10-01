@@ -39,7 +39,7 @@ export class AgentChatHistoryService {
       opencode: opencodeHistory(paths.opencode),
       claude: jsonlHistory("claude", paths.claude),
       qwen: jsonlHistory("qwen", paths.qwen),
-      kimi: kimiHistory(paths.kimi),
+      kimi: kimiHistory(paths.kimi, paths.kimiCode),
       omp: jsonlHistory("omp", paths.omp),
       pi: jsonlHistory("pi", paths.pi),
       cursor: cursorHistory(paths.cursor),
