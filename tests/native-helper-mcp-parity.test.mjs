@@ -19,6 +19,8 @@ import {
 } from "./native-helper-harness.mjs";
 
 const OPTIONS = { skip: SKIP_NATIVE, timeout: 60_000 };
+// Windows CI builds this current-user-only named-pipe host before running the gateway tests.
+const WINDOWS_PIPE_HOST = join(process.cwd(), "build", "windows-agent-pipe-host", "canvastty-windows-agent-pipe-host.exe");
 
 const browserEnvironment = (address, extra = {}) => baseEnvironment({
   [AGENT_BROWSER_ENV.address]: address,
@@ -349,7 +351,7 @@ test("browser MCP: the real AgentGateway serves both implementations", OPTIONS, 
       return { ok: true, requestId: command.requestId, tabId: null, commandSequence: executed.length, revisionBefore: null, revisionAfter: null, data: { tabs: [] } };
     },
     subscribe: () => () => undefined
-  }, { runtimeDirectory });
+  }, { runtimeDirectory, windowsHostPath: WINDOWS_PIPE_HOST });
   await gateway.start();
   t.after(() => gateway.close());
   const answers = [];
@@ -510,7 +512,8 @@ test("orchestration MCP: the real OrchestrationGateway serves both implementatio
         calls.push({ sessionId, tool: request.tool });
         return { agents: [] };
       }
-    }
+    },
+    windowsHostPath: WINDOWS_PIPE_HOST
   });
   await gateway.start();
   t.after(() => gateway.stop());
