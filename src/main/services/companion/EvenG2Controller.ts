@@ -678,6 +678,7 @@ export class EvenG2Controller {
     await this.stop();
     this.presentation.close();
     await this.saveQueue;
+    await this.diagnosticsWrite;
   }
   private json(res: ServerResponse, status: number, value: unknown): void {
     res.writeHead(status, {
@@ -734,6 +735,7 @@ export class EvenG2Controller {
     if (["/g2/discover", "/g2/pair-start", "/g2/pair-finish"].includes(url.pathname)) {
       const active = !!this.pairing && this.pairing.expiresAt > Date.now();
       res.once("finish", () => {
+        if (this.closing) return;
         const line = `${new Date().toISOString()} ${req.method} ${url.pathname} HTTP ${res.statusCode} active=${active} family=${address.includes(":") ? "IPv6" : "IPv4"}`;
         this.pairingDiagnostics = [...this.pairingDiagnostics, line].slice(-64);
         const text = this.pairingDiagnostics.join("\n") + "\n";
