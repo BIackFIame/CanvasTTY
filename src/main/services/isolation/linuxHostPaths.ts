@@ -87,6 +87,19 @@ export class LinuxHostPaths {
         }
       }
       const writable = paths.writable.filter((path) => this.fs.kind(path) === "directory");
+      // A missing agent directory must stay empty: an empty build.md would replace the CLI's default agent.
+      for (const path of paths.protectedDirectories ?? []) {
+        if (this.held.has(path)) { take(path, "folder"); continue; }
+        if (this.fs.kind(path) || !creatableInside(path, writable, (candidate) => this.fs.kind(candidate))) continue;
+        const parents: string[] = [];
+        for (let current = dirname(path); !this.fs.kind(current); current = dirname(current)) parents.push(current);
+        for (const parent of parents.reverse()) {
+          this.fs.mkdir(parent);
+          take(parent, "folder");
+        }
+        this.fs.mkdir(path);
+        take(path, "folder");
+      }
       for (const path of paths.protectedWrites) {
         if (path.endsWith(".lock")) continue;
         if (this.held.has(path)) { take(path, "placeholder"); continue; }

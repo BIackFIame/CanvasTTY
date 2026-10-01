@@ -59,6 +59,11 @@ Agents work in their own mode; CanvasTTY's layers sit outside it as a quiet safe
 | Delegation rules | A subagent never gets more than its orchestrator (never YOLO), works only in its orchestrator's project folder, within the depth and count limits the person set; orchestrators get a control connection of their own; no agent-facing tool changes settings, protection, profiles, trust or isolation; plugin launch options from an agent only where the plugin declared them delegable. | What a plugin the person trusted does with its own permissions. |
 | Agent isolation (OS layer) | On macOS (sandbox-exec) and Linux (bubblewrap), for subagents, plugin-started agents and every agent not in Manual: the whole process tree writes only in the project, its own temporary folder and its CLI's own folders; keys, other CLIs' credentials and CanvasTTY's tokens are unreadable; no other process, app, Apple event, preference write, launchd job or foreign Unix socket (Docker, tmux, SSH agent) is reachable. Fails closed. | Network is not restricted. Linux cannot filter Unix sockets, only hide the user runtime folder. The CLI's own sandbox cannot run inside the layer on macOS, so it is switched off there (approvals unchanged) and commands can use the network. A Claude launch may rewrite the login keychain file to save a refreshed sign-in, so it could also damage that file (other items stay behind their own access lists). Windows has no layer yet: subagents run in Manual there unless the person turns isolation off. |
 
+Isolation keeps approval configuration read-only, including OpenCode's project and custom config files and its `agent`/`agents` directories. CLI state and caches remain writable. A moved CLI home is refused if its real path overlaps host credentials or private CanvasTTY data; a selected account folder below `account-homes` remains available. Credential exclusions use the host environment captured before launch contributions, even if the launch changes `HOME`.
+
+OpenCode Auto inspects only regular local config files of at most 1 MiB. An existing source that cannot be inspected adds no Auto allowances. A launch contributor's uninspectable config is refused; only absent optional directory candidates are skipped. JSONC comments and trailing commas are parsed without changing quoted strings.
+
+
 ## Repository guards
 
 ```bash

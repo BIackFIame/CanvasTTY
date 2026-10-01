@@ -320,6 +320,65 @@ test("OpenCode auto keeps the person's specific rules for a tool after its own, 
   assert.equal(decide(files, result, "glob"), "allow");
 });
 
+test("OpenCode auto follows OpenCode's child-to-parent .opencode merge order and project-config disable flag", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-opencode-path-order-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const parent = join(home, "work");
+  const child = join(parent, "project");
+  await mkdir(join(parent, ".opencode"), { recursive: true });
+  await mkdir(join(child, ".opencode"), { recursive: true });
+  await writeFile(join(parent, ".opencode", "opencode.json"), JSON.stringify({ permission: { bash: "deny" } }));
+  await writeFile(join(child, ".opencode", "opencode.json"), JSON.stringify({ permission: { bash: "allow" } }));
+  const env = { HOME: home };
+  const person = openCodePersonRules(env, child);
+  assert.equal(person.top.bash, "deny", "the parent directory config is merged after its child");
+  const normal = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: child }));
+  assert.equal(normal.agent.build.permission.bash, "deny");
+  const disabled = openCodePersonRules({ ...env, OPENCODE_DISABLE_PROJECT_CONFIG: "true" }, child);
+  assert.equal(disabled.top.bash, undefined, "the upstream truthy flag disables project JSON and .opencode directories");
+});
+
+test("OpenCode Auto preserves later directory JSON over earlier build-agent front matter", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-opencode-agent-order-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const parent = join(home, "work");
+  const child = join(parent, "project");
+  await mkdir(join(child, ".opencode", "agent"), { recursive: true });
+  await mkdir(join(parent, ".opencode"), { recursive: true });
+  await writeFile(join(child, ".opencode", "agent", "build.md"), "---\npermission:\n  '*': allow\n---\nBuild things.\n");
+  await writeFile(join(parent, ".opencode", "opencode.json"), JSON.stringify({
+    agent: { build: { permission: { "*": "deny" } } }
+  }));
+  const env = { HOME: home };
+  const person = openCodePersonRules(env, child);
+  assert.equal(person.fileAgent["*"], "deny", "each directory's agent files merge before the next parent directory");
+  const result = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: child }));
+  assert.equal(result.agent.build.permission.read, undefined);
+  assert.equal(result.agent.build.permission.bash, undefined, "Auto adds no grants over the person's wildcard deny");
+});
+
+test("OpenCode Auto treats ambiguous or throwing injected config reads as unknown", () => {
+  const env = { OPENCODE_CONFIG: "/person/config.json" };
+  const thrown = openCodePersonRules(env, undefined, () => { throw new Error("read failed"); });
+  assert.equal(thrown.unknown, true);
+  const result = inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, readFile: () => { throw new Error("read failed"); } }));
+  assert.deepEqual(result.agent.build.permission, {});
+});
+
+test("ambiguous build-agent front matter variants leave OpenCode Auto disabled", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-opencode-agent-ambiguous-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const directory = join(home, ".opencode");
+  await mkdir(join(directory, "agent"), { recursive: true });
+  await mkdir(join(directory, "agents"), { recursive: true });
+  await writeFile(join(directory, "agent", "build.md"), "---\npermission:\n  read: allow\n---\nBuild.\n");
+  await writeFile(join(directory, "agents", "build.md"), "---\npermission:\n  read: deny\n---\nBuild.\n");
+  const env = { HOME: home };
+  const person = openCodePersonRules(env, home);
+  assert.equal(person.unknown, true);
+  assert.deepEqual(inlineOf(openCodeAutoEnvironment(env, { shellGuarded: true, cwd: home })).agent.build.permission, {});
+});
+
 test("OpenCode auto leaves a tool alone when the person's files name it for the build agent, or cannot be read", async (t) => {
   const home = await mkdtemp(join(tmpdir(), "ctty-opencode-agent-"));
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -363,6 +422,51 @@ test("a plugin cannot hand OpenCode or Kimi a configuration that decides approva
     files: [{ relPath: "k.json", content: JSON.stringify({ approval: { auto: true } }) }] }), /approval/u);
 });
 
+test("permission inspection parses JSONC without changing quoted comments or ignoring an invalid comment", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-jsonc-inspect-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  await mkdir(project, { recursive: true });
+  const config = join(project, "opencode.jsonc");
+  await writeFile(config, '{"description":"keep /* permission */ and // text", "permission":{"bash":"deny"},}');
+  const person = openCodePersonRules({ HOME: home }, project);
+  assert.equal(person.unknown, false);
+  assert.deepEqual(person.top, { bash: "deny" });
+  const relativePerson = openCodePersonRules({ OPENCODE_CONFIG: "opencode.jsonc" }, project);
+  assert.equal(relativePerson.unknown, false);
+  assert.deepEqual(relativePerson.top, { bash: "deny" }, "relative explicit config paths resolve from launch cwd");
+  assert.match(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: "opencode.jsonc" }, args: [], files: [] }, project), /sets permission/u,
+    "LaunchPipeline resolves relative explicit config paths from launch cwd");
+  assert.match(permissionConfigProblem("opencode", {
+    env: { OPENCODE_CONFIG: "{launchFiles}/config.jsonc" }, args: [],
+    files: [{ relPath: "config.jsonc", content: '{"description":"/* keep */", "permission":"allow",}' }]
+  }, project), /sets permission/u);
+  assert.match(permissionConfigProblem("opencode", {
+    env: { OPENCODE_CONFIG: "{launchFiles}/bad.jsonc" }, args: [],
+    files: [{ relPath: "bad.jsonc", content: '{"x": 1 /* never closes' }]
+  }, project), /not a JSON object/u, "an unclosed comment must be rejected");
+});
+
+test("OpenCode config directory inspection skips only absent candidates and resolves relative paths from launch cwd", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "ctty-config-dir-"));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const cwd = join(home, "launch");
+  const configDir = join(cwd, "conf");
+  await mkdir(configDir, { recursive: true });
+  const contribution = (folder) => ({ env: { OPENCODE_CONFIG_DIR: folder }, args: [], files: [] });
+  assert.equal(permissionConfigProblem("opencode", contribution("conf"), cwd), null, "all absent candidates are okay");
+  assert.equal(permissionConfigProblem("opencode", contribution("{launchFiles}"), cwd), null,
+    "absent optional config candidates from the launch-files directory are okay");
+  await writeFile(join(configDir, "opencode.jsonc"), "{");
+  assert.match(permissionConfigProblem("opencode", contribution("conf"), cwd), /cannot check|not a JSON object/u,
+    "an existing malformed candidate must stop launch");
+  await rm(join(configDir, "opencode.jsonc"));
+  const nonregular = join(configDir, "opencode.json");
+  await mkdir(nonregular);
+  assert.match(permissionConfigProblem("opencode", contribution("conf"), cwd), /cannot check/u,
+    "an existing nonregular candidate must stop launch");
+});
+
 test("core-owned flags: cursor's --force/-f/--yolo/--approve-mcps and mode switches are CanvasTTY's alone", () => {
   for (const flag of ["--force", "-f", "--yolo", "--approve-mcps", "--mode", "--plan"]) assert.equal(coreOwnedLaunchArgument("cursor", flag), true, flag);
   for (const flag of ["--auto", "--agent"]) assert.equal(coreOwnedLaunchArgument("opencode", flag), true, flag);
@@ -380,4 +484,28 @@ test("the profiles each CLI offers; YOLO that changes nothing is known", () => {
   assert.deepEqual(availableProfiles("terminal", true), ["normal"]);
   assert.equal(profileAvailable("kimi", "acceptEdits", true), false);
   assert.deepEqual([...BYPASS_CHANGES_NOTHING].sort(), ["minimax", "pi"]);
+});
+
+test("a contributor's configuration path that is a FIFO or oversized is refused at once, never read blocking the app", { skip: process.platform === "win32" }, async (t) => {
+  const { mkdtemp, rm, writeFile } = await import("node:fs/promises");
+  const { spawnSync } = await import("node:child_process");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const folder = await mkdtemp(join(tmpdir(), "canvastty-config-fifo-"));
+  t.after(() => rm(folder, { recursive: true, force: true }));
+  const fifo = join(folder, "opencode.json");
+  assert.equal(spawnSync("mkfifo", [fifo]).status, 0);
+  const huge = join(folder, "huge.json");
+  await writeFile(huge, `{"x":"${"a".repeat(2 * 1024 * 1024)}"}`);
+  // In a child: the old synchronous read of a FIFO with no writer never returns.
+  const script = `
+    const { permissionConfigProblem } = await import(${JSON.stringify(new URL("../src/main/services/LaunchPipeline.ts", import.meta.url).href)});
+    for (const path of process.argv.slice(1)) console.log(JSON.stringify(permissionConfigProblem("opencode", { env: { OPENCODE_CONFIG: path }, args: [], files: [] })));
+  `;
+  const child = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", "--input-type=module", "-e", script, fifo, huge], { encoding: "utf8", timeout: 20_000 });
+  assert.equal(child.signal, null, "it did not hang");
+  assert.equal(child.status, 0, child.stderr);
+  const answers = child.stdout.trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(answers.length, 2);
+  for (const answer of answers) assert.match(answer, /cannot check/u);
 });

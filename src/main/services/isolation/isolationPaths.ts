@@ -1,8 +1,9 @@
 import { existsSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { otherSpellings } from "../onDiskPath.ts";
+import { openCodeConfigPaths } from "../inspectedConfig.ts";
 
 /**
  * The folders one isolated agent may write, the ones it may not read, and the sockets it may connect to. Pure: the
@@ -17,6 +18,8 @@ export interface IsolationPathInput {
   sessionTemp: string;
   /** The agent's launch environment (HOME, XDG_*, CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, CanvasTTY's socket addresses). */
   env: Readonly<Record<string, string | undefined>>;
+  /** Host environment captured before launch contributors; credentials there stay hidden if HOME moves. */
+  hostEnvironment?: Readonly<Record<string, string | undefined>>;
   /** CanvasTTY's userData folder. */
   userDataPath: string;
   /** The session id, for its own plugin launch files and its own control grant. */
@@ -38,8 +41,15 @@ export interface IsolationPaths {
   creatableFolders: string[];
   /** Inside writable folders, still not writable: the repository's git config, the CLIs' own permission settings. */
   protectedWrites: string[];
+  /** Permission-bearing agent directories; empty directories are neutral, unlike a fabricated build.md. */
+  protectedDirectories?: string[];
   /** The project's git hook folders: only `*.sample` files may be written there (what `git init` creates). */
   gitHooks: string[];
+  /**
+   * The writable project folder (every spelling; none for a read-only project). No repository anywhere under it gets
+   * hooks or `info/attributes` from the agent: they would run, or pick filters, outside the layer.
+   */
+  projectRoots: string[];
   /** Not readable at all: other agents' credentials, SSH/cloud keys, CanvasTTY's tokens and secret stores. */
   unreadable: string[];
   /** Readable again inside an unreadable folder: what this launch was handed. */
@@ -88,6 +98,25 @@ function providerFolders(provider: ProviderId, env: IsolationPathInput["env"], h
     default:
       return { folders: named(provider), files: [] };
   }
+}
+
+/** The variables that move a CLI's home away from where providerFolders looks. */
+const HOME_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = {
+  codex: ["CODEX_HOME"],
+  claude: ["CLAUDE_CONFIG_DIR"],
+  grok: ["GROK_HOME"],
+  hermes: ["HERMES_HOME"],
+  kimi: ["KIMI_HOME"],
+  opencode: ["OPENCODE_CONFIG_DIR"],
+  qwen: ["QWEN_HOME"]
+};
+/** A CLI's configuration file named by a variable (it may hold keys): unreadable to other CLIs, never writable to its own. */
+const CONFIG_FILE_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = { opencode: ["OPENCODE_CONFIG"] };
+
+function movedProviderHomes(provider: ProviderId, env: IsolationPathInput["env"], variables = HOME_VARIABLES): string[] {
+  return (variables[provider] ?? [])
+    .map((name) => env[name])
+    .filter((value): value is string => typeof value === "string" && isAbsolute(value));
 }
 
 function xdgFolders(env: IsolationPathInput["env"], home: string): { config: string; data: string; state: string; cache: string } {
@@ -152,24 +181,66 @@ function realish(path: string): string {
 export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const home = input.env.HOME && isAbsolute(input.env.HOME) ? input.env.HOME : "/nonexistent-home";
   const xdg = xdgFolders(input.env, home);
+  const hostEnv = input.hostEnvironment ?? input.env;
+  const hostHome = hostEnv.HOME && isAbsolute(hostEnv.HOME) ? hostEnv.HOME : home;
+  const hostXdg = xdgFolders(hostEnv, hostHome);
+  // One launch may name the same source in several phases. Canonicalize it once, without a stale cross-run cache.
+  const spellingCache = new Map<string, string[]>();
+  const pathSpellings = (path: string): string[] => {
+    let found = spellingCache.get(path);
+    if (!found) { found = spellings(path); spellingCache.set(path, found); }
+    return found;
+  };
+  const all = (paths: readonly string[]): string[] => [...new Set(paths.flatMap(pathSpellings))];
   const own = providerFolders(input.provider, input.env, home);
   // A launch that moved its CLI home into CanvasTTY's account homes (an accounts plugin) or elsewhere: that folder is
-  // its own state too.
-  const movedHomes = ["CODEX_HOME", "CLAUDE_CONFIG_DIR", "GROK_HOME", "HERMES_HOME", "KIMI_HOME", "OPENCODE_CONFIG_DIR", "QWEN_HOME"]
-    .map((name) => input.env[name])
-    .filter((value): value is string => typeof value === "string" && isAbsolute(value));
+  // its own state too. Only this CLI's own variables: another CLI's (inherited from the person's shell) is that CLI's.
+  const movedHomes = input.provider === "opencode" && input.env.OPENCODE_CONFIG_DIR
+    ? [resolve(input.cwd, input.env.OPENCODE_CONFIG_DIR)]
+    : movedProviderHomes(input.provider, input.env);
   const ownFolders = [...own.folders, ...movedHomes];
+  // Other CLIs' credentials where they are by default and where the launch environment moved them (their own home
+  // variables, XDG_*): an exported GROK_HOME is where Grok's sign-in really is.
+  const hides = (folder: string): boolean => [home, input.cwd].some((kept) => isWithin(kept, folder));
   const others = AGENT_PROVIDERS.filter((provider) => provider !== input.provider)
     .flatMap((provider) => {
-      const folders = providerFolders(provider, {}, home);
-      return [...folders.folders, ...folders.files];
+      const defaults = providerFolders(provider, {}, home);
+      const moved = providerFolders(provider, input.env, home);
+      return [...defaults.folders, ...defaults.files, ...moved.folders, ...moved.files,
+        ...movedProviderHomes(provider, input.env), ...movedProviderHomes(provider, input.env, CONFIG_FILE_VARIABLES)];
     })
-    // A folder another CLI shares with this one (~/.cache/<name> never overlaps; .gemini could) stays this CLI's.
-    .filter((folder) => !ownFolders.includes(folder));
+    // A folder another CLI shares with this one (~/.cache/<name> never overlaps; .gemini could) stays this CLI's; a
+    // variable pointing at HOME or above the project would hide them, so it is not followed.
+    .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
   const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
   const project = input.cwd;
-  const all = (paths: readonly string[]): string[] => [...new Set(paths.flatMap(spellings))];
+  const trustedOwn = providerFolders(input.provider, {}, hostHome);
+  const trustedOthers = AGENT_PROVIDERS.filter((provider) => provider !== input.provider).flatMap((provider) => {
+    const defaults = providerFolders(provider, {}, hostHome);
+    const configured = providerFolders(provider, hostEnv, hostHome);
+    return [...defaults.folders, ...defaults.files, ...configured.folders, ...configured.files,
+      ...movedProviderHomes(provider, hostEnv), ...movedProviderHomes(provider, hostEnv, CONFIG_FILE_VARIABLES)];
+  }).filter((path) => ![...trustedOwn.folders, ...trustedOwn.files].includes(path) && !hides(path));
+  const sensitive = all([...sensitiveHomeFolders(home, xdg.config), ...sensitiveHomeFolders(hostHome, hostXdg.config), ...trustedOthers]);
+  const privateSpellings = privateData.map((path) => ({ path, spellings: pathSpellings(path) }));
+  const grantSpellings = all(grants);
+  const accountRoot = join(input.userDataPath, "account-homes");
+  const accountSpellings = pathSpellings(accountRoot);
+  // Never re-allow a broad or aliased provider home over credentials. Account homes and this run's own
+  // prepared files remain available, but only below their granted root; the root itself is never an account.
+  for (const folder of ownFolders) {
+    const candidates = pathSpellings(folder);
+    const overlaps = (paths: readonly string[]): boolean => candidates.some((candidate) => paths.some((path) => isWithin(candidate, path) || isWithin(path, candidate)));
+    if (overlaps(sensitive)) throw new Error(`CLI home ${folder} overlaps protected host credentials.`);
+    for (const hidden of privateSpellings) {
+      if (!overlaps(hidden.spellings)) continue;
+      const withinGrant = candidates.every((candidate) => grantSpellings.some((grant) => isWithin(candidate, grant)));
+      const ownAccount = hidden.path === accountRoot && candidates.every((candidate) => accountSpellings.some((base) => candidate !== base && isWithin(candidate, base)));
+      if (!withinGrant && !ownAccount) throw new Error(`CLI home ${folder} overlaps protected CanvasTTY data.`);
+    }
+  }
+  const configSources = input.provider === "opencode" ? openCodeConfigPaths(input.env, input.cwd) : { jsonFiles: [], agentDirectories: [] };
   const socketFolders = [
     ...Object.entries(input.env)
       .filter(([name, value]) => /^CANVASTTY_.*_ADDRESS$/u.test(name) && typeof value === "string" && isAbsolute(value))
@@ -195,10 +266,12 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       ...(existsSync(join(project, ".git", "config")) ? [join(project, ".git", "config"), join(project, ".git", "config.lock")] : []),
       ...(input.provider === "codex" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
       ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
-      ...(input.provider === "opencode" ? ["opencode.json", "opencode.jsonc", "config.json"].map((name) => join(xdg.config, "opencode", name)) : [])
+      ...configSources.jsonFiles
     ]),
+    protectedDirectories: all(configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")])),
     gitHooks: all([join(project, ".git", "hooks")]),
-    unreadable: all([...sensitiveHomeFolders(home, xdg.config), ...others, ...privateData]),
+    projectRoots: input.readOnlyProject ? [] : all([project]),
+    unreadable: all([...sensitive, ...others, ...privateData]),
     readableAgain: all([...grants, ...movedHomes]),
     socketFolders: all(socketFolders),
     // The temporary folder a launch's own folder lives in (sessionTemp is <temp root>/ctty-iso-…/tmp), and /tmp: where
@@ -207,10 +280,16 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   };
 }
 
+/** `path` is `folder` or inside it, by the host's path rules (separators, a drive on Windows). */
+function isWithin(path: string, folder: string): boolean {
+  const rest = relative(folder, path);
+  return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+}
+
 /** The folders between `home` (exclusive) and `folder` (exclusive). */
 function ancestorsBelow(home: string, folder: string): string[] {
   const found: string[] = [];
-  for (let current = dirname(folder); current !== home && current.startsWith(`${home}/`); current = dirname(current)) found.push(current);
+  for (let current = dirname(folder); current !== home && isWithin(current, home); current = dirname(current)) found.push(current);
   return found;
 }
 

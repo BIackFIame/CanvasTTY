@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -323,4 +323,25 @@ test("real CLIs start inside the layer with a fake HOME (version and config only
     }
   }
   t.diagnostic(`${ran} CLI runs inside the layer`);
+});
+
+test("launch homes cannot reopen host credentials or private app data", async (t) => {
+  const w = await world(t);
+  const input = { provider: "claude", cwd: w.project, sessionTemp: w.temp, userDataPath: w.userData, sessionId: "s1", hostEnvironment: w.env };
+  for (const home of [w.home, join(w.home, ".ssh"), join(w.home, ".codex"), join(w.userData, "agent-control"), join(w.userData, "account-homes")]) {
+    assert.throws(() => isolationPaths({ ...input, env: { ...w.env, CLAUDE_CONFIG_DIR: home } }), /overlaps.*protected|protected.*overlap/iu, home);
+  }
+  if (process.platform !== "win32") {
+    const alias = join(w.base, "cli-home-alias");
+    await symlink(join(w.home, ".ssh"), alias);
+    assert.throws(() => isolationPaths({ ...input, env: { ...w.env, CLAUDE_CONFIG_DIR: alias } }), /overlaps.*protected/iu,
+      "a symlink cannot disguise a credential directory");
+  }
+  const changedHome = join(w.base, "different-home");
+  const paths = isolationPaths({ ...input, env: { ...w.env, HOME: changedHome } });
+  assert.ok(paths.unreadable.includes(join(w.home, ".ssh")), "host HOME keys stay hidden when launch HOME moves");
+  assert.ok(paths.unreadable.includes(join(w.home, ".codex")), "host other-provider keys stay hidden");
+  const ownAccount = join(w.userData, "account-homes", "a1");
+  const own = isolationPaths({ ...input, env: { ...w.env, CLAUDE_CONFIG_DIR: ownAccount } });
+  assert.ok(own.readableAgain.includes(ownAccount), "the selected account remains available");
 });

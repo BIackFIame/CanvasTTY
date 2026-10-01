@@ -31,18 +31,34 @@ export function seatbeltProfile(paths: IsolationPaths): string {
   if (paths.writableFiles.length > 0) {
     lines.push(`(allow file-write*${paths.writableFiles.map((path) => ` (regex ${regex(`^${escapeRegex(path)}(\\.[^/]*)?$`)})`).join("")})`);
   }
-  if (paths.gitHooks.length > 0) {
-    lines.push(`(deny file-write*${paths.gitHooks.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/`)})`).join("")})`);
-    lines.push(`(allow file-write*${paths.gitHooks.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/[^/]+\\.sample$`)})`).join("")})`);
-  }
-  if (paths.protectedWrites.length > 0) {
-    lines.push(`(deny file-write*${paths.protectedWrites.map((path) => ` (subpath ${quote(path)})`).join("")})`);
-  }
   if (paths.unreadable.length > 0) {
     lines.push(`(deny file-read* file-write*${paths.unreadable.map((path) => ` (subpath ${quote(path)})`).join("")})`);
   }
   if (paths.readableAgain.length > 0) {
     lines.push(`(allow file-read*${paths.readableAgain.map((path) => ` (subpath ${quote(path)})`).join("")})`);
+  }
+  // The CLI's own home that sits in a hidden folder (an account home it was handed): writable again, like its other
+  // folders (a sign-in refresh writes there). Its permission settings are denied again below.
+  const ownHidden = paths.readableAgain.filter((path) => paths.writable.includes(path));
+  if (ownHidden.length > 0) {
+    lines.push(`(allow file-write*${ownHidden.map((path) => ` (subpath ${quote(path)})`).join("")})`);
+  }
+  // After every allow: git hooks and attributes of any repository in the project (only `*.sample` hooks, what
+  // `git init` writes), and the protected files.
+  const hookRules = [
+    ...paths.gitHooks.map((path) => `^${escapeRegex(path)}/`),
+    ...paths.projectRoots.map((path) => `^${escapeRegex(path)}/(.*/)?\\.git/hooks/`)
+  ];
+  if (hookRules.length > 0) {
+    lines.push(`(deny file-write*${hookRules.map((pattern) => ` (regex ${regex(pattern)})`).join("")})`);
+    lines.push(`(allow file-write*${hookRules.map((pattern) => ` (regex ${regex(`${pattern}[^/]+\\.sample$`)})`).join("")})`);
+  }
+  if (paths.projectRoots.length > 0) {
+    lines.push(`(deny file-write*${paths.projectRoots.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/(.*/)?\\.git/info/attributes$`)})`).join("")})`);
+  }
+  const protectedPaths = [...paths.protectedWrites, ...(paths.protectedDirectories ?? [])];
+  if (protectedPaths.length > 0) {
+    lines.push(`(deny file-write*${protectedPaths.map((path) => ` (subpath ${quote(path)})`).join("")})`);
   }
   lines.push(
     "(deny signal)",
