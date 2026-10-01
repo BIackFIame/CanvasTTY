@@ -85,7 +85,7 @@ test("revoking CanvasTTY lifecycle hooks leaves every provider launch unmodified
 test("providers without a hook adapter never write Grok's shared hook configuration", async (t) => {
   const root = await fixture(t);
   const adapters = adaptersFor(root);
-  for (const provider of ["pi", "cursor", "minimax", "devin", "antigravity"]) {
+  for (const provider of ["cursor", "minimax", "devin", "antigravity"]) {
     const launch = adapters.prepare(provider, `session-${provider}`, true);
     assert.deepEqual(launch.args, [], provider);
     assert.deepEqual(launch.environment, {}, provider);
@@ -100,6 +100,13 @@ test("ordinary OMP launches load the lifecycle extension without modifying share
   assert.deepEqual(launch.args, ["--extension", join(root, "omp-extension.mjs")]);
   assert.deepEqual(launch.environment, {});
   await assert.rejects(readFile(join(root, "grok", "hooks", "canvastty-runtime-hooks.json")), /ENOENT/u);
+  launch.releaseConfiguration();
+});
+
+test("ordinary Pi launches receive a session identity extension", async t => {
+  const root = await fixture(t);
+  const launch = adaptersFor(root).prepare("pi", "session-pi");
+  assert.deepEqual(launch.args, ["--extension", join(root, "omp-extension.mjs")]);
   launch.releaseConfiguration();
 });
 
@@ -200,6 +207,38 @@ test("revoking CanvasTTY lifecycle hooks immediately detaches live capabilities 
   granted.cleanup();
   revoked.cleanup();
   restarted.cleanup();
+});
+
+test("a late cleanup of an earlier launch does not detach the relaunch under the same card id", async (t) => {
+  const root = await fixture(t);
+  const leases = new Map();
+  const revocations = [];
+  const gateway = {
+    registerSession(terminalSessionId, provider) {
+      const capabilityToken = `token-${leases.size}-${revocations.length}-${Math.random()}`;
+      leases.set(terminalSessionId, capabilityToken);
+      return { address: join(root, "agent-runtime.sock"), terminalSessionId, provider, capabilityToken };
+    },
+    revokeTerminalSession(terminalSessionId, capabilityToken) {
+      revocations.push(terminalSessionId);
+      if (capabilityToken !== undefined && leases.get(terminalSessionId) !== capabilityToken) return;
+      leases.delete(terminalSessionId);
+    },
+    currentStatus(terminalSessionId) {
+      return leases.has(terminalSessionId) ? "idle" : null;
+    }
+  };
+  const bridge = new AgentRuntimeBridge(gateway, runtimeOptionsFor(root));
+  const first = bridge.prepareLaunch({ terminalSessionId: "session-reused", provider: "codex", cwd: root });
+  const second = bridge.prepareLaunch({ terminalSessionId: "session-reused", provider: "codex", cwd: root });
+
+  first.cleanup();
+  assert.equal(bridge.currentStatus("session-reused"), "idle");
+
+  // Turning status hooks off still finds and detaches the live relaunch.
+  bridge.setCoreHooksEnabled(false);
+  assert.equal(gateway.currentStatus("session-reused"), null);
+  second.cleanup();
 });
 
 test("trusted plugin hooks remain independent from CanvasTTY status hooks", async (t) => {

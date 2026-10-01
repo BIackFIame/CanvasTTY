@@ -22,6 +22,11 @@ export function useState(initial) {
   if (!(index in state)) state[index] = typeof initial === "function" ? initial() : initial;
   return [state[index], (update) => { queue.push([index, update]); }];
 }
+export function useRef(initial) {
+  const index = cursor++;
+  if (!(index in state)) state[index] = { current: initial };
+  return state[index];
+}
 export function useEffect() {}
 export function jsx(type, props) { return { type, props }; }
 export const jsxs = jsx;
@@ -31,7 +36,7 @@ export function __flush() {
   for (const [index, update] of queue.splice(0)) state[index] = typeof update === "function" ? update(state[index]) : update;
 }
 export function __reset() { state = []; cursor = 0; queue.length = 0; }
-export default { useState, useEffect };
+export default { useState, useRef, useEffect };
 `;
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -119,4 +124,79 @@ test("renderer state updaters never read a React event after its dispatch", asyn
     for (const match of source.matchAll(pattern)) offenders.push(`${file}: ${match[0].slice(0, 120)}`);
   }
   assert.deepEqual(offenders, []);
+});
+
+function stubSecrets() {
+  const calls = [];
+  const replies = [];
+  globalThis.window = {
+    canvasTTY: {
+      providerSecrets: {
+        status: async () => ({}),
+        set(secretId, value) {
+          calls.push(["set", secretId, value]);
+          const reply = Promise.withResolvers();
+          replies.push(reply);
+          return reply.promise;
+        },
+        clear(secretId) {
+          calls.push(["clear", secretId]);
+          const reply = Promise.withResolvers();
+          replies.push(reply);
+          return reply.promise;
+        }
+      }
+    }
+  };
+  return { calls, replies };
+}
+const settle = () => new Promise((resolve) => setImmediate(resolve));
+const enter = (field) => field.props.onKeyDown({ key: "Enter" });
+
+test("Enter during a pending save does not save the key again", async (t) => {
+  t.after(() => { delete globalThis.window; });
+  const { calls, replies } = stubSecrets();
+  __reset();
+  const props = { locale: "en" };
+  let tree = __render(ProviderSecretsSettings, props);
+  const key = fakeKey(120);
+  change(keyField(tree), key);
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  enter(keyField(tree));
+  // The same field, before and after React applied the busy state.
+  enter(keyField(tree));
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  enter(keyField(tree));
+  assert.deepEqual(calls, [["set", "MINIMAX_API_KEY", key]]);
+  replies[0].resolve();
+  await settle();
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  assert.equal(keyField(tree).props.value, "", "the saved key leaves the field");
+});
+
+test("text typed while a key is saving survives the save", async (t) => {
+  t.after(() => { delete globalThis.window; });
+  const { calls, replies } = stubSecrets();
+  __reset();
+  const props = { locale: "en" };
+  let tree = __render(ProviderSecretsSettings, props);
+  const first = fakeKey(120);
+  const second = fakeKey(140, "sk-api-");
+  change(keyField(tree), first);
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  enter(keyField(tree));
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  change(keyField(tree), second);
+  __flush();
+  replies[0].resolve();
+  await settle();
+  __flush();
+  tree = __render(ProviderSecretsSettings, props);
+  assert.deepEqual(calls, [["set", "MINIMAX_API_KEY", first]]);
+  assert.equal(keyField(tree).props.value, second);
 });

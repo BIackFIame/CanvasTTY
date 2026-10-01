@@ -31,7 +31,11 @@ const MINIMAX_SESSION_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
 export function normalizeThreadId(provider, value) {
   if (typeof value !== "string") return undefined;
-  if (["codex", "claude", "grok", "qwen", "kimi", "pi", "omp", "cursor"].includes(provider)) {
+  if (provider === "kimi") {
+    const uuid = value.startsWith("session_") ? value.slice(8) : value.startsWith("ses_") ? value.slice(4) : value;
+    return CANONICAL_UUID_RE.test(uuid) ? value.toLowerCase() : undefined;
+  }
+  if (["codex", "claude", "grok", "qwen", "pi", "omp", "cursor"].includes(provider)) {
     return CANONICAL_UUID_RE.test(value) ? value.toLowerCase() : undefined;
   }
   if (provider === "opencode") return OPENCODE_SESSION_RE.test(value) ? value : undefined;

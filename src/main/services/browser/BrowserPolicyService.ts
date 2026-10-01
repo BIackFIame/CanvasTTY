@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { basename, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { isPathInside } from "../../../agent-runtime/path-inside.mjs";
-import { chmod, mkdir, open, realpath, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, realpath, rm, stat, unlink } from "node:fs/promises";
 import { BrowserKernelError } from "./BrowserErrors.ts";
 
 export const DEFAULT_BROWSER_URL = "https://duckduckgo.com/";
@@ -10,6 +10,10 @@ export const MAX_BROWSER_TABS = 24;
 export const MAX_BROWSER_URL_LENGTH = 2_048;
 export const MAX_UPLOAD_FILES = 20;
 export const MAX_UPLOAD_FILE_BYTES = 100 * 1024 * 1024;
+// Staged upload copies otherwise live until BrowserService disposal or clearData(); cap how many
+// staging directories can accumulate across the session so a long-running window with many uploads
+// cannot grow this directory without bound. Well above any realistic number of concurrent uploads.
+export const MAX_STAGED_UPLOAD_DIRS = 64;
 
 const LOCAL_HTTP_HOSTS = new Set(["localhost", "localhost.", "127.0.0.1", "::1"]);
 
@@ -118,30 +122,70 @@ export class BrowserPolicyService {
     await mkdir(this.uploadStagingRoot, { recursive: true, mode: 0o700 });
     await chmod(this.uploadStagingRoot, 0o700);
     const paths: string[] = [];
-    for (const candidate of values) {
-      if (typeof candidate !== "string" || !isAbsolute(candidate) || candidate.length > 4_096) {
-        throw new BrowserKernelError("PATH_DENIED", "Upload path is invalid.");
+    try {
+      for (const candidate of values) {
+        if (typeof candidate !== "string" || !isAbsolute(candidate) || candidate.length > 4_096) {
+          throw new BrowserKernelError("PATH_DENIED", "Upload path is invalid.");
+        }
+        let canonical: string;
+        try {
+          canonical = await realpath(candidate);
+        } catch {
+          throw new BrowserKernelError("PATH_DENIED", "Upload file does not exist.");
+        }
+        if (!allowedRoots.some((root) => isPathInside(root, canonical))) {
+          throw new BrowserKernelError("PATH_DENIED", "Upload file is outside authorized directories.");
+        }
+        const metadata = await stat(canonical);
+        if (!metadata.isFile() || metadata.size > MAX_UPLOAD_FILE_BYTES) {
+          throw new BrowserKernelError("PAYLOAD_TOO_LARGE", "Upload file is invalid or exceeds 100 MB.");
+        }
+        paths.push(await this.stageUploadFile(canonical));
       }
-      let canonical: string;
-      try {
-        canonical = await realpath(candidate);
-      } catch {
-        throw new BrowserKernelError("PATH_DENIED", "Upload file does not exist.");
-      }
-      if (!allowedRoots.some((root) => isPathInside(root, canonical))) {
-        throw new BrowserKernelError("PATH_DENIED", "Upload file is outside authorized directories.");
-      }
-      const metadata = await stat(canonical);
-      if (!metadata.isFile() || metadata.size > MAX_UPLOAD_FILE_BYTES) {
-        throw new BrowserKernelError("PAYLOAD_TOO_LARGE", "Upload file is invalid or exceeds 100 MB.");
-      }
-      paths.push(await this.stageUploadFile(canonical));
+    } catch (error) {
+      // A later file in the same request must not leave earlier successfully-staged
+      // copies of this request behind: clean up everything this call staged so far.
+      await Promise.all(paths.map((path) => rm(dirname(path), { recursive: true, force: true }).catch(() => undefined)));
+      throw error;
     }
+    await this.evictExcessStagedUploads();
     return paths;
   }
 
   async clearStagedUploads(): Promise<void> {
     await rm(this.uploadStagingRoot, { recursive: true, force: true });
+  }
+
+  /**
+   * Staged upload copies otherwise live for the life of the BrowserService (cleared only by
+   * clearData() or dispose()), so a long session that runs many uploads would grow this
+   * directory without bound. Keep only the most recently staged directories, oldest first out.
+   */
+  private async evictExcessStagedUploads(): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(this.uploadStagingRoot, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    const directories = entries.filter((entry) => entry.isDirectory());
+    if (directories.length <= MAX_STAGED_UPLOAD_DIRS) return;
+    const withAge = await Promise.all(directories.map(async (entry) => {
+      const path = resolve(this.uploadStagingRoot, entry.name);
+      try {
+        const info = await stat(path);
+        return { path, createdAt: info.birthtimeMs || info.ctimeMs };
+      } catch {
+        return null;
+      }
+    }));
+    const sorted = withAge
+      .filter((value): value is { path: string; createdAt: number } => value !== null)
+      .sort((a, b) => a.createdAt - b.createdAt);
+    const excess = sorted.length - MAX_STAGED_UPLOAD_DIRS;
+    for (const stale of sorted.slice(0, Math.max(0, excess))) {
+      await rm(stale.path, { recursive: true, force: true }).catch(() => undefined);
+    }
   }
 
   private async stageUploadFile(canonical: string): Promise<string> {

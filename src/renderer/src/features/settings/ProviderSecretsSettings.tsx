@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { LocaleId, ProviderSecretId } from "../../../../shared/contracts";
 import { PROVIDER_SECRET_IDS } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n";
@@ -25,41 +25,43 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
     () => Object.fromEntries(PROVIDER_SECRET_IDS.map((secretId) => [secretId, false])) as Record<ProviderSecretId, boolean>
   );
   const [drafts, setDrafts] = useState<Partial<Record<ProviderSecretId, string>>>({});
-  const [busy, setBusy] = useState<ProviderSecretId | null>(null);
+  const [busy, setBusy] = useState<Partial<Record<ProviderSecretId, boolean>>>({});
   const [error, setError] = useState<string | null>(null);
+  // Saves in flight, read synchronously: Enter and a click can both arrive before React re-renders
+  // with the busy state, and a second write of the same key must not start meanwhile.
+  const inFlight = useRef(new Set<ProviderSecretId>());
 
   useEffect(() => {
     window.canvasTTY.providerSecrets.status().then(setStatus, () => undefined);
   }, []);
 
-  const save = async (secretId: ProviderSecretId): Promise<void> => {
-    const value = (drafts[secretId] ?? "").trim();
-    if (value.length === 0) return;
-    setBusy(secretId);
+  const run = async (secretId: ProviderSecretId, submitted: string, action: () => Promise<void>, configured: boolean): Promise<void> => {
+    if (inFlight.current.has(secretId)) return;
+    inFlight.current.add(secretId);
+    setBusy((current) => ({ ...current, [secretId]: true }));
     setError(null);
     try {
-      await window.canvasTTY.providerSecrets.set(secretId, value);
-      setStatus((current) => ({ ...current, [secretId]: true }));
-      setDrafts((current) => ({ ...current, [secretId]: "" }));
+      await action();
+      setStatus((current) => ({ ...current, [secretId]: configured }));
+      // Clear only what was submitted. Anything typed while the request ran is a new draft.
+      setDrafts((current) => ((current[secretId] ?? "") === submitted ? { ...current, [secretId]: "" } : current));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
-      setBusy(null);
+      inFlight.current.delete(secretId);
+      setBusy((current) => ({ ...current, [secretId]: false }));
     }
   };
 
+  const save = async (secretId: ProviderSecretId): Promise<void> => {
+    const submitted = drafts[secretId] ?? "";
+    const value = submitted.trim();
+    if (value.length === 0) return;
+    await run(secretId, submitted, () => window.canvasTTY.providerSecrets.set(secretId, value), true);
+  };
+
   const clear = async (secretId: ProviderSecretId): Promise<void> => {
-    setBusy(secretId);
-    setError(null);
-    try {
-      await window.canvasTTY.providerSecrets.clear(secretId);
-      setStatus((current) => ({ ...current, [secretId]: false }));
-      setDrafts((current) => ({ ...current, [secretId]: "" }));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setBusy(null);
-    }
+    await run(secretId, drafts[secretId] ?? "", () => window.canvasTTY.providerSecrets.clear(secretId), false);
   };
 
   return (
@@ -96,13 +98,13 @@ export function ProviderSecretsSettings({ locale }: ProviderSecretsSettingsProps
               />
               <button
                 type="button"
-                disabled={busy === secretId || draft.trim().length === 0}
+                disabled={busy[secretId] === true || draft.trim().length === 0}
                 onClick={() => void save(secretId)}
               >{t(locale, "providerSecretSave")}</button>
               {configured && (
                 <button
                   type="button"
-                  disabled={busy === secretId}
+                  disabled={busy[secretId] === true}
                   onClick={() => void clear(secretId)}
                 >{t(locale, "providerSecretClear")}</button>
               )}

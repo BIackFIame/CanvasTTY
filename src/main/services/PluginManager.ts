@@ -45,6 +45,7 @@ import {
   PLUGIN_API_VERSION
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
+import { PLUGIN_VISIBILITY_BRIDGE_SOURCE } from "../../shared/pluginVisibility.ts";
 import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
 import type { LaunchContributor } from "./LaunchPipeline.ts";
 import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
@@ -61,6 +62,10 @@ const METADATA_DIR = "metadata";
 const PLATFORM_ID = "canvastty";
 /** Manifest candidates: metadata/ first, then the legacy root. */
 const MANIFEST_CANDIDATES = [`${METADATA_DIR}/${MANIFEST_FILE}`, MANIFEST_FILE];
+/** How long a showcase manifest preview is reused (the listing and its visible page ask for the same ones). */
+const MANIFEST_PREVIEW_TTL_MS = 5 * 60_000;
+/** The showcase lists at most 1000 repositories. */
+const MANIFEST_PREVIEW_CACHE_LIMIT = 1_024;
 /** Icon candidates: metadata/ first, then the legacy root. */
 const ICON_CANDIDATES = [
   `${METADATA_DIR}/icon.png`,
@@ -78,6 +83,13 @@ const VERSIONS_FILE = "plugin-versions.json";
 const SEARCH_MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 15_000;
 const PREVIEW_TTL_MS = 10 * 60_000;
+/**
+ * Aggregate cap on install previews held at once. Each preview downloads a repository into its own
+ * staging directory and is only swept lazily (on the next previewInstall/install call) once its TTL
+ * passes; without a cap, previewing many plugins inside one TTL window (e.g. paging through the
+ * showcase) accumulates one staging directory per preview until the oldest ones happen to expire.
+ */
+const MAX_PENDING_PREVIEWS = 20;
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_RETRY_DELAY_MS = 1_500;
@@ -186,6 +198,7 @@ type DownloadModuleFiles = (
 ) => Promise<void>;
 
 export class PluginManager {
+  private readonly manifestPreviewCache = new Map<string, { at: number; manifest: PluginManifest }>();
   private readonly pluginRoot: string;
   private readonly stagingRoot: string;
   private readonly storageRoot: string;
@@ -199,6 +212,8 @@ export class PluginManager {
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
+  /** Plugin id -> tail of the install, module change, update and uninstall chain for that plugin. */
+  private readonly pluginOperations = new Map<string, Promise<void>>();
   private readonly storageWrites = new Map<string, Promise<void>>();
   private readonly downloadRepository: DownloadRepository;
   private readonly downloadFullRepository: DownloadRepository;
@@ -353,6 +368,7 @@ export class PluginManager {
         manifest,
         expiresAt: Date.now() + PREVIEW_TTL_MS
       };
+      await this.enforcePendingPreviewCap();
       this.pending.set(token, { directory, packageRoot, preview });
       return structuredClone(preview);
     } catch (error) {
@@ -367,7 +383,7 @@ export class PluginManager {
     if (!pending) throw new Error("Plugin installation preview expired. Inspect the GitHub link again.");
     this.pending.delete(token);
 
-    const { preview, packageRoot, directory } = pending;
+    const { preview, directory } = pending;
     const modules = normalizeSelectedModules(
       preview.manifest,
       selectedModules ?? preview.manifest.modules?.filter((module) => module.defaultSelected).map((module) => module.id)
@@ -380,11 +396,23 @@ export class PluginManager {
       throw new Error("Plugin module selection is invalid.");
     }
     const destination = join(this.pluginRoot, preview.manifest.id);
+    // Two previews of the same repository can be installed at once. The existence check and the
+    // directory move run under the plugin's lock, so the second call sees the first one's entry
+    // instead of failing its move and then deleting the directory and entry the first one made.
+    return this.withPluginLock(preview.manifest.id, () => this.installPending(pending, modules, destination));
+  }
+
+  private async installPending(
+    { preview, packageRoot, directory }: PendingInstall,
+    modules: string[],
+    destination: string
+  ): Promise<InstalledPlugin> {
     if (this.plugins.has(preview.manifest.id)) {
       await rm(directory, { recursive: true, force: true });
       throw new Error(`Plugin ${preview.manifest.id} is already installed.`);
     }
 
+    let installed: InstalledPlugin | null = null;
     try {
       if (preview.manifest.modules?.length) {
         await materializeModularPackage(
@@ -398,7 +426,7 @@ export class PluginManager {
       } else {
         await rename(packageRoot, destination);
       }
-      const installed: InstalledPlugin = {
+      installed = {
         manifest: preview.manifest,
         sourceUrl: preview.sourceUrl,
         enabled: true,
@@ -412,7 +440,7 @@ export class PluginManager {
       await this.persistRegistry();
       return structuredClone(activePlugin(installed));
     } catch (error) {
-      this.plugins.delete(preview.manifest.id);
+      if (installed && this.plugins.get(preview.manifest.id) === installed) this.plugins.delete(preview.manifest.id);
       await rm(destination, { recursive: true, force: true });
       throw error;
     } finally {
@@ -654,7 +682,11 @@ export class PluginManager {
     return registrations;
   }
 
-  async setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+  setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+    return this.withPluginLock(pluginId, () => this.replaceModules(pluginId, selectedModules));
+  }
+
+  private async replaceModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
     if (!plugin.manifest.modules?.length) throw new Error("Plugin does not declare optional modules.");
     const selected = normalizeSelectedModules(plugin.manifest, selectedModules);
@@ -707,7 +739,11 @@ export class PluginManager {
     }
   }
 
-  async uninstall(pluginId: string): Promise<void> {
+  uninstall(pluginId: string): Promise<void> {
+    return this.withPluginLock(pluginId, () => this.removePlugin(pluginId));
+  }
+
+  private async removePlugin(pluginId: string): Promise<void> {
     const plugin = this.requirePlugin(pluginId);
     if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
@@ -845,9 +881,20 @@ export class PluginManager {
     const manifests = new Map<string, PluginManifest>();
     if (unique.length === 0) return manifests;
 
+    // The showcase listing already fetched every manifest to filter by platform; the page the renderer then
+    // shows asks for the same ones. Found manifests are reused for a few minutes instead of downloaded again.
+    const now = Date.now();
+    const toFetch: string[] = [];
+    for (const sourceUrl of unique) {
+      const cached = this.manifestPreviewCache.get(sourceUrl);
+      if (cached && now - cached.at < MANIFEST_PREVIEW_TTL_MS) manifests.set(sourceUrl, cached.manifest);
+      else toFetch.push(sourceUrl);
+    }
+    if (toFetch.length === 0) return manifests;
+
     // Metadata-first: metadata/canvastty.plugin.json, then legacy root file.
     const parsed = new Map<string, { owner: string; repository: string }>();
-    for (const sourceUrl of unique) {
+    for (const sourceUrl of toFetch) {
       try {
         const source = new URL(sourceUrl);
         const parts = source.pathname.split("/").filter(Boolean);
@@ -870,13 +917,23 @@ export class PluginManager {
       for (const [key, result] of results) {
         if (!result.ok || result.text === undefined) continue;
         try {
-          manifests.set(key, validatePluginManifest(JSON.parse(result.text) as unknown));
+          const manifest = validatePluginManifest(JSON.parse(result.text) as unknown);
+          manifests.set(key, manifest);
+          this.rememberManifestPreview(key, manifest, now);
         } catch {
           // Malformed manifest — skipped; tile falls back to a live preview.
         }
       }
     }
     return manifests;
+  }
+
+  private rememberManifestPreview(sourceUrl: string, manifest: PluginManifest, at: number): void {
+    this.manifestPreviewCache.delete(sourceUrl);
+    if (this.manifestPreviewCache.size >= MANIFEST_PREVIEW_CACHE_LIMIT) {
+      this.manifestPreviewCache.delete(this.manifestPreviewCache.keys().next().value!);
+    }
+    this.manifestPreviewCache.set(sourceUrl, { at, manifest });
   }
 
   async checkForUpdates(): Promise<PluginUpdateStatus[]> {
@@ -918,7 +975,7 @@ export class PluginManager {
     const inFlight = this.updatingPlugins.get(pluginId);
     if (inFlight) return inFlight;
 
-    const update = this.performPluginUpdate(pluginId);
+    const update = this.withPluginLock(pluginId, () => this.performPluginUpdate(pluginId));
     this.updatingPlugins.set(pluginId, update);
     const clearInFlight = () => {
       if (this.updatingPlugins.get(pluginId) === update) this.updatingPlugins.delete(pluginId);
@@ -1049,6 +1106,22 @@ export class PluginManager {
     });
     this.versionsWrite = operation.then(() => undefined, () => undefined);
     return operation;
+  }
+
+  /**
+   * Runs one install, module change, update or uninstall of a plugin after the previous one for the
+   * same plugin id settles. Each of them moves the plugin directory aside and puts it back on
+   * failure, so two of them overlapping would restore or delete the other one's files.
+   */
+  private withPluginLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.pluginOperations.get(pluginId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.pluginOperations.set(pluginId, tail);
+    void tail.then(() => {
+      if (this.pluginOperations.get(pluginId) === tail) this.pluginOperations.delete(pluginId);
+    });
+    return result;
   }
 
   contribution(pluginId: string, contributionId: string): PluginContribution {
@@ -1219,6 +1292,23 @@ export class PluginManager {
       this.pending.delete(token);
       void rm(pending.directory, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * Keeps at most MAX_PENDING_PREVIEWS - 1 previews before a new one is added, evicting the oldest
+   * (insertion order) first so the map and its staging directories never grow past the cap even when
+   * every preview is still within its TTL.
+   */
+  private async enforcePendingPreviewCap(): Promise<void> {
+    const evicted: Promise<void>[] = [];
+    while (this.pending.size >= MAX_PENDING_PREVIEWS) {
+      const oldest = this.pending.keys().next();
+      if (oldest.done) break;
+      const pending = this.pending.get(oldest.value);
+      this.pending.delete(oldest.value);
+      if (pending) evicted.push(rm(pending.directory, { recursive: true, force: true }));
+    }
+    if (evicted.length > 0) await Promise.all(evicted);
   }
 
   private persistRegistry(): Promise<void> {
@@ -1606,8 +1696,9 @@ const MAX_LAUNCH_TEXT = 200;
 
 function validateServiceLaunch(value: unknown): PluginServiceLaunch {
   if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
-  assertOnlyKeys(value, ["appliesTo", "fields", "policy"], "Plugin service launch");
+  assertOnlyKeys(value, ["appliesTo", "fields", "policy", "delegable"], "Plugin service launch");
   if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  if (value.delegable !== undefined && typeof value.delegable !== "boolean") throw new Error("Plugin launch delegable must be true or false.");
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
     if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
@@ -1616,7 +1707,8 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
-  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}) };
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}),
+    ...(value.delegable === true ? { delegable: true } : {}) };
 }
 
 function validateServiceDecide(value: unknown): PluginServiceDecide {
@@ -1715,7 +1807,7 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   const kinds = new Set<string>();
   return value.map((candidate): PluginEnvironmentKind => {
     if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
-    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields"], "Plugin environment");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps"], "Plugin environment");
     const kind = requiredString(candidate.kind, "environment kind", 32);
     // Same shape the session store accepts for a saved environment's kind.
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
@@ -1733,9 +1825,21 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
       appliesTo = [...new Set(candidate.appliesTo as NonNullable<PluginEnvironmentKind["appliesTo"]>)];
     }
     const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields);
+    let keeps: PluginEnvironmentKind["keeps"];
+    if (candidate.keeps !== undefined) {
+      if (!isRecord(candidate.keeps)) throw new Error(`Plugin environment ${kind} keeps must be an object.`);
+      assertOnlyKeys(candidate.keeps, ["launch", "isolated", "confines"], `Plugin environment ${kind} keeps`);
+      keeps = {};
+      for (const key of ["launch", "isolated", "confines"] as const) {
+        const value = candidate.keeps[key];
+        if (value === undefined) continue;
+        if (typeof value !== "boolean") throw new Error(`Plugin environment ${kind} keeps.${key} must be true or false.`);
+        keeps[key] = value;
+      }
+    }
     return {
       kind, label, ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
-      ...(fields?.length ? { fields } : {})
+      ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {})
     };
   });
 }
@@ -2007,26 +2111,37 @@ function delay(durationMs: number): Promise<void> {
   });
 }
 
-async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+/**
+ * A response body read whole up to `maximumBytes`. Past that the stream is cancelled, which closes the connection;
+ * only releasing the reader would leave the socket open, still receiving what nobody reads.
+ */
+export async function readBoundedBody(body: ReadableStream<Uint8Array>, maximumBytes: number, tooLarge: string): Promise<Buffer> {
   const reader = body.getReader();
   const chunks: Buffer[] = [];
-  let totalBytes = 0;
+  let total = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_PACKAGE_BYTES) {
-        throw new Error("Plugin archive exceeds the 25 MB download limit.");
+      total += chunk.length;
+      if (total > maximumBytes) {
+        const error = new Error(tooLarge);
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
       }
       chunks.push(chunk);
     }
   } finally {
     reader.releaseLock();
   }
+  return Buffer.concat(chunks, total);
+}
+
+async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const archive = await readBoundedBody(body, MAX_PACKAGE_BYTES, "Plugin archive exceeds the 25 MB download limit.");
   try {
-    return gunzipSync(Buffer.concat(chunks, totalBytes), {
+    return gunzipSync(archive, {
       maxOutputLength: MAX_PACKAGE_BYTES + MAX_PACKAGE_ENTRIES * 1_024
     });
   } catch (error) {
@@ -2642,19 +2757,12 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
       throw new Error(message);
     }
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-    const reader = response.body.getReader();
-    const chunks: Buffer[] = [];
-    let total = 0;
+    if (Number.isFinite(declared) && declared > maximumBytes) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error("Plugin file exceeds its declared size.");
+    }
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = Buffer.from(value);
-        total += chunk.length;
-        if (total > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-        chunks.push(chunk);
-      }
+      return await readBoundedBody(response.body, maximumBytes, "Plugin file exceeds its declared size.");
     } catch (error) {
       if (controller.signal.aborted) {
         throw new TransientGithubDownloadError("GitHub plugin file download timed out.", { cause: error });
@@ -2663,10 +2771,7 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
         throw new TransientGithubDownloadError("GitHub plugin file download was interrupted.", { cause: error });
       }
       throw error;
-    } finally {
-      reader.releaseLock();
     }
-    return Buffer.concat(chunks, total);
   } finally {
     clearTimeout(timer);
   }
@@ -3227,6 +3332,12 @@ const PLUGIN_SDK_SOURCE = `(() => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    visibility: () => (document.visibilityState === "hidden" ? "hidden" : "visible"),
+    onVisibilityChange: (listener) => {
+      const notify = () => listener(document.visibilityState === "hidden" ? "hidden" : "visible");
+      document.addEventListener("visibilitychange", notify);
+      return () => document.removeEventListener("visibilitychange", notify);
+    },
     onStorageChange: (listener) => {
       storageListeners.add(listener);
       return () => storageListeners.delete(listener);
@@ -3237,6 +3348,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
 
 const PLUGIN_INPUT_BRIDGE_SOURCE = `(() => {
   if (parent === window) return;
+${PLUGIN_VISIBILITY_BRIDGE_SOURCE}
   let captureWheel = false;
   addEventListener("message", (event) => {
     const message = event.data;

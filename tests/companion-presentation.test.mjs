@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { TerminalPresentation } from "../src/main/services/companion/TerminalPresentation.ts";
+import { SecretRedactionRegistry } from "../src/main/services/safety/SecretRedaction.ts";
 import {
   latestCodexReply,
   cleanTerminalText,
@@ -152,4 +153,22 @@ test("only sessions the glasses read get a headless screen; a first read later s
   assert.deepEqual(parsed(lazy), ["s0"]);
   lazy.close();
   live.close();
+});
+
+test("the companion gets the screen and answers masked, also a key the terminal wrapped over two lines", async () => {
+  const registry = new SecretRedactionRegistry();
+  const secret = "held-value-0123456789-abcdefghij";
+  registry.add("session:plain", [secret]);
+  const session = { id: "plain", provider: "claude", status: "idle" };
+  const presentation = new TerminalPresentation({
+    listMetadata: () => [session],
+    geometry: () => ({ cols: 20, rows: 6 }),
+    readBuffer: () => ({ buffer: `key: ${secret}\r\n$ `, outputOffset: 0 }),
+    redactSecrets: (text) => registry.redact(text)
+  });
+  const view = await presentation.read(session.id);
+  assert.equal(view.body.includes("0123456789"), false, view.body);
+  assert.match(view.body, /<redacted:secret>/u);
+  presentation.answer(session.id, `the key is ${secret}`, "turn-one", Date.now() + 60_000);
+  assert.equal((await presentation.read(session.id)).body.includes(secret), false);
 });

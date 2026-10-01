@@ -1,12 +1,20 @@
 import { randomUUID } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { BrowserWindow, webContents } from "electron";
+import { app, BrowserWindow, webContents } from "electron";
 import type { BrowserActor, BrowserCommand, BrowserElementRef, BrowserResult } from "../../../shared/contracts.ts";
 import type { BrowserService } from "../BrowserService.ts";
 import { BROWSER_CANVAS_WHEEL_IDLE_MS } from "./BrowserCanvasFreeze.ts";
+import {
+  waitForBrowserSmokeWheelReady,
+  runBrowserSmokeCleanup,
+  requireBrowserSmokeScrollBaseline,
+  type BrowserSmokePageState,
+  type BrowserSmokeWheelReadiness
+} from "./BrowserSmokeReadiness.ts";
 
 const READY_TIMEOUT_MS = 12_000;
+const CLEANUP_TIMEOUT_MS = 1_000;
 const WHEEL_IDLE_SETTLE_MS = BROWSER_CANVAS_WHEEL_IDLE_MS * 2;
 const SENTINEL = "canvastty-secret-must-not-leak";
 
@@ -237,6 +245,7 @@ async function assertFocusAwarePhysicalWheel(service: BrowserService, url: strin
     service.setCanvasWheelCaptureMode("off");
     service.setInputFocused(true);
     service.setViewport({ x: 0, y: 0, width: 820, height: 620, surface: "native", canvasScale: 1 });
+    await preparePhysicalWheelSmoke(owner, contents);
     await waitForWheelIdle();
     const pageScrollY = await sendWheelUntilPageScrolls(contents, { x: 700, y: 300 });
     if (pageScrollY === 400) throw new Error("Focused Browser plain wheel did not scroll the page.");
@@ -282,12 +291,15 @@ async function assertFocusAwarePhysicalWheel(service: BrowserService, url: strin
     service.setCanvasWheelCaptureMode("key");
     await waitForWheelIdle();
     service.setViewport({ x: 0, y: 0, width: 820, height: 620, surface: "native", canvasScale: 1 });
-    await contents.executeJavaScript("window.scrollTo(0, 0)").catch(() => undefined);
-    await owner.webContents.executeJavaScript(`
-      globalThis.__canvasttyWheelRelayOff?.();
-      delete globalThis.__canvasttyWheelRelayOff;
-      delete globalThis.__canvasttyWheelRelays;
-    `).catch(() => undefined);
+    // A hung renderer must not hide the original readiness/assertion failure during cleanup.
+    await Promise.all([
+      runBrowserSmokeCleanup(() => contents.executeJavaScript("window.scrollTo(0, 0)"), CLEANUP_TIMEOUT_MS),
+      runBrowserSmokeCleanup(() => owner.webContents.executeJavaScript(`
+        globalThis.__canvasttyWheelRelayOff?.();
+        delete globalThis.__canvasttyWheelRelayOff;
+        delete globalThis.__canvasttyWheelRelays;
+      `), CLEANUP_TIMEOUT_MS)
+    ]);
   }
 }
 
@@ -548,17 +560,68 @@ async function assertOwnerWheelFreezesCrossingBrowser(service: BrowserService): 
   }
 }
 
+async function browserSmokePageState(contents: Electron.WebContents): Promise<BrowserSmokePageState> {
+  return await contents.executeJavaScript(`({
+    readyState: document.readyState,
+    visibilityState: document.visibilityState,
+    focused: document.hasFocus(),
+    width: window.innerWidth,
+    height: window.innerHeight,
+    scrollY: window.scrollY,
+    maxScrollY: Math.max(0, (document.scrollingElement?.scrollHeight ?? 0)
+      - (document.scrollingElement?.clientHeight ?? window.innerHeight))
+  })`) as BrowserSmokePageState;
+}
+
+async function preparePhysicalWheelSmoke(
+  owner: BrowserWindow,
+  contents: Electron.WebContents
+): Promise<void> {
+  if (owner.isDestroyed() || contents.isDestroyed()) {
+    throw new Error("Physical Browser wheel smoke cannot prepare a destroyed window or tab.");
+  }
+  owner.show();
+  if (process.platform === "darwin") app.focus({ steal: true });
+  owner.focus();
+  let state: BrowserSmokeWheelReadiness | null = null;
+  try {
+    await waitForBrowserSmokeWheelReady(async () => {
+      if (owner.isDestroyed() || contents.isDestroyed()) {
+        throw new Error("Physical Browser wheel smoke window or tab was destroyed while preparing input.");
+      }
+      // Logical input ownership is independent of native window/page focus. Electron requires the
+      // containing window to be focused before sendInputEvent can exercise real page wheel handling.
+      if (owner.isVisible() && owner.isFocused()) contents.focus();
+      state = {
+        ownerVisible: owner.isVisible(),
+        ownerFocused: owner.isFocused(),
+        page: await browserSmokePageState(contents)
+      };
+      return state;
+    }, READY_TIMEOUT_MS);
+  } catch (error) {
+    throw new Error(
+      `Physical Browser wheel smoke prerequisites were not met within ${READY_TIMEOUT_MS} ms. `
+      + "It requires an unlocked, active desktop, a visible focused window, and a loaded visible focused page. "
+      + `A locked display or unavailable desktop focus prevents physical input. State: ${JSON.stringify(state)}. `
+      + `Reason: ${error instanceof Error ? error.message : String(error)}.`,
+      { cause: error }
+    );
+  }
+}
+
 async function sendWheelUntilPageScrolls(
   contents: Electron.WebContents,
   point: { x: number; y: number }
 ): Promise<number> {
   for (const deltaY of [-120, 120]) {
     await contents.executeJavaScript("window.scrollTo(0, 400)");
+    const baseline = requireBrowserSmokeScrollBaseline(await browserSmokePageState(contents), point, 400);
     contents.sendInputEvent({ type: "mouseWheel", ...point, deltaX: 0, deltaY });
     for (let attempt = 0; attempt < 20; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 25));
       const scrollY = await contents.executeJavaScript("window.scrollY") as number;
-      if (scrollY !== 400) return scrollY;
+      if (scrollY !== baseline) return scrollY;
     }
   }
   return 400;

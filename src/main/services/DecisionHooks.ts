@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { AgentProviderId, SessionRole } from "../../shared/contracts.ts";
+import type { AgentProviderId, LaunchProfileId, SessionRole } from "../../shared/contracts.ts";
 import type { RuntimePermissionDecision, RuntimePermissionRequest } from "./agent-runtime/RuntimeGateway.ts";
 import { actionFromHook, checkBaseProtection } from "./safety/baseProtection.ts";
 import type { PrivateData } from "./safety/commandFacts.ts";
@@ -27,6 +27,16 @@ export interface DecisionSession {
   cwd: string;
   /** The agent's own config folders (CLAUDE_CONFIG_DIR of this run), whose plans and memory are not "outside". */
   configDirs: string[];
+  /** The profile the card runs in. */
+  profile?: LaunchProfileId;
+}
+
+/**
+ * Whether the agent's hook can hand a question to the person. Only Claude Code takes "ask" from a hook; for every
+ * other CLI an ask would silently become "go on", so it is a deny with the reason instead.
+ */
+export function hookCanAsk(provider: AgentProviderId): boolean {
+  return provider === "claude";
 }
 
 export interface DecisionHooksDependencies {
@@ -55,12 +65,18 @@ export interface DecisionRequest {
   truncated: boolean;
   /** How long CanvasTTY waits for this answer (the service's `decide.timeoutMs`, capped by the session's gate). */
   budgetMs: number;
+  /** The card's launch profile (auto, normal, acceptEdits, plan, yolo). */
+  profile: LaunchProfileId | null;
+  /** The agent can put an "ask" in front of the person; false: an ask is turned into a deny with its reason. */
+  canAsk: boolean;
 }
 
 type Verdict = "deny" | "ask" | "allow";
 interface Answer { verdict: Verdict | null; reason: string; service: DecisionService }
 
 const DECIDE_TIMEOUT_MS = DEFAULT_DECIDE_TIMEOUT_MS;
+/** Base protection's answer to a shell call, or a file write whose target it cannot see, cut before it was sent. */
+export const TOO_LARGE_MESSAGE = 'CanvasTTY blocked this tool call: its input is too large to check (over 40 KB), so base protection cannot see what it does. Split the work into smaller steps: keep commands short, and write long content with the file tool in parts.';
 const MAX_REASON = 500;
 const MAX_SERVICES = 8;
 
@@ -78,14 +94,16 @@ export class DecisionHooks {
     this.deps = deps;
   }
 
-  /** Whether a launch of this agent needs the decision hook at all. */
+  /** Whether a launch of this agent needs the decision hook at all. A plugin list that cannot be read counts as yes. */
   wanted(provider: AgentProviderId): boolean {
-    return this.protects() || this.applicable(provider).length > 0;
+    if (this.protects()) return true;
+    const services = this.applicable(provider);
+    return services === null || services.length > 0;
   }
 
   /** The longest wait a decision service of this agent asked for: the session's gate is sized for it at launch. */
   budgetMs(provider: AgentProviderId): number {
-    return Math.max(DECIDE_TIMEOUT_MS, ...this.applicable(provider).map((service) => this.timeoutFor(service)));
+    return Math.max(DECIDE_TIMEOUT_MS, ...(this.applicable(provider) ?? []).map((service) => this.timeoutFor(service)));
   }
 
   private timeoutFor(service: DecisionService): number {
@@ -108,8 +126,16 @@ export class DecisionHooks {
         ...(this.deps.privateData ? { privateData: this.deps.privateData } : {})
       });
       if (base) return { behavior: "deny", message: base.message };
+      // Cut input: the rules could not see the command, or where a file tool writes. Unchecked is not allowed.
+      if (request.truncated) {
+        const cut = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
+        if (cut.kind === "shell" || cut.kind === "edit" && cut.paths.length === 0) return { behavior: "deny", message: TOO_LARGE_MESSAGE };
+      }
     }
     const services = this.applicable(session.provider);
+    // The plugin list itself failed: that is the gateway's failure (the person is asked, or a fail-closed gate
+    // denies), never "no plugin has an opinion".
+    if (services === null) throw new Error("decision services unavailable");
     if (services.length === 0) return { behavior: "none" };
     const action = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
     const params: Omit<DecisionRequest, "budgetMs"> = {
@@ -121,14 +147,21 @@ export class DecisionHooks {
       agentCwd: request.cwd,
       tool: { name: request.toolName, kind: action.kind ?? "other", command: action.command, paths: action.paths },
       input: request.toolInput,
-      truncated: request.truncated
+      truncated: request.truncated,
+      profile: session.profile ?? null,
+      canAsk: hookCanAsk(session.provider)
     };
     // A service trusted after this card started gets no more time than the card's gate allows; the signal ends it.
     const answers = await Promise.all(services.map((service) => {
       const timeoutMs = this.timeoutFor(service);
       return this.ask(service, { ...params, budgetMs: timeoutMs }, timeoutMs, signal);
     }));
-    return mergeDecisions(answers, request.truncated);
+    const merged = mergeDecisions(answers, request.truncated);
+    // An agent that cannot ask would go on as if nobody objected: the person has to approve, so it is stopped.
+    if (merged.behavior === "ask" && !hookCanAsk(session.provider)) {
+      return { behavior: "deny", message: `${merged.message ?? "CanvasTTY asks the person about this tool call."} ${session.provider} cannot ask the person from here, so it was not run: tell the person what you want to do and why, and let them decide.` };
+    }
+    return merged;
   }
 
   private protects(): boolean {
@@ -136,9 +169,10 @@ export class DecisionHooks {
     try { return this.deps.baseProtection() !== false; } catch { return true; }
   }
 
-  private applicable(provider: AgentProviderId): DecisionService[] {
+  /** The decision services for this agent; null when the list could not be read. */
+  private applicable(provider: AgentProviderId): DecisionService[] | null {
     let services: DecisionService[];
-    try { services = this.deps.services(); } catch { return []; }
+    try { services = this.deps.services(); } catch { return null; }
     return services
       .filter((service) => !service.appliesTo || service.appliesTo.includes(provider))
       .slice(0, MAX_SERVICES);

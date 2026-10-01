@@ -37,6 +37,11 @@ import {
 /** What the model reads when CanvasTTY could not check a call and did not let it run. */
 export const FAIL_CLOSED_MESSAGE = "CanvasTTY safety check unavailable: this tool call was not run. Retry it, or ask the person how to proceed.";
 
+// Keep the amount of recursion accepted by both the Node and native hooks portable. V8's JSON.stringify stack
+// limit varies by platform and runtime build, so a deep tool_input must fail closed at this fixed boundary instead
+// of being sent by the native helper on systems where V8 happens to allow deeper values.
+const MAX_JSON_NESTING = 256;
+
 if (invokedDirectly() && process.argv[2] === "pretool") {
   const failClosed = process.env[DECISION_FAIL_CLOSED_ENV] === "1";
   const output = await decide(process.env, failClosed).catch(() => (failClosed ? unavailableOutput() : null));
@@ -57,6 +62,7 @@ async function decide(env, failClosed) {
   const identity = identityFrom(env);
   const raw = await readInput();
   if (!identity || raw === null) return unavailable();
+  if (hasExcessiveJsonNesting(raw)) return unavailable();
   let input;
   try { input = JSON.parse(raw); } catch { return unavailable(); }
   const message = buildRequest(input, identity);
@@ -66,6 +72,26 @@ async function decide(env, failClosed) {
   // The gateway itself failed and asks the person: Claude Code can ask, Codex and Qwen Code cannot.
   if (decision.unavailable && decision.behavior === "ask" && identity.provider !== "claude") return unavailable();
   return hookOutput(identity.provider, decision);
+}
+
+/** Detects excessive JSON container depth without recursively parsing it. JSON.parse validates syntax afterward. */
+function hasExcessiveJsonNesting(raw) {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (const character of raw) {
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === "{" || character === "[") {
+      if (++depth > MAX_JSON_NESTING) return true;
+    } else if (character === "}" || character === "]") depth--;
+  }
+  return false;
 }
 
 /** The deny for a call CanvasTTY could not check. */
@@ -83,7 +109,7 @@ export function identityFrom(env) {
   return identity.address && identity.terminalSessionId && identity.provider && identity.capabilityToken ? identity : null;
 }
 
-/** Reads the whole hook input; null when it is over the bound (the CLI then goes on as usual). */
+/** Reads the whole hook input; null when it is over the bound (a fail-closed gate then denies the call). */
 async function readInput() {
   const chunks = [];
   let size = 0;
@@ -181,7 +207,18 @@ export function hookOutput(provider, decision) {
       }
     };
   }
-  if (provider !== "claude") return null;
+  if (provider !== "claude") {
+    // Only Claude Code can put a question in front of the person. For any other CLI an ask that reached this far (the
+    // gateway could not get an answer in time) would silently let the call run: it is stopped instead.
+    if (decision.behavior !== "ask") return null;
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `${decision.message || "CanvasTTY could not check this tool call in time."} This agent cannot ask the person from here, so it was not run; tell the person what you want to do and let them decide.`
+      }
+    };
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "PreToolUse",

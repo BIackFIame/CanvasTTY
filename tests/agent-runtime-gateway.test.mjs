@@ -27,7 +27,10 @@ async function fixture(t) {
   return root;
 }
 
-test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local socket", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+for (const [provider, threadId] of [
+  ["claude", "5f1c2a90-aa11-4b22-9c33-0d44e55f6677"],
+  ["kimi", "session_5f1c2a90-aa11-4b22-9c33-0d44e55f6677"]
+]) test(`RuntimeGateway accepts an authenticated ${provider} hook with its native session ID`, POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
   const root = await fixture(t);
   const signals = [];
   const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
@@ -35,7 +38,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
   t.after(() => gateway.close());
   assert.equal((await stat(address)).mode & 0o777, 0o600);
 
-  const capability = gateway.registerSession("terminal-one", "claude");
+  const capability = gateway.registerSession("terminal-one", provider);
   const helper = new URL("../src/agent-runtime/hook-helper.mjs", import.meta.url);
   const child = spawn(process.execPath, [helper.pathname, "working", "UserPromptSubmit"], {
     env: {
@@ -47,7 +50,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
     },
     stdio: ["pipe", "ignore", "pipe"]
   });
-  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one", session_id: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677" }));
+  child.stdin.end(JSON.stringify({ prompt: "must stay local", prompt_id: "turn-one", session_id: threadId }));
   const result = await childResult(child);
   assert.equal(result.code, 0, result.stderr);
   assert.deepEqual(signals, [{
@@ -56,7 +59,7 @@ test("RuntimeGateway accepts one authenticated hook event over a mode-0600 local
       state: "working",
       event: "UserPromptSubmit",
       turnId: "turn-one",
-      threadId: "5f1c2a90-aa11-4b22-9c33-0d44e55f6677"
+      threadId
     }
   }]);
   assert.equal(JSON.stringify(signals).includes("must stay local"), false);
@@ -115,6 +118,44 @@ test("RuntimeGateway rejects a wrong capability and ignores a stale turn complet
   // A thread id reaches a provider argv on restore, so a flag-shaped one is refused.
   await send(capability.address, { ...message(capability, "idle", "Stop", "turn-new"), threadId: "--config=evil" });
   assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
+});
+
+test("RuntimeGateway: a late revoke carrying an older launch's capability leaves the newer lease alone", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const older = gateway.registerSession("terminal-reused", "codex");
+  const newer = gateway.registerSession("terminal-reused", "codex");
+
+  // The older launch's cleanup runs late, after the card was relaunched under the same id.
+  gateway.revokeTerminalSession("terminal-reused", older.capabilityToken);
+  await send(newer.address, message(newer, "working", "UserPromptSubmit", "turn-after-late-cleanup"));
+  assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
+
+  // Its own capability still revokes it.
+  gateway.revokeTerminalSession("terminal-reused", newer.capabilityToken);
+  await send(newer.address, message(newer, "idle", "Stop", "turn-after-late-cleanup"));
+  assert.deepEqual(signals.map(({ signal }) => signal.state), ["working"]);
+});
+
+test("RuntimeGateway: a late start of an earlier turn does not take over from the newer turn", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (id, signal) => signals.push({ id, signal }) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const capability = gateway.registerSession("terminal-turns", "codex");
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-1"));
+  await send(capability.address, message(capability, "idle", "Stop", "turn-1"));
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-2"));
+  // Turn 1's start hook arrives late, on its own connection.
+  await send(capability.address, message(capability, "working", "UserPromptSubmit", "turn-1"));
+  await send(capability.address, message(capability, "idle", "Stop", "turn-2"));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(signals.map(({ signal }) => `${signal.state}:${signal.turnId}`), ["working:turn-1", "idle:turn-1", "working:turn-2", "idle:turn-2"]);
+  assert.equal(gateway.currentStatus("terminal-turns"), "idle");
 });
 
 test("RuntimeGateway propagates threadId for codex sessions with canonical UUID", POSIX_RUNTIME_GATEWAY_TEST, async (t) => {
@@ -384,6 +425,40 @@ test("OpenCode question dialogs report needs-input and resume working afterward"
     { state: "needs_approval", event: "question.asked" },
     { state: "working", event: "question.replied" }
   ]);
+});
+
+test("OpenCode resumed sessions bind from native updates before status events, while child updates remain isolated", POSIX_RUNTIME_GATEWAY_TEST, async t => {
+  const root = await fixture(t);
+  const signals = [];
+  const gateway = new RuntimeGateway({ runtimeDirectory: root, onSignal: (_, signal) => signals.push(signal) });
+  await gateway.start();
+  t.after(() => gateway.close());
+  const capability = gateway.registerSession("terminal-resumed-opencode", "opencode");
+  const previous = Object.fromEntries(Object.values(AGENT_RUNTIME_ENV).map(key => [key, process.env[key]]));
+  const previousEnabled = process.env.CANVASTTY_LIFECYCLE_HOOKS_ENABLED;
+  for (const [key, value] of Object.entries(capability)) {
+    if (AGENT_RUNTIME_ENV[key]) process.env[AGENT_RUNTIME_ENV[key]] = value;
+  }
+  process.env.CANVASTTY_LIFECYCLE_HOOKS_ENABLED = "1";
+  t.after(() => {
+    for (const [key, value] of Object.entries({ ...previous, CANVASTTY_LIFECYCLE_HOOKS_ENABLED: previousEnabled })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const { CanvasTTYLifecycle } = await import("../src/agent-runtime/opencode-plugin.mjs?resumed-history-test");
+  const plugin = await CanvasTTYLifecycle();
+  const id = "ses_resumed123";
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id: "ses_child123", parentID: id } } } });
+  assert.equal(signals.length, 0);
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id } } } });
+  await plugin.event({ event: { type: "session.status", properties: { sessionID: id, status: { type: "busy" } } } });
+  await plugin.event({ event: { type: "session.updated", properties: { info: { id: "ses_other123" } } } });
+  await plugin.event({ event: { type: "session.status", properties: { sessionID: "ses_other123", status: { type: "idle" } } } });
+  await plugin.event({ event: { type: "session.idle", properties: { sessionID: id } } });
+  assert.deepEqual(signals.map(s => [s.state, s.event]), [
+    ["idle", "session.updated"], ["working", "session.status:busy"], ["idle", "session.idle"]
+  ]);
+  assert.equal(signals[0].threadId, id);
 });
 
 function message(capability, state, event, turnId) {

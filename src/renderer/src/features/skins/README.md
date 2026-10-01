@@ -60,6 +60,10 @@ Each has three detail levels and completed art. Gold & Black minimal working
 currently uses its idle PNG with an activity marker on the top rail; imported
 themes require a distinct PNG for every slot.
 
+The built-in art is shipped as AVIF (4:4:4, 1536x1024) to keep the app small;
+`node scripts/encode-skin-art.mjs <file.png>...` encodes a new frame or background
+with the same settings. Imported themes stay PNG.
+
 ## App API
 
 The isolated renderer bridge exposes `window.canvasTTY.pixelSkins.list()`,

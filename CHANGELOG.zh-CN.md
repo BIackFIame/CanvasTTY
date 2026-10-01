@@ -2,6 +2,43 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## 未发布
+
+### 更新后你会注意到
+
+在同一台 Apple Silicon Mac 上与 1.7.0 做初始整栈 A/B 对比：交替运行，每侧 3 次，取中位数，智能体 CLI 使用桩程序（真实 CLI 会在此之上增加自身开销）。
+
+| | 1.7.0 | 初始测量 | 变化 |
+|:--|--:|--:|--:|
+| 内存：10 个 OpenCode 智能体 + 编排者（RSS） | 1,762 MB | 1,103 MB | −37 % |
+| 每张智能体卡片的 helper（RSS） | 60 MB | 6 MB | −90 % |
+| Claude Code 每次工具调用的权限检查 | 165 ms | 23 ms | −86 % |
+| 5 个终端以 256 KB/s 输出 30 秒时渲染进程的 CPU 时间 | 3.16 s | 1.92 s | −39 % |
+| 每次平移/缩放渲染的 React 组件数 | 73 | 2 | −97 % |
+| 首个可交互帧（恢复 3 个终端） | 511 ms | 434 ms | −15 % |
+| 应用 / zip（macOS arm64） | 376 / 195 MB | 259 / 121 MB | −31 % / −38 % |
+
+报告中的隐藏终端测试夹具对比了隐藏时仍用 `visibility:hidden` 绘制与用 `display:none` 暂停屏幕绘制：改动前 renderer CPU 为 1.880710 秒，改动后为 1.773396 秒，五张卡片总计减少约 5.7%，包括最后一次恢复。两种情况处理相同的完整输出并保留终端状态；完整流解析仍然开启，不能把丢弃输出的有损环形缓冲区重放所节省的 CPU 作为优化目标。测试在 Apple Silicon Mac 上使用已安装的 xterm 6 和 Electron 运行：5 张卡片，10 秒，每张卡片每秒 1,024 Ki 个 UTF-16 单元；3 组交错配对运行的中位数。结果只计 renderer CPU，不包括应用主进程、PTY/IPC 或 WebGL，也不能证明整个应用、实时 provider 或 Linux/Windows 上的性能提升。评审期间没有独立重新测量该结果。
+
+无人可见的插件卡片会暂停并保留状态，隐藏的浏览器标签页会被降频；编排者以 Auto 运行时，子智能体不再每个操作都询问用户。
+
+### 变更
+
+- **启动模式。** 现在默认是 Auto。Manual、Accept edits、Plan 与 Bypass（YOLO）只在 CLI 支持时提供：Accept edits 与 Plan 适用于 Claude Code、Codex、Grok 和 OpenCode，Plan 还适用于 Cursor；没有自带自动模式的 CLI，其 Auto 就是跳过审批，且只在智能体隔离内存在。Bypass 需要用户为每个 CLI 确认一次，由主进程检查，且绝不交给子智能体。
+- **委派规则。** 子智能体的权限不超过其编排者（plan < manual < accept edits < auto，绝不为 Bypass），只在编排者的项目文件夹内工作，并受用户在 Settings → Agents 中设定的深度（2）与存活子智能体数（8）限制。对于无法询问的 CLI，决策插件的「ask」会变成附带原因的拒绝。
+- **智能体隔离。** 操作系统层（macOS 用 `sandbox-exec`，Linux 用 bubblewrap）包裹子智能体、插件启动的智能体以及所有非 Manual 模式的智能体：只能写入项目、本次启动的临时目录和其 CLI 自己的目录；密钥、其他 CLI 的凭据和 CanvasTTY 的 token 不可读；无法建立时拒绝启动。Windows 暂无隔离层，子智能体在那里以 Manual 运行。关闭隔离需由用户主动选择。
+- **Git 审计。** 隔离会话结束后，CanvasTTY 会检查它触及的仓库中是否有会在隔离外运行程序的 git 设置和文件，并提供 **Neutralize** 或 **Keep as is**。
+- **原生智能体 helper。** `canvastty-helper`（Go）在 macOS 和 Linux 上运行 MCP 服务器、权限检查和生命周期 hook；Windows 默认仍使用 JavaScript helper，`CANVASTTY_HELPERS=node` 可在任何系统上强制使用它们。从源码构建需要 Go 1.21 或更高版本（`npm run build:helpers`）；没有 Go 时使用 JavaScript helper。
+- **性能。** 只打包主进程和 preload 实际加载的内容，内置皮肤改用 AVIF；画布镜头放在 React 之外；屏幕外的 DOM 终端不再在滚动时重建；摘要模式和 HOME 编辑中隐藏的终端停止绘制并推迟选区重绘，解析器仍按有界批次接收完整输出以保留终端状态和历史；窗口在服务启动的同时加载，Settings 按需加载；隐藏的浏览器标签页、无人可见的插件帧以及关闭的 Settings 停止轮询。
+- **修复。** 两轮缺陷排查：编排工具在早期 gateway 竞争后可恢复，浏览器操作在重连后不再重复，重启的智能体不再返回上一段对话的答案，保存所有打开的卡片（而不只是前 64 张），并发创建时 32 个会话的上限依然有效，过大的截图替换为说明，`git worktree add` 指向其他仓库时被判定为写入。
+- `get_agent_result` 和 `wait_for_agent` 现在以 `answer` 返回 OpenCode 或 Codex 子 agent 的最终回复，而不是只给编排者全屏 TUI 的原始末尾输出。OpenCode 的回复由 CanvasTTY 插件在回合结束（`session.idle`）时从会话最后一条 assistant 消息读取，Codex 的来自其 Stop hook；最多 4,096 个字符并保留结尾，与其他 agent 输出一样遮蔽，只保存在内存中，下一回合开始时清除。只有子 agent 会捕获，普通卡片不会。`get_agent_result` 还会报告 `status`（回合结束后为 idle；CLI 打开期间 `state` 保持 running）。
+- 当编排者以「自动」运行时，子 agent 不再每一步都询问人。`spawn_agent` 支持可选的 `profile`（`auto`、`normal`、`acceptEdits` 或 `plan`）；不传时子 agent 继承编排者的配置（其 CLI 没有自动模式时为「普通」，YOLO 编排者的子 agent 以「自动」或「普通」运行：YOLO 需要 `spawn_agent` 无法选择的隔离环境）。回答（`profile`、`profileInherited`）、`list_agents` 和卡片会显示实际得到的配置。control CLI 的 `create --profile` 仍是其 worker 的对应方式。
+- OpenCode 新增 **自动** 启动配置。OpenCode 没有自动模式参数，因此它是本次运行在 OpenCode 默认 agent `agent.build` 下的 `OPENCODE_CONFIG_CONTENT`（追加在人自己的规则之后，不写入 `~/.config/opencode`）：项目内的读取、搜索和编辑无需询问（`.env` 文件仍会询问），shell 命令也一样，但仅在基础保护开启且其守卫在该 OpenCode 中运行时（否则照旧询问），项目外的路径照旧询问。卡片像其他 agent 一样显示 **自动**。
+- `spawn_agent` 和 control CLI 的 `create` 支持可选的 `model`（本次运行 CLI 自己的 `--model`：OpenCode 为 `provider/model`，以及 Codex、Claude、Qwen、Kimi 别名、Grok、OMP、Pi、Cursor）和 `effort`（Codex、Claude、Grok）。两者按 provider 校验并在拒绝时说明原因，重启和恢复时保留，且从不写入 CLI 的配置；被指定模型的编排者现在会用该模型运行子 agent，而不是 CLI 的默认模型。`list_providers` 显示每个 provider 的模型格式和 effort 级别，OpenCode 还会显示 `opencode models` 列出的模型（后台读取，超时 5 秒并缓存；工具不会等待它）。不在该列表中的 OpenCode 模型会在启动前被拒绝，并给出最多五个最接近的 id，否则 OpenCode 只会报「Unexpected server error」后停止；若子 agent 仍然退出，其屏幕最后几行会以 `exitLines` 出现在 `wait_for_agent`、`observe_agent` 和 `get_agent_result` 中。
+- 名称含有两种 Unicode 写法字符（西里尔字母「й」、带重音的字母；Finder 保存分解形式）的项目文件夹，现在无论 `spawn_agent`、control CLI 或插件传入哪种写法，都会以磁盘上的写法启动，CLI 不再把自己的项目当作外部文件夹（OpenCode 曾对每个文件询问「Access external directory …」）。agent 的 `PWD` 也设为其文件夹而不是应用的，OpenCode 在本次运行中被允许访问该文件夹的另一种写法；其他权限不变，ASCII 路径照旧启动。
+- 编排者新增两个 `canvastty_agents` 工具。`list_providers` 列出 CanvasTTY 可作为子 agent 启动的 agent：`spawn_agent.provider` 的确切 id、名称、CLI 是否已安装、上次额度检查得到的登录状态（`ok`、`signed_out`、`expired` 或 `unknown`；不会为此读取或请求任何内容）、子 agent 与编排者支持，以及插件提供的启动选项和挑选它们的插件工具（如 `list_routes`）；control CLI 中对应命令为 `providers`。`wait_for_agent`（`timeoutSeconds` 最多 600）等待子 agent 空闲、需要人处理、退出或安静下来，或超时，并返回状态和已遮蔽的输出末尾；只能等待自己的子 agent，调用被取消时立即停止。`spawn_agent` 现在列出已知的 provider id，未知 id 会被拒绝并提示调用 `list_providers`，而不是笼统的失败。工具说明、MCP 指令、编排者技能和拒绝消息都给出 `list_providers` → `spawn_agent` → `wait_for_agent` → `get_agent_result` 的流程，并要求 agent 不要在文件系统中搜索 agent CLI 或其配置。
+- 平移和缩放画布不再重新渲染整个应用：镜头保存在 React state 之外并直接移动场景，因此平移时只重新渲染小地图（以及页面跟随其移动的浏览器卡片），而不是每个指针或滚轮事件重新渲染 50–110 个组件；卡片只在跨越摘要模式或 WebGL 缩放阈值时重新渲染。使用 DOM 绘制的终端卡片（屏幕外或超出 WebGL 池的卡片）不再在每次输出滚动时逐行重建；在早期的屏幕外输出测试夹具中，renderer CPU 占用减半。屏幕显示不变。
+
 ## 1.7.0
 
 - Windows 编排启动改用现有的仅限当前用户访问的管道服务，并修复私有数据保护对展开后的 Windows 路径的识别。完整 Windows 测试现在会在 PR 合并前运行，而不再仅在发布打包时运行。

@@ -13,7 +13,7 @@ const { outputFiles } = await build({
 const { AgentChatHistoryService } = await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString("base64")}`);
 
 const id = "11111111-1111-4111-8111-111111111111";
-const pathVariables = ["OPENCODE_HOME", "XDG_DATA_HOME", "PI_CONFIG_DIR", "PI_CODING_AGENT_DIR",
+const pathVariables = ["OPENCODE_HOME", "XDG_DATA_HOME", "PI_CONFIG_DIR", "PI_CODING_AGENT_DIR", "KIMI_CODE_HOME", "KIMI_SHARE_DIR",
   "PI_CODING_AGENT_SESSION_DIR", "OMP_PROFILE", "PI_PROFILE", "QWEN_CODE_HOME", "QWEN_HOME", "QWEN_RUNTIME_DIR"];
 
 async function setup(t, environment) {
@@ -60,6 +60,16 @@ test("history service honors Pi session-directory override", async t => {
   const page = await service.list("pi");
   assert.equal(page.error, undefined);
   assert.equal(page.items[0]?.id, id);
+});
+
+test("history service finds Kimi Code in KIMI_CODE_HOME and preserves its native prefixed id", async t => {
+  const { root, service } = await setup(t, root => ({ KIMI_CODE_HOME: root, KIMI_SHARE_DIR: join(root, "legacy") }));
+  const session = join(root, "sessions", "wd_project", `session_${id}`);
+  await mkdir(session, { recursive: true });
+  await writeFile(join(session, "state.json"), JSON.stringify({ id: `session_${id}`, version: 2, cwd: root, updatedAt: Date.now(), title: "Current chat", custom: {} }));
+  const page = await service.list("kimi");
+  assert.equal(page.error, undefined);
+  assert.equal(page.items[0]?.id, `session_${id}`);
 });
 
 test("history service finds Qwen's current projects and legacy tmp stores without duplicates", async t => {
@@ -114,21 +124,21 @@ for (const [platform, home, expected] of [
   ["darwin", "/Users/Alice Smith", {
     codex: "/Users/Alice Smith/.codex", grok: "/Users/Alice Smith/.grok",
     opencode: "/Users/Alice Smith/.local/share/opencode", claude: "/Users/Alice Smith/.claude/projects",
-    qwen: ["/Users/Alice Smith/.qwen/projects", "/Users/Alice Smith/.qwen/tmp"], kimi: "/Users/Alice Smith/.kimi",
+    qwen: ["/Users/Alice Smith/.qwen/projects", "/Users/Alice Smith/.qwen/tmp"], kimi: "/Users/Alice Smith/.kimi", kimiCode: "/Users/Alice Smith/.kimi-code",
     omp: "/Users/Alice Smith/.omp/agent/sessions", pi: "/Users/Alice Smith/.pi/agent/sessions",
     cursor: "/Users/Alice Smith/.cursor", minimax: "/Users/Alice Smith/.minimax"
   }],
   ["linux", "/home/runner", {
     codex: "/home/runner/.codex", grok: "/home/runner/.grok",
     opencode: "/home/runner/.local/share/opencode", claude: "/home/runner/.claude/projects",
-    qwen: ["/home/runner/.qwen/projects", "/home/runner/.qwen/tmp"], kimi: "/home/runner/.kimi",
+    qwen: ["/home/runner/.qwen/projects", "/home/runner/.qwen/tmp"], kimi: "/home/runner/.kimi", kimiCode: "/home/runner/.kimi-code",
     omp: "/home/runner/.omp/agent/sessions", pi: "/home/runner/.pi/agent/sessions",
     cursor: "/home/runner/.cursor", minimax: "/home/runner/.minimax"
   }],
   ["win32", "C:\\Users\\Alice Smith", {
     codex: "C:\\Users\\Alice Smith\\.codex", grok: "C:\\Users\\Alice Smith\\.grok",
     opencode: "C:\\Users\\Alice Smith\\.local\\share\\opencode", claude: "C:\\Users\\Alice Smith\\.claude\\projects",
-    qwen: ["C:\\Users\\Alice Smith\\.qwen\\projects", "C:\\Users\\Alice Smith\\.qwen\\tmp"], kimi: "C:\\Users\\Alice Smith\\.kimi",
+    qwen: ["C:\\Users\\Alice Smith\\.qwen\\projects", "C:\\Users\\Alice Smith\\.qwen\\tmp"], kimi: "C:\\Users\\Alice Smith\\.kimi", kimiCode: "C:\\Users\\Alice Smith\\.kimi-code",
     omp: "C:\\Users\\Alice Smith\\.omp\\agent\\sessions", pi: "C:\\Users\\Alice Smith\\.pi\\agent\\sessions",
     cursor: "C:\\Users\\Alice Smith\\.cursor", minimax: "C:\\Users\\Alice Smith\\.minimax"
   }]

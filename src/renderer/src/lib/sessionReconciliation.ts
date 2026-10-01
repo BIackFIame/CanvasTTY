@@ -1,10 +1,16 @@
 import type { SessionMetadata, SessionSnapshot } from "../../../shared/contracts";
 
+/**
+ * Merges a list loaded earlier (the startup `terminal.list()`) into the live state. `removed` holds the ids
+ * a removal event dropped while the list was on its way: the list is older than that removal, so it must not
+ * bring those cards back.
+ */
 export function mergeSessionSnapshots(
   current: SessionSnapshot[],
-  loaded: readonly SessionSnapshot[]
+  loaded: readonly SessionSnapshot[],
+  removed: ReadonlySet<string> = new Set()
 ): SessionSnapshot[] {
-  return loaded.reduce(upsertSnapshot, current);
+  return loaded.reduce((sessions, next) => removed.has(next.id) ? sessions : upsertSnapshot(sessions, next), current);
 }
 
 export function upsertSession(

@@ -79,6 +79,8 @@ Domain decisions остаются в чистых selectors вроде `homeMode
 
 `SessionMetadata` владеет world-space position и размером карточки. `App` согласует bounds, а `TerminalCard` может хранить transient geometry pointer-move до pointer-up. Main process проверяет и ограничивает размеры до отправки session snapshot. Camera wheel обрабатывается только на пустом canvas; интерактивные поверхности сохраняют native scroll/input ownership.
 
+Камера не является состоянием React. `App` владеет `cameraStore` (`features/workspace/cameraStore.ts`); `WorkspaceCanvas` пишет transform сцены из listener'а store синхронно, до рендера всего, что измеряет сцену. На каждое движение подписаны только миникарта и `BrowserCard`; карточки подписаны на производные значения (`useCameraSelector`: масштаб сводки, допуск WebGL), а обработчики перетаскивания читают `camera.get().zoom` в момент движения, поэтому pan или zoom не рендерят карточки.
+
 Одна живая `TerminalCard` владеет одним xterm instance на всё время жизни session ID. Смена palette обновляет `terminal.options.theme` на месте; title/settings не должны пересоздавать terminal или его renderer scrollback. Window title обновляется как session metadata через `terminal:rename`. PTY input/resize, пришедшие одновременно с exit, сдерживаются на границе main process и не превращаются в uncaught Electron errors.
 
 Batching вывода — граница IPC/rendering, а не истории: каждый PTY chunk сразу добавляется в ограниченный scrollback, а ожидающий renderer output сбрасывается по таймеру 16 мс, перед exit и перед dispose. Trimming двигается по chunks вместо пересборки всего буфера на каждую запись; snapshot объединяет только сохранённый suffix.

@@ -51,6 +51,26 @@ test("a subagent records its parent and keeps the parent alive", () => {
   terminal.disposeAll();
 });
 
+test("closing a parent closes its subagents; other children and unrelated cards stay", () => {
+  const calls = [];
+  const terminal = manager(calls);
+  const create = (extra) => terminal.create({ provider: "codex", cwd: process.cwd(), profile: "normal", position: { x: 0, y: 0 }, ...extra });
+  const parent = create({ role: "orchestrator" });
+  const child = create({ role: "subagent", parentSessionId: parent.id });
+  const grandchild = create({ role: "subagent", parentSessionId: child.id });
+  const other = create({});
+  const killed = [];
+  for (const call of calls) {
+    const kill = call.process.kill.bind(call.process);
+    call.process.kill = () => { killed.push(call); return kill(); };
+  }
+  terminal.dispose(parent.id);
+  assert.deepEqual(terminal.list().map((session) => session.id), [other.id]);
+  assert.equal(killed.length, 3, "every PTY of the subtree is stopped");
+  assert.equal(grandchild.parentSessionId, child.id);
+  terminal.disposeAll();
+});
+
 test("subagents require a live parent session", () => {
   const calls = [];
   const terminal = manager(calls);

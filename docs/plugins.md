@@ -196,7 +196,7 @@ Up to 8 fields; `kind` is `boolean`, `select` (1–16 options) or `text` (at mos
 
 A `select` with `"optionsFrom": "service"` also lists choices the service offers, such as its own accounts. When the launcher opens, CanvasTTY asks the service `canvastty.launch.options` `{ provider, fields: [keys] }` and waits at most 3 s; the answer `{ "<key>": [{ value, label }] }` adds up to 64 choices per field after the declared ones (which stay required and are all the launcher shows when the service does not answer). Because such a list can change after a card was saved, its value is accepted as any text up to 200 characters without control characters, and `canvastty.launch.prepare` must check it and refuse a value it no longer knows.
 
-Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's; a plugin tool can hand them out (for example the account it picked). While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
+Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<pluginId>": { "<key>": value } }`), checked exactly like the launcher's, but only to a plugin whose `launch` declares `"delegable": true` (its options are safe for an agent to choose; without it only the person chooses them, and `list_providers` does not list them); a plugin tool can hand them out (for example the account it picked). Whatever a contribution adds is checked the same way for every launch: no permission, sandbox, hook or bypass flags, and no configuration the CLI reads that sets approvals (an OpenCode `OPENCODE_CONFIG` file or `OPENCODE_CONFIG_DIR`, `OPENCODE_PERMISSION`, Kimi's `--config`/`--config-file`); a file CanvasTTY cannot read and check is refused. While a child's launch waits for its plugins (launch options, a launch policy, an environment), `spawn_agent` answers only after its `prompt` reached the started agent, and `send_to_agent` waits the same way. A refused, failed or cancelled launch fails the call with the reason and the session id (the card stays); the text is dropped, never kept for a later restart. The control CLI answers `NOT_READY` for such a card.
 
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
@@ -247,10 +247,13 @@ An environment is where a card runs: a git worktree, a container, a remote host.
     "kind": "worktree", "label": "Git worktree",
     "description": "A branch in its own folder",
     "appliesTo": ["terminal", "claude"],
-    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }]
+    "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }],
+    "keeps": { "launch": true }
   }]
 }]
 ```
+
+`keeps` declares what of CanvasTTY's protection reaches the agent there: `launch` (the launch's arguments and environment reach the agent unchanged, so CanvasTTY's hooks and the profile's per-run settings work), `isolated` (the agent does not run on this computer's files: a container or a remote host) and `confines` (the environment itself confines the agent to the project). Undeclared means no: any profile but normal is refused without `launch`, and the card says that base protection does not reach the agent there. An `isolated` environment is not wrapped in CanvasTTY's agent isolation again (the card names the environment's own boundary); any other runs inside it, with the environment's folder as the project.
 
 CanvasTTY keeps the card, the PTY, the saved record and the restore order; the service answers five host-only requests (surfaces cannot send them):
 
@@ -387,7 +390,7 @@ The full example is [`examples/plugins/collect-demo`](../examples/plugins/collec
 Two safety parts are built in and need no plugin:
 
 - **Base protection** (Settings → Agents, on by default; the person can turn it off) denies, through the same hook, sudo and other elevation, piping downloaded or generated text into a shell, download-and-run, disk and format commands, fork bombs, and writing or deleting outside the working folder: the home folder, other projects and `/tmp` included, and deleting the working folder itself. An agent's own plan and memory folders (`~/.claude/plans`, `~/.claude/projects/<project>/memory`, and the same inside the run's `CLAUDE_CONFIG_DIR`) are not "outside". It also denies any use of CanvasTTY's own private data (from the app's userData folder: the agent-control token and descriptor, the gateways' connection records and sockets, the secret stores, account homes; and the control/runtime socket folders under the temporary folder), by any program, interpreter one-liners and socket clients included; the reason points the model at an **Orchestrator** launch and the `canvastty_agents` tools. The bundled control CLI may name its descriptor. It only ever denies; each reason tells the model what to do instead (a write to `/tmp` suggests a scratch folder inside the project).
-- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs). Plugin tool answers, `screen` in session events, card badges and card action messages are masked the same way.
+- **Secret redaction**: every text CanvasTTY hands from one agent to another (`observe_agent`, `wait_for_agent`, `get_agent_result`, the control CLI's `screen`, `result` and failure details) is masked: provider keys CanvasTTY holds, launch `secretEnv` values, values a service registered with `redaction.register`, also when the terminal wrapped them over lines, plus common key shapes (`sk-…`, GitHub, Slack, AWS, Google, JWT, `Bearer …`, `"apiKey": "…"`, PEM private keys, long random runs). Plugin tool answers, `screen` in session events, card badges and card action messages are masked the same way.
 
 host.onStorageChange(listener) notifies every live contribution of the same plugin — canvases, HOME widgets, and separate windows — of writes made through host.storage.set, avoiding polling when a plugin coordinates several surfaces.
 
@@ -491,6 +494,20 @@ Add `network` only for remote catalogs, radio, artwork, or streams; add `externa
 Scanned audio extensions are `.aac`, `.flac`, `.m4a`, `.mp3`, `.oga`, `.ogg`, `.opus`, `.wav`, and `.webm`. Assign `track.streamUrl` directly to an `<audio>` element; the host supports byte-range responses so duration probing and seeking work. A plugin with `media:library` may also `fetch(track.streamUrl)` when it needs the bytes for browser-side metadata parsing. The complete method overloads and result interfaces are in [`plugin-api.d.ts`](plugin-api.d.ts).
 
 Recommended startup flow: call `listLibraries()`, ask for a folder with `pickLibrary()` only when none is granted, scan the chosen library, restore queue/preferences from `storage`, then list and parse playlists. Treat revoked or moved folders as an explicit unavailable state and let the user choose them again.
+
+### Visibility
+
+A canvas app keeps running while its card is not drawn: zoomed out to a summary, hidden while HOME is being edited, panned off-screen, or with the window minimized. The host does not reload the frame; it suspends it the way a browser suspends a background tab. While suspended, `document.visibilityState` is `"hidden"` (and `visibilitychange` fires on each change), timers (`setTimeout`, `setInterval`) wake at most once a second, and `requestAnimationFrame` callbacks wait until the card is shown again. DOM, JavaScript state, network requests, audio and workers are untouched.
+
+```js
+host.onVisibilityChange((state) => {
+  if (state === "hidden") pausePolling();
+  else resumePolling();
+});
+const current = host.visibility(); // "visible" | "hidden"
+```
+
+Plain `document.addEventListener("visibilitychange", …)` works too, without the SDK. The host message behind it is `{ source: "canvastty-host", type: "visibility", state: "visible" | "hidden" }`; plugins do not need to handle it themselves.
 
 Context updates include the active CanvasTTY locale and palette. Plugins own their internal localization and styling; they should remain legible at the contribution's intended size and should not invent loading progress, sessions, status, limits, or telemetry.
 

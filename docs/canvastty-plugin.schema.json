@@ -212,7 +212,8 @@
           "items": { "enum": ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"] }
         },
         "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } },
-        "policy": { "description": "Also ask before every launch of these agents where the person did not choose the plugin; that answer may only refuse, and no answer refuses too.", "type": "boolean" }
+        "policy": { "description": "Also ask before every launch of these agents where the person did not choose the plugin; that answer may only refuse, and no answer refuses too.", "type": "boolean" },
+        "delegable": { "description": "These options are safe for an orchestrator to choose for its subagents (spawn_agent launchOptions). Without it only the person chooses them in the launcher.", "type": "boolean" }
       }
     },
     "environmentKind": {
@@ -227,7 +228,17 @@
           "type": "array", "minItems": 1, "uniqueItems": true,
           "items": { "enum": ["terminal", "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"] }
         },
-        "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } }
+        "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } },
+        "keeps": {
+          "description": "What of CanvasTTY's protection reaches the agent in this environment. Undeclared means no: the core refuses a launch that needs it (any profile but normal needs launch), or marks the card as not protected.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "launch": { "description": "The launch's arguments and environment reach the agent unchanged (CanvasTTY's hooks and the profile's per-run settings work there).", "type": "boolean" },
+            "isolated": { "description": "The agent does not run on this computer's files (container, remote host); this computer's isolation layer does not apply.", "type": "boolean" },
+            "confines": { "description": "The environment itself confines the agent to the project.", "type": "boolean" }
+          }
+        }
       }
     },
     "launchField": {

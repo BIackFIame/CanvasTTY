@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
@@ -26,6 +27,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { matchesShortcut } from "../../lib/shortcuts";
+import { GitRiskNotice } from "./GitRiskNotice";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
@@ -44,9 +46,10 @@ import {
   shouldSendTerminalLineBreak
 } from "./terminalShortcuts";
 import { attachTerminalRedrawViewport, fitTerminalPreservingViewport } from "./terminalViewport";
-import { limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
+import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutput";
+import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
+import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
 import { terminalLinkTarget } from "./terminalLinkTarget";
-import { attachTerminalOutput } from "./terminalOutput";
 import {
   constrainResize,
   snapMove,
@@ -55,9 +58,11 @@ import {
 import { shouldActivateCanvasFromClick } from "../workspace/focus";
 import type { ResizeDirection } from "../workspace/snap";
 import { terminalCanvasWidgetId } from "../workspace/canvasWidgetFocus";
-import { renameCommit, visibleTerminalTitle } from "./terminalTitle";
+import { compactPath, renameCommit, visibleTerminalTitle } from "./terminalTitle";
 import { canvasCardPropsEqual } from "./terminalCardProps";
+import { markBootOnce } from "../../lib/bootMarks";
 import { webglContextPool } from "./webglContextPool";
+import { skipEmptySelectionRedraws } from "./terminalSelectionRedraw";
 import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
 import { isPixelSkinThemeId, pixelSkinStateForSession } from "../skins/skinCatalog";
 import { isPixelSkinPackId, usePixelSkinPackSummary } from "../skins/SkinAssets";
@@ -70,7 +75,8 @@ interface TerminalCardProps {
   palette: PaletteId;
   borderSkin: TerminalBorderSkinId;
   skinDetail: PixelSkinPreferredDetail;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
   focusActivation: FocusActivation;
@@ -84,9 +90,15 @@ interface TerminalCardProps {
   forceMasterDetail: boolean;
   /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
   groupSelected?: boolean;
+  /**
+   * The card is CSS-hidden by an ancestor (HOME editing hides the whole window layer). One of the
+   * inputs of the card's surface lifecycle (surfaceLifecycle.ts): a hidden card is suspended.
+   */
+  hidden?: boolean;
   renaming: boolean;
   fullscreen: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onToggleFullscreen(): void;
   onActivate(session: SessionSnapshot): void;
   onSelect(id: string): void;
@@ -105,6 +117,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -142,7 +156,7 @@ function TerminalCardView({
   shortcuts,
   borderSkin: selectedBorderSkin,
   skinDetail,
-  zoom,
+  camera,
   stackIndex,
   snapEnabled,
   focusActivation,
@@ -155,9 +169,10 @@ function TerminalCardView({
   selected,
   forceMasterDetail,
   groupSelected,
+  hidden = false,
   renaming,
   fullscreen,
-  snapTargets,
+  getSnapTargets,
   onToggleFullscreen,
   onActivate,
   onSelect,
@@ -239,14 +254,21 @@ function TerminalCardView({
     return () => window.clearTimeout(timer);
   }, [actionToast]);
   const liveBounds = useRef<SessionBounds>({ position: session.position, size: session.size });
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  // The card renders when these derived values change, not on every camera move: a pan renders no card,
+  // and a zoom only at the summary and WebGL thresholds (and while the summary scale grows).
+  const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
+  const summaryMode = summaryScale > 1;
+  const webglScaleAllowed = useCameraSelector(camera, (current) => current.zoom <= WEBGL_MAX_SCALE);
   const terminalColors = terminalTheme(palette, pixelSkinTheme);
   const terminalBackground = terminalColors.background;
   const terminalForeground = terminalColors.foreground;
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const webglAddonRef = useRef<WebglAddon | null>(null);
   const fitRef = useRef<(() => void) | null>(null);
+  const lifecycle = surfaceLifecycle({ summary: summaryMode, hidden, focused });
+  const lifecycleRef = useRef(lifecycle);
+  lifecycleRef.current = lifecycle;
+  const pinnedInputRefreshRef = useRef<(() => void) | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchOpenRef = useRef(false);
   const [searchOpen, setSearchOpen] = useState(false);
@@ -334,7 +356,8 @@ function TerminalCardView({
     pinnedInput.setAttribute("aria-hidden", "true");
     host.append(pinnedInput);
     let pinnedRows = 0;
-    const updatePinnedInput = (): void => {
+    let pinnedFitFrame: number | null = null;
+    const renderPinnedInput = (): void => {
       const completePinned = pinnedTerminalInput(terminal.buffer.active);
       const maxPinnedRows = Math.max(1, Math.floor(host.clientHeight / (14 * 1.2) / 2));
       const pinned = completePinned ? limitPinnedTerminalInput(completePinned, maxPinnedRows) : null;
@@ -367,14 +390,26 @@ function TerminalCardView({
       }
       if (nextRows !== pinnedRows) {
         pinnedRows = nextRows;
-        requestAnimationFrame(() => fitRef.current?.());
+        if (pinnedFitFrame === null) pinnedFitFrame = requestAnimationFrame(() => {
+          pinnedFitFrame = null;
+          if (surfaceIsLive(lifecycleRef.current)) fitRef.current?.();
+        });
       }
     };
+    const pinnedRefresh = createPinnedInputRefresh({
+      isLive: () => surfaceIsLive(lifecycleRef.current),
+      refresh: renderPinnedInput,
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (frame) => cancelAnimationFrame(frame)
+    });
+    const updatePinnedInput = pinnedRefresh.schedule;
+    pinnedInputRefreshRef.current = updatePinnedInput;
     const pinnedScroll = terminal.onScroll(updatePinnedInput);
     const pinnedCursor = terminal.onCursorMove(updatePinnedInput);
     const pinnedOutput = terminal.onWriteParsed(updatePinnedInput);
     setOscTitle(null);
     const detachRedrawViewport = attachTerminalRedrawViewport(terminal);
+    const restoreSelectionRedraws = skipEmptySelectionRedraws(terminal);
     let lastReportedGrid = "";
     const reportGrid = (cols: number, rows: number): void => {
       const grid = `${cols}x${rows}`;
@@ -550,6 +585,9 @@ function TerminalCardView({
       }
       window.canvasTTY.terminal.input(session.id, data);
     });
+    // The first terminal card whose xterm is attached and forwards keystrokes: at startup this is a restored
+    // session (new sessions cannot exist yet), so this doubles as "restored terminal interactive".
+    markBootOnce("restoredTerminalInteractive");
     const titleChange = terminal.onTitleChange((title) => setOscTitle(title.trim() ? title : null));
     const searchResults = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
       setSearchMatches({
@@ -571,6 +609,9 @@ function TerminalCardView({
       pinnedScroll.dispose();
       pinnedCursor.dispose();
       pinnedOutput.dispose();
+      pinnedRefresh.dispose();
+      if (pinnedFitFrame !== null) cancelAnimationFrame(pinnedFitFrame);
+      if (pinnedInputRefreshRef.current === updatePinnedInput) pinnedInputRefreshRef.current = null;
       host.classList.remove("terminal-card__surface--pinned-input");
       host.style.removeProperty("--pinned-input-height");
       pinnedInput.remove();
@@ -580,6 +621,7 @@ function TerminalCardView({
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
       detachRedrawViewport();
+      restoreSelectionRedraws();
       terminal.dispose();
     };
   }, [session.id]);
@@ -647,21 +689,41 @@ function TerminalCardView({
   useEffect(() => {
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
-    webglContextPool().update(session.id, { eligible: !summaryMode && zoom <= WEBGL_MAX_SCALE, focused });
-  }, [session.id, focused, summaryMode, zoom]);
+    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
     webglContextPool().viewportChanged();
   }, [position, size]);
 
+  // The card's surface lifecycle: suspended while it draws no terminal (summary thumbnail, HOME editing).
+  // Off-screen and minimized cards stay live on purpose: the main process can replay only its scrollback
+  // ring (smaller than xterm's scrollback), so a long unattended stretch would cost the card real history.
+  const deliveryGate = useRef<SurfaceGate | null>(null);
   useEffect(() => {
-    // Gate the main-process output stream: in summary mode the card is a cheap
-    // thumbnail, so the renderer skips terminalData (scrollback stays
-    // authoritative and the missing suffix is replayed when it turns visible).
-    window.canvasTTY.terminal.setVisible(session.id, !summaryMode);
-    return () => window.canvasTTY.terminal.setVisible(session.id, false);
-  }, [session.id, summaryMode]);
+    const gate = createTerminalDeliveryGate(window.canvasTTY.terminal, session.id);
+    deliveryGate.current = gate;
+    return () => {
+      gate.dispose();
+      if (deliveryGate.current === gate) deliveryGate.current = null;
+    };
+  }, [session.id]);
+  useEffect(() => {
+    deliveryGate.current?.set(lifecycle);
+    // The suspended surface hides xterm's screen so its IntersectionObserver pauses painting;
+    // output still advances the parser and scrollback. Keep the host's geometry for fitting.
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    const live = surfaceIsLive(lifecycle);
+    terminal.options.cursorBlink = live;
+    if (live) {
+      pinnedInputRefreshRef.current?.();
+      // A terminal first opened while suspended may not have measured its cells yet.
+      const frame = requestAnimationFrame(() => fitRef.current?.());
+      return () => cancelAnimationFrame(frame);
+    }
+  }, [session.id, lifecycle]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -714,7 +776,8 @@ function TerminalCardView({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -724,11 +787,11 @@ function TerminalCardView({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     const nextPosition = snapEnabled
-      ? snapMove(rawPosition, state.startBounds.size, snapTargets)
+      ? snapMove(rawPosition, state.startBounds.size, state.snapTargets)
       : rawPosition;
     applyLiveBounds({ position: nextPosition, size: state.startBounds.size });
   };
@@ -741,12 +804,18 @@ function TerminalCardView({
 
   // A group drag takes pointer capture without a pointerup; drop local state so a
   // later hover cannot act on it.
+  // Pointer capture lost mid-gesture (no pointerup): nothing was committed, so the card goes back to its saved bounds.
+  // After a normal pointerup the gesture is already over and this does nothing.
   const cancelDrag = (): void => {
+    if (!dragState.current) return;
     dragState.current = null;
+    applyLiveBounds({ position: session.position, size: session.size });
   };
 
   const cancelResize = (): void => {
+    if (!resizeState.current) return;
     resizeState.current = null;
+    applyLiveBounds({ position: session.position, size: session.size });
   };
 
   const startResize = (event: React.PointerEvent<HTMLDivElement>, direction: ResizeDirection): void => {
@@ -757,7 +826,8 @@ function TerminalCardView({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -768,8 +838,8 @@ function TerminalCardView({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const raw: SessionBounds = {
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),
@@ -785,7 +855,7 @@ function TerminalCardView({
       }
     };
     const constrained = constrainResize(raw, state.direction);
-    applyLiveBounds(snapEnabled ? snapResize(constrained, state.direction, snapTargets) : constrained);
+    applyLiveBounds(snapEnabled ? snapResize(constrained, state.direction, state.snapTargets) : constrained);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {
@@ -1060,6 +1130,23 @@ function TerminalCardView({
               {t(locale, session.autoDowngraded ? "autoDowngraded" : "autoProfile")}
             </span>
           )}
+          {(session.profile === "acceptEdits" || session.profile === "plan" || session.profile === "yolo") && (
+            <span className="terminal-card__role" title={t(locale, session.profile === "acceptEdits" ? "acceptEditsNote" : session.profile === "plan" ? "planNote" : "bypassInsideIsolation")}>
+              {t(locale, session.profile === "acceptEdits" ? "acceptEditsProfile" : session.profile === "plan" ? "planProfile" : "bypassProfile")}
+            </span>
+          )}
+          {session.isolation && (
+            <span className={`terminal-card__role terminal-card__isolation terminal-card__isolation--${session.isolation.state}`} data-isolation={session.isolation.state}
+              title={session.isolation.state === "on" ? t(locale, "isolationOnNote") : session.isolation.reason ?? ""}>
+              {t(locale, session.isolation.state === "on" ? "isolationOn" : session.isolation.state === "off" ? "isolationOff"
+                : session.isolation.state === "environment" ? "isolationEnvironment" : "isolationUnavailable")}
+            </span>
+          )}
+          {session.configuredMode && (
+            <span className="terminal-card__role" title={`${session.configuredMode.mode} · ${session.configuredMode.source}`}>
+              {t(locale, "configuredModeBadge")}: {session.configuredMode.mode}
+            </span>
+          )}
           {session.environment && (
             <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
               {session.environment.label}
@@ -1074,7 +1161,7 @@ function TerminalCardView({
         </div>
         {!pixelControls && terminalActions}
       </header>
-      <div className="terminal-card__surface" ref={terminalHost} />
+      <div className="terminal-card__surface" data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost} />
       {pixelSkinTheme && (
         <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}
           width={size.width} height={size.height} detail={pixelDetail} surfaceBounds={pixelSurfaceBounds ?? undefined} />
@@ -1128,6 +1215,9 @@ function TerminalCardView({
             <button type="button" onClick={() => setConfirmClose(false)}>{t(locale, "cancel")}</button>
           </div>
         </div>
+      )}
+      {session.gitRisk && !summaryMode && (
+        <GitRiskNotice report={session.gitRisk} locale={locale} className="terminal-card__git-risk" />
       )}
       {session.restoreNote && noteDismissed !== session.restoreNote && !summaryMode && (
         <div className="terminal-card__note" role="status">
@@ -1227,13 +1317,6 @@ function terminalTheme(palette: PaletteId, pixelSkin: string | null = null): { b
     cursor: palette === "lilac" ? "#bfc9ee" : "#b8cf99",
     selectionBackground: "#7b789966"
   };
-}
-
-function compactPath(path: string): string {
-  const home = "/home/";
-  if (!path.startsWith(home)) return path;
-  const parts = path.split("/").filter(Boolean);
-  return parts.length > 2 ? `~/${parts.slice(2).join("/")}` : path;
 }
 
 function isCardControl(target: EventTarget): boolean {

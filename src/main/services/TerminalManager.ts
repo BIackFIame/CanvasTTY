@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import * as pty from "node-pty";
 import type { IPty } from "node-pty";
 import type {
   CreateSessionRequest,
+  GitRiskReport,
   Point,
   ProviderId,
   SessionBounds,
@@ -52,13 +53,22 @@ import {
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
+import { onDiskPath } from "./onDiskPath.ts";
+import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
+import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
-import { hasAutoMode, isLaunchProfile } from "../../shared/autoMode.ts";
-import { RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
+import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
+import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
+import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
+import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
+import { LaunchRefusal } from "./launchRefusal.ts";
+import { configuredMode } from "./configuredMode.ts";
+import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
@@ -66,7 +76,7 @@ import {
   type PersistedSessionExtras,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
-import { chooseResume, planSessionRestore, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
+import { chooseResume, planSessionRestore, restorableRecords, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
 import {
   createProviderLifecycleParser,
@@ -76,6 +86,15 @@ import {
 
 const MAX_SCROLLBACK_CHARS = 240_000;
 const OUTPUT_BATCH_MS = 16;
+/**
+ * A flood of PTY output (e.g. `cat` on a huge file) can emit many `data` events before the batch timer's
+ * callback runs, since each event only needs the event loop, not the timer's turn. Without a cap, pendingOutput
+ * grows unbounded for that whole burst. Once a session's queued output crosses this many UTF-16 code units, it
+ * is flushed immediately instead of waiting for the timer.
+ */
+const MAX_PENDING_OUTPUT_CHARS = 1_048_576;
+/** How long repeated setBounds/rename/etc. calls are coalesced before the session store is rewritten once. */
+const PERSISTENCE_DEBOUNCE_MS = 150;
 const DEFAULT_TERMINAL_SIZE = { width: 700, height: 430 };
 const MIN_TERMINAL_SIZE = { width: 420, height: 260 };
 const MAX_TERMINAL_SIZE = { width: 1_600, height: 1_100 };
@@ -90,6 +109,7 @@ interface ManagedSession {
   bufferLength: number;
   outputOffset: number;
   pendingOutput: string[];
+  pendingOutputChars: number;
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
@@ -99,6 +119,12 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
+  /** Turns the agent started (its status became working) since launch. */
+  turnStarts?: number;
+  /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
+  promptTurnMark?: number;
+  /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
+  answer?: { text: string; truncated: boolean; at: number };
   /**
    * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
    * and owning plugin carried into the saved record.
@@ -127,8 +153,17 @@ interface ManagedSession {
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
-  "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">;
+  "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">
+  & Partial<Pick<EnvironmentRegistry, "keeps">>;
 type LaunchOutcome = "launched" | "failed" | "superseded";
+/** Why a launch did not start: the CLI is missing, or a launch rule refused it. */
+interface LaunchFailure { diagnostic: string; exitCode?: number }
+/**
+ * Who asked for a card: the person (launcher, restore), a person-owned automation through the control endpoint, a
+ * plugin service, or an orchestrator (a subagent). Only the person may start YOLO without a prior acknowledgement,
+ * and never for a subagent.
+ */
+export type LaunchOrigin = "person" | "control" | "plugin" | "subagent";
 
 interface PlannedSpawn {
   command: string;
@@ -176,8 +211,8 @@ export interface ProviderLifecycleSignal {
 export type FailureOrigin = "restore" | "user";
 
 type Emit = (
-  channel: typeof IPC.terminalData | typeof IPC.terminalSession | typeof IPC.terminalRemoved,
-  payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent
+  channel: typeof IPC.terminalData | typeof IPC.terminalSession | typeof IPC.terminalRemoved | typeof IPC.terminalGitRisk,
+  payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport
 ) => void;
 
 export class TerminalManager {
@@ -211,14 +246,37 @@ export class TerminalManager {
   private redaction = new SecretRedactionRegistry();
   // Where each running card was actually started (an environment may move it) and its agent config folder.
   private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
+  // Whether base protection is on (Settings → Agents); OpenCode's auto profile lets shell commands run without asking
+  // only then. Unknown counts as off.
+  private baseProtectionOn: () => boolean = () => false;
+  // The model and effort of a card whose first launch runs before the card is registered (create, restore).
+  private readonly startingModels = new Map<string, LaunchModelChoice>();
   private quitting = false;
   private readonly quitReleases: Promise<void>[] = [];
   // Every PTY started here whose exit has not been reported yet, closed cards included, with that exit.
   private readonly liveProcesses = new Map<IPty, Promise<void>>();
   private suppressPersistence = false;
+  // Coalesces rapid persistence requests (a drag fires setBounds many times a second) into one
+  // normalize+stringify+atomic-write of the session store instead of one per call.
+  private persistenceTimer: ReturnType<typeof setTimeout> | null = null;
   // The live agent-control descriptor, handed only to orchestrator-role sessions
   // spawned while it is set; null while the endpoint is off.
   private controlConnection: ControlConnection | null = null;
+  // The operating-system isolation layer (null: none configured, e.g. in unit tests).
+  private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null = null;
+  // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
+  private readonly isolationCleanups = new Map<string, () => void>();
+  /** Open git risk reports by id: the card it belongs to (none once closed) and what neutralize removes. */
+  private readonly gitRisks = new Map<string, { sessionId: string | null; repositories: GitRiskRepository[] }>();
+  /** When isolated launches started whose card did not exist yet (see wrapIsolated). */
+  private readonly isolationStarts = new Map<string, number>();
+  // Plugin owners of cards being created (before the card exists), so their first launch counts as delegated.
+  private readonly startingOwners = new Map<string, string>();
+  // What a card's first launch found in its CLI's own configuration, before the card exists.
+  private readonly pendingConfiguredModes = new Map<string, { mode: string; source: string }>();
+  // Whether the person acknowledged YOLO for a CLI (Settings: acknowledgedDangerousProfiles); unset allows it.
+  private yoloAcknowledged: (provider: ProviderId) => boolean = () => true;
   // Set and cleared around a single synchronous session emit (see emitSession):
   // the main process reads it from its emit callback to tell a failure that is
   // merely re-derived state from one the user just caused.
@@ -238,6 +296,21 @@ export class TerminalManager {
     this.agentRuntime = agentRuntime;
     this.spawnPty = spawnPty;
     this.lifecycleHooksEnabled = lifecycleHooksEnabled;
+  }
+
+  /** The operating-system isolation layer around delegated and non-manual agents (isolation/AgentIsolation.ts). */
+  configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null): void {
+    this.isolation = isolation;
+  }
+
+  /** The layer can contain an agent here now (what a "contained" auto needs). */
+  containment(): boolean {
+    try { return this.isolation?.containment() === true; } catch { return false; }
+  }
+
+  /** Whether the person acknowledged YOLO for a CLI; read at every YOLO launch that is not the person's own click. */
+  configureYoloAcknowledgement(acknowledged: (provider: ProviderId) => boolean): void {
+    this.yoloAcknowledged = (provider) => { try { return acknowledged(provider) === true; } catch { return false; } };
   }
 
   configureOrchestration(coordinator: OrchestrationLaunchCoordinator | null): void {
@@ -287,7 +360,8 @@ export class TerminalManager {
       provider: session.metadata.provider,
       role: session.metadata.role ?? "agent",
       cwd: launched?.cwd ?? session.metadata.cwd,
-      configDirs: launched?.configDir ? [launched.configDir] : []
+      configDirs: launched?.configDir ? [launched.configDir] : [],
+      profile: session.metadata.profile
     };
   }
 
@@ -317,6 +391,15 @@ export class TerminalManager {
     this.schedulePersistence();
   }
 
+  /** Refuses a model its CLI does not list (the cached listing only; none cached allows it). */
+  configureModelCheck(check: (provider: ProviderId, model: string) => string | null): void {
+    this.modelCheck = check;
+  }
+
+  configureBaseProtection(enabled: () => boolean): void {
+    this.baseProtectionOn = () => { try { return enabled() === true; } catch { return false; } };
+  }
+
   configureSessionPersistence(store: TerminalSessionStore, mode: SessionRestoreMode): void {
     this.sessionStore = store;
     this.sessionRestoreMode = mode;
@@ -331,14 +414,20 @@ export class TerminalManager {
       return;
     }
 
-    // Environments resume first; a card whose environment stopped comes back
-    // stopped with the plugin's reason and never runs locally instead.
+    // Environments resume first, only for cards that come back at all; a card whose environment stopped comes
+    // back stopped with the plugin's reason and never runs locally instead. A card that does not come back (not
+    // restored, or a subagent whose parent is gone) leaves the saved state now: its environment is released.
     const resumed = new Map<string, { ok: true } | { ok: false; reason: string }>();
     const environments = this.environments;
     if (environments) {
+      const restorable = new Set(restorableRecords(persisted, this.sessionRestoreMode, (id) => this.sessions.has(id)).map((record) => record.id));
       await Promise.all(persisted.map(async (record) => {
-        if (!record.environment || !record.restore || record.lastState !== "running") return;
-        if (!environments.available(record.environment)) return;
+        if (!record.environment || !environments.available(record.environment)) return;
+        if (!restorable.has(record.id)) {
+          if (!this.sessions.has(record.id)) await environments.release(record.environment, record.id, { keepData: true, reason: "closed" });
+          return;
+        }
+        if (record.lastState !== "running") return;
         resumed.set(record.id, await environments.resume(record.environment, record.id));
       }));
     }
@@ -373,6 +462,10 @@ export class TerminalManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.persistenceTimer !== null) {
+      clearTimeout(this.persistenceTimer);
+      this.persistenceTimer = null;
+    }
     await this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved during shutdown.", error);
     });
@@ -413,8 +506,13 @@ export class TerminalManager {
     return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * Every card's metadata, without its scrollback: at initial hydration every card subscribes and calls
+   * readBuffer() for its own history anyway (attachTerminalOutput), so a full copy here would only be
+   * serialized across IPC and thrown away unread. Use readBuffer(id) for a card's actual history.
+   */
   list(): SessionSnapshot[] {
-    return [...this.sessions.values()].map((session) => snapshot(session));
+    return [...this.sessions.values()].map((session) => ({ ...structuredClone(session.metadata), buffer: "" }));
   }
 
   /**
@@ -444,6 +542,22 @@ export class TerminalManager {
     return { cols: session.cols, rows: session.rows };
   }
 
+  /**
+   * Whether a submitted prompt was delivered to the session (through deliverInput) and whether a turn has started since
+   * then; null when the session does not exist.
+   */
+  turnProgress(id: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const mark = session.promptTurnMark;
+    return { promptSent: mark !== undefined, turnStartedSincePrompt: mark !== undefined && (session.turnStarts ?? 0) > mark };
+  }
+
+  /** The session's output offset without copying its scrollback; null when it does not exist. */
+  outputOffset(id: string): number | null {
+    return this.sessions.get(id)?.outputOffset ?? null;
+  }
+
   readBuffer(id: string): TerminalBufferSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
@@ -464,16 +578,33 @@ export class TerminalManager {
 
   create(
     request: CreateSessionRequest,
-    control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number } = {}
+    control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string } = {}
   ): SessionSnapshot {
-    assertCreateRequest(request);
+    assertCreateRequest(request, this.containment());
+    const origin: LaunchOrigin = request.role === "subagent" ? "subagent" : control.origin ?? "person";
+    if (request.profile === "yolo" && request.provider !== "terminal") {
+      // YOLO is the person's decision, made in the launcher for that CLI; nothing else starts it on their behalf.
+      if (origin === "subagent") throw new LaunchRefusal("YOLO (bypass) is never given to a subagent.");
+      if (!this.yoloAcknowledged(request.provider)) {
+        throw new LaunchRefusal(`YOLO for ${request.provider} was not acknowledged by the person. They choose it once in CanvasTTY's launcher; ${origin === "plugin" ? "a plugin" : origin === "control" ? "the control endpoint" : "a launch"} cannot start it before that.`);
+      }
+    }
+    // A typed path (an orchestrator's spawn_agent, the control CLI) may spell the folder in another Unicode form
+    // than the disk does; the CLI would then see its own project as a foreign folder.
+    request = { ...request, cwd: onDiskPath(request.cwd) };
     const threadId = request.resumeThreadId === undefined ? undefined : normalizeThreadId(request.provider, request.resumeThreadId);
     if (request.resumeThreadId !== undefined && (!threadId || !canResumeThreadById(request.provider) || request.environment)) {
       throw new Error("Invalid local conversation resume request.");
     }
     const resume: ResumeRequest = threadId ? { threadId } : null;
-    if (control.captureResult && request.provider !== "codex") {
-      throw new Error("Result capture requires a Codex session.");
+    const modelChoice = launchModelChoice(request.provider, request.model, request.effort);
+    if (modelChoice.model !== undefined) {
+      let unknown: string | null = null;
+      try { unknown = this.modelCheck(request.provider, modelChoice.model); } catch { unknown = null; }
+      if (unknown) throw new Error(unknown);
+    }
+    if (control.captureResult && !RESULT_CAPTURE_PROVIDERS.has(request.provider)) {
+      throw new Error("Result capture requires a Codex or OpenCode session.");
     }
     assertDirectory(request.cwd);
 
@@ -482,9 +613,15 @@ export class TerminalManager {
       throw new Error("Parent terminal session does not exist.");
     }
 
+    const delegated = origin === "subagent" || control.ownerPluginId !== undefined;
     const launchOptions = this.launchPipeline
-      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions)
+      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions, origin === "subagent" ? { delegated: true } : undefined)
       : request.launchOptions === undefined ? undefined : failWith("Plugin launch options are not available.");
+    // The isolation layer decides before anything starts: a subagent without it runs in normal, a launch that
+    // needs it and cannot have it is refused.
+    const decision = this.decideIsolation(request.provider, request.profile, delegated, null);
+    if (decision.refuse) throw new LaunchRefusal(decision.refuse);
+    if (decision.profile !== request.profile) request = { ...request, profile: decision.profile };
     const environmentChoice = this.environments
       ? this.environments.normalizeChoice(request.provider, request.environment) ?? null
       : request.environment === undefined ? null : failWith("Plugin environments are not available.");
@@ -505,18 +642,31 @@ export class TerminalManager {
       status: initialSessionStatus(request.provider),
       startedAt: Date.now(),
       exitCode: null,
-      failureDetails: null
+      failureDetails: null,
+      ...modelChoice,
+      ...(decision.isolation ? { isolation: decision.isolation } : {})
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
-    const launched = awaitMeasuredGrid || contributed
-      ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
-      : this.spawnProcess(id, request.provider, request.profile, request.cwd,
-        INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
-        control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    this.startingModels.set(id, modelChoice);
+    if (control.ownerPluginId !== undefined) this.startingOwners.set(id, control.ownerPluginId);
+    let launched: ReturnType<TerminalManager["spawnProcess"]> | { process: null; agentBrowser: null; agentRuntime: null; agentOrchestration: null; failure: null };
+    try {
+      launched = awaitMeasuredGrid || contributed
+        ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
+        : this.spawnProcess(id, request.provider, request.profile, request.cwd,
+          INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, control.captureResult, role,
+          control.answerCaptureGrantExpiresAt, null, request.parentSessionId);
+    } finally {
+      this.startingModels.delete(id);
+      this.startingOwners.delete(id);
+    }
     if (launched.failure) applyLaunchFailure(metadata, launched.failure);
+    const configured = this.pendingConfiguredModes.get(id);
+    this.pendingConfiguredModes.delete(id);
+    if (configured) metadata.configuredMode = configured;
 
     const session: ManagedSession = {
       metadata,
@@ -528,6 +678,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser: launched.agentBrowser,
       agentRuntime: launched.agentRuntime,
       agentOrchestration: launched.agentOrchestration,
@@ -540,7 +691,8 @@ export class TerminalManager {
       captureResult: control.captureResult === true,
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
-        ...(environmentChoice ? { environmentChoice } : {})
+        ...(environmentChoice ? { environmentChoice } : {}),
+        ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
       },
       launchToken: 0,
       launchCleanup: null,
@@ -550,6 +702,7 @@ export class TerminalManager {
       launchWaiters: new Set()
     };
     this.sessions.set(id, session);
+    this.adoptIsolationStart(id, session);
     if (launched.process) this.bindProcess(id, session, launched.process);
     if (contributed) this.launchContributed(id, session, resume, null, control.answerCaptureGrantExpiresAt);
     const runtimeStatus = this.agentRuntime?.currentStatus(id);
@@ -588,6 +741,8 @@ export class TerminalManager {
     // Input queued for the launch that ended never reaches this one.
     session.launchEpoch += 1;
     this.wakeLaunchWaiters(session);
+    // What the ended process's hooks and title said is not about the new one: its title counts until its own hooks report.
+    resetLaunchSignals(session);
     let resume: ResumeRequest = null;
     if (options.resume === true && session.metadata.provider !== "terminal") {
       const peers = [...this.sessions.values()].filter((candidate) => (
@@ -700,16 +855,18 @@ export class TerminalManager {
    * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
    * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
    * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
-   * it never reaches a later launch of the card.
+   * it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing either.
    */
-  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS): Promise<InputDelivery> {
+  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
+    const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
+    if (signal?.aborted) return canceled;
     const session = this.sessions.get(id);
     if (!session) return { delivered: false, reason: "The session does not exist." };
     const epoch = session.launchEpoch;
     const deadline = Date.now() + waitMs;
     const waiting = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
       && session.metadata.exitCode === null && !session.process;
-    while (waiting()) {
+    while (waiting() && !signal?.aborted) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         return { delivered: false, reason: `The session did not start within ${Math.round(waitMs / 1000)} s.` };
@@ -719,11 +876,14 @@ export class TerminalManager {
         function wake(): void {
           clearTimeout(timer);
           session!.launchWaiters.delete(wake);
+          signal?.removeEventListener("abort", wake);
           resolve();
         }
         session.launchWaiters.add(wake);
+        signal?.addEventListener("abort", wake, { once: true });
       });
     }
+    if (signal?.aborted) return canceled;
     if (this.sessions.get(id) !== session) return { delivered: false, reason: "The session was closed before it started." };
     if (session.launchEpoch !== epoch) return { delivered: false, reason: "The session was restarted before it started." };
     if (session.metadata.exitCode !== null) {
@@ -731,9 +891,11 @@ export class TerminalManager {
         ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
         : "The session has already exited." };
     }
-    return this.inputChecked(id, data)
-      ? { delivered: true }
-      : { delivered: false, reason: "The terminal no longer accepts input." };
+    // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
+    const mark = session.turnStarts ?? 0;
+    if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
+    if (data.endsWith("\r")) session.promptTurnMark = mark;
+    return { delivered: true };
   }
 
   private wakeLaunchWaiters(session: ManagedSession): void {
@@ -799,7 +961,7 @@ export class TerminalManager {
       height: clamp(bounds.size.height, MIN_TERMINAL_SIZE.height, MAX_TERMINAL_SIZE.height)
     };
     this.emitSession(session.metadata);
-    this.schedulePersistence();
+    this.scheduleBoundsPersistence();
   }
 
   rename(id: string, title: string): SessionMetadata {
@@ -830,12 +992,33 @@ export class TerminalManager {
     }
 
     const nextStatus = signal.state;
+    // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
+    if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
+    // A new turn: the previous answer is no longer this turn's.
+    if (nextStatus === "working") session.answer = undefined;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
     if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
+  }
+
+  /**
+   * Keeps the final answer a result-capturing session reported with its turn's end (the Codex Stop hook, the OpenCode
+   * plugin's session.idle); read back masked by answer(). In memory only, never saved.
+   */
+  recordAnswer(id: string, result: { text: string; truncated: boolean }): void {
+    const session = this.sessions.get(id);
+    if (!session?.captureResult || typeof result?.text !== "string") return;
+    session.answer = { text: result.text, truncated: result.truncated === true, at: Date.now() };
+  }
+
+  /** The last final answer (masked), or null when none was reported since the current turn started. */
+  answer(id: string): { text: string; truncated: boolean; at: number } | null {
+    const answer = this.sessions.get(id)?.answer;
+    if (!answer) return null;
+    return { ...answer, text: this.redactSecretsTail(answer.text, answer.text.length + 1) };
   }
 
   setLifecycleHooksEnabled(enabled: boolean): void {
@@ -890,14 +1073,11 @@ export class TerminalManager {
     // suffix arrives — once — without resending the history before it. The
     // observers get no replay: they already received every chunk.
     //
-    // The window is bounded by MAX_SCROLLBACK_CHARS: when the hidden stretch
-    // was longer than the ring, the buffer no longer reaches back to
-    // hiddenSince and the head of that stretch is gone for good. There is no
-    // field on TerminalDataEvent to say so, so the consumer derives the hole
-    // from the offset arithmetic (the event starts after the offset it already
-    // wrote) and marks it in the card instead of stitching it as continuous
-    // output. Never widen the ring to hide this: the truncation must stay
-    // visible.
+    // The stretch fits the ring: keepHiddenCardWhole hands a hidden card what
+    // it missed before the ring could drop any of it, so this replay starts
+    // exactly where the card stopped and its terminal state stays the
+    // session's. Should a hole ever reach the renderer anyway, the consumer
+    // derives it from the offsets and marks it instead of stitching it.
     this.flushOutput(id, session);
     this.hiddenSinceOffset.delete(id);
     if (hiddenSince === undefined || session.outputOffset === hiddenSince) return;
@@ -914,13 +1094,30 @@ export class TerminalManager {
   dispose(id: string, options: { keepEnvironmentData?: boolean } = {}): void {
     const session = this.sessions.get(id);
     if (!session) return;
+    // A subagent belongs to its parent: closing the parent closes its subagents first (deepest first), so none keeps
+    // running without an owner. Quitting disposes every card anyway.
+    if (!this.quitting) {
+      for (const child of [...this.sessions.values()]) {
+        if (child.metadata.role === "subagent" && child.metadata.parentSessionId === id) this.dispose(child.metadata.id);
+      }
+    }
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.isolationStarts.delete(id);
     this.wakeLaunchWaiters(session);
+    // Closed: an open report goes to the app; a pending audit runs and reports there.
+    if (session.metadata.gitRisk) {
+      const open = this.gitRisks.get(session.metadata.gitRisk.id);
+      if (open) open.sessionId = null;
+      this.emit(IPC.terminalGitRisk, { ...structuredClone(session.metadata.gitRisk), title: session.metadata.title });
+    } else if (session.extras.gitAuditSince !== undefined && !this.quitting) {
+      void this.auditGit(id, session);
+    }
     this.hiddenSinceOffset.delete(id);
     this.launchContexts.delete(id);
     this.redaction.clear(`session:${id}`);
+    this.releaseIsolation(id);
     session.launchToken += 1;
     void session.launchCleanup?.().catch(() => undefined);
     session.launchCleanup = null;
@@ -957,8 +1154,14 @@ export class TerminalManager {
   }
 
   private restorePersistedSession(step: RestoreStep, resumed?: { ok: true } | { ok: false; reason: string }): void {
-    const descriptor = step.record;
+    let descriptor = step.record;
     if (this.sessions.has(descriptor.id)) return;
+    // A saved subagent never comes back with more than its orchestrator may give (whatever its record says).
+    if (descriptor.role === "subagent") {
+      const parent = descriptor.parentSessionId ? this.sessions.get(descriptor.parentSessionId) : undefined;
+      const ceiling = profileCeiling(parent?.metadata.profile ?? "auto");
+      if (PROFILE_RANK[descriptor.profile] > PROFILE_RANK[ceiling]) descriptor = { ...descriptor, profile: ceiling };
+    }
     const metadata: SessionMetadata = {
       id: descriptor.id,
       revision: 0,
@@ -976,13 +1179,16 @@ export class TerminalManager {
       exitCode: null,
       failureDetails: null,
       ...(step.note ? { restoreNote: step.note } : {}),
-      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {})
+      ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
+      ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
+      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {})
     };
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
-      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {})
+      ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {}),
+      ...(descriptor.gitAuditSince !== undefined ? { gitAuditSince: descriptor.gitAuditSince } : {})
     };
 
     let process: IPty | null = null;
@@ -1043,7 +1249,11 @@ export class TerminalManager {
       && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
     if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
-        const launched = this.spawnProcess(
+        this.startingModels.set(descriptor.id, { ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+          ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}) });
+        let launched: ReturnType<TerminalManager["spawnProcess"]>;
+        try {
+          launched = this.spawnProcess(
           descriptor.id,
           descriptor.provider,
           descriptor.profile,
@@ -1056,7 +1266,10 @@ export class TerminalManager {
           undefined,
           null,
           descriptor.parentSessionId
-        );
+          );
+        } finally {
+          this.startingModels.delete(descriptor.id);
+        }
         process = launched.process;
         agentBrowser = launched.agentBrowser;
         agentRuntime = launched.agentRuntime;
@@ -1084,6 +1297,7 @@ export class TerminalManager {
       bufferLength: 0,
       outputOffset: 0,
       pendingOutput: [],
+      pendingOutputChars: 0,
       agentBrowser,
       agentRuntime,
       agentOrchestration,
@@ -1104,6 +1318,7 @@ export class TerminalManager {
       launchWaiters: new Set()
     };
     this.sessions.set(descriptor.id, session);
+    this.adoptIsolationStart(descriptor.id, session);
     if (process) this.bindProcess(descriptor.id, session, process);
     if (contributed) this.launchContributed(descriptor.id, session, resume, "restore", undefined, true);
     const runtimeStatus = this.agentRuntime?.currentStatus(descriptor.id);
@@ -1113,6 +1328,76 @@ export class TerminalManager {
     // something that happened under the user — announcing it every launch
     // would notify about the same silent state again and again.
     this.emitSession(metadata, metadata.status === "failed" ? "restore" : null);
+    if (extras.gitAuditSince !== undefined) void this.auditGit(descriptor.id, session);
+  }
+
+  /**
+   * Audits the repositories under a session's folder for what its isolated agent left that runs outside the layer
+   * (gitAudit.ts). Findings go on the card, or to the app when the card is gone; nothing is changed without the
+   * person (resolveGitRisk). A clean audit ends the pending one.
+   */
+  private async auditGit(id: string, session: ManagedSession): Promise<void> {
+    const since = session.extras.gitAuditSince;
+    if (since === undefined) return;
+    let repositories: GitRiskRepository[];
+    try {
+      repositories = await auditRepositories(session.metadata.cwd, since);
+    } catch (error) {
+      console.warn("CanvasTTY could not check the repositories an isolated agent worked in.", error);
+      return;
+    }
+    const live = this.sessions.get(id) === session;
+    const running = live && session.metadata.exitCode === null && this.isolationCleanups.has(id);
+    if (repositories.length === 0) {
+      // Still running isolated (a relaunch): its own audit follows when it ends.
+      if (!running && session.metadata.gitRisk === undefined) delete session.extras.gitAuditSince;
+      if (live) this.schedulePersistence();
+      return;
+    }
+    const previous = session.metadata.gitRisk;
+    if (previous) this.gitRisks.delete(previous.id);
+    const report: GitRiskReport = {
+      id: randomUUID(),
+      cwd: session.metadata.cwd,
+      repositories: repositories.map((repository) => ({
+        path: repository.worktree,
+        items: repository.items.map((item) => item.kind === "config"
+          ? { ...item, value: this.redactSecrets(item.value).slice(0, 160) }
+          : item)
+      }))
+    };
+    this.gitRisks.set(report.id, { sessionId: live ? id : null, repositories });
+    if (live) {
+      session.metadata.gitRisk = report;
+      this.emitSession(session.metadata);
+      this.schedulePersistence();
+    } else {
+      this.emit(IPC.terminalGitRisk, { ...report, title: session.metadata.title });
+    }
+  }
+
+  private adoptIsolationStart(id: string, session: ManagedSession): void {
+    const started = this.isolationStarts.get(id);
+    if (started === undefined) return;
+    this.isolationStarts.delete(id);
+    session.extras.gitAuditSince ??= started;
+    this.schedulePersistence();
+  }
+
+  /** The person's answer to a git risk report: neutralize removes what was found; keep leaves it. Both close it. */
+  async resolveGitRisk(reportId: string, action: "neutralize" | "keep"): Promise<void> {
+    const open = this.gitRisks.get(reportId);
+    if (!open) throw new Error("This git warning is no longer open.");
+    if (action === "neutralize") await neutralizeRepositories(open.repositories);
+    this.gitRisks.delete(reportId);
+    const session = open.sessionId ? this.sessions.get(open.sessionId) : undefined;
+    if (!session || session.metadata.gitRisk?.id !== reportId) return;
+    delete session.metadata.gitRisk;
+    // A session still running isolated is audited from now on when it ends.
+    if (this.isolationCleanups.has(session.metadata.id) && session.metadata.exitCode === null) session.extras.gitAuditSince = Date.now();
+    else delete session.extras.gitAuditSince;
+    this.emitSession(session.metadata);
+    this.schedulePersistence();
   }
 
   private persistSessions(): Promise<void> {
@@ -1128,6 +1413,23 @@ export class TerminalManager {
     void this.persistSessions().catch((error) => {
       console.warn("CanvasTTY terminal window state could not be saved.", error);
     });
+  }
+
+  /**
+   * Same as `schedulePersistence`, but coalesced: a drag fires `setBounds` many times a second, and each one
+   * used to normalize, stringify and atomically rewrite the whole session store. Rapid geometry updates are
+   * batched into a single write instead, `PERSISTENCE_DEBOUNCE_MS` after the last of them.
+   */
+  private scheduleBoundsPersistence(): void {
+    if (this.persistenceTimer !== null) return;
+    this.persistenceTimer = setTimeout(() => {
+      this.persistenceTimer = null;
+      void this.persistSessions().catch((error) => {
+        console.warn("CanvasTTY terminal window state could not be saved.", error);
+      });
+    }, PERSISTENCE_DEBOUNCE_MS);
+    // A background timer must never be the reason the process (or a test) stays alive.
+    this.persistenceTimer.unref?.();
   }
 
   private emitSession(metadata: SessionMetadata, failureOrigin: FailureOrigin | null = null): void {
@@ -1208,16 +1510,30 @@ export class TerminalManager {
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
     agentRuntime: PreparedAgentRuntimePtyLaunch | null;
     agentOrchestration: PreparedOrchestrationPtyLaunch | null;
-    failure: UnavailableProviderCli | null;
+    failure: LaunchFailure | null;
   } {
+    const none = { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null };
+    const decision = this.launchIsolation(id, provider, profile, role, null);
+    if (decision.refuse) return { ...none, failure: { diagnostic: `Launch refused: ${decision.refuse}`, exitCode: 1 } };
+    profile = decision.profile;
     const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution,
-      this.personTrustedFolder(parentSessionId, cwd));
+      this.personTrustedFolder(parentSessionId, cwd), false, decision.apply);
     if ("failure" in planned) {
-      return { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: planned.failure };
+      return { ...none, failure: planned.failure };
+    }
+    this.noteConfiguredMode(id, provider, profile, planned.env, planned.cwd);
+    let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
+    if (decision.apply) {
+      try {
+        spawn = this.wrapIsolated(id, provider, profile, planned);
+      } catch (error) {
+        planned.cleanup();
+        return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
+      }
     }
     try {
-      const process = this.spawnPty(planned.command, planned.args, {
-        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: planned.env
+      const process = this.spawnPty(spawn.command, spawn.args, {
+        name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
       this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
       return {
@@ -1229,8 +1545,85 @@ export class TerminalManager {
       };
     } catch (error) {
       planned.cleanup();
+      this.releaseIsolation(id);
       throw error;
     }
+  }
+
+  /** In the manual profile the CLI's own configuration decides: the card says when it skips approvals. */
+  private noteConfiguredMode(id: string, provider: ProviderId, profile: LaunchProfile, env: Record<string, string>, cwd: string): void {
+    const found = profile === "normal" && provider !== "terminal" ? configuredMode(provider, env, cwd) : null;
+    const target = this.sessions.get(id)?.metadata;
+    if (target) {
+      if (found) target.configuredMode = found;
+      else delete target.configuredMode;
+    } else if (found) {
+      this.pendingConfiguredModes.set(id, found);
+    }
+  }
+
+  /** Delegated: a subagent, or a card a plugin started (not the person). */
+  private isDelegated(id: string, role: SessionRole): boolean {
+    return role === "subagent" || Boolean(this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id));
+  }
+
+  private decideIsolation(provider: ProviderId, profile: LaunchProfile, delegated: boolean, environment: { isolated: boolean; label: string } | null): IsolationDecision {
+    if (!this.isolation) return { apply: false, profile };
+    return this.isolation.decide({ provider, profile, delegated, environment });
+  }
+
+  /**
+   * The isolation decision for one launch (the setting may have changed since the card was made); the card shows it,
+   * and a subagent whose layer is gone runs in normal from now on.
+   */
+  private launchIsolation(id: string, provider: ProviderId, profile: LaunchProfile, role: SessionRole,
+    environment: { isolated: boolean; label: string } | null): IsolationDecision {
+    const decision = this.decideIsolation(provider, profile, this.isDelegated(id, role), environment);
+    const metadata = this.sessions.get(id)?.metadata;
+    if (metadata && !decision.refuse) {
+      if (decision.isolation) metadata.isolation = decision.isolation;
+      else delete metadata.isolation;
+      metadata.profile = decision.profile;
+    }
+    return decision;
+  }
+
+  /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
+  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }): { command: string; args: string[]; env: Record<string, string> } {
+    if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
+    if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
+    const grant = controlGrantFolder(planned.env);
+    const wrapped = this.isolation.wrap({
+      sessionId: id,
+      provider,
+      cwd: planned.cwd,
+      command: planned.command,
+      args: planned.args,
+      env: planned.env,
+      profile,
+      ...(grant ? { grantedPrivate: [grant] } : {})
+    });
+    this.releaseIsolation(id);
+    this.isolationCleanups.set(id, wrapped.cleanup);
+    // Its repositories are audited once it ends (and on close or restore): from the earliest session not audited yet.
+    // A first launch wraps before its card exists: adoptIsolationStart records it then.
+    const session = this.sessions.get(id);
+    if (session) {
+      if (session.extras.gitAuditSince === undefined) {
+        session.extras.gitAuditSince = Date.now();
+        this.schedulePersistence();
+      }
+    } else if (!this.isolationStarts.has(id)) {
+      this.isolationStarts.set(id, Date.now());
+    }
+    return { command: wrapped.command, args: wrapped.args, env: wrapped.env };
+  }
+
+  private releaseIsolation(id: string): void {
+    const cleanup = this.isolationCleanups.get(id);
+    if (!cleanup) return;
+    this.isolationCleanups.delete(id);
+    try { cleanup(); } catch { /* its folder is gone already */ }
   }
 
   /** Everything a launch needs short of the PTY, so an environment can wrap it first. */
@@ -1245,8 +1638,9 @@ export class TerminalManager {
     answerCaptureGrantExpiresAt: number | undefined,
     contribution: LaunchContribution | null,
     trustedFolder?: string,
-    environmentWrapped = false
-  ): PlannedSpawn | { failure: UnavailableProviderCli } {
+    environmentWrapped = false,
+    isolated = false
+  ): PlannedSpawn | { failure: LaunchFailure } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
     if (providerCli?.state === "unavailable") return { failure: providerCli };
     // What decides whether Claude's lifecycle hooks may go over HTTP (ClaudeHttpHooks.ts): where and how it runs.
@@ -1302,14 +1696,16 @@ export class TerminalManager {
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
-      const providerEnvironment = {
+      const providerEnvironment: Record<string, string> = {
         ...(provider === "opencode"
           ? mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment)
           : { ...browserEnvironment, ...runtimeEnvironment }),
         ...orchestrationEnvironment,
         // Orchestrators alone learn where the control descriptor and CLI are.
-        ...controlEnvironment(role, this.controlConnection)
+        ...controlEnvironment(role, this.controlConnection, id)
       };
+      // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
+      if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
       const providerArgs = [...(agentRuntime?.args ?? []), ...(agentBrowser?.args ?? [])];
       // Stable terminal observations for the CLI controller; leave ordinary launches unchanged.
       if (captureResult && provider === "codex") providerArgs.push("-c", "tui.animations=false");
@@ -1323,14 +1719,18 @@ export class TerminalManager {
         ...(providerCli ? { providerCli } : {}),
         resumePrevious: resume !== null,
         ...(resume && typeof resume === "object" ? { resumeThreadId: resume.threadId } : {}),
-        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {})
+        ...(contribution?.thirdPartyModel ? { thirdPartyModel: true } : {}),
+        ...(agentRuntime?.decisions === true && this.baseProtectionOn() && !environmentWrapped ? { shellGuarded: true } : {}),
+        ...(isolated ? { isolated: true } : {}),
+        cwd,
+        ...this.launchModelOf(id)
       });
       const session = this.sessions.get(id);
       if (session) setAutoDowngraded(session.metadata, profile === "auto" && contribution?.thirdPartyModel === true);
       // A plugin may add to the person's environment, never replace what the core sets for this launch.
       const contributedEnvironment = contribution?.env ?? {};
-      const collision = Object.keys(contributedEnvironment)
-        .find((key) => key in providerEnvironment || key in (launch.environment ?? {}));
+      const coreNames = new Set([...Object.keys(providerEnvironment), ...Object.keys(launch.environment ?? {})].map((key) => envKey(key)));
+      const collision = Object.keys(contributedEnvironment).find((key) => coreNames.has(envKey(key)));
       if (collision) {
         throw new Error(`Launch refused: ${contribution!.envSources[collision]} sets ${collision}, which CanvasTTY sets for this launch.`);
       }
@@ -1339,7 +1739,8 @@ export class TerminalManager {
         command: launch.command,
         args: launch.args,
         cwd,
-        env: { ...baseEnvironment, ...launchEnvironment },
+        // The app's own PWD names another folder; a CLI that reads PWD must see where it runs.
+        env: { ...baseEnvironment, ...launchEnvironment, PWD: cwd },
         launchEnvironment,
         agentBrowser,
         agentRuntime,
@@ -1350,6 +1751,17 @@ export class TerminalManager {
       cleanup();
       throw error;
     }
+  }
+
+  /** The model and effort this card's launches ask the CLI for. */
+  private launchModelOf(id: string): LaunchModelChoice {
+    const starting = this.startingModels.get(id);
+    if (starting) return starting;
+    const metadata = this.sessions.get(id)?.metadata;
+    return {
+      ...(metadata?.model !== undefined ? { model: metadata.model } : {}),
+      ...(metadata?.effort !== undefined ? { effort: metadata.effort } : {})
+    };
   }
 
   /**
@@ -1515,11 +1927,28 @@ export class TerminalManager {
       void contribution?.cleanup().catch(() => undefined);
     };
 
-    // 4. The host spawns the PTY; an environment only rewrites what is spawned.
-    let planned: PlannedSpawn | { failure: UnavailableProviderCli };
+    // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
+    const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+    if (environment && keeps.launch !== true && metadata.profile !== "normal") {
+      dropContribution();
+      return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
+    }
+    const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
+      environment ? { isolated: keeps.isolated === true, label: environment.label } : null);
+    if (decision.refuse) {
+      dropContribution();
+      return refuse(decision.refuse);
+    }
+    if (environment && keeps.launch !== true) {
+      metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
+        reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
+    }
+
+    // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
+    let planned: PlannedSpawn | { failure: LaunchFailure };
     try {
-      planned = this.planSpawn(id, metadata.provider, metadata.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment));
+      planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
+        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
     } catch (error) {
       dropContribution();
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
@@ -1534,6 +1963,7 @@ export class TerminalManager {
       planned.cleanup();
       dropContribution();
     };
+    this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
     let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
     if (environment && environments) {
       if (typeof planned.args === "string") {
@@ -1562,7 +1992,16 @@ export class TerminalManager {
         return refuse(wrapped.reason);
       }
       this.addLaunchSecrets(session, wrapped.secrets);
-      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd, env: { ...planned.env, ...wrapped.env } };
+      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
+        env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
+    }
+    if (decision.apply) {
+      try {
+        spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
+      } catch (error) {
+        abandon();
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
     }
     let process: IPty;
     try {
@@ -1571,6 +2010,7 @@ export class TerminalManager {
       });
     } catch (error) {
       abandon();
+      this.releaseIsolation(id);
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
       return "failed";
     }
@@ -1621,7 +2061,9 @@ export class TerminalManager {
       if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
         this.applyProviderSignal(id, { kind: "lifecycle", state: lifecycleState }, "title");
       }
+      this.keepHiddenCardWhole(id, current, data);
       appendScrollback(current, data);
+      this.keepHiddenCardWhole(id, current, null, data);
       this.queueOutput(id, current, data);
     });
 
@@ -1643,6 +2085,8 @@ export class TerminalManager {
 
   private recordExit(id: string, current: ManagedSession, exitCode: number): void {
     this.flushOutput(id, current);
+    this.releaseIsolation(id);
+    if (current.extras.gitAuditSince !== undefined) void this.auditGit(id, current);
     current.metadata.exitCode = exitCode;
     current.metadata.status = exitCode === 0 ? "done" : "failed";
     current.metadata.failureDetails = exitCode === 0
@@ -1661,8 +2105,41 @@ export class TerminalManager {
     this.schedulePersistence();
   }
 
+  /**
+   * A hidden card is not streamed, but its terminal must still see every byte: a replay that starts after the ring
+   * dropped part of the hidden stretch cannot restore what that part did to the terminal (an alternate screen entered,
+   * modes set, an escape sequence cut in half), and the card's parser would continue from a state the session never
+   * had. So just before the ring would drop output this card has not received, the card gets the stretch it missed
+   * as one renderer-only event, and the stretch starts again. The card parses it without painting (it is hidden), so
+   * a quiet hidden card still costs nothing and a flooding one costs its parsing in ring-sized pieces, never a gap.
+   * Called before the chunk joins the ring (`before`) and after it (`after`: a single chunk longer than the ring).
+   */
+  private keepHiddenCardWhole(id: string, session: ManagedSession, before: string | null, after?: string): void {
+    const since = this.hiddenSinceOffset.get(id);
+    if (since === undefined) return;
+    const missed = session.outputOffset - since;
+    if (before !== null) {
+      if (missed === 0 || missed + before.length <= MAX_SCROLLBACK_CHARS) return;
+      this.emit(IPC.terminalData, { id, data: scrollbackTail(session, missed), outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+      return;
+    }
+    // The chunk alone outgrew the ring: it is the whole stretch (the part before it was handed over just now).
+    if (after !== undefined && missed > MAX_SCROLLBACK_CHARS) {
+      this.emit(IPC.terminalData, { id, data: after, outputOffset: session.outputOffset, audience: "renderer" });
+      this.hiddenSinceOffset.set(id, session.outputOffset);
+    }
+  }
+
   private queueOutput(id: string, session: ManagedSession, data: string): void {
     session.pendingOutput.push(data);
+    session.pendingOutputChars += data.length;
+    // A flood (e.g. `cat` on a huge file) can push many chunks before the batch timer's callback gets a
+    // turn; flush this session now instead of letting its buffer grow without bound.
+    if (session.pendingOutputChars >= MAX_PENDING_OUTPUT_CHARS) {
+      this.flushOutput(id, session);
+      return;
+    }
     this.queuedOutput.set(id, session);
     if (this.outputTimer !== null) return;
     // Keep a TUI's clear-and-redraw sequence in one renderer update whenever possible.
@@ -1687,6 +2164,7 @@ export class TerminalManager {
 
     const data = session.pendingOutput.join("");
     session.pendingOutput.length = 0;
+    session.pendingOutputChars = 0;
     // While the card is hidden the batch is for the observers only: the
     // renderer catches up through the replay in setVisible.
     this.emit(IPC.terminalData, {
@@ -1699,12 +2177,12 @@ export class TerminalManager {
 }
 
 /** A manager event the main process forwards to its in-process observers. */
-export function reachesObservers(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
+export function reachesObservers(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport): boolean {
   return !("audience" in payload) || payload.audience !== "renderer";
 }
 
 /** A manager event the main process forwards to the renderer. */
-export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent): boolean {
+export function reachesRenderer(payload: TerminalDataEvent | SessionEvent | SessionRemovedEvent | GitRiskReport): boolean {
   return !("audience" in payload) || payload.audience !== "observers";
 }
 
@@ -1718,6 +2196,17 @@ function environmentBadge(environment: PersistedEnvironmentRef): NonNullable<Ses
  * card they alone end a turn; the title only reports one starting. Without them (hooks off, or a remote run without a
  * bridge) the title's idle stands.
  */
+function resetLaunchSignals(session: ManagedSession): void {
+  // Nor is its conversation: its answer and turn counts would answer a wait for the new one.
+  delete session.answer;
+  delete session.turnStarts;
+  delete session.promptTurnMark;
+  delete session.hookSignals;
+  delete session.titleState;
+  if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
+  session.answeredPromptTimer = undefined;
+}
+
 function titleDefersToHooks(session: ManagedSession, state: "idle" | "working" | "needs_approval"): boolean {
   return state !== "working" && session.metadata.provider === "claude" && session.hookSignals !== undefined;
 }
@@ -1740,9 +2229,9 @@ function failWith(message: string): never {
   throw new Error(message);
 }
 
-function applyLaunchFailure(metadata: SessionMetadata, failure: UnavailableProviderCli): void {
+function applyLaunchFailure(metadata: SessionMetadata, failure: LaunchFailure): void {
   metadata.status = "failed";
-  metadata.exitCode = 127;
+  metadata.exitCode = failure.exitCode ?? 127;
   metadata.failureDetails = failure.diagnostic;
 }
 
@@ -1809,10 +2298,34 @@ function assertDirectory(cwd: string): void {
 const SESSION_PROVIDERS = new Set<ProviderId>(CANVAS_LAUNCHER_ITEMS);
 const SESSION_ROLES = new Set<SessionRole>(["agent", "orchestrator", "subagent"]);
 
-function assertCreateRequest(request: CreateSessionRequest): void {
+type LaunchModelChoice = { model?: string; effort?: ReasoningEffort };
+
+/** The request's model and effort, checked for its CLI; a refusal names what that CLI takes. */
+function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown): LaunchModelChoice {
+  if (model === undefined && effort === undefined) return {};
+  if (provider === "terminal") throw new Error("A plain terminal has no model.");
+  if (model !== undefined) {
+    const problem = launchModelProblem(provider, model);
+    if (problem) throw new Error(problem);
+  }
+  if (effort !== undefined) {
+    const problem = launchEffortProblem(provider, effort);
+    if (problem) throw new Error(problem);
+  }
+  return {
+    ...(model !== undefined ? { model: model as string } : {}),
+    ...(effort !== undefined ? { effort: effort as ReasoningEffort } : {})
+  };
+}
+
+function assertCreateRequest(request: CreateSessionRequest, containment: boolean): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
   if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
-  if (request.profile === "auto" && !hasAutoMode(request.provider)) throw new Error(`${request.provider} has no auto mode; use the normal profile.`);
+  if (!profileAvailable(request.provider, request.profile, containment) && !(request.provider === "terminal" && request.profile === "yolo")) {
+    throw new LaunchRefusal(request.profile === "auto"
+      ? `${request.provider} has no auto mode of its own, and CanvasTTY's agent isolation, which its auto needs, is not available here; use the normal profile.`
+      : `${request.provider} has no ${request.profile} mode; use the normal profile.`);
+  }
   if (request.role === "orchestrator" && request.provider === "terminal") throw new Error("A plain terminal cannot be an orchestrator.");
   if (typeof request.cwd !== "string" || request.cwd.length === 0) throw new Error("Project folder is required.");
   if (!isPoint(request.position)) throw new Error("Session position is invalid.");

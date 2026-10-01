@@ -1,9 +1,19 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
-import type { ProviderId, SessionRole } from "../../../shared/contracts.ts";
+import type { AgentProviderId, ProviderId, SessionRole } from "../../../shared/contracts.ts";
+import { launchEffortProblem, launchModelProblem } from "../../../shared/launchModel.ts";
 import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentRequest } from "../AgentControlService.ts";
+import { LaunchRefusal } from "../launchRefusal.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
-import { ORCHESTRATION_TOOL_DEFINITIONS, isPluginOrchestrationTool } from "../../../agent-browser/orchestration-catalog.mjs";
+import {
+  DEFAULT_AGENT_WAIT_SECONDS,
+  MAX_AGENT_WAIT_SECONDS,
+  ORCHESTRATION_TOOL_DEFINITIONS,
+  isPluginOrchestrationTool,
+  unknownProviderMessage
+} from "../../../agent-browser/orchestration-catalog.mjs";
+import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
+import { listProviderDirectory, type ProviderDirectorySources } from "../providerDirectory.ts";
 import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
 
 /**
@@ -15,10 +25,16 @@ import type { McpToolDefinition } from "../../../agent-browser/orchestration-cat
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
   private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
+  private readonly providers: ProviderDirectorySources;
 
-  constructor(control: AgentControlService, plugins: Pick<PluginAgentTools, "list" | "call"> | null = null) {
+  constructor(
+    control: AgentControlService,
+    plugins: Pick<PluginAgentTools, "list" | "call"> | null = null,
+    providers: ProviderDirectorySources = { cli: () => null, limits: () => null }
+  ) {
     this.control = control;
     this.plugins = plugins;
+    this.providers = providers;
   }
 
   /** Orchestrators see the core tools; every role sees the plugin tools that list it (EP-6). */
@@ -40,10 +56,14 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", "Only orchestrator sessions can use CanvasTTY's agent tools.", false);
       }
       switch (request.tool) {
+        case "list_providers":
+          return this.listProviders(session);
+        case "wait_for_agent":
+          return await this.wait(sessionId, request.arguments, signal);
         case "spawn_agent":
           return await this.spawn(sessionId, request.arguments, signal);
         case "send_to_agent":
-          return await this.send(sessionId, request.arguments);
+          return await this.send(sessionId, request.arguments, signal);
         case "observe_agent":
           return this.observe(sessionId, request.arguments);
         case "get_agent_result":
@@ -59,6 +79,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (error && typeof error === "object" && "bridgeError" in error) throw error;
       // The launch was refused, cancelled or superseded: retrying the same call would not deliver it either.
       if (error instanceof PromptNotDeliveredError) throw orchestrationBridgeError("INVALID_REQUEST", error.message, false);
+      // A delegation or launch rule said no: the same call would be refused again.
+      if (error instanceof LaunchRefusal) throw orchestrationBridgeError("INVALID_REQUEST", error.message, false);
       throw orchestrationBridgeError(
         "INTERNAL_ERROR",
         error instanceof Error ? error.message : "Orchestration command failed.",
@@ -83,14 +105,60 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
+  private listProviders(session: { role: SessionRole; provider: ProviderId }): Record<string, unknown> {
+    const pluginTools = this.plugins?.list(session.role, session.provider).map((tool) => tool.name) ?? [];
+    return listProviderDirectory(this.providers, pluginTools) as unknown as Record<string, unknown>;
+  }
+
+  private async wait(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const target = args.sessionId as string;
+    // Its own session is in its subtree, but waiting on itself would only ever time out.
+    if (target === orchestratorId) {
+      throw orchestrationBridgeError("INVALID_REQUEST", "wait_for_agent waits for a subagent, not for this session.", false);
+    }
+    this.requireOwned(orchestratorId, target);
+    const seconds = typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : DEFAULT_AGENT_WAIT_SECONDS;
+    try {
+      const result = await this.control.waitFor(target, {
+        timeoutMs: Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000,
+        ...(signal ? { signal } : {})
+      });
+      return { ...result };
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw canceledError();
+      throw error;
+    }
+  }
+
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
+      throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
+    }
+    const provider = args.provider as AgentProviderId;
+    const problem = (args.model !== undefined ? launchModelProblem(provider, args.model) : null)
+      ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
+    if (problem) throw orchestrationBridgeError("INVALID_REQUEST", `${problem} Call list_providers for what ${provider} takes.`, false);
+    const profile = this.control.profileFor(orchestratorId, provider, args.profile);
+    if ("error" in profile) throw orchestrationBridgeError("INVALID_REQUEST", profile.error, false);
+    if (args.model !== undefined) {
+      let unknown: string | null = null;
+      try { unknown = await this.providers.checkModel?.(provider, args.model as string) ?? null; } catch { unknown = null; }
+      if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
+    }
+    if (signal?.aborted) throw canceledError();
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
-      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {})
+      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {}),
+      ...(args.model !== undefined ? { model: args.model as string } : {}),
+      ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
+      profile: profile.profile
+    }, signal).catch((error: unknown) => {
+      if (signal?.aborted) throw canceledError();
+      throw error;
     });
     if (signal?.aborted) {
       // Canceled while the agent was starting: nobody will receive its id, so close it.
@@ -105,17 +173,28 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       sessionId: created.id,
       provider: created.provider,
       status: created.status,
-      title: created.title
+      title: created.title,
+      profile: created.profile,
+      ...(profile.inherited ? { profileInherited: true } : {}),
+      ...(created.model !== undefined ? { model: created.model } : {}),
+      ...(created.effort !== undefined ? { effort: created.effort } : {})
     };
   }
 
-  private async send(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async send(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     this.requireOwned(orchestratorId, args.sessionId as string);
-    await this.control.send(
-      args.sessionId as string,
-      args.prompt as string,
-      args.submit === undefined ? true : Boolean(args.submit)
-    );
+    try {
+      await this.control.send(
+        args.sessionId as string,
+        args.prompt as string,
+        args.submit === undefined ? true : Boolean(args.submit),
+        signal
+      );
+    } catch (error) {
+      if (signal?.aborted) throw canceledError();
+      throw error;
+    }
+    if (signal?.aborted) throw canceledError();
     return { sessionId: args.sessionId as string, sent: true };
   }
 
@@ -125,7 +204,13 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       args.sessionId as string,
       args.maxChars as number | undefined
     );
-    return { sessionId: observation.sessionId, status: observation.status, output: observation.output };
+    return {
+      sessionId: observation.sessionId,
+      status: observation.status,
+      output: observation.output,
+      ...(observation.exitCode !== undefined ? { exitCode: observation.exitCode } : {}),
+      ...(observation.exitLines ? { exitLines: observation.exitLines } : {})
+    };
   }
 
   private result(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {
@@ -134,8 +219,11 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     return {
       sessionId: result.sessionId,
       state: result.state,
+      status: result.status,
       exitCode: result.exitCode,
-      output: result.output
+      output: result.output,
+      ...(result.exitLines ? { exitLines: result.exitLines } : {}),
+      ...(result.answer ? { answer: result.answer } : {})
     };
   }
 
@@ -151,7 +239,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         sessionId: session.id,
         provider: session.provider,
         status: session.status,
-        title: session.title
+        title: session.title,
+        profile: session.profile,
+        ...(session.model !== undefined ? { model: session.model } : {})
       }))
     };
   }

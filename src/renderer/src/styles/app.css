@@ -1,6 +1,7 @@
 * { box-sizing: border-box; }
 html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-body { background: #20222c; user-select: none; }
+/* The native window background (main/index.ts), seen only before React's first commit: no dark frame at startup. */
+body { background: #aaa7a2; user-select: none; }
 button, select, input { font: inherit; }
 button { border: 0; }
 
@@ -437,6 +438,7 @@ button { border: 0; }
 .terminal-card__header .provider-icon--small { --provider-icon-art-size: 1.85em; width: 2.15em; height: 2.15em; }
 .terminal-card__role { flex: none; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.2); font: 800 .7em var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
 .terminal-card__environment { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.14); font: 700 .7em var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.terminal-card__isolation--off, .terminal-card__isolation--unavailable { background: rgba(255,170,60,.35); }
 .terminal-card__rename { width: min(27.7em, calc(100% - .92em)); height: 2.31em; padding: 0 .69em; border: .08em solid rgba(255,255,255,.24); outline: 0; border-radius: .54em; color: white; background: rgba(23,26,36,.72); font: 700 .92em var(--font-mono); user-select: text; }
 .terminal-card__rename:focus { border-color: var(--primary); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 32%, transparent); }
 .terminal-card__actions { display: flex; align-items: center; gap: .38em; }
@@ -454,6 +456,9 @@ button { border: 0; }
 .terminal-card__pinned-input[hidden] { display: none; }
 .terminal-card--grok .terminal-card__surface { padding: 6px 8px 8px; }
 .terminal-card__surface .xterm { height: 100%; }
+/* xterm observes its screen's intersection, which visibility:hidden alone does not change.
+   Keep the surface and terminal geometry while suspending the screen's renderer. */
+.terminal-card__surface[data-suspended="true"] .xterm-screen { display: none; }
 .terminal-card__surface .xterm-viewport { background-color: var(--terminal-background, #202430); }
 .terminal-card__summary { position: absolute; inset: var(--card-header-height) 0 0; width: 100%; height: calc(100% - var(--card-header-height)); display: none; align-items: center; justify-content: center; overflow: hidden; padding: 0; color: white; background: var(--terminal-background, #202430); cursor: zoom-in; text-align: left; }
 .terminal-card__summary[data-focus-activation="off"] { cursor: pointer; }
@@ -1128,7 +1133,12 @@ button { border: 0; }
 .settings-panel .canvas-launcher-settings-menu .canvas-menu__row--muted .canvas-menu__grow { color: var(--text-muted-on-dark); }
 .toast { position: fixed; z-index: 9999; left: 50%; bottom: 24px; max-width: min(540px, calc(100% - 40px)); padding: 12px 17px; border-radius: 11px; color: white; background: rgba(37,38,48,.94); box-shadow: var(--shadow-md); opacity: 0; transform: translate(-50%, 18px); pointer-events: none; transition: all .2s ease; }
 .toast--visible { opacity: 1; transform: translate(-50%, 0); }
-.loading-screen { position: absolute; inset: 0; z-index: 5000; display: grid; place-items: center; color: var(--text); background: var(--surface); font-size: 14px; font-weight: 900; letter-spacing: .05em; }
+/* Shown until the critical snapshot is in, usually for a few frames only. It keeps the window's own native
+   background (main/index.ts backgroundColor) so startup does not flash a dark panel between the empty window and
+   the canvas; the label appears only when startup is slow enough to need one. */
+.loading-screen { position: absolute; inset: 0; z-index: 5000; display: grid; place-items: center; color: #2f3038; background: #aaa7a2; font-size: 14px; font-weight: 900; letter-spacing: .05em; }
+.loading-screen > span { animation: loading-label-in 160ms ease-out 600ms both; }
+@keyframes loading-label-in { from { opacity: 0; } to { opacity: 1; } }
 
 @media (max-width: 1000px) {
   .titlebar__subtitle { display: none; }
@@ -1183,6 +1193,18 @@ button { border: 0; }
 .terminal-card__toast--warn { box-shadow: inset 3px 0 0 #e5a33a, var(--shadow-md); }
 .terminal-card__note { position: absolute; z-index: 17; left: 10px; right: 10px; bottom: 10px; display: flex; align-items: flex-start; gap: 8px; padding: 7px 9px; border-radius: 9px; color: white; background: rgba(28,30,40,.94); box-shadow: var(--shadow-md); font-size: 12px; font-weight: 650; line-height: 1.35; }
 .terminal-card__note span { flex: 1; min-width: 0; }
+.git-risk { display: flex; flex-direction: column; gap: 6px; padding: 9px 11px; border-radius: 10px; color: white; background: rgba(120,28,28,.96); box-shadow: var(--shadow-md); font-size: 12px; line-height: 1.35; max-height: 60%; overflow: auto; }
+.git-risk strong { font-weight: 750; }
+.git-risk__list, .git-risk__list ul { margin: 0; padding-left: 16px; }
+.git-risk code { font-size: 11px; overflow-wrap: anywhere; }
+.git-risk__failure { color: #ffd6d6; }
+.git-risk__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-risk__actions button { padding: 4px 9px; border-radius: 7px; color: white; background: rgba(255,255,255,.14); cursor: pointer; font-weight: 650; }
+.git-risk__actions button:first-child { background: rgba(255,255,255,.28); }
+.git-risk__actions button:disabled { opacity: .55; cursor: default; }
+.terminal-card__git-risk { position: absolute; z-index: 18; left: 10px; right: 10px; bottom: 10px; }
+.git-risk-panel { position: fixed; z-index: 60; right: 16px; bottom: 16px; width: min(460px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.git-risk-panel .git-risk { max-height: none; }
 .terminal-card__note button { flex: none; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; color: rgba(255,255,255,.78); background: rgba(255,255,255,.07); cursor: pointer; }
 .terminal-card__search-count { min-width: 46px; color: rgba(255,255,255,.62); font: 750 11px var(--font-mono); text-align: center; }
 

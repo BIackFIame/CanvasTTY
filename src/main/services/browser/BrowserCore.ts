@@ -14,6 +14,7 @@ import { BrowserCommandDispatcher } from "./BrowserCommandDispatcher.ts";
 import { BrowserKernelError, throwIfAborted } from "./BrowserErrors.ts";
 import { BrowserPolicyService, DEFAULT_BROWSER_URL } from "./BrowserPolicyService.ts";
 import { isSensitiveName } from "../safety/sensitiveNames.ts";
+import type { AgentDisconnectReason } from "../agent-browser/protocol.ts";
 
 export interface BrowserCoreTab {
   id: string;
@@ -97,8 +98,9 @@ export class BrowserCore {
     this.host.heartbeatActor(actor, timestamp);
   }
 
-  agentDisconnected(actor: BrowserActor): void {
-    this.dispatcher.clearActor(actor);
+  agentDisconnected(actor: BrowserActor, reason?: AgentDisconnectReason): void {
+    // A dropped socket reconnects with the same connection; a revoked or expired one does not.
+    this.dispatcher.clearActor(actor, { reconnecting: reason === "closed" });
     this.host.disconnectActor(actor);
   }
 
@@ -215,8 +217,16 @@ export class BrowserCore {
         return { data: { hovered: true }, tabId: requiredTabId };
       }
       case "browser_type": {
-        const pointer = await this.automation.type(requiredTabId, revision, command.ref, command.text, signal);
-        this.host.touchActor(actor, requiredTabId, pointer);
+        const { point, typed } = await this.automation.type(requiredTabId, revision, command.ref, command.text, signal);
+        this.host.touchActor(actor, requiredTabId, point);
+        if (!typed) {
+          // Focusing the element opened a dialog: nothing was typed. Handle the dialog, then type again.
+          const dialog = this.host.pendingDialog(requiredTabId);
+          throw new BrowserKernelError("DIALOG_OPEN", "A JavaScript dialog opened before the text was typed; nothing was typed.", {
+            retryable: true,
+            ...(dialog ? { details: { dialogType: dialog.type } } : {})
+          });
+        }
         return { data: { typed: true }, tabId: requiredTabId };
       }
       case "browser_select":

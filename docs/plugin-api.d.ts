@@ -67,6 +67,10 @@ export interface CanvasTTYPluginHost {
   };
   onContext(listener: (context: CanvasTTYPluginContext) => void): () => void;
   onStorageChange(listener: (key: string, value: unknown) => void): () => void;
+  /** "hidden" while the plugin's card is not drawn (summary zoom, HOME editing, off-screen, minimized window). */
+  visibility(): "visible" | "hidden";
+  /** Called on every change of `visibility()`; the same moment `document` fires `visibilitychange`. */
+  onVisibilityChange(listener: (state: "visible" | "hidden") => void): () => void;
 }
 
 export interface CanvasTTYPluginContext {
@@ -292,6 +296,8 @@ export interface CanvasTTYEnvironmentKind {
   appliesTo?: CanvasTTYProviderId[];
   /** At most 8 launcher fields; values reach `prepare` only. */
   fields?: CanvasTTYLaunchField[];
+  /** What of CanvasTTY's protection reaches the agent there; undeclared means no (see docs/plugins.md). */
+  keeps?: { launch?: boolean; isolated?: boolean; confines?: boolean };
 }
 
 /** Opaque to CanvasTTY: saved with the card (at most 4 KB of JSON) and handed back unchanged. */
@@ -366,6 +372,8 @@ export interface CanvasTTYServiceLaunch {
   /** Also asked before every launch of these agents where the person did not choose the plugin (`chosen: false`);
    * such an answer may only refuse, and no answer refuses too. */
   policy?: boolean;
+  /** An orchestrator may choose these options for its subagents (spawn_agent launchOptions); otherwise only the person. */
+  delegable?: boolean;
 }
 
 export type CanvasTTYLaunchField =

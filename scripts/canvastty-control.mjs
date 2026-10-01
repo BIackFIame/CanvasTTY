@@ -31,6 +31,22 @@ async function privateFile(path, maximum = 16 * 1024) {
   } finally { await file.close(); }
 }
 
+/**
+ * "session" for an orchestrator session's own connection, "person" otherwise or when there is no connection file.
+ * Any other failure to read it is thrown: guessing "person" would send an orchestrator's create as a YOLO launch,
+ * which the endpoint refuses for a subagent.
+ */
+export async function connectionScope(connectionPath) {
+  let text;
+  try { text = await privateFile(connectionPath); }
+  catch (error) {
+    if (error?.code === "ENOENT") return "person";
+    throw error;
+  }
+  try { return JSON.parse(text).scope === "session" ? "session" : "person"; }
+  catch { return "person"; }
+}
+
 export async function controlRequest({ connectionPath, clientPath, method, params = {}, requestId = randomUUID(), timeoutMs = 8000 }) {
   let connection;
   try { connection = JSON.parse(await privateFile(connectionPath)); }
@@ -106,7 +122,7 @@ export async function controlRequest({ connectionPath, clientPath, method, param
 export function parseArguments(argv) {
   const options = {};
   const positional = [];
-  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--prompt-file", "--text", "--after", "--choice", "--revision", "--archive", "--name", "--apertures", "--detail"]);
+  const flags = new Set(["--connection", "--client-file", "--request-id", "--cwd", "--title", "--provider", "--profile", "--model", "--effort", "--prompt-file", "--text", "--after", "--choice", "--revision", "--archive", "--name", "--apertures", "--detail"]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--json") continue;
@@ -128,8 +144,17 @@ Enable agent orchestration in CanvasTTY Settings → Agents first (or start it
 with --agent-control). Each --client-file owns only the sessions it creates.
 Keep the same private client file across related commands.
 
-create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile normal|auto]
-  provider: codex (default), claude, qwen, kimi, opencode, hermes, grok, omp, pi.
+providers
+  The agents CanvasTTY can create workers for: id (the --provider value), name,
+  installed/available, signIn (ok, signed_out, expired or unknown). Run it first;
+  do not search the filesystem for agent CLIs or their configuration.
+create --cwd <directory> [--provider <id>] [--title <name>] [--yolo | --profile auto|normal|acceptEdits|plan]
+       [--model <id>] [--effort <level>]
+  provider: an id from providers; codex (default), claude, qwen, kimi, opencode,
+  hermes, grok, omp, pi, cursor, minimax, devin, antigravity.
+  --model: the CLI's own --model for this worker (OpenCode: provider/model); if
+  the person names a model, pass it. --effort: codex, claude and grok only.
+  providers shows each provider's model format and effort levels.
   Only Codex workers report a captured result and expose startup/approval menus
   to choose/dismiss; the create response lists each worker's capabilities.
 list
@@ -147,8 +172,13 @@ skin-select <skin-id> [--detail minimal|detailed]
 Global options: --connection <descriptor> --client-file <private-file>
                 --request-id <id> --json
 
-create defaults to the YOLO profile: full access, no sandbox approvals.
---profile auto (codex, claude, grok): the CLI's own auto mode in its sandbox.
+From the person's own terminal, create defaults to the YOLO profile (full access,
+no approvals), which CanvasTTY allows only for CLIs the person acknowledged YOLO
+for in its launcher. Inside an orchestrator session (its own connection), create
+makes a subagent of that session: without --profile it gets the session's
+profile, never more and never YOLO, in a folder inside the session's project, up
+to the limits the person set; such a connection cannot change settings or themes.
+--profile auto: the CLI's own auto mode inside CanvasTTY's outer layers.
 No global provider configuration is modified. Scope tasks before sending them.
 After a timeout, inspect status; retry identical input with the SAME request ID.
 `;
@@ -157,21 +187,27 @@ export async function runCli(argv) {
   const { options, positional } = parseArguments(argv);
   if (options.help) return { help: HELP };
   const [method, sessionId] = positional;
-  if (!["create", "list", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
-  if (positional.length !== (["create", "list", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
+  if (!["create", "list", "providers", "status", "screen", "send", "result", "interrupt", "choose", "dismiss", "skin-list", "skin-install", "skin-select"].includes(method)) throw new Error("Unknown command; see --help.");
+  if (positional.length !== (["create", "list", "providers", "skin-list", "skin-install"].includes(method) ? 1 : 2)) throw new Error("Unexpected or missing positional argument.");
   const allowed = new Set(["connection", "client-file", "request-id",
-    ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo"] : []),
+    ...(method === "create" ? ["cwd", "title", "provider", "profile", "yolo", "model", "effort"] : []),
     ...(method === "send" ? ["prompt-file", "text"] : []), ...(method === "result" ? ["after"] : []),
     ...(method === "choose" ? ["choice", "revision"] : []), ...(method === "dismiss" ? ["revision"] : [])]);
   if (method === "skin-install") ["archive", "name", "apertures", "activate", "detail"].forEach((key) => allowed.add(key));
   if (method === "skin-select") allowed.add("detail");
   if (Object.keys(options).some((key) => !allowed.has(key))) throw new Error("Option does not apply to this command.");
-  let params = ["list", "skin-list", "skin-install"].includes(method) ? {} : { sessionId };
+  let params = ["list", "providers", "skin-list", "skin-install"].includes(method) ? {} : { sessionId };
   if (method === "create") {
     if (!options.cwd) throw new Error("create requires --cwd.");
     if (options.yolo && options.profile && options.profile !== "yolo") throw new Error("Conflicting launch profiles.");
-    params = { provider: options.provider || "codex", cwd: resolve(options.cwd), profile: options.profile || "yolo",
-      ...(options.title === undefined ? {} : { title: options.title }) };
+    // An orchestrator's own connection makes subagents: no profile means the orchestrator's (never YOLO).
+    const agentScope = !options.yolo && !options.profile
+      && await connectionScope(resolve(options.connection || defaultConnectionPath())) === "session";
+    params = { provider: options.provider || "codex", cwd: resolve(options.cwd),
+      ...(agentScope ? {} : { profile: options.yolo ? "yolo" : options.profile || "yolo" }),
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(options.model === undefined ? {} : { model: options.model }),
+      ...(options.effort === undefined ? {} : { effort: options.effort }) };
   }
   if (method === "send") {
     if ((options["prompt-file"] === undefined) === (options.text === undefined)) throw new Error("send requires exactly one of --prompt-file or --text.");

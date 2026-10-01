@@ -54,6 +54,7 @@ export function resolveAgentHistoryPaths(options: HistoryPathOptions = {}) {
     claude: path.join(env("CLAUDE_CONFIG_DIR") || path.join(home, ".claude"), "projects"),
     qwen: [path.join(qwen, "projects"), path.join(qwen, "tmp")],
     kimi: env("KIMI_SHARE_DIR") || path.join(home, ".kimi"),
+    kimiCode: env("KIMI_CODE_HOME") || path.join(home, ".kimi-code"),
     omp: env("PI_CODING_AGENT_SESSION_DIR") || path.join(ompData, "sessions"),
     pi: env("PI_CODING_AGENT_SESSION_DIR") ? expand(env("PI_CODING_AGENT_SESSION_DIR")!)
       : path.join(expand(env("PI_CODING_AGENT_DIR") || path.join(home, ".pi", "agent")), "sessions"),

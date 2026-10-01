@@ -64,6 +64,7 @@ import {
   UI_SCALE_STEP
 } from "../../shared/contracts.ts";
 import { isTerminalBorderSkinId } from "./SkinRegistry.ts";
+import { isLaunchProfile } from "../../shared/autoMode.ts";
 import {
   canvasNavigationPlatform,
   defaultCanvasWheelBinding,
@@ -414,8 +415,21 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     agentChatHistoryExpandMode: "hover",
     agentChatHistorySearchAgents: "current",
     agentChatHistorySearchSessions: "filtered",
-    agentControlEnabled: false
+    agentControlEnabled: false,
+    agentIsolation: "on",
+    orchestrationMaxDepth: DEFAULT_ORCHESTRATION_MAX_DEPTH,
+    orchestrationMaxSubagents: DEFAULT_ORCHESTRATION_MAX_SUBAGENTS,
+    defaultLaunchProfile: "auto"
   };
+}
+
+export const DEFAULT_ORCHESTRATION_MAX_DEPTH = 2;
+export const DEFAULT_ORCHESTRATION_MAX_SUBAGENTS = 8;
+export const MAX_ORCHESTRATION_DEPTH = 4;
+export const MAX_ORCHESTRATION_SUBAGENTS = 32;
+
+function boundedInteger(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum ? value : fallback;
 }
 
 const API_PROFILE_PROTOCOL_SET = new Set<ApiProfileProtocol>(API_PROFILE_PROTOCOLS);
@@ -691,7 +705,19 @@ export function normalizeSettings(
     // Never inferred from anything else: only an explicit boolean turns the endpoint on.
     agentControlEnabled: typeof source.agentControlEnabled === "boolean"
       ? source.agentControlEnabled
-      : fallback.agentControlEnabled ?? false
+      : fallback.agentControlEnabled ?? false,
+    // On unless the person turned it off: only an explicit "off" does.
+    agentIsolation: source.agentIsolation === "off" || source.agentIsolation === "on"
+      ? source.agentIsolation
+      : fallback.agentIsolation ?? "on",
+    orchestrationMaxDepth: boundedInteger(source.orchestrationMaxDepth, 1, MAX_ORCHESTRATION_DEPTH,
+      fallback.orchestrationMaxDepth ?? DEFAULT_ORCHESTRATION_MAX_DEPTH),
+    orchestrationMaxSubagents: boundedInteger(source.orchestrationMaxSubagents, 1, MAX_ORCHESTRATION_SUBAGENTS,
+      fallback.orchestrationMaxSubagents ?? DEFAULT_ORCHESTRATION_MAX_SUBAGENTS),
+    // Bypass (YOLO) is never a default: it is chosen per launch and acknowledged.
+    defaultLaunchProfile: isLaunchProfile(source.defaultLaunchProfile) && source.defaultLaunchProfile !== "yolo"
+      ? source.defaultLaunchProfile
+      : fallback.defaultLaunchProfile ?? "auto"
   };
 }
 
