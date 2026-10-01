@@ -187,7 +187,7 @@ test("permission gate: no socket, a refused socket, no identity and an ignored a
   const input = bashInput({ command: "ls" });
   for (const provider of PROVIDERS) {
     for (const failClosed of [true, false]) {
-      for (const [label, address] of [["missing", join(root, "missing.sock")], ["refused", stale]]) {
+      for (const [label, address] of [["missing", socketPath()], ["refused", stale]]) {
         assertSame(await gateCase({ provider, failClosed, input, address }), `${label} / ${provider} / ${failClosed}`);
       }
     }
@@ -203,7 +203,7 @@ test("permission gate: no socket, a refused socket, no identity and an ignored a
   // Without the `pretool` argument the gate does nothing at all.
   const results = [];
   for (const implementation of IMPLEMENTATIONS) {
-    const result = await runOnce(implementation.gate.slice(0, -1), { env: runtimeEnvironment(join(root, "missing.sock"), "claude", { [DECISION_FAIL_CLOSED_ENV]: "1" }), input });
+    const result = await runOnce(implementation.gate.slice(0, -1), { env: runtimeEnvironment(socketPath(), "claude", { [DECISION_FAIL_CLOSED_ENV]: "1" }), input });
     results.push({ implementation: implementation.name, code: result.code, stdout: result.stdout, received: [] });
   }
   assert.equal(assertSame(results, "no pretool argument").stdout, "");

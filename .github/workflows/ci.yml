@@ -76,6 +76,10 @@ jobs:
           cache: false
       - name: Install locked dependencies and build native modules
         run: npm ci
+      - name: Build the Windows native helper for parity tests
+        run: npm run build:helpers -- --host
+        env:
+          CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
       - name: Test the native helper's named-pipe transport
         working-directory: native/canvastty-helper
         run: go test ./...
