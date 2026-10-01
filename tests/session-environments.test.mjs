@@ -322,6 +322,7 @@ test("refusals and timeouts leave the card failed with the reason and nothing sp
 
 test("restore resumes environments first, then parents before children; stopped and missing never run locally", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-restore-"));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   const environment = (box) => ({ pluginId: PLUGIN, kind: "box", ref: { box }, label: `box ${box}` });
   const base = { provider: "terminal", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
     position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true };
@@ -344,8 +345,6 @@ test("restore resumes environments first, then parents before children; stopped 
     }
   }) });
   const { manager, calls } = await managerFixture(lifetime, registry, { directory });
-  // After the fixture registered its shutdown: after hooks run in order, and the store writes until shutdown.
-  const lifetime = persistenceFixtureLifetime(t, directory);
   await waitFor(() => calls.filter((call) => call.command === process.execPath).length === 2);
   // Every resume is answered before any wrapped launch starts, and the parent launches before its child.
   const firstWrap = order.findIndex((entry) => entry.startsWith("wrap:"));
@@ -374,6 +373,7 @@ test("restore resumes environments first, then parents before children; stopped 
 
 test("a card that does not come back never resumes its environment; it is released, its data kept", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-orphan-"));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   const environment = (box) => ({ pluginId: PLUGIN, kind: "box", ref: { box }, label: `box ${box}` });
   const base = { provider: "claude", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
     position: at, size: { width: 700, height: 430 }, lastState: "running", restore: true };
@@ -384,8 +384,6 @@ test("a card that does not come back never resumes its environment; it is releas
   ] }));
   const { registry, requests } = registryFixture({ answers: defaultAnswers() });
   const { manager } = await managerFixture(lifetime, registry, { directory });
-  // After the fixture registered its shutdown: after hooks run in order, and the store writes until shutdown.
-  const lifetime = persistenceFixtureLifetime(t, directory);
   const steps = (id) => requests.filter((request) => request.params.sessionId === id).map((request) => request.step);
   assert.deepEqual(steps("orphan"), ["release"]);
   assert.deepEqual(steps("skipped"), ["release"]);
@@ -397,6 +395,7 @@ test("a card that does not come back never resumes its environment; it is releas
 
 test("an exited card resumes its environment only when restarted", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-exited-"));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   await writeFile(join(directory, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{
     id: "done", provider: "terminal", profile: "normal", role: "agent", title: "T", titleCustomized: false, cwd,
     position: at, size: { width: 700, height: 430 }, lastState: "exited", exitCode: 0, restore: true,
@@ -405,8 +404,6 @@ test("an exited card resumes its environment only when restarted", async (t) => 
   let resume = { stopped: { reason: "box is asleep" } };
   const { registry, requests } = registryFixture({ answers: defaultAnswers({ resume: () => resume }) });
   const { manager, calls } = await managerFixture(lifetime, registry, { directory });
-  // After the fixture registered its shutdown: after hooks run in order, and the store writes until shutdown.
-  const lifetime = persistenceFixtureLifetime(t, directory);
   assert.equal(card(manager, "done").status, "done");
   assert.equal(requests.length, 0);
   manager.restart("done");
@@ -599,6 +596,7 @@ test("quitting while prepare is pending: the choice is saved, the card comes bac
 
 test("a failed prepare keeps its choice across an app restart; manual Restart prepares it again, never locally", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-env-failed-"));
+  const lifetime = persistenceFixtureLifetime(t, directory);
   let answer = { refuse: { reason: "no docker" } };
   const { registry, requests } = registryFixture({ answers: defaultAnswers({ prepare: () => answer }) });
   const first = await managerFixture(lifetime, registry, { directory });
@@ -614,8 +612,6 @@ test("a failed prepare keeps its choice across an app restart; manual Restart pr
   assert.deepEqual(record.environmentChoice, { pluginId: PLUGIN, kind: "box", options: { name: "two" } });
 
   const second = await managerFixture(lifetime, registry, { directory });
-  // After the fixture registered its shutdown: after hooks run in order, and the store writes until shutdown.
-  const lifetime = persistenceFixtureLifetime(t, directory);
   const restored = card(second.manager, created.id);
   assert.equal(restored.status, "failed");
   assert.match(restored.failureDetails, /environment was not prepared.*not started locally/u);
