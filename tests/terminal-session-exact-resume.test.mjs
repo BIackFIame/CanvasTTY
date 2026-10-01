@@ -8,6 +8,7 @@ import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.
 
 const FIRST_THREAD = "11111111-1111-4111-8111-111111111111";
 const SECOND_THREAD = "22222222-2222-4222-8222-222222222222";
+const HERMES_SESSION = "20261001_031347_02c965";
 
 function registry() {
   return {
@@ -76,6 +77,26 @@ test("restoring two Codex cards in one cwd resumes their own conversations", asy
       ["resume", SECOND_THREAD]
     ]);
     assert.deepEqual(restored.list().map((session) => session.id), [first.id, second.id]);
+    await restored.shutdown();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Hermes hook identity survives restart and resumes that exact conversation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-hermes-exact-resume-"));
+  try {
+    const initial = manager(directory, []);
+    await initial.restorePersistedSessions();
+    const card = initial.create({ provider: "hermes", profile: "normal", cwd: process.cwd(), position: { x: 0, y: 0 } });
+    initial.applyProviderSignal(card.id, { kind: "lifecycle", state: "idle", threadId: HERMES_SESSION });
+    await initial.shutdown();
+    assert.equal((await new TerminalSessionStore(directory).load())[0]?.threadId, HERMES_SESSION);
+
+    const calls = [];
+    const restored = manager(directory, calls);
+    await restored.restorePersistedSessions();
+    assert.deepEqual(calls[0].args.slice(-2), ["--resume", HERMES_SESSION]);
     await restored.shutdown();
   } finally {
     await rm(directory, { recursive: true, force: true });

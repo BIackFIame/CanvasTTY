@@ -149,13 +149,18 @@ test("restored agent windows use each provider's native continue mode", () => {
     "resume"
   ]);
 
-  for (const provider of ["claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin"]) {
+  for (const provider of ["claude", "qwen", "kimi", "opencode", "grok", "omp", "pi", "cursor", "minimax", "devin"]) {
     const launch = resolveTerminalLaunch(provider, "normal", ["--bridge"], {
       providerCli: available(provider, `/resolved/${provider}`),
       resumePrevious: true
     });
     assert.deepEqual(launch.args, ["--bridge", "--continue"]);
   }
+  const hermes = resolveTerminalLaunch("hermes", "normal", ["--bridge"], {
+    providerCli: available("hermes", "/resolved/hermes"),
+    resumePrevious: true
+  });
+  assert.deepEqual(hermes.args, ["--bridge", "sessions", "browse"]);
   // antigravity deliberately restores fresh: no latest-session launch flag.
   const restored = resolveTerminalLaunch("antigravity", "normal", ["--bridge"], {
     providerCli: available("antigravity", "/resolved/agy"),
@@ -209,7 +214,7 @@ test("Codex restore throws on malformed resumeThreadId", () => {
   }
 });
 
-test("Claude, OpenCode and Qwen resume their own session by id", () => {
+test("Claude, OpenCode, Hermes and Qwen resume their own session by id", () => {
   const uuid = "12345678-1234-4234-8234-123456789abc";
   const claude = resolveTerminalLaunch("claude", "normal", ["--bridge"], {
     providerCli: available("claude", "/resolved/claude"),
@@ -225,7 +230,18 @@ test("Claude, OpenCode and Qwen resume their own session by id", () => {
   });
   assert.deepEqual(opencode.args, ["--session", "ses_7a1b2c3d4ffeAbCdEfGhIjKlMn"]);
 
-  for (const [provider, malformed] of [["claude", "--config=evil"], ["claude", "not-a-uuid"], ["opencode", uuid], ["opencode", "ses_../x"]]) {
+  const hermes = resolveTerminalLaunch("hermes", "normal", [], {
+    providerCli: available("hermes", "/resolved/hermes"),
+    resumePrevious: true,
+    resumeThreadId: "20261001_031347_02c965"
+  });
+  assert.deepEqual(hermes.args, ["--resume", "20261001_031347_02c965"]);
+
+  for (const [provider, malformed] of [
+    ["claude", "--config=evil"], ["claude", "not-a-uuid"],
+    ["opencode", uuid], ["opencode", "ses_../x"],
+    ["hermes", "--resume-evil"], ["hermes", "not-a-session"]
+  ]) {
     assert.throws(() => resolveTerminalLaunch(provider, "normal", [], {
       providerCli: available(provider, `/resolved/${provider}`),
       resumePrevious: true,

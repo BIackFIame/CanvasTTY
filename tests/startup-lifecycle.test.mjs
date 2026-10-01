@@ -89,6 +89,20 @@ test("services start while the startup page loads, and the application surface w
   assert.equal(context.startupRunning, false);
 });
 
+test("loading the application surface removes the startup page from browser history", async () => {
+  const source = await readFile(mainPath, "utf8");
+  const body = source.slice(
+    source.indexOf("async function loadApplicationSurface"),
+    source.indexOf("async function loadApplication(")
+  );
+
+  assert.match(body, /navigationHistory\.clear\(\)/);
+  assert.ok(
+    body.indexOf("navigationHistory.clear()") > body.lastIndexOf("await window.load"),
+    "history is cleared only after the application surface finishes loading"
+  );
+});
+
 test("dependencies only some paths need are not imported when the main process starts", async () => {
   // Each costs its import time on every launch (electron-updater about 30 ms): they load
   // through lazyRequire on first use. The smoke runners are test code behind env flags.

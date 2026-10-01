@@ -132,6 +132,7 @@ function resolveResumeArguments(
     }
     return ["resume"];
   }
+  if (provider === "hermes" && !resumeThreadId) return ["sessions", "browse"];
   const byId = RESUME_BY_ID_ARGUMENTS[provider];
   if (byId && resumeThreadId) {
     const threadId = normalizeThreadId(provider, resumeThreadId);
@@ -160,9 +161,9 @@ export function canResumeThreadById(provider: ProviderId): boolean {
   return provider === "codex" || (provider !== "terminal" && RESUME_BY_ID_ARGUMENTS[provider] !== undefined);
 }
 
-/** Without an id, Codex opens its own resume picker, so the person chooses; nothing is guessed. */
+/** Without an id, Codex and Hermes open their own resume pickers, so the person chooses; nothing is guessed. */
 export function resumeWithoutIdOpensPicker(provider: ProviderId): boolean {
-  return provider === "codex";
+  return provider === "codex" || provider === "hermes";
 }
 
 /** The CLI has a "latest conversation in this folder" flag. */

@@ -23,10 +23,10 @@ export interface RestoreStep {
 
 /**
  * Picks how an agent continues its own conversation: by the id its hook reported
- * when there is one. Without an id Codex opens its resume picker, and a "latest in
- * this folder" flag is used only when this card is the only card of that CLI in the
- * folder; otherwise two cards would continue the same conversation, so it starts
- * fresh and says so.
+ * when there is one. Without an id Codex and Hermes open their resume pickers;
+ * a "latest in this folder" flag is used only when this card is the only card
+ * of that CLI in the folder; otherwise two cards would continue the same
+ * conversation, so it starts fresh and says so.
  */
 export function chooseResume(
   provider: ProviderId,
