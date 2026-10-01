@@ -6,9 +6,9 @@
 
 ### 更新后你会注意到
 
-在同一台 Apple Silicon Mac 上与 1.7.0 做 A/B 对比：交替运行，每侧 3 次，取中位数，智能体 CLI 使用桩程序（真实 CLI 会在此之上增加自身开销）。
+在同一台 Apple Silicon Mac 上与 1.7.0 做初始整栈 A/B 对比：交替运行，每侧 3 次，取中位数，智能体 CLI 使用桩程序（真实 CLI 会在此之上增加自身开销）。
 
-| | 1.7.0 | 现在 | 变化 |
+| | 1.7.0 | 初始测量 | 变化 |
 |:--|--:|--:|--:|
 | 内存：10 个 OpenCode 智能体 + 编排者（RSS） | 1,762 MB | 1,103 MB | −37 % |
 | 每张智能体卡片的 helper（RSS） | 60 MB | 6 MB | −90 % |
@@ -17,6 +17,8 @@
 | 每次平移/缩放渲染的 React 组件数 | 73 | 2 | −97 % |
 | 首个可交互帧（恢复 3 个终端） | 511 ms | 434 ms | −15 % |
 | 应用 / zip（macOS arm64） | 376 / 195 MB | 259 / 121 MB | −31 % / −38 % |
+
+报告中的隐藏终端测试夹具对比了隐藏时仍用 `visibility:hidden` 绘制与用 `display:none` 暂停屏幕绘制：改动前 renderer CPU 为 1.880710 秒，改动后为 1.773396 秒，五张卡片总计减少约 5.7%，包括最后一次恢复。两种情况处理相同的完整输出并保留终端状态；完整流解析仍然开启，不能把丢弃输出的有损环形缓冲区重放所节省的 CPU 作为优化目标。测试在 Apple Silicon Mac 上使用已安装的 xterm 6 和 Electron 运行：5 张卡片，10 秒，每张卡片每秒 1,024 Ki 个 UTF-16 单元；3 组交错配对运行的中位数。结果只计 renderer CPU，不包括应用主进程、PTY/IPC 或 WebGL，也不能证明整个应用、实时 provider 或 Linux/Windows 上的性能提升。评审期间没有独立重新测量该结果。
 
 无人可见的插件卡片会暂停并保留状态，隐藏的浏览器标签页会被降频；编排者以 Auto 运行时，子智能体不再每个操作都询问用户。
 
@@ -35,7 +37,7 @@
 - `spawn_agent` 和 control CLI 的 `create` 支持可选的 `model`（本次运行 CLI 自己的 `--model`：OpenCode 为 `provider/model`，以及 Codex、Claude、Qwen、Kimi 别名、Grok、OMP、Pi、Cursor）和 `effort`（Codex、Claude、Grok）。两者按 provider 校验并在拒绝时说明原因，重启和恢复时保留，且从不写入 CLI 的配置；被指定模型的编排者现在会用该模型运行子 agent，而不是 CLI 的默认模型。`list_providers` 显示每个 provider 的模型格式和 effort 级别，OpenCode 还会显示 `opencode models` 列出的模型（后台读取，超时 5 秒并缓存；工具不会等待它）。不在该列表中的 OpenCode 模型会在启动前被拒绝，并给出最多五个最接近的 id，否则 OpenCode 只会报「Unexpected server error」后停止；若子 agent 仍然退出，其屏幕最后几行会以 `exitLines` 出现在 `wait_for_agent`、`observe_agent` 和 `get_agent_result` 中。
 - 名称含有两种 Unicode 写法字符（西里尔字母「й」、带重音的字母；Finder 保存分解形式）的项目文件夹，现在无论 `spawn_agent`、control CLI 或插件传入哪种写法，都会以磁盘上的写法启动，CLI 不再把自己的项目当作外部文件夹（OpenCode 曾对每个文件询问「Access external directory …」）。agent 的 `PWD` 也设为其文件夹而不是应用的，OpenCode 在本次运行中被允许访问该文件夹的另一种写法；其他权限不变，ASCII 路径照旧启动。
 - 编排者新增两个 `canvastty_agents` 工具。`list_providers` 列出 CanvasTTY 可作为子 agent 启动的 agent：`spawn_agent.provider` 的确切 id、名称、CLI 是否已安装、上次额度检查得到的登录状态（`ok`、`signed_out`、`expired` 或 `unknown`；不会为此读取或请求任何内容）、子 agent 与编排者支持，以及插件提供的启动选项和挑选它们的插件工具（如 `list_routes`）；control CLI 中对应命令为 `providers`。`wait_for_agent`（`timeoutSeconds` 最多 600）等待子 agent 空闲、需要人处理、退出或安静下来，或超时，并返回状态和已遮蔽的输出末尾；只能等待自己的子 agent，调用被取消时立即停止。`spawn_agent` 现在列出已知的 provider id，未知 id 会被拒绝并提示调用 `list_providers`，而不是笼统的失败。工具说明、MCP 指令、编排者技能和拒绝消息都给出 `list_providers` → `spawn_agent` → `wait_for_agent` → `get_agent_result` 的流程，并要求 agent 不要在文件系统中搜索 agent CLI 或其配置。
-- 平移和缩放画布不再重新渲染整个应用：镜头保存在 React state 之外并直接移动场景，因此平移时只重新渲染小地图（以及页面跟随其移动的浏览器卡片），而不是每个指针或滚轮事件重新渲染 50–110 个组件；卡片只在跨越摘要模式或 WebGL 缩放阈值时重新渲染。使用 DOM 绘制的终端卡片（屏幕外或超出 WebGL 池的卡片）不再在每次输出滚动时逐行重建，屏幕外卡片输出时 renderer 的 CPU 占用减半。屏幕显示不变。
+- 平移和缩放画布不再重新渲染整个应用：镜头保存在 React state 之外并直接移动场景，因此平移时只重新渲染小地图（以及页面跟随其移动的浏览器卡片），而不是每个指针或滚轮事件重新渲染 50–110 个组件；卡片只在跨越摘要模式或 WebGL 缩放阈值时重新渲染。使用 DOM 绘制的终端卡片（屏幕外或超出 WebGL 池的卡片）不再在每次输出滚动时逐行重建；在早期的屏幕外输出测试夹具中，renderer CPU 占用减半。屏幕显示不变。
 
 ## 1.7.0
 
