@@ -43,3 +43,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Native helper builds (scripts/build-native-helpers.mjs)
+/build/native-helpers/

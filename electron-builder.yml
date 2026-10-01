@@ -23,8 +23,9 @@ asarUnpack:
 # macOS (>= 16) and Windows (>= 30), so the Linux AppImage and deb targets flip
 # the bit without receiving validation from it.
 #
-# runAsNode is deliberately left ENABLED: provider CLIs and the agent runtime
-# spawn the bundled helpers as
+# runAsNode is deliberately left ENABLED: where the native canvastty-helper is
+# not shipped or not chosen (Windows, CANVASTTY_HELPERS=node), provider CLIs and
+# the agent runtime spawn the bundled helpers as
 # { command: process.execPath, args: [helper], env: { ELECTRON_RUN_AS_NODE: "1" } }
 # (src/main/index.ts for the browser, agent-runtime, and plugin-hook helpers,
 # src/agent-runtime/*.mjs, plus the generated lifecycle hook commands). Setting
@@ -75,6 +76,13 @@ extraResources:
     to: agent/browser
     filter:
       - SKILL.md
+  # canvastty-helper for this target (scripts/build-native-helpers.mjs, `npm run build:helpers`). Without it the app
+  # runs the .mjs helpers above under Electron-as-Node (src/main/services/agentHelpers.ts).
+  - from: build/native-helpers/${os}-${arch}
+    to: helpers
+    filter:
+      - canvastty-helper
+      - canvastty-helper.exe
 npmRebuild: true
 compression: normal
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}

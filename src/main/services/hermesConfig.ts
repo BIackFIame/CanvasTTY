@@ -50,7 +50,8 @@ export interface HermesStdioHelperLaunch {
 
 interface HermesTemporaryConfigurationOptions {
   homeDirectory: string;
-  helper: HermesStdioHelperLaunch;
+  /** The canvastty_browser entry; null when browser access is off (then only canvastty_agents is written). */
+  helper: HermesStdioHelperLaunch | null;
   /** Optional second MCP server (canvastty_agents) written next to the browser one. */
   orchestrationHelper?: HermesStdioHelperLaunch;
 }
@@ -58,6 +59,7 @@ interface HermesTemporaryConfigurationOptions {
 interface HermesRecoveryJournal {
   version: 1;
   ownershipId: string;
+  /** "" when this configuration has no canvastty_browser entry (browser access off). */
   entryHash: string;
   /** Absent in journals written before orchestration support; never undefined when set. */
   orchestrationEntryHash?: string;
@@ -69,6 +71,7 @@ interface HermesRecoveryJournal {
 
 export class HermesTemporaryConfiguration {
   readonly hasOrchestrationEntry: boolean;
+  readonly hasBrowserEntry: boolean;
   private readonly paths: ReturnType<typeof hermesPaths>;
   private readonly journal: HermesRecoveryJournal;
   private cleaned = false;
@@ -80,18 +83,20 @@ export class HermesTemporaryConfiguration {
     this.paths = paths;
     this.journal = journal;
     this.hasOrchestrationEntry = journal.orchestrationEntryHash !== undefined;
+    this.hasBrowserEntry = journal.entryHash !== "";
   }
 
   static begin(options: HermesTemporaryConfigurationOptions): HermesTemporaryConfiguration {
-    validateHelper(options.helper);
+    if (options.helper) validateHelper(options.helper);
     if (options.orchestrationHelper) validateHelper(options.orchestrationHelper);
+    if (!options.helper && !options.orchestrationHelper) throw new Error("Hermes temporary configuration needs an MCP server.");
     mkdirSync(options.homeDirectory, { recursive: true, mode: CONFIG_DIRECTORY_MODE });
     const paths = hermesPaths(options.homeDirectory);
     const lock = acquireConfigurationLock(paths.lock, "Hermes");
     try {
       this.recoverLocked(paths);
       const ownershipId = randomUUID();
-      const entry = hermesMcpEntry(options.helper);
+      const entry = options.helper ? hermesMcpEntry(options.helper) : null;
       const orchestrationEntry = options.orchestrationHelper
         ? hermesOrchestrationEntry(options.orchestrationHelper)
         : null;
@@ -99,13 +104,13 @@ export class HermesTemporaryConfiguration {
       const { document, value } = parseHermesDocument(configOriginal ?? "", paths.config);
       const mcpServersOriginallyPresent = Object.hasOwn(value, "mcp_servers");
       const servers = mcpServers(value, paths.config);
-      if (MCP_SERVER_NAME in servers) {
+      if (entry && MCP_SERVER_NAME in servers) {
         throw new Error(`Hermes MCP server name ${MCP_SERVER_NAME} is already configured.`);
       }
       if (orchestrationEntry && ORCHESTRATION_MCP_SERVER_NAME in servers) {
         throw new Error(`Hermes MCP server name ${ORCHESTRATION_MCP_SERVER_NAME} is already configured.`);
       }
-      document.setIn(["mcp_servers", MCP_SERVER_NAME], entry);
+      if (entry) document.setIn(["mcp_servers", MCP_SERVER_NAME], entry);
       if (orchestrationEntry) {
         document.setIn(["mcp_servers", ORCHESTRATION_MCP_SERVER_NAME], orchestrationEntry);
       }
@@ -118,7 +123,7 @@ export class HermesTemporaryConfiguration {
       const journal: HermesRecoveryJournal = {
         version: 1,
         ownershipId,
-        entryHash: hashCanonical(entry),
+        entryHash: entry ? hashCanonical(entry) : "",
         ...(orchestrationEntry ? { orchestrationEntryHash: hashCanonical(orchestrationEntry) } : {}),
         configOriginalHash: configOriginal === null ? null : hashText(configOriginal),
         configMutatedHash: hashText(configMutated),
@@ -267,7 +272,7 @@ function cleanupOwnedConfiguration(
     if (before === null) return;
     const { document, value } = parseHermesDocument(before, paths.config);
     const servers = mcpServers(value, paths.config);
-    const ownedEntries: Array<[string, string]> = [[MCP_SERVER_NAME, journal.entryHash]];
+    const ownedEntries: Array<[string, string]> = journal.entryHash ? [[MCP_SERVER_NAME, journal.entryHash]] : [];
     if (journal.orchestrationEntryHash) {
       ownedEntries.push([ORCHESTRATION_MCP_SERVER_NAME, journal.orchestrationEntryHash]);
     }

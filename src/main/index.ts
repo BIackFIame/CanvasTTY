@@ -75,6 +75,7 @@ import {
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
+import { agentHelperLaunches } from "./services/agentHelpers";
 import {
   recoverHermesConfigurationOnStartup,
   resolveHermesHomeDirectory
@@ -415,24 +416,17 @@ async function initializeServices(): Promise<void> {
     agentGateway = new AgentGateway(browserService.core, { runtimeDirectory, windowsHostPath });
     agentGateway.setEnabled(settings.get().browserAgentAccess);
     await agentGateway.start();
-    const helperPath = app.isPackaged
-      ? join(process.resourcesPath, "agent-browser", "mcp-helper.mjs")
-      : join(app.getAppPath(), "src", "agent-browser", "mcp-helper.mjs");
-    agentBrowserHelper = {
-      command: process.execPath,
-      args: [helperPath],
-      env: { ELECTRON_RUN_AS_NODE: "1" }
-    };
-    const orchestrationHelperPath = app.isPackaged
-      ? join(process.resourcesPath, "agent-browser", "orchestration-helper.mjs")
-      : join(app.getAppPath(), "src", "agent-browser", "orchestration-helper.mjs");
+    // The native canvastty-helper where it was built for this platform, the .mjs helpers otherwise.
+    const helpers = agentHelperLaunches({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+      execPath: process.execPath
+    });
+    agentBrowserHelper = helpers.browser;
     agentBrowserBridge = new AgentBrowserBridge(agentGateway, {
       helper: agentBrowserHelper,
-      orchestrationHelper: {
-        command: process.execPath,
-        args: [orchestrationHelperPath],
-        env: { ELECTRON_RUN_AS_NODE: "1" }
-      },
+      orchestrationHelper: helpers.orchestration,
       providerClis,
       runtimeDirectory,
       hermesHomeDirectory,
@@ -472,23 +466,13 @@ async function initializeServices(): Promise<void> {
       httpHooks: true
     });
     await runtimeGateway.start();
-    const runtimeHelperPath = app.isPackaged
-      ? join(process.resourcesPath, "agent-runtime", "hook-helper.mjs")
-      : join(app.getAppPath(), "src", "agent-runtime", "hook-helper.mjs");
     const openCodePluginPath = app.isPackaged
       ? join(process.resourcesPath, "agent-runtime", "opencode-plugin.mjs")
       : join(app.getAppPath(), "src", "agent-runtime", "opencode-plugin.mjs");
     const pluginHookRunnerPath = app.isPackaged
       ? join(process.resourcesPath, "agent-runtime", "plugin-hook-runner.mjs")
       : join(app.getAppPath(), "src", "agent-runtime", "plugin-hook-runner.mjs");
-    const permissionGatePath = app.isPackaged
-      ? join(process.resourcesPath, "agent-runtime", "permission-gate.mjs")
-      : join(app.getAppPath(), "src", "agent-runtime", "permission-gate.mjs");
-    agentRuntimeHelper = {
-      command: process.execPath,
-      args: [runtimeHelperPath],
-      env: { ELECTRON_RUN_AS_NODE: "1" }
-    };
+    agentRuntimeHelper = helpers.hook;
     const claudeHttpHookPolicy = new ClaudeHttpHookPolicy();
     agentRuntimeBridge = new AgentRuntimeBridge(runtimeGateway, {
       helper: agentRuntimeHelper,
@@ -498,7 +482,7 @@ async function initializeServices(): Promise<void> {
       kimiHomeDirectory,
       recoverOnStart: true,
       coreHooksEnabled: settings.get().agentLifecycleHooksEnabled,
-      permissionGate: { command: process.execPath, args: [permissionGatePath], env: { ELECTRON_RUN_AS_NODE: "1" } },
+      permissionGate: helpers.permissionGate,
       wantsDecisions: (provider) => decisionHooks.wanted(provider),
       decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
       claudeHttpHooks: (facts) => claudeHttpHookPolicy.verdict(facts),

@@ -14,6 +14,7 @@ jobs:
     name: Package ${{ matrix.name }}
     env:
       CANVASTTY_GITHUB_CLIENT_ID: ${{ vars.CANVASTTY_GITHUB_CLIENT_ID }}
+      CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -42,10 +43,17 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Set up Go (canvastty-helper, standard library only)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
       - name: Install locked dependencies
         run: npm ci
       - name: Audit repository secrets
         run: npm run audit:secrets
+      - name: Build the native helper (the parity tests run it)
+        run: npm run build:helpers -- --host
       - name: Run tests
         run: npm test
       - name: Build installers
