@@ -68,7 +68,7 @@ test("App mounts the canvas only with the snapshot and the heavy surfaces only a
   assert.ok(stable.indexOf('markBootOnce("firstStableFrame")') < stable.indexOf("setSurfacesMounted(true)"));
 
   // Browser runtime, HOME media and limits wait for the surfaces phase.
-  for (const call of ["browserApi.open()", "window.canvasTTY.media.read(current.mediaPath)", "window.canvasTTY.limits.get()"]) {
+  for (const call of ["browserApi.open()", "window.canvasTTY.media.read(mediaPath)", "window.canvasTTY.limits.get()"]) {
     const at = source.indexOf(call);
     assert.notEqual(at, -1, call);
     const effectStart = source.lastIndexOf("useEffect(() => {", at);

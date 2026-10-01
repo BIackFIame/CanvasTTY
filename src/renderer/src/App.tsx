@@ -179,6 +179,29 @@ const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {
 const DEFAULT_FOCUS_ZOOM = 0.92;
 const PLUGIN_CANVAS_FOCUS_ZOOM = 1;
 
+function startHomeMediaRead(
+  path: string,
+  read: (path: string) => Promise<string | null>,
+  isCurrent: () => boolean,
+  setMediaData: (data: string | null) => void
+): () => void {
+  let active = true;
+  void read(path).then((data) => {
+    if (active && isCurrent()) setMediaData(data);
+  }).catch(() => undefined);
+  return () => { active = false; };
+}
+
+function consumeProvidedHomeMediaPath(
+  path: string,
+  providedPathRef: { current: { path: string } | null }
+): boolean {
+  const provided = providedPathRef.current;
+  if (!provided) return false;
+  providedPathRef.current = null;
+  return provided.path === path;
+}
+
 function TerminalBorderSkinStyleHost({ skinId }: { skinId: AppSettings["terminalBorderSkin"] }): null {
   const controllerRef = useRef<TerminalBorderSkinStyleController | null>(null);
   const activeSkinIdRef = useRef(skinId);
@@ -264,6 +287,8 @@ export function App(): React.JSX.Element {
   const setCamera = cameraStore.set;
   const isHomeCamera = useRef(true);
   const browserCanvasRef = useRef<BrowserCanvasState | null>(null);
+  const mediaReadGenerationRef = useRef(0);
+  const providedMediaRef = useRef<{ path: string } | null>(null);
   /**
    * Latest settings, kept in step synchronously by the mutators below. A canvas gesture
    * can commit several windows in one tick; deriving each write from the render-captured
@@ -381,12 +406,28 @@ export function App(): React.JSX.Element {
       void browserApi.open().then((state) => { if (active) setBrowser(state); })
         .catch((error: unknown) => showToast(error instanceof Error ? error.message : t(current.locale, "browserActionFailed")));
     }
-    if (current.mediaPath) {
-      void window.canvasTTY.media.read(current.mediaPath).then((data) => { if (active) setMediaData(data); })
-        .catch(() => undefined);
-    }
     return () => { active = false; };
   }, [showToast, surfacesMounted]);
+
+  useEffect(() => {
+    // HOME media remains deferred until after the first stable frame, then follows settings changes.
+    if (!surfacesMounted) return;
+    const path = settings.mediaPath;
+    if (!path) {
+      setMediaData(null);
+      return;
+    }
+
+    if (consumeProvidedHomeMediaPath(path, providedMediaRef)) return;
+
+    const generation = ++mediaReadGenerationRef.current;
+    return startHomeMediaRead(
+      path,
+      (mediaPath) => window.canvasTTY.media.read(mediaPath),
+      () => mediaReadGenerationRef.current === generation && settingsRef.current.mediaPath === path,
+      setMediaData
+    );
+  }, [settings.mediaPath, surfacesMounted]);
 
   useEffect(() => {
     const browserApi = window.canvasTTY.browser;
@@ -596,10 +637,18 @@ export function App(): React.JSX.Element {
       const selection = await window.canvasTTY.dialog.pickMedia();
       if (!selection) return;
 
+      if (settingsRef.current.mediaPath === selection.path) {
+        // A same-path deferred read may already be pending; its result must not replace this data URL.
+        mediaReadGenerationRef.current += 1;
+      } else {
+        // Settings can notify before update() resolves, so suppress the path effect synchronously.
+        providedMediaRef.current = { path: selection.path };
+      }
       const updated = await window.canvasTTY.settings.update({ mediaPath: selection.path });
       setSettings(updated);
       setMediaData(selection.dataUrl);
     } catch {
+      providedMediaRef.current = null;
       showToast(t(settings.locale, "mediaFailed"));
     }
   }, [settings.locale, showToast]);
@@ -607,6 +656,7 @@ export function App(): React.JSX.Element {
   const removeMedia = useCallback(async (): Promise<void> => {
     try {
       const updated = await window.canvasTTY.settings.update({ mediaPath: null });
+      mediaReadGenerationRef.current += 1;
       setSettings(updated);
       setMediaData(null);
     } catch {
