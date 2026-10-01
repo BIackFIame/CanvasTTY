@@ -2,9 +2,9 @@ import { ORCHESTRATION_MCP_SERVER_NAME } from "../../agent-browser/orchestration
 import { MCP_SERVER_NAME } from "../../agent-browser/tool-catalog.mjs";
 import { ORCHESTRATION_ENV } from "./agent-browser/orchestration-protocol.ts";
 import { otherSpellings } from "./onDiskPath.ts";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { lazyRequire } from "../lazyRequire.ts";
+import { openCodeConfigPaths, parseJsonc, readInspectedFile } from "./inspectedConfig.ts";
 
 const lazyYaml = lazyRequire<typeof import("yaml")>("yaml");
 
@@ -154,49 +154,54 @@ export interface OpenCodePersonRules {
 export function openCodePersonRules(
   environment: Readonly<Record<string, string | undefined>>,
   cwd?: string,
-  readFile: (path: string) => string | null = readTextFile
+  readFile?: (path: string) => string | null
 ): OpenCodePersonRules {
-  const home = environment.HOME ?? "";
-  const configHome = environment.XDG_CONFIG_HOME || (home ? join(home, ".config") : "");
-  const globalDir = configHome ? join(configHome, "opencode") : "";
-  const projectDirs = cwd ? ancestors(cwd).reverse() : [];
-  const configDirs = [
-    ...(globalDir ? [globalDir] : []),
-    ...projectDirs.map((dir) => join(dir, ".opencode")),
-    ...(environment.OPENCODE_CONFIG_DIR ? [environment.OPENCODE_CONFIG_DIR] : [])
-  ];
-  const jsonFiles = [
-    ...(globalDir ? ["config.json", "opencode.json", "opencode.jsonc"].map((name) => join(globalDir, name)) : []),
-    ...(environment.OPENCODE_CONFIG ? [environment.OPENCODE_CONFIG] : []),
-    ...projectDirs.flatMap((dir) => ["opencode.json", "opencode.jsonc"].map((name) => join(dir, name))),
-    ...configDirs.slice(globalDir ? 1 : 0).flatMap((dir) => ["opencode.json", "opencode.jsonc"].map((name) => join(dir, name)))
-  ];
+  const paths = openCodeConfigPaths(environment, cwd);
   let top: PermissionBlock = {};
   let fileAgent: PermissionBlock = {};
   let unknown = false;
+  const fileCache = new Map<string, string | null>();
+  const read = (path: string): string | null => {
+    if (fileCache.has(path)) return fileCache.get(path)!;
+    let text: string | null;
+    if (readFile) {
+      try { text = readFile(path); }
+      catch { unknown = true; text = null; }
+    } else {
+      const file = readInspectedFile(path);
+      if (file.kind === "uninspectable") unknown = true;
+      text = file.kind === "text" ? file.text : null;
+    }
+    fileCache.set(path, text);
+    return text;
+  };
   const take = (value: unknown, into: "top" | "agent"): void => {
     const block = permissionBlock(value);
     if (block === null) { unknown = true; return; }
     if (into === "top") top = mergeDeep(top, block);
     else fileAgent = mergeDeep(fileAgent, block);
   };
-  for (const file of jsonFiles) {
-    const text = readFile(file);
-    if (text === null) continue;
-    const parsed = parseLoose(text);
-    if (!isObject(parsed)) { if (text.trim()) unknown = true; continue; }
-    if (parsed.permission !== undefined) take(parsed.permission, "top");
-    const agent = isObject(parsed.agent) && isObject(parsed.agent.build) ? parsed.agent.build.permission : undefined;
-    if (agent !== undefined) take(agent, "agent");
-  }
-  for (const dir of configDirs) {
-    for (const file of [join(dir, "agent", "build.md"), join(dir, "agents", "build.md")]) {
-      const text = readFile(file);
+  for (const source of paths.orderedSources) {
+    if (source.kind === "json") {
+      const text = read(source.path);
+      if (text === null) continue;
+      const parsed = parseLoose(text);
+      if (!isObject(parsed)) { if (text.trim()) unknown = true; continue; }
+      if (parsed.permission !== undefined) take(parsed.permission, "top");
+      const agent = isObject(parsed.agent) && isObject(parsed.agent.build) ? parsed.agent.build.permission : undefined;
+      if (agent !== undefined) take(agent, "agent");
+      continue;
+    }
+    const permissions: unknown[] = [];
+    for (const file of [join(source.directory, "agent", "build.md"), join(source.directory, "agents", "build.md")]) {
+      const text = read(file);
       if (text === null) continue;
       const front = markdownFrontMatter(text);
       if (front === null) { unknown = true; continue; }
-      if (front.permission !== undefined) take(front.permission, "agent");
+      if (front.permission !== undefined) permissions.push(front.permission);
     }
+    if (permissions.length > 1) unknown = true;
+    else if (permissions.length === 1) take(permissions[0], "agent");
   }
   const inline = parseLoose(environment[OPENCODE_CONFIG_CONTENT] ?? "");
   let inlineAgent: PermissionBlock = {};
@@ -329,26 +334,10 @@ function markdownFrontMatter(text: string): Record<string, unknown> | null {
   }
 }
 
-function ancestors(folder: string): string[] {
-  const found: string[] = [];
-  let current = folder;
-  for (let i = 0; i < 64; i++) {
-    found.push(current);
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return found;
-}
-
 function parseLoose(text: string): unknown {
   if (!text.trim()) return null;
-  try { return JSON.parse(text); } catch { /* JSONC */ }
-  try { return JSON.parse(text.replace(/\/\*[\s\S]*?\*\//gu, "").replace(/(^|[^:"\\])\/\/.*$/gmu, "$1").replace(/,\s*([}\]])/gu, "$1")); } catch { return null; }
-}
-
-function readTextFile(path: string): string | null {
-  try { return readFileSync(path, "utf8"); } catch { return null; }
+  const parsed = parseJsonc(text);
+  return parsed.ok ? parsed.value : null;
 }
 
 /** The auto rules (see openCodeAutoEnvironment); insertion order matters, the last matching rule wins. */
