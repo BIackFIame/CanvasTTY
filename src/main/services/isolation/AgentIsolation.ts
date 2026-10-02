@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -14,6 +15,10 @@ export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 export const ISOLATION_FOLDER_PREFIX = "ctty-iso-";
 /** Tells the agent inside the layer what it may do (its value is ISOLATION_NOTE). */
 export const ISOLATION_ENV = "CANVASTTY_ISOLATION";
+/** Where the docs say how to let bubblewrap create its namespaces (Ubuntu 24.04 and later restrict them). */
+export const BUBBLEWRAP_USERNS_DOCS = "docs/installing-and-security.md#linux-when-bubblewrap-cannot-start";
+/** A failed bubblewrap check is repeated after this long, so allowing it takes effect without a restart. */
+const BUBBLEWRAP_PROBE_RETRY_MS = 60_000;
 export const ISOLATION_NOTE = "CanvasTTY agent isolation: files can be written only inside the project folder, $TMPDIR and this CLI's own folders; SSH/cloud keys, other agents' credentials and CanvasTTY's tokens cannot be read; other processes, apps and daemons are out of reach. \"Operation not permitted\" outside that is this rule: do the work inside the project, or tell the person what you need.";
 
 export interface AgentIsolationOptions {
@@ -32,6 +37,13 @@ export interface AgentIsolationOptions {
   exists?: (path: string) => boolean;
   /** Linux: the host folders and placeholders bubblewrap needs (shared across launches); tests pass their own. */
   linuxHostPaths?: LinuxHostPaths;
+  /**
+   * Linux: runs bubblewrap once with the namespaces a launch uses and returns null when it works, or what it said.
+   * bubblewrap can be installed and still unable to create an unprivileged user namespace (Ubuntu 24.04's AppArmor
+   * `kernel.apparmor_restrict_unprivileged_userns=1`). Tests pass their own.
+   */
+  bubblewrapProbe?: (bwrap: string) => string | null;
+  now?: () => number;
 }
 
 export interface IsolationDecisionInput {
@@ -87,6 +99,8 @@ export class AgentIsolation {
   private readonly hostEnvironment: Readonly<Record<string, string | undefined>>;
   private bubblewrap: string | null | undefined;
   private readonly linuxHostPaths: LinuxHostPaths;
+  /** The last bubblewrap check: a working one is kept, a failed one is repeated after BUBBLEWRAP_PROBE_RETRY_MS. */
+  private bubblewrapCheck: { path: string; failure: string | null; at: number } | null = null;
 
   constructor(options: AgentIsolationOptions) {
     this.options = options;
@@ -106,7 +120,11 @@ export class AgentIsolation {
     }
     if (this.platform === "linux") {
       if (this.bubblewrap === undefined) this.bubblewrap = findOnPath("bwrap", exists);
-      return this.bubblewrap ? { layer: "bubblewrap" } : { reason: "bubblewrap (bwrap) is not installed; install it to isolate agents on Linux." };
+      if (!this.bubblewrap) return { reason: "bubblewrap (bwrap) is not installed; install it to isolate agents on Linux." };
+      const failure = this.bubblewrapFailure(this.bubblewrap);
+      return failure === null
+        ? { layer: "bubblewrap" }
+        : { reason: `bubblewrap (bwrap) is installed but cannot create its sandbox here (${failure}); Ubuntu 24.04 and later block unprivileged user namespaces through AppArmor. ${BUBBLEWRAP_USERNS_DOCS} says how to allow it.` };
     }
     if (this.platform === "win32") return { reason: "CanvasTTY has no agent isolation layer on Windows yet." };
     return { reason: `CanvasTTY has no agent isolation layer on ${this.platform}.` };
@@ -214,6 +232,17 @@ export class AgentIsolation {
     }
   }
 
+  /** Null when bubblewrap can start here; cached, so a launch costs one check at most once a minute. */
+  private bubblewrapFailure(bwrap: string): string | null {
+    const now = (this.options.now ?? Date.now)();
+    const last = this.bubblewrapCheck;
+    if (last && last.path === bwrap && (last.failure === null || now - last.at < BUBBLEWRAP_PROBE_RETRY_MS)) return last.failure;
+    let failure: string | null;
+    try { failure = (this.options.bubblewrapProbe ?? probeBubblewrap)(bwrap); } catch (error) { failure = error instanceof Error ? error.message : String(error); }
+    this.bubblewrapCheck = { path: bwrap, failure, at: now };
+    return failure;
+  }
+
   private enabled(): boolean {
     try { return this.options.enabled() !== false; } catch { return true; }
   }
@@ -228,6 +257,19 @@ function removeMountPoint(hooks: string): void {
     for (const name of names) rmdirSync(join(gitDir, name));
     rmdirSync(gitDir);
   } catch { /* not empty, or already gone */ }
+}
+
+/** Starts `true` under bubblewrap with the namespaces a launch gets: null when it runs, else bubblewrap's first line. */
+export function probeBubblewrap(bwrap: string): string | null {
+  const result = spawnSync(bwrap, ["--die-with-parent", "--unshare-pid", "--unshare-ipc", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], {
+    stdio: ["ignore", "ignore", "pipe"],
+    encoding: "utf8",
+    timeout: 5_000
+  });
+  if (result.status === 0) return null;
+  const said = (result.stderr ?? "").split("\n").map((line) => line.trim()).find(Boolean);
+  const detail = said ?? result.error?.message ?? (result.signal ? `stopped by ${result.signal}` : `exit code ${String(result.status)}`);
+  return detail.length > 200 ? `${detail.slice(0, 199)}…` : detail;
 }
 
 function findOnPath(name: string, exists: (path: string) => boolean): string | null {

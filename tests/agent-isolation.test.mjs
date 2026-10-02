@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { AgentIsolation, ISOLATION_FOLDER_PREFIX } from "../src/main/services/isolation/AgentIsolation.ts";
+import { AgentIsolation, ISOLATION_FOLDER_PREFIX, probeBubblewrap } from "../src/main/services/isolation/AgentIsolation.ts";
 import { isolationPaths } from "../src/main/services/isolation/isolationPaths.ts";
 import { seatbeltProfile } from "../src/main/services/isolation/seatbelt.ts";
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
@@ -92,6 +92,50 @@ test("the isolation decision: delegated and non-manual launches, the person's se
   assert.match(linux.decide({ provider: "claude", profile: "auto", delegated: true }).isolation.reason, /bubblewrap \(bwrap\) is not installed/u);
   assert.throws(() => windows.wrap({ sessionId: "s", provider: "codex", cwd: "C:\\p", command: "codex", args: [], env: {} }),
     /not available: .* not started without it/u, "fails closed");
+});
+
+test("bubblewrap that cannot create a user namespace (Ubuntu's AppArmor restriction) counts as no layer, and is checked again later", () => {
+  let now = 0;
+  const calls = [];
+  let answer = "bwrap: setting up uid map: Permission denied";
+  const linux = new AgentIsolation({ userDataPath: "/u", enabled: () => true, platform: "linux", bubblewrapPath: "/usr/bin/bwrap", now: () => now,
+    bubblewrapProbe: (bwrap) => { calls.push(bwrap); return answer; } });
+  const sub = linux.decide({ provider: "codex", profile: "auto", delegated: true });
+  assert.deepEqual([sub.apply, sub.profile, sub.isolation.state, sub.refuse], [false, "normal", "unavailable", undefined], "a subagent runs in Manual instead of being refused");
+  assert.match(sub.isolation.reason, /bubblewrap \(bwrap\) is installed but cannot create its sandbox here \(bwrap: setting up uid map: Permission denied\)/u);
+  assert.match(sub.isolation.reason, /AppArmor\. docs\/installing-and-security\.md#linux-when-bubblewrap-cannot-start says how to allow it\. It runs in normal \(it asks\) instead of auto\./u);
+  const own = linux.decide({ provider: "claude", profile: "acceptEdits", delegated: false });
+  assert.deepEqual([own.apply, own.profile, own.isolation.state], [false, "acceptEdits", "unavailable"], "the person's own launch is not refused either");
+  assert.equal(linux.containment(), false);
+  assert.throws(() => linux.wrap({ sessionId: "s", provider: "codex", cwd: "/p", command: "codex", args: [], env: {} }), /not available: bubblewrap \(bwrap\) is installed but/u);
+  assert.deepEqual(calls, ["/usr/bin/bwrap"], "checked once while the answer is fresh");
+
+  now = 59_000;
+  linux.decide({ provider: "codex", profile: "auto", delegated: true });
+  assert.equal(calls.length, 1);
+  answer = null; // the person allowed it (an AppArmor profile for bwrap, or the sysctl)
+  now = 61_000;
+  assert.deepEqual(linux.decide({ provider: "codex", profile: "auto", delegated: true }), { apply: true, profile: "auto", isolation: { state: "on", layer: "bubblewrap" } });
+  assert.equal(calls.length, 2);
+  now = 10_000_000;
+  answer = "would not be asked again";
+  assert.equal(linux.decide({ provider: "codex", profile: "auto", delegated: true }).apply, true, "a working bubblewrap is kept");
+  assert.equal(calls.length, 2);
+
+  const throwing = new AgentIsolation({ userDataPath: "/u", enabled: () => true, platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => { throw new Error("spawn EACCES"); } });
+  assert.match(throwing.decide({ provider: "codex", profile: "auto", delegated: true }).isolation.reason, /cannot create its sandbox here \(spawn EACCES\)/u);
+});
+
+test("the bubblewrap check reports what bubblewrap said, and a missing binary", { skip: process.platform === "win32" ? "POSIX shell script" : false }, async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ctty-bwprobe-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fake = join(dir, "bwrap");
+  await writeFile(fake, "#!/bin/sh\necho 'bwrap: setting up uid map: Permission denied' >&2\nexit 1\n", { mode: 0o755 });
+  assert.equal(probeBubblewrap(fake), "bwrap: setting up uid map: Permission denied");
+  const ok = join(dir, "ok");
+  await writeFile(ok, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  assert.equal(probeBubblewrap(ok), null);
+  assert.match(probeBubblewrap(join(dir, "missing")), /ENOENT/u);
 });
 
 test("the paths: the project and the CLI's own folders writable; other CLIs' credentials, keys and CanvasTTY's tokens unreadable", async (t) => {
@@ -209,7 +253,7 @@ test("bubblewrap: git hooks the agent could create later never reach the real pr
 
 test("bubblewrap: the empty .git a throwaway hooks mount leaves behind is removed; a repository made inside stays", async (t) => {
   const w = await world(t);
-  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
   const launch = { sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env };
   let wrapped = layer.wrap(launch);
   // What bwrap does for the mount point.
@@ -371,7 +415,7 @@ test("bubblewrap: the handed home is writable but its permission settings are re
 
 test("an isolated launch gets an empty git template, so git init writes no hooks", async (t) => {
   const w = await world(t);
-  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", exists: () => true });
+  const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
   const wrapped = layer.wrap({ sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });
   try {
     assert.ok(wrapped.env.GIT_TEMPLATE_DIR);

@@ -67,6 +67,25 @@ OpenCode Auto inspects only regular local config files of at most 1 MiB. An exis
 
 **Git audit.** When an isolated agent session ends, is closed or is restored after a quit, CanvasTTY checks the repositories under its folder whose git folder changed. If git would now run something outside isolation (a `core.hooksPath`, a filter or diff driver, `fsmonitor`, a hook file, `info/attributes`), a notice lists exactly what changed; **Neutralize** removes those keys and disables those files, **Keep as is** leaves them. It does not undo other file changes inside the project.
 
+### Linux: when bubblewrap cannot start
+
+Ubuntu 24.04 and later (and other distributions with `kernel.apparmor_restrict_unprivileged_userns=1`) let only programs with an AppArmor profile create unprivileged user namespaces, which bubblewrap needs. CanvasTTY checks this once (again a minute after a failure) and, when `bwrap` is installed but cannot start, treats it like a computer without an isolation layer: subagents and plugin-started agents run in Manual, and the card says why. To allow it, either give bubblewrap its own profile (recommended, it affects only `bwrap`):
+
+```sh
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+or lift the restriction for every program with `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0` (add the line to `/etc/sysctl.d/60-userns.conf` to keep it after a reboot). New launches use the layer within a minute; no restart is needed.
+
 ## Repository guards
 
 ```bash
