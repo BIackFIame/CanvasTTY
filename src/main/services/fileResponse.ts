@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open } from "node:fs/promises";
+import { open, type FileHandle } from "node:fs/promises";
 import { Readable } from "node:stream";
 
 export async function streamFile(
@@ -21,7 +21,7 @@ export async function streamFile(
 
 async function respond(
   request: Request,
-  handle: import("node:fs/promises").FileHandle,
+  handle: FileHandle,
   mimeType: string,
   extraHeaders: Readonly<Record<string, string>>,
   streaming: () => void
