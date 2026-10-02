@@ -1,21 +1,18 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 import type {
-  BrowserCanvasState,
   CameraState,
-  CanvasRegion,
   LocaleId,
   MinimapInteractionMode,
-  PluginCanvasInstance,
   ProviderId,
   SessionBounds,
-  SessionSnapshot,
-  Size,
-  StickyNote
+  Size
 } from "../../../../shared/contracts";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { t } from "../../lib/i18n";
+import { useCameraSelector, type CameraStore } from "./cameraStore";
 import { browserLayerId, noteLayerId, pluginLayerId, terminalLayerId } from "./canvasSelectionGesture";
+import { minimapContentEqual, type MinimapContent } from "./minimapContent";
 import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
@@ -26,16 +23,9 @@ import {
   minimapWorldPoint
 } from "./minimapGeometry";
 
-interface CanvasMinimapProps {
+interface CanvasMinimapProps extends MinimapContent {
   viewport: RefObject<HTMLDivElement | null>;
-  camera: CameraState;
-  homeBounds: SessionBounds;
-  canvasRegions: readonly CanvasRegion[];
-  sessions: readonly SessionSnapshot[];
-  stickyNotes: readonly StickyNote[];
-  pluginCanvas: readonly PluginCanvasInstance[];
-  browserCanvas: BrowserCanvasState | null;
-  layerOrder: readonly string[];
+  camera: CameraStore;
   locale: LocaleId;
   interactionMode: MinimapInteractionMode;
   onCameraChange(camera: CameraState): void;
@@ -55,7 +45,16 @@ interface MinimapDragState {
   moved: boolean;
 }
 
-export function CanvasMinimap({
+export const CanvasMinimap = memo(CanvasMinimapView, (previous, next) => (
+  previous.viewport === next.viewport
+  && previous.camera === next.camera
+  && previous.locale === next.locale
+  && previous.interactionMode === next.interactionMode
+  && previous.onCameraChange === next.onCameraChange
+  && minimapContentEqual(previous, next)
+));
+
+function CanvasMinimapView({
   viewport,
   camera,
   homeBounds,
@@ -70,10 +69,8 @@ export function CanvasMinimap({
   onCameraChange
 }: CanvasMinimapProps): React.JSX.Element {
   const surface = useRef<HTMLSpanElement>(null);
-  const cameraRef = useRef(camera);
   const dragState = useRef<MinimapDragState | null>(null);
   const [viewportSize, setViewportSize] = useState<Size>({ width: 1, height: 1 });
-  cameraRef.current = camera;
 
   useEffect(() => {
     const element = viewport.current;
@@ -107,27 +104,10 @@ export function CanvasMinimap({
     () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds)]),
     [canvasRegions, entities, homeBounds]
   );
-  const worldViewport = useMemo(
-    () => cameraWorldViewport(camera, viewportSize),
-    [camera, viewportSize]
-  );
-  const viewportArea = useMemo(
-    () => minimapAreaForBounds(worldViewport, worldBounds),
-    [worldBounds, worldViewport]
-  );
-  const viewportEdge = useMemo(
-    () => minimapEdgePointForBounds(worldViewport, worldBounds),
-    [worldBounds, worldViewport]
-  );
   const homeArea = useMemo(
     () => minimapAreaForBounds(homeBounds, worldBounds),
     [homeBounds, worldBounds]
   );
-
-  const applyCamera = (next: CameraState): void => {
-    cameraRef.current = next;
-    onCameraChange(next);
-  };
 
   const navigate = (clientX: number, clientY: number): void => {
     const element = surface.current;
@@ -138,8 +118,8 @@ export function CanvasMinimap({
       x: (clientX - bounds.left) / bounds.width,
       y: (clientY - bounds.top) / bounds.height
     }, worldBounds);
-    const current = cameraRef.current;
-    applyCamera({
+    const current = camera.get();
+    onCameraChange({
       zoom: current.zoom,
       x: viewportSize.width / 2 - target.x * current.zoom,
       y: viewportSize.height / 2 - target.y * current.zoom
@@ -168,7 +148,7 @@ export function CanvasMinimap({
       worldBounds
     );
     if (!next) return;
-    applyCamera(next);
+    onCameraChange(next);
   };
 
   return (
@@ -188,7 +168,7 @@ export function CanvasMinimap({
           dragState.current = {
             pointerId: event.pointerId,
             startClient: { x: event.clientX, y: event.clientY },
-            startCamera: cameraRef.current,
+            startCamera: camera.get(),
             moved: false
           };
         } else {
@@ -225,8 +205,8 @@ export function CanvasMinimap({
                 : null;
         if (!delta) return;
         event.preventDefault();
-        const current = cameraRef.current;
-        applyCamera({ ...current, x: current.x + delta.x, y: current.y + delta.y });
+        const current = camera.get();
+        onCameraChange({ ...current, x: current.x + delta.x, y: current.y + delta.y });
       }}
     >
       <span className="canvas-minimap__surface" ref={surface} aria-hidden="true">
@@ -264,12 +244,27 @@ export function CanvasMinimap({
             );
           })}
         </span>
-        {viewportArea && <i className="canvas-minimap__viewport" style={areaStyle(viewportArea)} />}
-        {viewportEdge && (
-          <i className="canvas-minimap__viewport-edge" style={pointStyle(viewportEdge)} />
-        )}
+        <MinimapViewport camera={camera} viewportSize={viewportSize} worldBounds={worldBounds} />
       </span>
     </button>
+  );
+}
+
+// Only this layer subscribes to pan/zoom; the workspace rectangles and icons do not render per camera event.
+function MinimapViewport({ camera, viewportSize, worldBounds }: {
+  camera: CameraStore;
+  viewportSize: Size;
+  worldBounds: SessionBounds;
+}): React.JSX.Element {
+  const current = useCameraSelector(camera, (value) => value);
+  const worldViewport = cameraWorldViewport(current, viewportSize);
+  const area = minimapAreaForBounds(worldViewport, worldBounds);
+  const edge = minimapEdgePointForBounds(worldViewport, worldBounds);
+  return (
+    <>
+      {area && <i className="canvas-minimap__viewport" style={areaStyle(area)} />}
+      {edge && <i className="canvas-minimap__viewport-edge" style={pointStyle(edge)} />}
+    </>
   );
 }
 

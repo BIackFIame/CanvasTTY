@@ -5,7 +5,7 @@ import type { CameraState } from "../../../../shared/contracts";
  * The canvas camera outside React state. A pan or zoom changes it on every pointer or wheel event; kept in
  * App state it rendered the whole application tree per event. The store applies the scene transform
  * directly (see `sceneTransform`), and only the parts that really depend on the camera subscribe:
- * the minimap and the browser card (its native view follows the card) take every change, cards take
+ * the minimap's camera rectangle and the browser card (its native view follows the card) take every change, cards take
  * derived values that change rarely (summary mode, WebGL eligibility), and pointer handlers read `get()`.
  */
 export interface CameraStore {

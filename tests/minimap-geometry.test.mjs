@@ -11,6 +11,7 @@ import {
   minimapWorldBounds,
   minimapWorldPoint
 } from "../src/renderer/src/features/workspace/minimapGeometry.ts";
+import { minimapContentEqual } from "../src/renderer/src/features/workspace/minimapContent.ts";
 
 const home = {
   position: { x: 0, y: 0 },
@@ -45,7 +46,7 @@ test("minimap projection uses one scale for both axes and never stretches object
   };
   const projected = minimapAreaForBounds(square, world);
 
-  assert.equal(worldUnitsPerPixelX, worldUnitsPerPixelY);
+  assert.ok(Math.abs(worldUnitsPerPixelX - worldUnitsPerPixelY) < 1e-9);
   assert.ok(projected);
   assert.equal(
     Math.round(projected.width * MINIMAP_SURFACE_SIZE.width * 1_000),
@@ -147,4 +148,58 @@ test("minimap drag follows the same grab direction as empty-canvas drag", () => 
   assert.equal(Math.abs(dragged.x - 186) < 1e-9, true);
   assert.equal(Math.abs(dragged.y - 252) < 1e-9, true);
   assert.equal(dragged.zoom, 0.5);
+});
+
+test("session activity and text changes do not invalidate the workspace layer", () => {
+  const scene = {
+    homeBounds: home,
+    canvasRegions: [],
+    sessions: [{ ...home, id: "session", provider: "codex", title: "Original", buffer: "", status: "idle" }],
+    stickyNotes: [{ ...home, id: "note", text: "Original note" }],
+    pluginCanvas: [],
+    browserCanvas: null,
+    layerOrder: ["terminal:session", "note:note"]
+  };
+  const updated = {
+    ...scene,
+    homeBounds: { position: { ...home.position }, size: { ...home.size } },
+    sessions: [{ ...scene.sessions[0], title: "Renamed", buffer: "New output", status: "working" }],
+    stickyNotes: [{ ...scene.stickyNotes[0], text: "Edited note" }],
+    layerOrder: [...scene.layerOrder]
+  };
+  assert.equal(minimapContentEqual(scene, updated), true);
+
+  for (const change of [
+    { provider: "hermes" },
+    { id: "replacement" },
+    { position: { x: 100, y: 0 } },
+    { size: { width: 2_000, height: 1_062 } }
+  ]) {
+    assert.equal(minimapContentEqual(scene, { ...scene, sessions: [{ ...scene.sessions[0], ...change }] }), false);
+  }
+  assert.equal(minimapContentEqual(scene, { ...scene, sessions: [] }), false);
+  assert.equal(minimapContentEqual(scene, { ...scene, layerOrder: [...scene.layerOrder].reverse() }), false);
+  assert.equal(minimapContentEqual(scene, { ...scene, homeBounds: { ...home, size: { width: 2_000, height: 1_062 } } }), false);
+});
+
+test("region appearance, plugin geometry and Browser visibility invalidate the workspace layer", () => {
+  const scene = {
+    homeBounds: home,
+    canvasRegions: [{ ...home, id: "region", color: "#B8CF99", title: "Original" }],
+    sessions: [],
+    stickyNotes: [],
+    pluginCanvas: [{ ...home, id: "plugin" }],
+    browserCanvas: { ...home },
+    layerOrder: ["plugin:plugin", "browser"]
+  };
+  assert.equal(minimapContentEqual(scene, {
+    ...scene, canvasRegions: [{ ...scene.canvasRegions[0], title: "Renamed" }]
+  }), true);
+  assert.equal(minimapContentEqual(scene, {
+    ...scene, canvasRegions: [{ ...scene.canvasRegions[0], color: "#9CC7DC" }]
+  }), false);
+  assert.equal(minimapContentEqual(scene, {
+    ...scene, pluginCanvas: [{ ...scene.pluginCanvas[0], position: { x: 100, y: 0 } }]
+  }), false);
+  assert.equal(minimapContentEqual(scene, { ...scene, browserCanvas: null }), false);
 });
