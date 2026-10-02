@@ -1,5 +1,4 @@
-import type { Point, SessionBounds } from "../../../../shared/contracts.ts";
-import { isRenameInputTarget, isShortcutCaptureTarget } from "../../lib/shortcuts.ts";
+import type { Point, SessionBounds } from "../../../../shared/contracts";
 
 export const browserCanvasWidgetId = "browser";
 
@@ -54,29 +53,11 @@ export function isPriorityLocalCanvasWheelTarget(target: EventTarget | null): bo
     && target.closest('[data-canvas-wheel-priority="local"]') !== null;
 }
 
-export type CanvasFocusDirection = "up" | "down" | "left" | "right";
-
-const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
-  ArrowUp: "up",
-  ArrowDown: "down",
-  ArrowLeft: "left",
-  ArrowRight: "right"
-};
-
 export function acceptsTextInput(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest("textarea, input, select, [contenteditable='true']"));
 }
 
-export function canvasFocusShortcut(
-  event: Pick<KeyboardEvent, "key" | "altKey" | "ctrlKey" | "metaKey" | "shiftKey" | "repeat" | "target">
-): CanvasFocusDirection | null {
-  if (event.repeat || !event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return null;
-  const direction = CANVAS_FOCUS_ARROWS[event.key];
-  if (!direction) return null;
-  if (event.target instanceof Element && event.target.closest(".xterm-helper-textarea")) return direction;
-  if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target) || acceptsTextInput(event.target)) return null;
-  return direction;
-}
+export type CanvasFocusDirection = "up" | "down" | "left" | "right";
 
 export interface CanvasFocusCandidate {
   id: string;

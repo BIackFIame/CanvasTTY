@@ -86,7 +86,6 @@ import type { SnapLayout } from "./canvasStacking";
 import {
   acceptsTextInput,
   browserCanvasWidgetId,
-  canvasFocusShortcut,
   canvasWidgetInDirection,
   canvasWidgetTarget,
   pluginCanvasWidgetId,
@@ -110,8 +109,7 @@ import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
 import { webglContextPool } from "../terminal/webglContextPool";
 
 const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
-  "top-left",
-  "top-right",
+  "top-left",  "top-right",
   "bottom-left",
   "bottom-right"
 ];
@@ -120,6 +118,13 @@ const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
 const NO_SNAP_TARGETS = (): readonly SessionBounds[] => [];
 /** The fullscreen layer is outside the scene: its card always draws at scale 1. */
 const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
+
+const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
+  focusUp: "up",
+  focusDown: "down",
+  focusLeft: "left",
+  focusRight: "right"
+};
 
 /** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
 interface TerminalCardHandlers {
@@ -920,8 +925,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         return;
       }
       if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
-      const direction = canvasFocusShortcut(event);
-      if (direction) {
+      const focusAction = (Object.keys(CANVAS_FOCUS_ARROWS) as Array<"focusUp" | "focusDown" | "focusLeft" | "focusRight">)
+        .find((action) => matchesShortcut(event, settings.shortcuts[action]));
+      const direction = focusAction ? CANVAS_FOCUS_ARROWS[focusAction] : undefined;
+      if (direction && !event.repeat
+        && !isShortcutCaptureTarget(event.target) && !isRenameInputTarget(event.target)) {
         event.preventDefault();
         event.stopPropagation();
         focusDirectionRef.current(direction);
