@@ -85,29 +85,32 @@ export function CanvasMinimap({
     return () => observer.disconnect();
   }, [viewport]);
 
-  const worldViewport = useMemo(
-    () => cameraWorldViewport(camera, viewportSize),
-    [camera, viewportSize]
-  );
-  const worldBounds = useMemo(() => minimapWorldBounds(worldViewport), [worldViewport]);
-  const viewportPoint = useMemo(
-    () => minimapPointForBounds(worldViewport, worldBounds),
-    [worldBounds, worldViewport]
-  );
-  const homeEdge = useMemo(
-    () => minimapEdgePointForBounds(homeBounds, worldBounds),
-    [homeBounds, worldBounds]
-  );
-  const homeArea = useMemo(
-    () => minimapAreaForBounds(homeBounds, worldBounds),
-    [homeBounds, worldBounds]
-  );
   const entities = useMemo<MinimapEntity[]>(() => [
     ...sessions.map((session) => ({ id: session.id, kind: "terminal" as const, bounds: session })),
     ...stickyNotes.map((note) => ({ id: note.id, kind: "note" as const, bounds: note })),
     ...pluginCanvas.map((instance) => ({ id: instance.id, kind: "plugin" as const, bounds: instance })),
     ...(browserCanvas ? [{ id: "browser", kind: "browser" as const, bounds: browserCanvas }] : [])
   ], [browserCanvas, pluginCanvas, sessions, stickyNotes]);
+  const worldBounds = useMemo(
+    () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds)]),
+    [canvasRegions, entities, homeBounds]
+  );
+  const worldViewport = useMemo(
+    () => cameraWorldViewport(camera, viewportSize),
+    [camera, viewportSize]
+  );
+  const viewportArea = useMemo(
+    () => minimapAreaForBounds(worldViewport, worldBounds),
+    [worldBounds, worldViewport]
+  );
+  const viewportEdge = useMemo(
+    () => minimapEdgePointForBounds(worldViewport, worldBounds),
+    [worldBounds, worldViewport]
+  );
+  const homeArea = useMemo(
+    () => minimapAreaForBounds(homeBounds, worldBounds),
+    [homeBounds, worldBounds]
+  );
 
   const applyCamera = (next: CameraState): void => {
     cameraRef.current = next;
@@ -233,9 +236,9 @@ export function CanvasMinimap({
             style={pointStyle(minimapPointForBounds(entity.bounds, worldBounds))}
           />
         ))}
-        <i className="canvas-minimap__viewport" style={pointStyle(viewportPoint)} />
-        {homeEdge && (
-          <i className="canvas-minimap__home-edge" style={pointStyle(homeEdge)} />
+        {viewportArea && <i className="canvas-minimap__viewport" style={areaStyle(viewportArea)} />}
+        {viewportEdge && (
+          <i className="canvas-minimap__viewport-edge" style={pointStyle(viewportEdge)} />
         )}
       </span>
     </button>
