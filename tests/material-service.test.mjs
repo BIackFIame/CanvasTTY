@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -279,5 +279,20 @@ test("batch bounds update multiple cards at once", async () => {
     const updated = service.snapshot().materials;
     assert.deepEqual(updated.find((m) => m.id === first.id)?.position, { x: 10, y: 20 });
     assert.deepEqual(updated.find((m) => m.id === second.id)?.position, { x: 30, y: 40 });
+  });
+});
+
+test("collect keeps blobs while the state cannot be persisted", async () => {
+  await withMaterials(async ({ service, userData, create }) => {
+    const created = await service.addCapture({ bytes: pngBytes(4, 4, 1), name: "a.png", mimeType: "image/png", origin: { kind: "clipboard" }, point: { x: 0, y: 0 }, natural: { width: 4, height: 4 } });
+    await service.flush();
+    const blobs = async () => await readdir(join(userData, "materials", "versions")).catch(() => []);
+    assert.equal((await blobs()).length > 0, true);
+    await mkdir(join(userData, "materials", "state.json.tmp"));
+    await service.remove(created.materialId);
+    assert.equal((await blobs()).length > 0, true, "the blob survives while state.json.tmp is blocked");
+    await rm(join(userData, "materials", "state.json.tmp"), { recursive: true });
+    const restarted = await create();
+    assert.equal(restarted.snapshot().materials.length, 1, "the removal was not persisted either");
   });
 });

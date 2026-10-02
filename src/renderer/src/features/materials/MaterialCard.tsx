@@ -4,6 +4,7 @@ import { constrainMaterialResize, MATERIAL_MAX_SIZE, MATERIAL_MIN_SIZE, material
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { materialLayerId } from "../workspace/canvasSelectionGesture";
+import { SUMMARY_ZOOM, summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { snapMove, snapResize, type ResizeDirection } from "../workspace/snap";
 import {
   formatBytes,
@@ -16,7 +17,7 @@ import {
 interface MaterialCardProps {
   material: CanvasMaterial;
   locale: LocaleId;
-  zoom: number;
+  camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
   snapTargets: readonly SessionBounds[];
@@ -43,7 +44,7 @@ const RESIZE_DIRECTIONS: ResizeDirection[] = ["n", "ne", "e", "se", "s", "sw", "
 export function MaterialCard({
   material,
   locale,
-  zoom,
+  camera,
   stackIndex,
   snapEnabled,
   snapTargets,
@@ -60,8 +61,8 @@ export function MaterialCard({
   const [position, setPosition] = useState(material.position);
   const [size, setSize] = useState(material.size);
   const [confirmingRemoval, setConfirmingRemoval] = useState(false);
-  const summaryMode = zoom < 0.5;
-  const summaryScale = summaryMode ? Math.min(2.5, Math.max(1, 0.5 / zoom)) : 1;
+  const summaryMode = useCameraSelector(camera, (current) => current.zoom < SUMMARY_ZOOM);
+  const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
   const subtitle = material.origin?.kind === "clipboard"
     ? t(locale, "materialFromClipboard")
     : material.origin?.kind === "browser"
@@ -108,8 +109,8 @@ export function MaterialCard({
     const state = dragState.current;
     if (!state || state.pointerId !== event.pointerId || event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
       position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
@@ -147,8 +148,8 @@ export function MaterialCard({
     if (!state || state.pointerId !== event.pointerId || event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const constrained = constrainMaterialResize({
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),

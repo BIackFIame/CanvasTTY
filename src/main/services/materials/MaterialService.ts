@@ -353,12 +353,12 @@ export class MaterialService {
     }
   }
 
-  async flush(): Promise<void> {
+  async flush(strict = false): Promise<void> {
     if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
     }
-    await this.writeState();
+    await this.writeState(strict);
   }
 
   async dispose(): Promise<void> {
@@ -450,7 +450,7 @@ export class MaterialService {
     this.persistTimer.unref?.();
   }
 
-  private writeState(): Promise<void> {
+  private writeState(strict = false): Promise<void> {
     const state = this.options.persist()
       ? { version: MATERIAL_STATE_VERSION, materials: [...this.materials.values()] }
       : emptyMaterialState();
@@ -464,7 +464,7 @@ export class MaterialService {
     this.writeQueue = write.catch((error) => {
       console.warn("CanvasTTY materials could not be saved.", error);
     });
-    return this.writeQueue;
+    return strict ? write : this.writeQueue;
   }
 
   private serial<T>(task: () => Promise<T>): Promise<T> {
@@ -482,6 +482,11 @@ export class MaterialService {
   }
 
   private async collect(): Promise<void> {
+    try {
+      await this.writeState(true);
+    } catch {
+      return;
+    }
     await this.blobs.collect(this.referencedHashes());
   }
 

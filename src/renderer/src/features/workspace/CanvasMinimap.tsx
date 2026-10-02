@@ -62,6 +62,7 @@ function CanvasMinimapView({
   canvasRegions,
   sessions,
   stickyNotes,
+  materials,
   pluginCanvas,
   browserCanvas,
   layerOrder,

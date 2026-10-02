@@ -34,9 +34,7 @@ import type {
   SessionEvent,
   SessionRemovedEvent,
   GitRiskReport,
-  TerminalDataEvent,
-  UpdaterState,
-  UpdaterStateEvent
+  TerminalDataEvent
 } from "../shared/contracts.ts";
 import { IPC } from "../shared/contracts.ts";
 import { terminalFileDropText } from "../shared/terminalFileDrop";

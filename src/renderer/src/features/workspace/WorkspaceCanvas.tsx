@@ -1205,7 +1205,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               key={material.id}
               material={withGroupNudge(materialLayerId(material.id), material)}
               locale={settings.locale}
-              zoom={camera.zoom}
+              camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, materialLayerId(material.id))}
               snapEnabled={settings.snapToGrid}
               snapTargets={[
