@@ -24,7 +24,7 @@
 
 ### 变更
 
-- **用于 agent 后台标签页的浏览器引擎。** 插件可以提供更轻量的浏览器引擎（`browser:engine`，见[插件](docs/plugins.zh-CN.md)）；`browser_new_tab` 接受 `engine`（默认 `auto`、`chromium` 或引擎 id）。安装并运行引擎后，agent 的新标签页在后台用它打开，用户的活动标签页保持不变；用户自己的标签页始终使用 Chromium。没有真实布局的引擎通过 DOM 点击。在截图、拖拽、下载、机器人验证墙、文字相对页面过少、缺少 CDP 方法、引擎崩溃或标签页被显示时，标签页以相同 id 转到 Chromium，并给 agent 一个 `notice`；该网站在本次会话中被记住。没有标签页 id 的命令发往 agent 最后打开的标签页。引擎不会得到 cookie 或配置文件。示例引擎：独立的 `canvastty-plugin-lightpanda`。
+- **用于 agent 后台标签页的浏览器引擎。** 插件可以提供更轻量的浏览器引擎（`browser:engine`，见[插件](docs/plugins.zh-CN.md)）；`browser_new_tab` 接受 `engine`（默认 `auto`、`chromium` 或引擎 id）。安装并运行引擎后，agent 的新标签页在后台用它打开，用户的活动标签页保持不变；用户自己的标签页始终使用 Chromium。没有真实布局的引擎通过 DOM 点击。在截图、拖拽、下载、机器人验证墙、文字相对页面过少、缺少 CDP 方法、引擎崩溃或标签页被显示时，标签页以相同 id 转到 Chromium，并给 agent 一个 `notice`；该网站在本次会话中被记住。没有标签页 id 的命令发往 agent 最后打开的标签页。引擎不会得到 cookie 或配置文件。示例引擎：独立的 `canvastty-plugin-lightpanda`。 浏览器卡片在屏幕外时，后台标签页的截图也能正常工作。
 - **启动模式。** 现在默认是 Auto。Manual、Accept edits、Plan 与 Bypass（YOLO）只在 CLI 支持时提供：Accept edits 与 Plan 适用于 Claude Code、Codex、Grok 和 OpenCode，Plan 还适用于 Cursor；没有自带自动模式的 CLI，其 Auto 就是跳过审批，且只在智能体隔离内存在。Bypass 需要用户为每个 CLI 确认一次，由主进程检查，且绝不交给子智能体。
 - **委派规则。** 子智能体的权限不超过其编排者（plan < manual < accept edits < auto，绝不为 Bypass），只在编排者的项目文件夹内工作，并受用户在 Settings → Agents 中设定的深度（2）与存活子智能体数（8）限制。对于无法询问的 CLI，决策插件的「ask」会变成附带原因的拒绝。
 - **智能体隔离。** 操作系统层（macOS 用 `sandbox-exec`，Linux 用 bubblewrap）包裹子智能体、插件启动的智能体以及所有非 Manual 模式的智能体：只能写入项目、本次启动的临时目录和其 CLI 自己的目录；密钥、其他 CLI 的凭据和 CanvasTTY 的 token 不可读；无法建立时拒绝启动。Windows 暂无隔离层，子智能体在那里以 Manual 运行；在 bubblewrap 无法创建用户命名空间的 Linux 上（Ubuntu 24.04 的 AppArmor 限制）也是如此，卡片会显示原因，并说明[如何允许](docs/installing-and-security.zh-CN.md#linuxbubblewrap-无法启动时)。关闭隔离需由用户主动选择。

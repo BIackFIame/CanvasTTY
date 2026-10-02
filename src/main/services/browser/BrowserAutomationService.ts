@@ -159,9 +159,9 @@ export interface BrowserAutomationOptions {
    */
   beforeCommand?(tabId: string): Promise<void>;
   /**
-   * Before a screenshot of a tab nobody sees: lets the host give it a surface to paint on for the capture (a tab that
-   * moved from a contributed engine is drawn under the active tab, hidden by it). Returns what undoes that, or null
-   * when the host did nothing.
+   * Before a screenshot of a background tab nobody sees (an agent's tab, or one that moved from a contributed engine):
+   * lets the host give it a surface to paint on for the capture, outside what the person sees. Returns what undoes
+   * that, or null when the host did nothing.
    */
   captureSurface?(tabId: string): Promise<(() => void) | null>;
 }
@@ -1503,7 +1503,8 @@ async function captureLentSurface(contents: WebContents, signal?: AbortSignal): 
   for (let attempt = 0; attempt < LENT_SURFACE_CAPTURE_TRIES; attempt += 1) {
     throwIfAborted(signal);
     try {
-      last = await contents.capturePage();
+      // stayHidden/stayAwake: the page keeps its hidden state and is painted for the capture even if the window is occluded.
+      last = await contents.capturePage(undefined, { stayHidden: true, stayAwake: true });
       if (!last.isEmpty() && last.getSize().width > 0) return last;
     } catch {
       // The compositor has no frame for the view yet.

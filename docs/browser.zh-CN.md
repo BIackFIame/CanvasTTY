@@ -35,7 +35,7 @@ CanvasTTY `1.0.2` 已从 HOME 提供内置浏览器，它是可信的画布应�
 
 智能体 mutation 在每个标签页内按 FIFO 执行，按 request ID 去重，在产生副作用前检查 document revision，并受 rate limit 与 timeout 限制；若必需的审计 attempt 无法写入，该 mutation 会被阻止。read 可以并行执行，不同标签页使用独立 mutation lane。
 
-agent 的 `browser_new_tab` 可以在插件提供的浏览器引擎中于后台打开标签页（引擎已安装并运行时的默认 `engine: "auto"`；`"chromium"` 强制普通标签页）。这种标签页在列表中带有 `engine`，从不显示，不会得到 cookie 或配置文件；在需要截图、遇到机器人验证墙、文字过少、引擎缺少能力、引擎崩溃或标签页被显示时，它以相同 id 转到 Chromium，并在 agent 的结果中说明。用户打开的标签页始终使用 Chromium。见[插件文档](plugins.zh-CN.md)。
+agent 的 `browser_new_tab` 可以在插件提供的浏览器引擎中于后台打开标签页（引擎已安装并运行时的默认 `engine: "auto"`；`"chromium"` 强制普通标签页）。这种标签页在列表中带有 `engine`，从不显示，不会得到 cookie 或配置文件；在需要截图、遇到机器人验证墙、文字过少、引擎缺少能力、引擎崩溃或标签页被显示时，它以相同 id 转到 Chromium，并在 agent 的结果中说明。用户打开的标签页始终使用 Chromium。见[插件文档](plugins.zh-CN.md)。 浏览器卡片在屏幕外时，后台标签页（agent 自己的，或从引擎迁移过来的）也可以截图；只有卡片中显示的标签页需要卡片在视野内。
 
 ## 网站与文件边界
 

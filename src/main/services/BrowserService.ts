@@ -176,8 +176,6 @@ export class BrowserService {
       captureSurface: async (tabId) => this.lendCaptureSurface(tabId)
     }
   );
-  /** Chromium tabs a contributed engine's tab moved to: never shown unless someone shows them. */
-  private readonly movedEngineTabs = new Set<string>();
   private readonly agents: AgentRegistry;
   /** Agents' background tabs in plugin-contributed engines: no view, never shown, never saved. */
   private readonly engineTabs: BrowserEngineTabs;
@@ -208,6 +206,8 @@ export class BrowserService {
   private restoreTabsEnabled: boolean;
   private clipOwnerId: number | null = null;
   private clipTabId: string | null = null;
+  /** Background tabs whose view is in the window only for a screenshot (lendCaptureSurface). */
+  private readonly lentTabs = new Set<string>();
   private pointerTabId: string | null = null;
   private presenceWindow: BrowserWindow | null = null;
   private presenceWindowReady: Promise<void> | null = null;
@@ -663,7 +663,6 @@ export class BrowserService {
     if (this.disposed) throw new BrowserKernelError("BRIDGE_UNAVAILABLE", "Browser service is disposed.");
     const normalized = this.policy.assertNavigationUrl(url);
     const tab = this.createRuntimeTab(tabId, normalized, revision);
-    this.movedEngineTabs.add(tabId);
     this.native.setBounds(tab.view, {
       x: 0,
       y: 0,
@@ -687,27 +686,41 @@ export class BrowserService {
   }
 
   /**
-   * A tab that moved from a contributed engine for a screenshot has never been on screen, and Chromium paints only
-   * what is shown. For the capture it is placed under the active tab, with the same bounds: it paints, the active tab
-   * covers it, and it is taken out again right after. Without a shown active tab there is nothing to lend (the
-   * screenshot then answers VIEWPORT_UNAVAILABLE as for any hidden tab).
+   * A screenshot of a background tab (an agent's tab, or one that moved from a contributed engine) while the person
+   * looks elsewhere. Chromium paints a view only while some of it lies inside a shown window; a view that is hidden,
+   * in no window, or entirely outside it gives an empty capture. So for the capture the tab's view, at its page size,
+   * is put in the window with only its top-left pixel inside the window's bottom-right corner, under a one-pixel
+   * cover in the window's background color, and taken out right after: the whole page is painted and captured, and
+   * the person sees nothing. The clip view's own tab (the active tab while its card is off-screen) is not lent: its
+   * page stays hidden while it is busy, and the answer asks for the card to be brought into view as before.
    */
   private async lendCaptureSurface(tabId: string): Promise<(() => void) | null> {
-    if (!this.movedEngineTabs.has(tabId) || tabId === this.activeTabId) return null;
     const tab = this.tabs.get(tabId);
-    const active = this.activeTabId ? this.tabs.get(this.activeTabId) : undefined;
-    if (!tab || tab.visible || tab.sleeping || tab.view.webContents.isDestroyed()) return null;
-    if (!active || !active.visible || this.clipTabId !== active.id) return null;
-    const bounds = active.view.getBounds();
-    if (bounds.width <= 0 || bounds.height <= 0) return null;
-    this.clipView.addChildView(tab.view, 0);
-    this.native.setBounds(tab.view, bounds);
+    if (!tab || tab.visible || tab.sleeping || tab.view.webContents.isDestroyed() || this.clipTabId === tab.id) return null;
+    const owner = this.getOwner();
+    if (!owner || owner.isDestroyed()) return null;
+    const [contentWidth, contentHeight] = owner.getContentSize();
+    if (!contentWidth || !contentHeight) return null;
+    const current = tab.view.getBounds();
+    const width = current.width > 0 ? current.width : Math.max(BACKGROUND_TAB_SIZE.width, Math.round(this.viewport.width));
+    const height = current.height > 0 ? current.height : Math.max(BACKGROUND_TAB_SIZE.height, Math.round(this.viewport.height));
+    this.lentTabs.add(tab.id);
+    owner.contentView.addChildView(tab.view);
+    this.native.setBounds(tab.view, { x: contentWidth - 1, y: contentHeight - 1, width, height });
     this.native.setVisible(tab.view, true);
+    const cover = new View();
+    cover.setBackgroundColor(owner.getBackgroundColor() || "#000000");
+    owner.contentView.addChildView(cover);
+    cover.setBounds({ x: contentWidth - 1, y: contentHeight - 1, width: 1, height: 1 });
     return () => {
-      // Shown meanwhile: it is the clip view's active tab now, and syncViews owns it.
-      if (this.clipTabId === tab.id) return;
+      this.lentTabs.delete(tab.id);
+      if (owner.isDestroyed()) return;
+      owner.contentView.removeChildView(cover);
+      if (owner.contentView.children.includes(tab.view)) owner.contentView.removeChildView(tab.view);
+      // Closed, put to sleep, or shown (and mounted in the clip view) meanwhile: syncViews owns it then.
+      if (this.disposed || this.tabs.get(tab.id) !== tab || tab.visible || tab.sleeping || tab.view.webContents.isDestroyed()) return;
       this.native.setVisible(tab.view, false);
-      this.clipView.removeChildView(tab.view);
+      this.native.setBounds(tab.view, current.width > 0 ? current : { x: 0, y: 0, width, height });
     };
   }
 
@@ -1273,8 +1286,8 @@ export class BrowserService {
   }
 
   private destroyTab(tab: BrowserTab): void {
-    this.movedEngineTabs.delete(tab.id);
     this.lifecycle.untrack(tab.id);
+    this.lentTabs.delete(tab.id);
     this.wakingTabs.delete(tab.id);
     this.canvasPointers.cancelTab(tab.id);
     if (this.activeTabId === tab.id) {
@@ -1401,7 +1414,8 @@ export class BrowserService {
       tab.visible = false;
       return;
     }
-    this.native.setVisible(tab.view, visible);
+    // A tab lent a surface for a screenshot stays painted until the capture gives it back.
+    if (visible || !this.lentTabs.has(tab.id)) this.native.setVisible(tab.view, visible);
     const changed = tab.visible !== visible;
     tab.visible = visible;
     this.applyBackgroundThrottling(tab);
