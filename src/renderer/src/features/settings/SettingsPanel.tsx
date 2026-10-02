@@ -43,6 +43,7 @@ import type {
   SessionStatus,
   ShortcutAction,
   TerminalBorderSkinListItem,
+  TerminalLinkOpenMode,
   TerminalBorderSkinId,
   UpdaterState,
   ZoomSensitivity
@@ -1141,6 +1142,17 @@ export function SettingsPanel({
                   value={settings.copyOnSelect ? "on" : "off"}
                   options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
                   onChange={(value) => void onChange({ copyOnSelect: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "terminalLinkOpenMode")} description={t(locale, "terminalLinkOpenModeDescription")}>
+                <Segmented
+                  value={settings.terminalLinkOpenMode}
+                  options={[
+                    ["canvas", "CanvasTTY"],
+                    ["external", t(locale, "terminalLinkOpenExternal")],
+                    ["ask", t(locale, "terminalLinkOpenAsk")]
+                  ]}
+                  onChange={(value) => void onChange({ terminalLinkOpenMode: value as TerminalLinkOpenMode })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "terminalWheelDirection")}>
