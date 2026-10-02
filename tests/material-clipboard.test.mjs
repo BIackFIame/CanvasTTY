@@ -161,3 +161,9 @@ test("a capture is discarded when persistence is off", async () => {
     }
   });
 });
+
+test("the canvas pastes materials only on the Cmd/Ctrl chord", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url), "utf8");
+  assert.match(source, /\} else if \(\(event\.ctrlKey \|\| event\.metaKey\) && !event\.altKey && matchesPhysicalOrLayoutKey\(event, "KeyV", "v"\)/);
+});

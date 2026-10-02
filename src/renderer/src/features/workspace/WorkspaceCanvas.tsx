@@ -918,7 +918,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         setRegionEditor(null);
         setCommandPaletteOpen(false);
         onOpenSettings();
-      } else if (matchesPhysicalOrLayoutKey(event, "KeyV", "v") && !event.shiftKey && !acceptsTextInput(event.target)) {
+      } else if ((event.ctrlKey || event.metaKey) && !event.altKey && matchesPhysicalOrLayoutKey(event, "KeyV", "v") && !event.shiftKey && !acceptsTextInput(event.target)) {
         event.preventDefault();
         pasteMaterialsRef.current();
       }
