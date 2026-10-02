@@ -471,7 +471,6 @@ button { border: 0; }
 .material-card__summary small { color: var(--text-muted-on-dark); font-size: 19px; }
 .material-card--summary:not(.material-card--image) .material-card__summary { display: flex; }
 .material-card--summary .material-card__actions { visibility: hidden; }
-.material-card__badge { padding: .3em .55em; border-radius: .5em; color: var(--text-dark); background: var(--secondary); font: 850 .75em/1 var(--font-mono); }
 .material-remark-status { --marker: var(--accent); }
 .material-remark-status--sent { --marker: var(--blue); }
 .material-remark-status--reported { --marker: var(--yellow); }
