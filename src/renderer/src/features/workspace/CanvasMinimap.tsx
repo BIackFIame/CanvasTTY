@@ -7,18 +7,21 @@ import type {
   LocaleId,
   MinimapInteractionMode,
   PluginCanvasInstance,
+  ProviderId,
   SessionBounds,
   SessionSnapshot,
   Size,
   StickyNote
 } from "../../../../shared/contracts";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import { t } from "../../lib/i18n";
+import { browserLayerId, noteLayerId, pluginLayerId, terminalLayerId } from "./canvasSelectionGesture";
 import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
   minimapAreaForBounds,
   minimapEdgePointForBounds,
-  minimapPointForBounds,
+  MINIMAP_SURFACE_SIZE,
   minimapWorldBounds,
   minimapWorldPoint
 } from "./minimapGeometry";
@@ -32,6 +35,7 @@ interface CanvasMinimapProps {
   stickyNotes: readonly StickyNote[];
   pluginCanvas: readonly PluginCanvasInstance[];
   browserCanvas: BrowserCanvasState | null;
+  layerOrder: readonly string[];
   locale: LocaleId;
   interactionMode: MinimapInteractionMode;
   onCameraChange(camera: CameraState): void;
@@ -41,6 +45,7 @@ interface MinimapEntity {
   id: string;
   kind: "terminal" | "plugin" | "browser" | "note";
   bounds: SessionBounds;
+  provider?: ProviderId;
 }
 
 interface MinimapDragState {
@@ -59,6 +64,7 @@ export function CanvasMinimap({
   stickyNotes,
   pluginCanvas,
   browserCanvas,
+  layerOrder,
   locale,
   interactionMode,
   onCameraChange
@@ -86,11 +92,17 @@ export function CanvasMinimap({
   }, [viewport]);
 
   const entities = useMemo<MinimapEntity[]>(() => [
-    ...sessions.map((session) => ({ id: session.id, kind: "terminal" as const, bounds: session })),
-    ...stickyNotes.map((note) => ({ id: note.id, kind: "note" as const, bounds: note })),
-    ...pluginCanvas.map((instance) => ({ id: instance.id, kind: "plugin" as const, bounds: instance })),
-    ...(browserCanvas ? [{ id: "browser", kind: "browser" as const, bounds: browserCanvas }] : [])
+    ...sessions.map((session) => ({
+      id: terminalLayerId(session.id), kind: "terminal" as const, bounds: session, provider: session.provider
+    })),
+    ...stickyNotes.map((note) => ({ id: noteLayerId(note.id), kind: "note" as const, bounds: note })),
+    ...pluginCanvas.map((instance) => ({ id: pluginLayerId(instance.id), kind: "plugin" as const, bounds: instance })),
+    ...(browserCanvas ? [{ id: browserLayerId, kind: "browser" as const, bounds: browserCanvas }] : [])
   ], [browserCanvas, pluginCanvas, sessions, stickyNotes]);
+  const layerIndices = useMemo(
+    () => new Map(layerOrder.map((id, index) => [id, index + 1])),
+    [layerOrder]
+  );
   const worldBounds = useMemo(
     () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds)]),
     [canvasRegions, entities, homeBounds]
@@ -229,13 +241,29 @@ export function CanvasMinimap({
           ) : null;
         })}
         {homeArea && <i className="canvas-minimap__home" style={areaStyle(homeArea)} />}
-        {entities.map((entity) => (
-          <i
-            className={`canvas-minimap__entity canvas-minimap__entity--${entity.kind}`}
-            key={`${entity.kind}:${entity.id}`}
-            style={pointStyle(minimapPointForBounds(entity.bounds, worldBounds))}
-          />
-        ))}
+        <span className="canvas-minimap__windows">
+          {entities.map((entity) => {
+            const area = minimapAreaForBounds(entity.bounds, worldBounds);
+            if (!area) return null;
+            const iconSize = Math.min(16,
+              area.width * MINIMAP_SURFACE_SIZE.width - 4,
+              area.height * MINIMAP_SURFACE_SIZE.height - 4
+            );
+            return (
+              <i
+                className={`canvas-minimap__entity canvas-minimap__entity--${entity.kind}`}
+                key={entity.id}
+                style={{
+                  ...areaStyle(area),
+                  zIndex: layerIndices.get(entity.id) ?? 1,
+                  "--minimap-icon-size": `${iconSize}px`
+                } as CSSProperties}
+              >
+                {entity.provider && iconSize >= 8 && <ProviderIcon provider={entity.provider} size="small" />}
+              </i>
+            );
+          })}
+        </span>
         {viewportArea && <i className="canvas-minimap__viewport" style={areaStyle(viewportArea)} />}
         {viewportEdge && (
           <i className="canvas-minimap__viewport-edge" style={pointStyle(viewportEdge)} />

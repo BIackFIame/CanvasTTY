@@ -1330,7 +1330,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             {settings.minimapPlacement === placement && (
               <LiveCanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
                 canvasRegions={renderedCanvasRegions} sessions={renderedSessions} stickyNotes={renderedStickyNotes}
-                pluginCanvas={renderedPluginCanvas} browserCanvas={renderedBrowserCanvas}
+                pluginCanvas={renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id))}
+                browserCanvas={renderedBrowserCanvas} layerOrder={layerOrder}
                 locale={settings.locale} interactionMode={settings.minimapInteractionMode}
                 onCameraChange={commitCamera} />
             )}
