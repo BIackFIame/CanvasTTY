@@ -130,11 +130,15 @@ export class CdpTabDriver implements TabDriver {
     const driver = new CdpTabDriver(options);
     const connect = options.connect ?? connectWebSocket;
     const opening = (async () => {
-      driver.socket = await connect(url, {
+      const socket = await connect(url, {
         message: (text) => driver.receive(text),
         close: () => driver.closed("engine-closed")
       });
-      if (driver.destroyed) throw new Error("Browser engine closed the connection.");
+      if (driver.destroyed) {
+        socket.close();
+        throw new Error("Browser engine closed the connection.");
+      }
+      driver.socket = socket;
       const created = await driver.call("Target.createTarget", { url: "about:blank" }, null) as { targetId?: unknown };
       if (typeof created.targetId !== "string" || !created.targetId) throw new Error("Browser engine did not create a page.");
       driver.targetId = created.targetId;

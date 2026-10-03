@@ -20,6 +20,14 @@ class FakeClock {
     this.timers.delete(id);
   };
 
+  async next() {
+    const [id, timer] = [...this.timers.entries()].sort((left, right) => left[1].at - right[1].at)[0];
+    this.timers.delete(id);
+    this.now = Math.max(this.now, timer.at);
+    timer.callback();
+    await flush();
+  }
+
   async tick(ms) {
     const until = this.now + ms;
     for (;;) {
@@ -43,8 +51,9 @@ async function flush() {
 
 function deferred() {
   let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function fixture(options = {}) {
@@ -56,16 +65,20 @@ function fixture(options = {}) {
     freezeBlocker: (id) => blockers.freeze.get(id) ?? null,
     discardBlocker: async (id) => {
       log.push(`check:${id}`);
+      if (gates.discardBlockerError) throw gates.discardBlockerError;
       return blockers.discard.get(id) ?? null;
     },
     freeze: async (id) => {
       log.push(`freeze:${id}`);
       if (gates.freeze) await gates.freeze.promise;
+      if (gates.freezeError) throw gates.freezeError;
       log.push(`frozen:${id}`);
     },
     resume: async (id) => { log.push(`resume:${id}`); },
     discard: async (id) => {
       log.push(`discard:${id}`);
+      if (gates.discard) await gates.discard.promise;
+      if (gates.discardError) throw gates.discardError;
       return true;
     },
     restore: async (id) => { log.push(`restore:${id}`); },
@@ -179,6 +192,88 @@ test("blocked tabs are retried later and never forced: media or a dialog block f
   assert.equal(lifecycle.state("form"), "frozen", "a page with a beforeunload handler is never discarded");
   assert.ok(log.filter((line) => line === "check:form").length >= 2, "and is asked again later");
   assert.equal(lifecycle.state("media"), "discarded");
+});
+
+test("rejected freezes back off all expired deadlines and later recover", async () => {
+  const { clock, log, gates, lifecycle } = fixture({ discardAfterMs: 30_000, retryAfterMs: 1_000 });
+  gates.freezeError = new Error("debugger unavailable");
+  lifecycle.track("tab", false);
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await clock.next();
+    assert.equal(clock.now, 30_000 + (attempt - 1) * 1_000);
+    assert.equal(lifecycle.state("tab"), "active", "a rejected freeze does not change the state");
+    assert.equal(log.filter((line) => line === "freeze:tab").length, attempt);
+    assert.equal(log.filter((line) => line === "error:debugger unavailable").length, attempt);
+    assert.deepEqual([...clock.timers.values()].map((timer) => timer.at), [clock.now + 1_000]);
+    await clock.tick(999);
+    assert.equal(log.filter((line) => line === "freeze:tab").length, attempt, "no retry before the interval");
+  }
+  gates.freezeError = null;
+  await clock.tick(1);
+  assert.deepEqual(log.slice(-5), ["frozen:tab", "state:tab:frozen", "check:tab", "discard:tab", "state:tab:discarded"]);
+  assert.equal(lifecycle.state("tab"), "discarded");
+  assert.equal(clock.timers.size, 0);
+});
+
+for (const failure of ["discardError", "discardBlockerError"]) {
+  test(`a rejected ${failure} preserves a frozen tab, backs off and later recovers`, async () => {
+    const { clock, log, gates, lifecycle } = fixture({ discardAfterMs: 60_000, retryAfterMs: 1_000 });
+    lifecycle.track("tab", false);
+    await clock.tick(30_000);
+    gates[failure] = new Error("discard unavailable");
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await clock.next();
+      assert.equal(clock.now, 60_000 + (attempt - 1) * 1_000);
+      assert.equal(lifecycle.state("tab"), "frozen");
+      assert.equal(log.filter((line) => line === "check:tab").length, attempt);
+      assert.equal(log.filter((line) => line === "error:discard unavailable").length, attempt);
+      assert.deepEqual([...clock.timers.values()].map((timer) => timer.at), [clock.now + 1_000]);
+      await clock.tick(999);
+      assert.equal(log.filter((line) => line === "check:tab").length, attempt);
+    }
+    gates[failure] = null;
+    await clock.tick(1);
+    assert.equal(lifecycle.state("tab"), "discarded");
+    assert.equal(clock.timers.size, 0);
+  });
+}
+
+test("a rejected discard of an active tab defers its expired freeze deadline too", async () => {
+  const { clock, log, blockers, gates, lifecycle } = fixture({ discardAfterMs: 30_000, retryAfterMs: 1_000 });
+  blockers.freeze.set("tab", "media");
+  gates.discard = deferred();
+  lifecycle.track("tab", false);
+  await clock.next();
+  await clock.tick(1_000);
+  gates.discard.reject(new Error("discard unavailable"));
+  await flush();
+  assert.equal(lifecycle.state("tab"), "active");
+  assert.deepEqual([...clock.timers.values()].map((timer) => timer.at), [32_000]);
+  await clock.tick(999);
+  assert.equal(log.filter((line) => line === "discard:tab").length, 1);
+  gates.discard = null;
+  await clock.tick(1);
+  assert.equal(lifecycle.state("tab"), "discarded");
+});
+
+test("a rejected hidden-limit discard waits before another tab can queue it again", async () => {
+  const { clock, log, gates, lifecycle } = fixture({ maxLiveHiddenTabs: 1, retryAfterMs: 1_000 });
+  gates.discardError = new Error("discard unavailable");
+  lifecycle.track("oldest", false);
+  await clock.tick(100);
+  lifecycle.track("newer", false);
+  await clock.next();
+  assert.equal(lifecycle.state("oldest"), "frozen");
+  assert.deepEqual(log.filter((line) => line.startsWith("discard:")), ["discard:oldest"]);
+  await clock.tick(100);
+  assert.equal(log.filter((line) => line === "discard:oldest").length, 1, "newer's timer respects oldest's backoff");
+  gates.discardError = null;
+  await clock.tick(900);
+  lifecycle.track("trigger", false);
+  await clock.tick(30_000);
+  assert.equal(lifecycle.state("oldest"), "discarded");
 });
 
 test("more than six live hidden tabs: the least recently used idle ones are discarded early", async () => {

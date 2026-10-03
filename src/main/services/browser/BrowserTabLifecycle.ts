@@ -34,7 +34,7 @@ export interface TabLifecycleOptions {
   freezeAfterMs?: number;
   discardAfterMs?: number;
   maxLiveHiddenTabs?: number;
-  /** How long a blocked freeze or discard waits before it is tried again. */
+  /** How long a blocked or failed freeze or discard waits before it is tried again. */
   retryAfterMs?: number;
   now?: () => number;
   setTimer?: (callback: () => void, ms: number) => unknown;
@@ -216,6 +216,13 @@ export class BrowserTabLifecycle {
     entry.discardNotBefore = 0;
   }
 
+  private deferRetries(entry: Entry): void {
+    const retryAt = this.now() + this.retryAfterMs;
+    // Either deadline can already be due, including one that expired while the failed transition was in flight.
+    entry.freezeNotBefore = Math.max(entry.freezeNotBefore, retryAt);
+    entry.discardNotBefore = Math.max(entry.discardNotBefore, retryAt);
+  }
+
   private idle(entry: Entry): boolean {
     return this.enabled && !this.disposed && !entry.visible && !entry.busy && this.entries.get(entry.id) === entry;
   }
@@ -266,6 +273,9 @@ export class BrowserTabLifecycle {
         await this.tryDiscard(entry);
       }
       this.enforceHiddenLimit();
+    } catch (error) {
+      this.deferRetries(entry);
+      throw error;
     } finally {
       this.schedule(entry);
     }
@@ -302,6 +312,9 @@ export class BrowserTabLifecycle {
       void this.enqueue(entry, async () => {
         try {
           await this.tryDiscard(entry);
+        } catch (error) {
+          this.deferRetries(entry);
+          throw error;
         } finally {
           entry.discardQueued = false;
           this.schedule(entry);
