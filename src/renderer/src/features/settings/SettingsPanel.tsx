@@ -1204,6 +1204,16 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ browserRestoreTabs: value === "on" })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "browserPauseHiddenTabs")}
+                description={t(locale, "browserPauseHiddenTabsDescription")}
+              >
+                <Segmented
+                  value={settings.browserPauseHiddenTabs ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ browserPauseHiddenTabs: value === "on" })}
+                />
+              </SettingGroup>
               <SettingGroup label={t(locale, "browserDownloads")}>
                 <BrowserDownloadList downloads={browser.downloads} locale={locale} />
               </SettingGroup>

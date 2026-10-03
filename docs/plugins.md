@@ -385,6 +385,23 @@ A service with `cards:decorate` can put a badge on any card and declare up to 8 
 
 The full example is [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): the card action **Show changes** on cards in the `worktree` environment (from `env-worktree`) shows `git diff --stat` of the worktree and sets a "N changed" badge, and the tool `collect-demo__diffstat` gives orchestrators the same for their own folder or a subagent's, which it learns about from session events.
 
+### Browser engines (`browser:engine`)
+
+A service may run another browser engine for agents' background tabs, for example a headless engine that reads pages with far less CPU and memory than Chromium. It declares one `browserEngine`:
+
+```json
+"permissions": ["browser:engine"],
+"services": [{
+  "id": "engine", "title": "Engine", "entry": "services/engine.mjs",
+  "browserEngine": { "id": "lightpanda", "title": "Lightpanda", "layout": false }
+}]
+```
+
+- `id` is what agents pass as `engine` to `browser_new_tab` (`[a-z0-9][a-z0-9._-]*`, at most 64 characters, never `auto` or `chromium`, unique within the plugin). `layout` says the engine lays pages out for real; without it (the default) observation skips element geometry and clicks and hovers go through the DOM (`element.click()`), so an engine with synthetic boxes still works.
+- For each tab the host calls `canvastty.browserEngine.openTab` `{ engineId, tabId }` (host-only, 20 s) and expects `{ webSocketUrl }`: a `ws://` CDP endpoint on `127.0.0.1`, `[::1]` or `localhost` with a port, anything else is refused. The core opens its own connection there, creates the page with `Target.createTarget` and drives it over a flat session, one connection per tab. `canvastty.browserEngine.closeTab` `{ engineId, tabId }` (a notification) says the tab is gone, so the service can stop its process when idle. The service starts, supervises and stops the engine process itself.
+- The core owns the policy. Only an agent's new tab may use an engine: with `engine: "auto"` (the default) the first running engine, or the one it names. A tab the person opens, and `engine: "chromium"`, always get Chromium. An engine tab is never shown: the person or an agent showing it moves it to Chromium first. The engine gets no cookies, no browser profile and no credentials, only the URL; the tab's page starts empty.
+- Fallback: the tab moves to Chromium under the same tab id (next document revision, refs stale) when a screenshot, a drag or a download is asked for, the page looks like a bot wall (a challenge title or text, a `/cdn-cgi/challenge-platform/` request, a 403, 429 or 503 document), the text is far too thin for the page's size, the engine lacks a CDP method (`-32601`), or the engine disconnects. The agent's result carries a `notice`; an action on an element ref answers `STALE_REF` with `details.movedToChromium`. A site that failed this way goes straight to Chromium for the rest of the session. If `openTab` fails, the tab opens in Chromium and `auto` skips that engine for a minute.
+
 ### Base protection and redaction (core)
 
 Two safety parts are built in and need no plugin:
@@ -410,6 +427,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch |
 | `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
+| `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |

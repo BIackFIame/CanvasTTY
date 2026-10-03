@@ -544,6 +544,48 @@ test("Windows host recovery is bounded to three retries and disabling cancels ba
   assert.equal(enabledLease.address, "fake-pipe-1");
 });
 
+test("a Windows host that keeps dying right after starting is given up on; one that served a while gets a fresh budget", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 0;
+  const { factory, transports } = fakeWindowsPipeHostFactory();
+  const gateway = new OrchestrationGateway({
+    runtimeDirectory: "unused",
+    platform: "win32",
+    windowsHostPath: "C:\\fake\\host.exe",
+    windowsPipeHostFactory: factory,
+    now: () => now,
+    handler: { execute: async () => ({}) }
+  });
+  t.after(() => gateway.stop());
+
+  await gateway.start();
+  // Each replacement starts and dies at once: three replacements, then recovery stops.
+  for (const delay of [500, 1_000, 2_000]) {
+    transports.at(-1).emit("fatal", new Error("host exited"));
+    t.mock.timers.tick(delay);
+    await new Promise(setImmediate);
+  }
+  assert.equal(transports.length, 4);
+  assert.equal(gateway.address, "fake-pipe-3");
+  transports[3].emit("fatal", new Error("host exited"));
+  t.mock.timers.tick(30_000);
+  await new Promise(setImmediate);
+  assert.equal(transports.length, 4, "a host that crashes on start-up is not restarted forever");
+  assert.equal(gateway.address, null);
+
+  // An explicit start brings it back; a host that then serves past the window earns three new attempts.
+  await gateway.start();
+  assert.equal(transports.length, 5);
+  for (let round = 0; round < 4; round += 1) {
+    now += 61_000;
+    transports.at(-1).emit("fatal", new Error("host exited"));
+    t.mock.timers.tick(500);
+    await new Promise(setImmediate);
+  }
+  assert.equal(transports.length, 9, "long-lived hosts are replaced every time");
+  assert.equal(gateway.address, "fake-pipe-8");
+});
+
 test("an explicit stop wins over a replacement host that is still starting", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
   let finishReplacement;

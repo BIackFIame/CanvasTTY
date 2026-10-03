@@ -59,6 +59,25 @@
 
 **Git 审计。** 隔离的智能体会话结束、被关闭或在退出后恢复时，CanvasTTY 会检查其文件夹下 git 目录发生变化的仓库。如果 git 现在会在隔离外运行某些东西（`core.hooksPath`、filter 或 diff 驱动、`fsmonitor`、hook 文件、`info/attributes`），会出现一条列出具体变化的通知；**Neutralize** 删除这些键并停用这些文件，**Keep as is** 保持不变。它不会撤销项目内的其他文件改动。
 
+### Linux：bubblewrap 无法启动时
+
+Ubuntu 24.04 及更新版本（以及其他设置了 `kernel.apparmor_restrict_unprivileged_userns=1` 的发行版）只允许带 AppArmor 配置文件的程序创建非特权用户命名空间，而 bubblewrap 需要它。CanvasTTY 会检查一次（失败后一分钟再查），如果 `bwrap` 已安装却无法启动，就按没有隔离层的电脑处理：子智能体和插件启动的智能体以手动模式运行，卡片会说明原因。要允许它，可以为 bubblewrap 单独添加配置文件（推荐，只影响 `bwrap`）：
+
+```sh
+sudo tee /etc/apparmor.d/bwrap >/dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo apparmor_parser -r /etc/apparmor.d/bwrap
+```
+
+或者对所有程序解除限制：`sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`（写入 `/etc/sysctl.d/60-userns.conf` 可在重启后保留）。新的启动会在一分钟内用上隔离层，无需重启。
+
 ## 仓库防护
 
 ```bash

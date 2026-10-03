@@ -88,7 +88,9 @@ function runHook(registry, output, input) {
 
 test("OpenCode runs each plugin hook as one process per event, not a runner process that starts another", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "canvastty-opencode-hooks-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  // The hook processes start in the plugin folder and may still be exiting after
+  // writing their files; Windows refuses to remove a folder a live process sits in.
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 }));
   const pluginRoot = join(root, "plugin");
   const registry = join(root, "plugin-hooks.json");
   const runnerCalls = join(root, "runner-calls");

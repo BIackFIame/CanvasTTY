@@ -41,7 +41,10 @@ function tool(name, description, properties = {}, required = []) {
 
 export const TOOL_DEFINITIONS = Object.freeze([
   tool("browser_list_tabs", "List visible browser tabs and their stable tab IDs."),
-  tool("browser_new_tab", "Open a new visible tab. Re-observe after navigation before using element refs.", { url }),
+  tool("browser_new_tab", "Open a new tab; use the returned tabId for later commands. engine: auto (default) opens it in the background in a lighter engine when the person installed one (reading, observing, clicking by element), otherwise as a visible Chromium tab; chromium always opens a visible Chromium tab. A background tab moves to Chromium by itself when needed (screenshots, bot checks, unreadable pages, or when shown): same tabId, stale refs, and the result says so.", {
+    url,
+    engine: string({ minLength: 1, maxLength: 64 })
+  }),
   tool("browser_close_tab", "Close a visible tab by stable tab ID.", { tabId }, ["tabId"]),
   tool("browser_activate_tab", "Make a tab active and visible.", { tabId }, ["tabId"]),
   tool("browser_navigate", "Navigate a tab, or the active tab when tabId is omitted, to an HTTP(S) URL.", {

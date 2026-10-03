@@ -79,7 +79,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
     modules: string[];
   };
   contribution: {
@@ -175,6 +175,22 @@ export interface CanvasTTYPluginServiceManifestEntry {
   tools?: CanvasTTYAgentTool[];
   /** Card actions; needs `cards:decorate`. Up to 8; ids unique within the plugin. */
   cardActions?: CanvasTTYCardAction[];
+  /** A browser engine for agents' background tabs; needs `browser:engine`. Ids unique within the plugin. */
+  browserEngine?: CanvasTTYBrowserEngine;
+}
+
+/**
+ * The host calls `canvastty.browserEngine.openTab` `{ engineId, tabId }` for each agent background tab and expects
+ * `{ webSocketUrl }`: a `ws://` CDP endpoint on 127.0.0.1, [::1] or localhost with a port, one page per connection.
+ * `canvastty.browserEngine.closeTab` `{ engineId, tabId }` is a notification.
+ */
+export interface CanvasTTYBrowserEngine {
+  /** What agents pass as `engine` to browser_new_tab: `^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$`, never `auto` or `chromium`. */
+  id: string;
+  title: string;
+  description?: string;
+  /** Real layout (boxes, viewport). Omitted or false: observation skips geometry, clicks and hovers go through the DOM. */
+  layout?: boolean;
 }
 
 export type CanvasTTYSessionRole = "agent" | "orchestrator" | "subagent";

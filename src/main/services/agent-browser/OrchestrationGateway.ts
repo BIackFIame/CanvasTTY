@@ -41,6 +41,8 @@ import {
 const CAPABILITY_TTL_MS = 60_000;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
+/** A replacement host that dies within this long of starting still counts toward MAX_TRANSPORT_RESTART_ATTEMPTS. */
+const TRANSPORT_FAST_FAILURE_WINDOW_MS = 60_000;
 
 interface CapabilityLease {
   connectionId: string;
@@ -100,6 +102,8 @@ export class OrchestrationGateway {
   private generation = 0;
   private restartTimer: NodeJS.Timeout | null = null;
   private restartAttempts = 0;
+  /** When the current Windows pipe host started listening. */
+  private transportStartedAt: number | null = null;
   private restartToken = 0;
   private recovering = false;
   /** The start caller (or recovery attempt) that currently owns a shared in-flight start. */
@@ -204,6 +208,7 @@ export class OrchestrationGateway {
         throw new Error("The Windows orchestration pipe host failed during startup.");
       }
       this.socketEndpoint = endpoint;
+      this.transportStartedAt = this.now();
     } else {
       // Unix domain sockets cap at ~104 path bytes (macOS); fall back to a short
       // current-user directory exactly like the browser gateway does.
@@ -253,12 +258,18 @@ export class OrchestrationGateway {
     this.socketEndpoint = null;
     this.ownedRuntimeDirectory = null;
     this.running = false;
+    this.transportStartedAt = null;
   }
 
   private handleTransportFatal(transport: WindowsPipeHostTransport, generation: number): void {
     // A late event from an old host, or one superseded by explicit stop(), cannot affect a successor.
     if (this.windowsTransport !== transport || generation !== this.generation) return;
     const wasRunning = this.running;
+    // A host that served for a while earns a fresh retry budget; one that dies right after starting does not, so a
+    // host that keeps crashing on start-up is not restarted forever.
+    const ranFor = this.transportStartedAt === null ? 0 : this.now() - this.transportStartedAt;
+    if (ranFor >= TRANSPORT_FAST_FAILURE_WINDOW_MS) this.restartAttempts = 0;
+    this.transportStartedAt = null;
     this.windowsTransport = null;
     this.socketEndpoint = null;
     this.running = false;
@@ -317,8 +328,8 @@ export class OrchestrationGateway {
         if (this.recovering && this.enabled) this.scheduleTransportRestart();
         return;
       }
+      // The retry budget is kept until the replacement outlives TRANSPORT_FAST_FAILURE_WINDOW_MS (see the fatal handler).
       this.recovering = false;
-      this.restartAttempts = 0;
     } catch {
       if (intent === this.startIntent && token === this.restartToken && this.enabled) this.scheduleTransportRestart();
     }

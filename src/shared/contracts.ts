@@ -325,6 +325,8 @@ export interface AppSettings {
   browserAgentAccess: boolean;
   browserShowAgentPresence: boolean;
   browserRestoreTabs: boolean;
+  /** Pause hidden browser tabs after a while, and put long-hidden ones to sleep (they reload when used). */
+  browserPauseHiddenTabs: boolean;
   /** Show an OS notification when a session needs approval or fails. */
   attentionNotifications: boolean;
   /**
@@ -556,7 +558,8 @@ export type PluginPermission =
   | "sessions:read-screen"
   | "sessions:launch"
   | "sessions:control"
-  | "cards:decorate";
+  | "cards:decorate"
+  | "browser:engine";
 
 export type HermesHudSnapshot =
   | { state: "unavailable"; reason: "cli-not-found"; message: string }
@@ -632,6 +635,18 @@ export interface PluginService {
   tools?: PluginAgentTool[];
   /** Card actions (`cards:decorate`): menu items on matching cards; the host calls `canvastty.cards.invoke`. */
   cardActions?: PluginCardAction[];
+  /** A browser engine (`browser:engine`) for agents' background tabs; the host calls `canvastty.browserEngine.*`. */
+  browserEngine?: PluginBrowserEngine;
+}
+
+/** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */
+export interface PluginBrowserEngine {
+  /** What agents pass as `engine` to browser_new_tab; `[a-z0-9][a-z0-9._-]*`, never `auto` or `chromium`. */
+  id: string;
+  title: string;
+  description?: string;
+  /** The engine lays pages out for real. Without layout (the default) clicks and hovers go through the DOM. */
+  layout: boolean;
 }
 
 /** A tool a plugin service offers to agents through canvastty_agents. */
@@ -1182,7 +1197,21 @@ export interface BrowserTabSnapshot {
   favicon: string | null;
   agents: AgentPresenceSnapshot[];
   crashState: string | null;
+  /**
+   * A hidden tab CanvasTTY paused to save power: "paused" is frozen (it resumes at once), "sleeping" is unloaded
+   * (it reloads when shown or used). Absent while the tab runs.
+   */
+  lifecycle?: BrowserTabLifecycleState;
+  /** The last picture of a sleeping tab, for the card; only on the active tab. Never sent to agents. */
+  preview?: string | null;
+  /**
+   * Set on an agent's background tab that a plugin-contributed browser engine drives (the engine id). Such a tab is
+   * never shown: showing it moves it to Chromium first. Absent on Chromium tabs.
+   */
+  engine?: string;
 }
+
+export type BrowserTabLifecycleState = "paused" | "sleeping";
 
 export interface BrowserSnapshot {
   tabs: BrowserTabSnapshot[];
@@ -1367,6 +1396,11 @@ export interface BrowserCommand {
   cursor?: string;
   limit?: number;
   expectedRevision?: number;
+  /**
+   * browser_new_tab only: `auto` (default), `chromium`, or a plugin-contributed engine's id. `auto` gives an agent's
+   * new tab the installed engine when one runs; a person's tabs always use Chromium.
+   */
+  engine?: string;
 }
 
 export interface BrowserResult<T = unknown> {
@@ -1378,6 +1412,8 @@ export interface BrowserResult<T = unknown> {
   revisionAfter: number | null;
   data?: T;
   error?: BrowserError;
+  /** Set when the tab had been put to sleep while hidden and was reloaded to run this command. */
+  notice?: string;
 }
 
 export interface BrowserActivityEvent {

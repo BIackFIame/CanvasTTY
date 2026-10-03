@@ -51,7 +51,7 @@ import { AgentControlService } from "./services/AgentControlService";
 import { AgentIsolation } from "./services/isolation/AgentIsolation";
 import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
-import { BrowserService } from "./services/BrowserService";
+import { BrowserService, type BrowserServiceOptions } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
 import { activeCanvasWheelBinding } from "../shared/canvasNavigation";
 import type { ProviderSmokeTarget } from "./services/browser/ProviderElectronSmoke";
@@ -118,6 +118,8 @@ protocol.registerSchemesAsPrivileged([
   }
 ]);
 
+/** A contributed browser engine may have to start its process before it can open a tab. */
+const BROWSER_ENGINE_OPEN_TIMEOUT_MS = 20_000;
 let mainWindow: BrowserWindow | null = null;
 let evenG2: EvenG2Controller | null = null;
 const browserRequests = new Map<string, { resolve():void; reject(error:Error):void; timer:ReturnType<typeof setTimeout> }>();
@@ -402,8 +404,20 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   browserService = new BrowserService(() => mainWindow, {
     userDataPath,
     restoreTabs: settings.get().browserRestoreTabs,
+    pauseHiddenTabs: settings.get().browserPauseHiddenTabs,
+    ...browserLifecycleTimingOverride(process.env.CANVASTTY_BROWSER_LIFECYCLE_MS),
     canvasWheelCaptureMode: settings.get().canvasWheelCaptureMode,
     canvasNavigationInput,
+    // Agents' background tabs may run in a plugin-contributed engine (browser:engine); policy stays in the core.
+    engines: {
+      providers: () => pluginManager!.browserEngineProviders()
+        .filter((provider) => pluginServices!.running(provider.pluginId, provider.serviceId)),
+      openTab: (provider, tabId) => pluginServices!.hostCall(provider.pluginId, provider.serviceId,
+        "canvastty.browserEngine.openTab", { engineId: provider.engineId, tabId }, BROWSER_ENGINE_OPEN_TIMEOUT_MS),
+      closeTab: (provider, tabId) => {
+        pluginServices?.notify(provider.pluginId, provider.serviceId, "canvastty.browserEngine.closeTab", { engineId: provider.engineId, tabId });
+      }
+    },
     ...(process.env.CANVASTTY_BROWSER_SMOKE_URL
       ? { downloadRoot: join(userDataPath, "browser-smoke-downloads") }
       : {})
@@ -758,6 +772,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       browserService?.setRestoreTabs(next.browserRestoreTabs).catch((error: unknown) => {
         console.warn("CanvasTTY browser tab restore setting could not be applied.", error);
       });
+      browserService?.setPauseHiddenTabs(next.browserPauseHiddenTabs);
       browserService?.cancelCanvasNavigationGesture();
       browserService?.setCanvasWheelCaptureMode(next.canvasWheelCaptureMode);
       canvasNavigationInput?.setBindings({
@@ -1266,4 +1281,14 @@ function broadcastPluginServiceEvent(event: PluginServiceEvent): void {
 function securePluginStorageAvailable(): boolean {
   if (!safeStorage.isEncryptionAvailable()) return false;
   return process.platform !== "linux" || safeStorage.getSelectedStorageBackend() !== "basic_text";
+}
+
+/**
+ * Shorter pause/sleep delays for measurements and smoke runs: "freezeMs,discardMs" (for example "3000,8000").
+ * Anything else is ignored and the defaults (30 s, 10 min) apply.
+ */
+function browserLifecycleTimingOverride(value: string | undefined): Pick<BrowserServiceOptions, "tabLifecycle"> {
+  const match = /^(\d{3,9}),(\d{3,9})$/u.exec(value ?? "");
+  if (!match) return {};
+  return { tabLifecycle: { freezeAfterMs: Number(match[1]), discardAfterMs: Number(match[2]) } };
 }

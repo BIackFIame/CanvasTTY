@@ -74,7 +74,8 @@ const fallback = {
   browserCanvas: null,
   browserAgentAccess: true,
   browserShowAgentPresence: true,
-  browserRestoreTabs: true
+  browserRestoreTabs: true,
+  browserPauseHiddenTabs: true
 };
 
 test("keeps valid wheel, edge pan, zoom, and focus values", () => {
@@ -868,8 +869,10 @@ test("normalizes browser agent access, indicators, and tab restore preferences",
   const disabled = normalizeSettings({
     browserAgentAccess: false,
     browserShowAgentPresence: false,
-    browserRestoreTabs: false
+    browserRestoreTabs: false,
+    browserPauseHiddenTabs: false
   }, fallback);
+  assert.equal(disabled.browserPauseHiddenTabs, false);
   assert.equal(disabled.browserAgentAccess, false);
   assert.equal(disabled.browserShowAgentPresence, false);
   assert.equal(disabled.browserRestoreTabs, false);
@@ -877,8 +880,10 @@ test("normalizes browser agent access, indicators, and tab restore preferences",
   const invalid = normalizeSettings({
     browserAgentAccess: "yes",
     browserShowAgentPresence: "sometimes",
-    browserRestoreTabs: 1
+    browserRestoreTabs: 1,
+    browserPauseHiddenTabs: "off"
   }, fallback);
+  assert.equal(invalid.browserPauseHiddenTabs, true, "pausing hidden tabs is on unless turned off");
   assert.equal(invalid.browserAgentAccess, true);
   assert.equal(invalid.browserShowAgentPresence, true);
   assert.equal(invalid.browserRestoreTabs, true);

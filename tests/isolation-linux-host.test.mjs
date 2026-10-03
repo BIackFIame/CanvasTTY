@@ -26,7 +26,7 @@ async function freshHome(t) {
   return { base, home, project, temp, userData, env: { HOME: home, PATH: "/usr/bin:/bin" } };
 }
 
-const linux = (w, hostPaths) => new AgentIsolation({ userDataPath: w.userData, enabled: () => true, platform: "linux", bubblewrapPath: BWRAP,
+const linux = (w, hostPaths) => new AgentIsolation({ userDataPath: w.userData, enabled: () => true, platform: "linux", bubblewrapPath: BWRAP, bubblewrapProbe: () => null,
   tempRoot: w.temp, ...(hostPaths ? { linuxHostPaths: hostPaths } : {}) });
 const wrapIn = (isolation, w, provider, extra = {}) => isolation.wrap({ sessionId: "s1", provider, cwd: w.project, command: "/bin/sh",
   args: ["-c", "true"], env: { ...w.env, ...extra } });

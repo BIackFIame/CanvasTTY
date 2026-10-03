@@ -411,6 +411,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     browserAgentAccess: true,
     browserShowAgentPresence: true,
     browserRestoreTabs: true,
+    browserPauseHiddenTabs: true,
     attentionNotifications: true,
     attentionQueueVisible: true,
     attentionQueuePlacement: "bottom-right",
@@ -683,6 +684,9 @@ export function normalizeSettings(
     browserRestoreTabs: typeof source.browserRestoreTabs === "boolean"
       ? source.browserRestoreTabs
       : fallback.browserRestoreTabs,
+    browserPauseHiddenTabs: typeof source.browserPauseHiddenTabs === "boolean"
+      ? source.browserPauseHiddenTabs
+      : fallback.browserPauseHiddenTabs,
     attentionNotifications: typeof source.attentionNotifications === "boolean"
       ? source.attentionNotifications
       : fallback.attentionNotifications,

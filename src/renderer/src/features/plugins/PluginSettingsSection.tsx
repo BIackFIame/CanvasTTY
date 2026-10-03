@@ -1081,6 +1081,7 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "sessions:launch": "permissionSessionsLaunch",
     "sessions:control": "permissionSessionsControl",
     "cards:decorate": "permissionCardsDecorate",
+    "browser:engine": "permissionBrowserEngine",
     network: "permissionNetwork"
   } as const)[permission];
 }

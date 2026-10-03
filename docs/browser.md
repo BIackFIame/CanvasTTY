@@ -37,6 +37,8 @@ Agent mutations are ordered FIFO per tab, deduplicated by request ID, revision-c
 
 If the browser view has zero width or height, `browser_observe` returns `VIEWPORT_UNAVAILABLE` instead of a misleading empty list of controls. `browser_screenshot` returns the same retryable error for an empty capture. Bring the Browser card into view, then observe or capture again; reopening the tab is unnecessary. `browser_read_page` can still read document text while no drawable view is available.
 
+An agent's `browser_new_tab` may open its tab in the background in a browser engine a plugin contributes (`engine: "auto"`, the default, when one is installed and running; `"chromium"` forces a normal tab). Such a tab is listed with its `engine`, is never shown, gets no cookies or profile, and moves to Chromium under the same tab id when a screenshot, a bot wall, thin text, a missing capability, an engine crash or showing the tab needs it; the agent's result says so. Tabs the person opens always use Chromium. See [Browser engines](plugins.md#browser-engines-browserengine). A background tab (an agent's own, or one that moved from an engine) can be captured while the Browser card is off-screen; only the tab shown in the card needs the card in view.
+
 ## Website and file boundaries
 
 - Remote pages run sandboxed with context isolation and no Node.js or CanvasTTY preload.

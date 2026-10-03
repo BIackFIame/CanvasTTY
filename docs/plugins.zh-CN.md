@@ -361,6 +361,23 @@ interface PluginSessionEvent {
 
 完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。
 
+### 浏览器引擎（`browser:engine`）
+
+服务可以为 agent 的后台标签页运行另一种浏览器引擎，例如以远低于 Chromium 的 CPU 和内存读取页面的无头引擎。它声明一个 `browserEngine`：
+
+```json
+"permissions": ["browser:engine"],
+"services": [{
+  "id": "engine", "title": "Engine", "entry": "services/engine.mjs",
+  "browserEngine": { "id": "lightpanda", "title": "Lightpanda", "layout": false }
+}]
+```
+
+- `id` 是 agent 传给 `browser_new_tab` 的 `engine`（`[a-z0-9][a-z0-9._-]*`，最多 64 个字符，不能是 `auto` 或 `chromium`，插件内唯一）。`layout` 表示引擎真正进行页面布局；省略时（默认）观察不使用元素几何信息，点击和悬停通过 DOM（`element.click()`）完成，因此坐标不真实的引擎也能工作。
+- 对每个标签页，宿主调用 `canvastty.browserEngine.openTab` `{ engineId, tabId }`（仅宿主，20 s），并期望得到 `{ webSocketUrl }`：`127.0.0.1`、`[::1]` 或 `localhost` 上带端口的 `ws://` CDP 地址，其他地址会被拒绝。核心自己连接该地址，用 `Target.createTarget` 创建页面并通过扁平会话驱动它，每个标签页一个连接。`canvastty.browserEngine.closeTab` `{ engineId, tabId }`（通知）表示标签页已关闭，服务可在空闲时停止进程。引擎进程由服务自己启动、监管和停止。
+- 策略由核心决定。只有 agent 新建的标签页可以使用引擎：`engine: "auto"`（默认）使用第一个运行中的引擎，或使用指定的引擎。用户打开的标签页和 `engine: "chromium"` 始终使用 Chromium。引擎标签页从不显示：用户或 agent 显示它时，它会先转到 Chromium。引擎不会得到 cookie、浏览器配置文件或凭据，只得到 URL；标签页从空白页开始。
+- 回退：在请求截图、拖拽或下载，页面像机器人验证墙（验证标题或文字、`/cdn-cgi/challenge-platform/` 请求、403/429/503 文档），文字相对页面大小过少，引擎缺少 CDP 方法（`-32601`）或引擎断开时，标签页以相同 id 转到 Chromium（文档版本递增，旧 ref 失效）。agent 的结果带有 `notice`；针对元素 ref 的操作返回带 `details.movedToChromium` 的 `STALE_REF`。以这种方式失败的网站在本次会话剩余时间内直接使用 Chromium。如果 `openTab` 失败，标签页在 Chromium 中打开，`auto` 在一分钟内跳过该引擎。
+
 ### 基础保护与密钥遮蔽（核心）
 
 两项安全功能内置，无需插件：
@@ -386,6 +403,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `sessions:launch` | `sessions.create` | 通过常规启动流程启动可见的 agent 卡片 |
 | `sessions:control` | `sessions.send`、`sessions.stop` | 只能向本插件启动的卡片输入文本并关闭它们 |
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
+| `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
