@@ -362,6 +362,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       candidate.id === instance.contributionId && candidate.kind === "canvas-app"
     ));
   }).map((instance) => instance.id)), [plugins, settings.pluginCanvas]);
+  const minimapPluginCanvas = useMemo(
+    () => renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)),
+    [renderedPluginCanvas, renderablePluginIds]
+  );
   const activeLayerIds = useMemo(() => [
     ...renderedSessions.map((session) => terminalLayerId(session.id)),
     ...renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)).map((instance) => pluginLayerId(instance.id)),
@@ -1328,9 +1332,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               </section>
             )}
             {settings.minimapPlacement === placement && (
-              <LiveCanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
+              <CanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
                 canvasRegions={renderedCanvasRegions} sessions={renderedSessions} stickyNotes={renderedStickyNotes}
-                pluginCanvas={renderedPluginCanvas} browserCanvas={renderedBrowserCanvas}
+                pluginCanvas={minimapPluginCanvas}
+                browserCanvas={renderedBrowserCanvas} layerOrder={layerOrder}
                 locale={settings.locale} interactionMode={settings.minimapInteractionMode}
                 onCameraChange={commitCamera} />
             )}
@@ -1390,10 +1395,4 @@ function shouldKeepCanvasContextMenu(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(
     "textarea, input, select, [contenteditable='true'], .terminal-card, .plugin-canvas-card, .browser-card, .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-canvas-region-id], [data-sticky-note-id], [data-interactive='true']"
   ));
-}
-
-/** The minimap draws the camera's viewport, so it is the one part of the HUD that renders on every move. */
-function LiveCanvasMinimap(props: Omit<React.ComponentProps<typeof CanvasMinimap>, "camera"> & { camera: CameraStore }): React.JSX.Element {
-  const camera = useCameraSelector(props.camera, (current) => current);
-  return <CanvasMinimap {...props} camera={camera} />;
 }

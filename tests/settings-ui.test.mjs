@@ -165,12 +165,12 @@ test("canvas overlays share configurable collision-safe corner slots", async () 
   assert.match(workspace, /<CanvasMinimap/);
   assert.match(workspace, /interactionMode=\{settings\.minimapInteractionMode\}/);
   assert.match(minimap, /setPointerCapture/);
-  assert.match(minimap, /startCamera: cameraRef\.current/);
+  assert.match(minimap, /startCamera: camera\.get\(\)/);
   assert.doesNotMatch(minimap, /state\?\.pointerId === event\.pointerId && !state\.moved/);
   assert.match(minimap, /\} else \{\s*dragState\.current = null;\s*navigate\(event\.clientX, event\.clientY\);\s*\}/);
   assert.match(minimap, /interactionMode === "drag"/);
   assert.match(minimap, /data-interaction-mode=\{interactionMode\}/);
-  assert.match(minimap, /applyCamera\(\{/);
+  assert.match(minimap, /onCameraChange\(\{/);
 });
 
 test("General keeps independent persistence controls", async () => {
