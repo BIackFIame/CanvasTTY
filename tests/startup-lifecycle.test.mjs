@@ -35,6 +35,10 @@ function startupContext(events, overrides = {}) {
     shutdownRunning: false,
     shutdownComplete: false,
     servicesReady: false,
+    appSurfaceReady: false,
+    installMacMenu: null,
+    pendingMenuUpdateCheck: false,
+    checkUpdatesFromMenu: null,
     mainWindow: null,
     process: { env: {} },
     shellWindowGone: () => false,
@@ -42,9 +46,10 @@ function startupContext(events, overrides = {}) {
     ipcGate: gate,
     ipcReadinessGate: () => gate,
     markMainBoot: () => undefined,
+    mainBootMarks: () => [],
+    diagnostics: { record: () => undefined },
     initializeServices: async (ipc) => { events.push(ipc === gate ? "services (gated)" : "services"); },
     loadApplicationSurface: async () => { events.push("surface"); },
-    initializeUpdater: () => events.push("updater"),
     runStartupSmokes: async () => { events.push("smokes"); },
     showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); },
     ...overrides
@@ -70,7 +75,7 @@ test("the application surface loads while services start, and its IPC goes throu
   assert.deepEqual(events, ["window", "services (gated)", "surface"], "nothing is reported before the services settle");
   services.resolve();
   await startup;
-  assert.deepEqual(events, ["window", "services (gated)", "surface", "gate settled", "updater", "smokes"]);
+  assert.deepEqual(events, ["window", "services (gated)", "surface", "gate settled", "smokes"]);
   assert.equal(context.startupRunning, false);
 });
 
@@ -126,7 +131,7 @@ test("a restart after the services are up loads the surface without starting the
   const { context } = startupContext(events, { servicesReady: true, ipcGate: null });
   const startApplication = await startApplicationWith(context);
   await startApplication();
-  assert.deepEqual(events, ["window", "surface", "updater", "smokes"]);
+  assert.deepEqual(events, ["window", "surface", "smokes"]);
 });
 
 test("loading the application surface removes the startup page from browser history", async () => {
@@ -149,8 +154,16 @@ test("dependencies only some paths need are not imported when the main process s
   const lazy = ["electron-updater", "yaml", "secure-remote-password/client.js", "secure-remote-password/server.js", "@xterm/headless"];
   const root = new URL("../src/main/", import.meta.url);
   const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".ts"));
+  const main = await readFile(mainPath, "utf8");
+  assert.match(main, /await import\("\.\/services\/updates\/ElectronUpdaterAdapter"\)/);
+  assert.doesNotMatch(main, /^import\s+(?!type\b)[^;]*?from\s+"\.\/services\/updates\/(?:ElectronUpdaterAdapter|AwaitedNsisUpdater)"/gmu);
+  const lazyUpdaterModules = new Set([
+    "services/updates/ElectronUpdaterAdapter.ts",
+    "services/updates/AwaitedNsisUpdater.ts"
+  ]);
   const staticImports = [];
   for (const file of files) {
+    if (lazyUpdaterModules.has(file.replaceAll("\\", "/"))) continue;
     const source = await readFile(new URL(file, root), "utf8");
     for (const match of source.matchAll(/^import\s+(?!type\b)[^;]*?from\s+"([^"]+)"/gmu)) {
       if (lazy.includes(match[1]) || /ElectronSmoke$/u.test(match[1])) staticImports.push(`${file}: ${match[1]}`);

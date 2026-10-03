@@ -4,7 +4,7 @@ import test from "node:test";
 import { updaterPresentation } from "../src/renderer/src/features/settings/updaterPresentation.ts";
 
 const settingsPanelPath = new URL("../src/renderer/src/features/settings/SettingsPanel.tsx", import.meta.url);
-const updatesPath = new URL("../src/renderer/src/features/settings/UpdatesSettings.tsx", import.meta.url);
+const updatesPath = new URL("../src/renderer/src/features/settings/UpdateSettings.tsx", import.meta.url);
 const appStylesPath = new URL("../src/renderer/src/styles/app.css", import.meta.url);
 
 const VERSION = "1.4.0";
@@ -91,19 +91,20 @@ test("Updates is its own top-level section directly above About, and General no 
   const ids = [...sections.matchAll(/\{ id: "([a-z]+)"/g)].map((match) => match[1]);
   assert.equal(ids.at(-1), "about");
   assert.equal(ids.at(-2), "updates");
-  assert.match(panel, /section === "updates" && \(\s*<UpdatesSettings state=\{updaterState\} locale=\{locale\} currentVersion=\{appManifest\.version\} \/>/);
+  assert.match(panel, /section === "updates" && \(\s*<UpdatesSettings locale=\{locale\} \/>/);
   assert.doesNotMatch(panel, /UpdaterRow|settings-update-row/);
 
-  // The existing IPC plumbing stays: state subscription in the panel, actions in the section.
-  assert.match(panel, /window\.canvasTTY\.updater\.onState\(/);
-  assert.match(panel, /window\.canvasTTY\.updater\.state\(\)/);
-  assert.match(updates, /window\.canvasTTY\.updater\.check\(\)/);
-  assert.match(updates, /window\.canvasTTY\.updater\.install\(\)/);
+  // The update section owns its status subscription and explicit actions.
+  assert.match(updates, /window\.canvasTTY\.update\.onStatus\(/);
+  assert.match(updates, /window\.canvasTTY\.update\.status\(\)/);
+  assert.match(updates, /invoke\(window\.canvasTTY\.update\.check\)/);
+  assert.match(updates, /invoke\(window\.canvasTTY\.update\.download\)/);
+  assert.match(updates, /invoke\(window\.canvasTTY\.update\.install\)/);
 
   // Explicit actions: Download and Install are separate buttons, each gated by the presentation.
-  assert.match(updates, /\{view\.actions\.download && \(/);
-  assert.match(updates, /\{view\.actions\.install && \(/);
-  assert.match(updates, /\{view\.progress !== null && \(\s*<progress/);
+  assert.match(updates, /status\.type === "available"/);
+  assert.match(updates, /status\.type === "ready"/);
+  assert.match(updates, /status\.type === "downloading" && <>[\s\S]*?<progress max=\{100\} value=\{status\.percent\}/);
 });
 
 test("the Updates layout keeps the icon, status and actions on one grid", async () => {
