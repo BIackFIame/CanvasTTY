@@ -1,4 +1,4 @@
-import { BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
+import { BrowserWindow, clipboard, dialog, shell } from "electron";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import type { MaterialsAddResult, Point } from "../../shared/contracts.ts";
 import { IPC } from "../../shared/contracts.ts";
@@ -6,6 +6,7 @@ import type { MaterialService } from "../services/materials/MaterialService";
 import { captureRejection, fileUrlPaths, plistPaths, textPaths, windowsFileNames } from "../services/materials/materialClipboard.ts";
 import { isId } from "../services/materials/materialState.ts";
 import { assertMainRenderer } from "./registerIpc";
+import type { IpcRegistrar } from "./IpcReadinessGate";
 
 const MAX_CLIPBOARD_PATHS = 16;
 
@@ -14,7 +15,7 @@ interface MaterialIpcDependencies {
   getMainWindow(): BrowserWindow | null;
 }
 
-export function registerMaterialIpc({ materials, getMainWindow }: MaterialIpcDependencies): void {
+export function registerMaterialIpc(ipcMain: IpcRegistrar, { materials, getMainWindow }: MaterialIpcDependencies): void {
 
   ipcMain.handle(IPC.materialsSnapshot, (event) => {
     assertMainRenderer(event, getMainWindow);

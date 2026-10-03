@@ -784,7 +784,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     }
   });
   await materialService.load();
-  registerMaterialIpc({ materials: materialService, getMainWindow: () => mainWindow });
+  registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
   registerIpc(ipc, {
     settings,
     recheckProviderClis: async () => {
