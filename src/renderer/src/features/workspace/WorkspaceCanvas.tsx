@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
@@ -36,7 +36,7 @@ import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { sessionStatusTone } from "../../lib/sessionStatusTone";
 import { RadialLauncher } from "../launcher/QuickRadialMenu";
 import { StickyNoteCard } from "../notes/StickyNoteCard";
-import { MaterialCard } from "../materials/MaterialCard";
+const MaterialCard = lazy(() => import("../materials/MaterialCard").then((module) => ({ default: module.MaterialCard })));
 import type { MaterialCommand } from "../materials/materialCardModel";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
@@ -257,9 +257,9 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     onRestartSession, onDisposeSession, onBrowserBoundsChange, onFocusBrowser,
     onCloseBrowser, onCreateCanvasRegion, onChangeCanvasRegion,
     onCanvasRegionBoundsChange, onDeleteCanvasRegion, onCreateStickyNote,
-    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote, surfacesMounted = true,
+    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote,
     materials, onAddMaterialFiles, onPickMaterials, onPasteMaterials, onMaterialBoundsChange,
-    onMaterialBoundsChangeBatch, onRemoveMaterial, onMaterialCommand
+    onMaterialBoundsChangeBatch, onRemoveMaterial, onMaterialCommand, surfacesMounted = true
   } = props;
   const viewport = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<CanvasMenuState | null>(null);
@@ -1200,19 +1200,16 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               groupSelected={marqueeSelection.has(noteLayerId(note.id))}
             />
           ))}
-          {renderedMaterials.map((material) => (
-            <MaterialCard
-              key={material.id}
-              material={withGroupNudge(materialLayerId(material.id), material)}
+          <Suspense fallback={null}>
+            {renderedMaterials.map((material) => (
+              <MaterialCard
+                key={material.id}
+                material={withGroupNudge(materialLayerId(material.id), material)}
               locale={settings.locale}
               camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, materialLayerId(material.id))}
               snapEnabled={settings.snapToGrid}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== material)
-              ]}
+              getSnapTargets={snapTargets.forLayer(materialLayerId(material.id))}
               groupSelected={marqueeSelection.has(materialLayerId(material.id))}
               removeRequest={materialRemoveRequest?.id === material.id ? materialRemoveRequest.version : 0}
               onBoundsChange={onMaterialBoundsChange}
@@ -1221,6 +1218,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               onAction={onMaterialCommand}
             />
           ))}
+          </Suspense>
         </div>
       </div>
 

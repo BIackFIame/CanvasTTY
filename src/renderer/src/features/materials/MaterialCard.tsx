@@ -20,7 +20,7 @@ interface MaterialCardProps {
   camera: CameraStore;
   stackIndex: number;
   snapEnabled: boolean;
-  snapTargets: readonly SessionBounds[];
+  getSnapTargets(): readonly SessionBounds[];
   groupSelected?: boolean;
   removeRequest: number;
   onBoundsChange(id: string, bounds: SessionBounds): void;
@@ -47,7 +47,7 @@ export function MaterialCard({
   camera,
   stackIndex,
   snapEnabled,
-  snapTargets,
+  getSnapTargets,
   groupSelected = false,
   removeRequest,
   onBoundsChange,
@@ -113,7 +113,7 @@ export function MaterialCard({
       y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, getSnapTargets()) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -165,7 +165,7 @@ export function MaterialCard({
       }
     }, state.direction);
     applyBounds(snapEnabled
-      ? snapResize(constrained, state.direction, snapTargets, { min: MATERIAL_MIN_SIZE, max: MATERIAL_MAX_SIZE })
+      ? snapResize(constrained, state.direction, getSnapTargets(), { min: MATERIAL_MIN_SIZE, max: MATERIAL_MAX_SIZE })
       : constrained);
   };
 
