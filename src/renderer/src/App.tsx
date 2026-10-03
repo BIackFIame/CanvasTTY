@@ -172,7 +172,8 @@ const FALLBACK_SETTINGS: AppSettings = {
   agentIsolation: "on",
   orchestrationMaxDepth: 2,
   orchestrationMaxSubagents: 8,
-  defaultLaunchProfile: "auto"
+  defaultLaunchProfile: "auto",
+  defaultLaunchProfiles: {}
 };
 
 const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {
