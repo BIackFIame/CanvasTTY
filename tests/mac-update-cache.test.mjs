@@ -34,7 +34,9 @@ for (const mode of ["normal", "crash"]) {
         cwd: process.cwd(), encoding: "utf8"
       });
       assert.match(child.stdout, /READY/);
-      assert.equal(mode === "normal" ? child.status : child.signal, mode === "normal" ? 0 : "SIGKILL");
+      if (mode === "normal") assert.equal(child.status, 0);
+      else if (process.platform === "win32") assert.ok(Number.isInteger(child.status) && child.status !== 0);
+      else assert.equal(child.signal, "SIGKILL");
       assert.equal(await readFile(installed, "utf8"), "1.5.2");
       const cache = await readdir(join(directory, "updates"));
       assert.equal(cache.length, 1);
@@ -73,14 +75,16 @@ test("Mac update server removes its cache after the installer exits", async () =
     await mkdir(cache);
     const appcast = join(cache, "appcast.xml");
     const archive = join(cache, "update.zip");
+    const helper = join(directory, "helper.mjs");
+    await writeFile(helper, "process.exit(0);\n");
     await writeFile(appcast, "appcast");
     await writeFile(archive, "archive");
     const child = spawnSync(process.execPath, ["src/native/updates/mac-update-server.mjs",
-      "/usr/bin/true", "unused.app", appcast, archive, "1.6.0"], {
+      process.execPath, helper, appcast, archive, "1.6.0"], {
       cwd: process.cwd(), encoding: "utf8", timeout: 10_000
     });
     assert.equal(child.status, 0, child.stderr);
-    assert.deepEqual(await readdir(directory), []);
+    assert.deepEqual(await readdir(directory), ["helper.mjs"]);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
