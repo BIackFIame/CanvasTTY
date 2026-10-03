@@ -35,6 +35,7 @@ import type {
   SessionRestoreMode,
   SessionRowColorMode,
   ShortcutBindings,
+  TerminalLinkOpenMode,
   StickyNote,
   TerminalBorderSkinId,
   ZoomSensitivity
@@ -101,6 +102,7 @@ const RADIAL_LAUNCHER_ITEM_SET = new Set<RadialLauncherItemId>(RADIAL_LAUNCHER_I
 const EDGE_PAN_SPEEDS = new Set<EdgePanSpeed>(["slow", "normal", "fast"]);
 const ZOOM_SENSITIVITIES = new Set<ZoomSensitivity>(["slow", "normal", "fast"]);
 const FOCUS_ACTIVATIONS = new Set<FocusActivation>(["off", "single", "double"]);
+const TERMINAL_LINK_OPEN_MODES = new Set<TerminalLinkOpenMode>(["canvas", "external", "ask"]);
 const CANVAS_WHEEL_CAPTURE_MODES = new Set<CanvasWheelCaptureMode>(["off", "always", "key"]);
 const CANVAS_OVERLAY_PLACEMENTS = new Set<CanvasOverlayPlacement>([
   "top-left",
@@ -187,6 +189,7 @@ export class SettingsStore {
         || !("agentChatHistorySearchSessions" in source)
         || !("agentControlEnabled" in source)
         || !("sessionRestoreMode" in source)
+        || !("terminalLinkOpenMode" in source)
         || !("persistCanvasRegions" in source)
         || !("persistStickyNotes" in source)
         || !("canvasRegions" in source)
@@ -374,6 +377,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     appSkin: "classic",
     snapToGrid: true,
     copyOnSelect: false,
+    terminalLinkOpenMode: "ask",
     invertTerminalWheel: true,
     invertCanvasWheel: false,
     edgePan: false,
@@ -607,6 +611,9 @@ export function normalizeSettings(
       : fallback.appSkin,
     snapToGrid: typeof source.snapToGrid === "boolean" ? source.snapToGrid : fallback.snapToGrid,
     copyOnSelect: typeof source.copyOnSelect === "boolean" ? source.copyOnSelect : fallback.copyOnSelect,
+    terminalLinkOpenMode: TERMINAL_LINK_OPEN_MODES.has(source.terminalLinkOpenMode as TerminalLinkOpenMode)
+      ? source.terminalLinkOpenMode as TerminalLinkOpenMode
+      : fallback.terminalLinkOpenMode,
     invertTerminalWheel: typeof source.invertTerminalWheel === "boolean"
       ? source.invertTerminalWheel
       : fallback.invertTerminalWheel,

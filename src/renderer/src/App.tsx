@@ -121,6 +121,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   appSkin: "classic",
   snapToGrid: true,
   copyOnSelect: false,
+  terminalLinkOpenMode: "ask",
   invertTerminalWheel: true,
   invertCanvasWheel: false,
   edgePan: false,
@@ -889,6 +890,21 @@ export function App(): React.JSX.Element {
     });
   }, [openBrowser, settings.locale, showToast]);
 
+  const openTerminalUrl = useCallback(async (url: string): Promise<void> => {
+    try {
+      const safeUrl = normalizeExternalUrl(url);
+      if (settings.terminalLinkOpenMode === "canvas") {
+        await openBrowser(safeUrl);
+      } else if (settings.terminalLinkOpenMode === "external") {
+        await window.canvasTTY.external.openUrl(safeUrl);
+      } else {
+        setPendingTerminalUrl(safeUrl);
+      }
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
+    }
+  }, [openBrowser, settings.locale, settings.terminalLinkOpenMode, showToast]);
+
   const closeBrowser = useCallback(async (): Promise<void> => {
     try {
       const browserApi = window.canvasTTY.browser;
@@ -1353,13 +1369,7 @@ export function App(): React.JSX.Element {
           onOpenAgent={openAgent}
           onOpenTerminal={(position) => void openTerminal(position)}
           onOpenBrowser={openBrowserFromUi}
-          onOpenTerminalUrl={(url) => {
-            try {
-              setPendingTerminalUrl(normalizeExternalUrl(url));
-            } catch (error) {
-              showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
-            }
-          }}
+          onOpenTerminalUrl={(url) => void openTerminalUrl(url)}
           onRequestMedia={requestMedia}
           onRemoveMedia={removeMedia}
           onHomeLayoutChange={changeHomeLayout}

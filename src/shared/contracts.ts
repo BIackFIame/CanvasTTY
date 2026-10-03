@@ -70,6 +70,7 @@ export type CanvasOverlayPlacement = "top-left" | "top-right" | "bottom-left" | 
 export type MinimapInteractionMode = "click" | "drag";
 export type BrowserViewportSurface = "native" | "placeholder" | "hidden";
 export type FocusActivation = "off" | "single" | "double";
+export type TerminalLinkOpenMode = "canvas" | "external" | "ask";
 export type ShortcutAction = keyof ShortcutBindings;
 export type KeyboardPreset = "macos" | "windows" | "linux" | "custom";
 export type RadialLauncherActionId = "note" | "browser" | "settings";
@@ -290,6 +291,7 @@ export interface AppSettings {
   appSkin: AppSkinId;
   snapToGrid: boolean;
   copyOnSelect: boolean;
+  terminalLinkOpenMode: TerminalLinkOpenMode;
   invertTerminalWheel: boolean;
   invertCanvasWheel: boolean;
   edgePan: boolean;

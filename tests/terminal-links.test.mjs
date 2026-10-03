@@ -11,7 +11,7 @@ const contractsPath = new URL("../src/shared/contracts.ts", import.meta.url);
 const preloadPath = new URL("../src/preload/index.ts", import.meta.url);
 const ipcPath = new URL("../src/main/ipc/registerIpc.ts", import.meta.url);
 
-test("terminal HTTP(S) links open a Canvas or system-browser chooser", async () => {
+test("terminal HTTP(S) links use the preferred browser or the chooser", async () => {
   const [terminal, dialog, workspace, app] = await Promise.all([
     readFile(terminalCardPath, "utf8"),
     readFile(dialogPath, "utf8"),
@@ -26,7 +26,14 @@ test("terminal HTTP(S) links open a Canvas or system-browser chooser", async () 
   // The card gets a stable callback that calls the workspace's latest onOpenTerminalUrl.
   assert.match(workspace, /openUrl: onOpenTerminalUrl/);
   assert.match(workspace, /onOpenUrl: \(url: string\) => latest\.current!\.openUrl\(url\)/);
-  assert.match(app, /onOpenTerminalUrl=\{\(url\) => \{[\s\S]*?normalizeExternalUrl\(url\)[\s\S]*?showToast/);
+  assert.match(app, /onOpenTerminalUrl=\{\(url\) => void openTerminalUrl\(url\)\}/);
+  const handler = app.match(/const openTerminalUrl = useCallback\([\s\S]*?\n  \}, \[[^\]]*\]\);/)?.[0];
+  assert.ok(handler);
+  assert.match(handler, /const safeUrl = normalizeExternalUrl\(url\)/);
+  assert.match(handler, /terminalLinkOpenMode === "canvas"\)\s*\{\s*await openBrowser\(safeUrl\)/);
+  assert.match(handler, /terminalLinkOpenMode === "external"\)\s*\{\s*await window\.canvasTTY\.external\.openUrl\(safeUrl\)/);
+  assert.match(handler, /else\s*\{\s*setPendingTerminalUrl\(safeUrl\)/);
+  assert.match(handler, /catch \(error\)\s*\{\s*showToast/);
   assert.match(dialog, /onOpenCanvas\(url\)/);
   assert.match(dialog, /onOpenExternal\(url\)/);
   assert.match(app, /<TerminalLinkDialog/);
