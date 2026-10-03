@@ -2,6 +2,18 @@
 
 [English](ARCHITECTURE.md) · [Русский](ARCHITECTURE.ru.md) · [简体中文](ARCHITECTURE.zh-CN.md)
 
+## Application updates
+
+The main process owns one update service and the `idle`, `checking`, `available`, `downloading`, `ready`, `installing`, `upToDate`, and `error` states. Preload exposes only check, download, install, the current status, and status subscription to the trusted renderer. The source is stable `howdeploy/CanvasTTY` releases. A check runs 30 seconds after startup, then hourly, and is also available on demand. Download and installation require separate user actions.
+
+On macOS, the adapter caches the archive before starting Sparkle; Sparkle 2 verifies its Ed25519 signature before replacement. Windows NSIS and Linux AppImage/deb use `electron-updater` with automatic downloading and install-on-quit disabled. Windows portable uses a release link for manual installation.
+
+## Application diagnostics
+
+`DiagnosticLog` owns a bounded, serialized JSONL journal below `userData/logs` (four 1 MiB files). Startup/shutdown, session status transitions, application errors, renderer exceptions, updater states and IPC failures are recorded; PTY output and input are not subscribed to. Secret masking is shared with the existing safety registry and applied before disk writes and again during report preparation.
+
+`diagnosticIpc` accepts only the trusted main frame. Preload exposes collector availability, user-triggered submission and renderer error reporting. The collector URL comes from the application manifest (a loopback-only HTTP override is allowed in development). Reports contain selected runtime metadata and recent logs, are gzip-compressed, and require HTTPS plus an acknowledgement matching their identifier. The standalone collector and deployment instructions are in [diagnostics.md](diagnostics.md); there is no automatic upload.
+
 ## Process boundaries
 
 CanvasTTY follows Electron's three-layer model:

@@ -160,11 +160,91 @@ export function EvenG2Controls({
     ["scope", t(locale, "evenG2Access")],
     ["pair", t(locale, "evenG2Connect")],
   ];
+  const showingWebSetup = stage === "web" || (stage !== "overview" && webEnabled);
+  const headingMatchesMode = showingWebSetup === isWebOrigin(state.config.publicOrigin);
+  const connectionControls = <>
+    {state.peers.map((peer) => (
+      <div className="g2-peer" key={peer.id}>
+        <div className="g2-peer__top">
+          <div>
+            <strong>{peer.name}</strong>
+            <p>
+              {webEnabled
+                ? Date.now() - peer.lastSeen < 12000 ? t(locale, "webCompanionBrowserConnected") : t(locale, "webCompanionBrowserDisconnected")
+                : Date.now() - peer.lastSeen < 12000 ? t(locale, "evenG2EvenAppIsOnline") : t(locale, "evenG2WaitingForEvenApp")}
+            </p>
+          </div>
+          <button
+            onClick={() => {
+              setEditing(true);
+              setDraft({
+                ...state.config,
+                sessionIds: [...peer.grant.sessionIds],
+              });
+              setStage("scope");
+            }}
+          >
+            {t(locale, "evenG2ManageAccess")}
+          </button>
+        </div>
+        {!webEnabled && <div className="g2-checks">
+          <span>
+            <i className={peer.telemetry?.display === "confirmed" ? "pass" : ""} />
+            {t(locale, "evenG2Display")}: {peer.telemetry?.display === "confirmed"
+              ? t(locale, "evenG2Acknowledged") : t(locale, "evenG2NotChecked")}
+          </span>
+          <span>
+            <i className={peer.telemetry?.microphone === "off" && peer.telemetry.audioBytes > 0 ? "pass" : ""} />
+            {t(locale, "evenG2Microphone")}: {peer.telemetry?.microphone === "unknown"
+              ? t(locale, "evenG2Unconfirmed") : peer.telemetry?.audioBytes
+                ? t(locale, "evenG2AudioReceived") : t(locale, "evenG2NotChecked")}
+          </span>
+        </div>}
+        {peer.telemetry?.error && (
+          <p className="g2-settings__error" role="status">{peer.telemetry.error}</p>
+        )}
+        {!!peer.telemetry?.diagnostics?.length && (
+          <details>
+            <summary>{t(locale, "evenG2DeviceDiagnostics")}</summary>
+            <pre style={{ whiteSpace: "pre-wrap", fontSize: 11, overflowWrap: "anywhere" }}>
+              {peer.telemetry.diagnostics.join("\n")}
+            </pre>
+          </details>
+        )}
+        {!webEnabled && <p className="g2-muted">{t(locale, "evenG2InEvenAppOpenSettings")}</p>}
+        {revoke === peer.id ? (
+          <div className="g2-actions">
+            <span>{t(locale, "evenG2RevokeThisDeviceSAccess")}</span>
+            <button onClick={() => setRevoke(null)}>{t(locale, "evenG2Cancel")}</button>
+            <button className="g2-danger" onClick={() =>
+              void command({ type: "revoke", id: peer.id }).then(() => setRevoke(null))
+            }>{t(locale, "evenG2Revoke")}</button>
+          </div>
+        ) : (
+          <button className="g2-link" onClick={() => setRevoke(peer.id)}>{t(locale, "evenG2DisconnectDevice")}</button>
+        )}
+      </div>
+    ))}
+    {state.config.enabled && (
+      <button className="g2-link" disabled={busy} onClick={() =>
+        void command({ type: "configure", config: { ...state.config, enabled: false } }).then((next) => {
+          if (next) setDraft(next.config);
+        })
+      }>{webEnabled ? t(locale, "webCompanionTurnOff") : t(locale, "evenG2TurnOffEvenG2Integration")}</button>
+    )}
+    {webEnabled && (
+      <button className="g2-link" disabled={busy} onClick={() =>
+        void command({ type: "configure", config: { ...state.config, enabled: false, publicOrigin: "" } })
+          .then((next) => { if (next) setDraft(next.config); })
+      }>{t(locale, "webCompanionOptOut")}</button>
+    )}
+  </>;
   return (
-    <section className="g2-settings" aria-label={webEnabled ? t(locale, "webCompanion") : "Even G2"} ref={panelRef}>
+    <section className={`g2-controls${stage === "overview" ? " g2-controls--overview" : ""}`} ref={panelRef}>
+    <section className="g2-settings" aria-label={showingWebSetup ? t(locale, "webCompanion") : "Even G2"}>
       <header className="g2-settings__heading">
         <span className="g2-settings__icon">
-          <svg
+          {showingWebSetup ? <UiIcon name="browser" size={30} /> : <svg
             width="34"
             height="22"
             viewBox="0 0 34 22"
@@ -194,25 +274,28 @@ export function EvenG2Controls({
               stroke="currentColor"
               strokeWidth="2"
             />
-          </svg>
+          </svg>}
         </span>
         <div>
-          <span className="g2-settings__eyebrow">{webEnabled ? t(locale, "webCompanion").toUpperCase() : "EVEN G2"}</span>
+          <span className="g2-settings__eyebrow">{showingWebSetup ? t(locale, "webCompanion").toUpperCase() : "EVEN G2"}</span>
           <h3>
-            {webEnabled ? t(locale, "webCompanionTitle") : t(locale, "evenG2YourSessionsOnYourGlasses")}
+            {showingWebSetup ? t(locale, "webCompanionTitle") : t(locale, "evenG2YourSessionsOnYourGlasses")}
           </h3>
           <p>
-            {webEnabled ? t(locale, isUsbOrigin(displayOrigin) ? "webCompanionUsbSubtitle" : "webCompanionSubtitle") : t(locale, "evenG2ReadResponsesSpeakToAn")}
+            {showingWebSetup ? t(locale, isUsbOrigin(displayOrigin) ? "webCompanionUsbSubtitle" : "webCompanionSubtitle") : t(locale, "evenG2ReadResponsesSpeakToAn")}
           </p>
+          {stage === "overview" && <p className="g2-settings__hint">
+            {webEnabled ? t(locale, "webCompanionSwitchDescription") : t(locale, "evenG2ConnectOnceChooseWhatYour")}
+          </p>}
         </div>
         <span
           className={
-            "g2-settings__status " + (activePeers.length ? "is-online" : "")
+            "g2-settings__status " + (headingMatchesMode && activePeers.length ? "is-online" : "")
           }
         >
-          {activePeers.length
+          {headingMatchesMode && activePeers.length
             ? t(locale, "evenG2Connected")
-            : state.config.enabled
+            : headingMatchesMode && state.config.enabled
               ? t(locale, "evenG2Enabled")
               : t(locale, "evenG2Off")}
         </span>
@@ -225,9 +308,6 @@ export function EvenG2Controls({
       {stage === "overview" ? (
         <>
           <div className="g2-settings__entry">
-            <p>
-              {webEnabled ? t(locale, "webCompanionSwitchDescription") : t(locale, "evenG2ConnectOnceChooseWhatYour")}
-            </p>
             <button
               className="g2-primary"
               onClick={async () => {
@@ -254,153 +334,7 @@ export function EvenG2Controls({
               <UiIcon name="arrow" />
             </button>
           </div>
-          <div className="g2-settings__network">
-            <p>{webEnabled ? t(locale, "webCompanionChooseLan") : t(locale, "evenG2CanvasTTYChoosesALocalNetwork")}</p>
-            <button type="button" onClick={() => {
-              setDraft({ ...state.config, publicOrigin: "", interfaceName: "" });
-              setStage("transport");
-            }}>
-              {t(locale, "evenG2LocalNetworkSettings")}
-            </button>
-          </div>
-          <div className="g2-settings__network">
-            <p>{t(locale, "webCompanionOverview")}</p>
-            <button type="button" onClick={() => {
-              setEditing(false);
-              setDraft(state.config);
-              setStage("web");
-            }}>
-              {t(locale, "webCompanion")}
-            </button>
-            {webEnabled && (
-              <p className="g2-muted">{t(locale, "webCompanionStatus")} {state.config.enabled ? t(locale, "evenG2Enabled") : t(locale, "evenG2Off")} · <a href={`${state.config.publicOrigin}/mobile/`} target="_blank" rel="noreferrer">{state.config.publicOrigin}/mobile/</a></p>
-            )}
-          </div>
-          {state.peers.map((peer) => (
-            <div className="g2-peer" key={peer.id}>
-              <div className="g2-peer__top">
-                <div>
-                  <strong>{peer.name}</strong>
-                  <p>
-                    {webEnabled
-                      ? Date.now() - peer.lastSeen < 12000 ? t(locale, "webCompanionBrowserConnected") : t(locale, "webCompanionBrowserDisconnected")
-                      : Date.now() - peer.lastSeen < 12000 ? t(locale, "evenG2EvenAppIsOnline") : t(locale, "evenG2WaitingForEvenApp")}
-                  </p>
-                </div>
-                <button
-                  onClick={() => {
-                    setEditing(true);
-                    setDraft({
-                      ...state.config,
-                      sessionIds: [...peer.grant.sessionIds],
-                    });
-                    setStage("scope");
-                  }}
-                >
-                  {t(locale, "evenG2ManageAccess")}
-                </button>
-              </div>
-              {!webEnabled && <div className="g2-checks">
-                <span>
-                  <i
-                    className={
-                      peer.telemetry?.display === "confirmed" ? "pass" : ""
-                    }
-                  />
-                  {t(locale, "evenG2Display")}:{" "}
-                  {peer.telemetry?.display === "confirmed"
-                    ? t(locale, "evenG2Acknowledged")
-                    : t(locale, "evenG2NotChecked")}
-                </span>
-                <span>
-                  <i
-                    className={
-                      peer.telemetry?.microphone === "off" &&
-                      peer.telemetry.audioBytes > 0
-                        ? "pass"
-                        : ""
-                    }
-                  />
-                  {t(locale, "evenG2Microphone")}:{" "}
-                  {peer.telemetry?.microphone === "unknown"
-                    ? t(locale, "evenG2Unconfirmed")
-                    : peer.telemetry?.audioBytes
-                      ? t(locale, "evenG2AudioReceived")
-                      : t(locale, "evenG2NotChecked")}
-                </span>
-              </div>}
-              {peer.telemetry?.error && (
-                <p className="g2-settings__error" role="status">
-                  {peer.telemetry.error}
-                </p>
-              )}
-              {!!peer.telemetry?.diagnostics?.length && (
-                <details>
-                  <summary>
-                    {t(locale, "evenG2DeviceDiagnostics")}
-                  </summary>
-                  <pre
-                    style={{
-                      whiteSpace: "pre-wrap",
-                      fontSize: 11,
-                      overflowWrap: "anywhere",
-                    }}
-                  >
-                    {peer.telemetry.diagnostics.join("\n")}
-                  </pre>
-                </details>
-              )}
-              {!webEnabled && <p className="g2-muted">
-                {t(locale, "evenG2InEvenAppOpenSettings")}
-              </p>}
-              {revoke === peer.id ? (
-                <div className="g2-actions">
-                  <span>
-                    {t(locale, "evenG2RevokeThisDeviceSAccess")}
-                  </span>
-                  <button onClick={() => setRevoke(null)}>
-                    {t(locale, "evenG2Cancel")}
-                  </button>
-                  <button
-                    className="g2-danger"
-                    onClick={() =>
-                      void command({ type: "revoke", id: peer.id }).then(() =>
-                        setRevoke(null),
-                      )
-                    }
-                  >
-                    {t(locale, "evenG2Revoke")}
-                  </button>
-                </div>
-              ) : (
-                <button className="g2-link" onClick={() => setRevoke(peer.id)}>
-                  {t(locale, "evenG2DisconnectDevice")}
-                </button>
-              )}
-            </div>
-          ))}
-          {state.config.enabled && (
-            <button
-              className="g2-link"
-              disabled={busy}
-              onClick={() =>
-                void command({
-                  type: "configure",
-                  config: { ...state.config, enabled: false },
-                }).then((next) => {
-                  if (next) setDraft(next.config);
-                })
-              }
-            >
-              {webEnabled ? t(locale, "webCompanionTurnOff") : t(locale, "evenG2TurnOffEvenG2Integration")}
-            </button>
-          )}
-          {webEnabled && (
-            <button className="g2-link" disabled={busy} onClick={() =>
-              void command({ type: "configure", config: { ...state.config, enabled: false, publicOrigin: "" } })
-                .then((next) => { if (next) setDraft(next.config); })
-            }>{t(locale, "webCompanionOptOut")}</button>
-          )}
+          {!webEnabled && <div className="g2-settings__connections">{connectionControls}</div>}
         </>
       ) : (
         <>
@@ -820,6 +754,50 @@ export function EvenG2Controls({
           )}
         </>
       )}
+    </section>
+    {stage === "overview" && <>
+      <section className="g2-settings" aria-label={t(locale, "evenG2LocalNetwork")}>
+        <header className="g2-settings__heading">
+          <span className="g2-settings__icon"><UiIcon name="sliders-horizontal" size={30} /></span>
+          <div>
+            <h3>{t(locale, "evenG2LocalNetwork")}</h3>
+            <p>{webEnabled ? t(locale, "webCompanionChooseLan") : t(locale, "evenG2CanvasTTYChoosesALocalNetwork")}</p>
+          </div>
+        </header>
+        <div className="g2-settings__entry">
+          <button type="button" onClick={() => {
+            setDraft({ ...state.config, publicOrigin: "", interfaceName: "" });
+            setStage("transport");
+          }}>{t(locale, "evenG2LocalNetworkSettings")}</button>
+        </div>
+      </section>
+      <section className="g2-settings" aria-label={t(locale, "webCompanion")}>
+        <header className="g2-settings__heading">
+          <span className="g2-settings__icon"><UiIcon name="browser" size={30} /></span>
+          <div>
+            <h3>{t(locale, "webCompanion")}</h3>
+            <p>{t(locale, "webCompanionOverview")}</p>
+          </div>
+          <span className={"g2-settings__status " + (webEnabled && activePeers.length ? "is-online" : "")}>
+            {webEnabled && activePeers.length ? t(locale, "evenG2Connected")
+              : webEnabled && state.config.enabled ? t(locale, "evenG2Enabled") : t(locale, "evenG2Off")}
+          </span>
+        </header>
+        <div className="g2-settings__entry">
+          <button type="button" onClick={() => {
+            setEditing(false);
+            setDraft(state.config);
+            setStage("web");
+          }}>{t(locale, "webCompanion")}</button>
+        </div>
+        {webEnabled && <div className="g2-settings__connections">
+          <p className="g2-muted">
+            {t(locale, "webCompanionStatus")} {state.config.enabled ? t(locale, "evenG2Enabled") : t(locale, "evenG2Off")} · <a href={`${state.config.publicOrigin}/mobile/`} target="_blank" rel="noreferrer">{state.config.publicOrigin}/mobile/</a>
+          </p>
+          {connectionControls}
+        </div>}
+      </section>
+    </>}
     </section>
   );
 }

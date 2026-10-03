@@ -23,7 +23,6 @@ import type {
   StickyNote
 } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
-import { ShortcutReference } from "../../components/ShortcutReference";
 import { t } from "../../lib/i18n";
 import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesShortcut, shouldKeepNativeKeyboardInput } from "../../lib/shortcuts";
 import { BrowserCard } from "../browser/BrowserCard";
@@ -189,6 +188,7 @@ interface WorkspaceCanvasProps {
   onCameraChange(camera: CameraState): void;
   onGoHome(): void;
   onOpenSettings(): void;
+  onOpenShortcutReference(): void;
   onOpenAgent(provider: AgentProviderId, position?: Point): void;
   onOpenTerminal(position?: Point): void;
   onOpenBrowser(position?: Point): void;
@@ -1362,10 +1362,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                   <div><kbd>{displayCanvasNavigationBinding(settings.canvasNavigationOverride, window.canvasTTY.window.isMacOS)}</kbd>
                     <span>{t(settings.locale, "canvasNavigationOverrideHint")}</span></div>
                 )}
-                <details className="shortcut-hints__more" data-interactive="true" data-canvas-wheel-priority="local">
-                  <summary>{t(settings.locale, "keyboardShortcuts")}</summary>
-                  <ShortcutReference locale={settings.locale} bindings={settings.shortcuts} />
-                </details>
+                <button className="shortcut-hints__more" type="button" data-interactive="true"
+                  aria-haspopup="dialog" onClick={props.onOpenShortcutReference}>
+                  {t(settings.locale, "keyboardShortcuts")}
+                  <UiIcon name="app-window" size={14} />
+                </button>
               </aside>
             )}
           </div>

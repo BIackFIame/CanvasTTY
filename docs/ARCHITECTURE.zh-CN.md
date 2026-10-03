@@ -2,6 +2,18 @@
 
 [English](ARCHITECTURE.md) · [Русский](ARCHITECTURE.ru.md) · [简体中文](ARCHITECTURE.zh-CN.md)
 
+## 应用更新
+
+主进程管理统一的更新服务及 `idle`、`checking`、`available`、`downloading`、`ready`、`installing`、`upToDate`、`error` 状态。Preload 仅向可信 renderer 提供检查、下载、安装、当前状态和状态订阅。更新来源仅为 `howdeploy/CanvasTTY` 的稳定版发布。应用启动 30 秒后检查，此后每小时检查一次，也可手动检查。下载和安装分别需要用户操作。
+
+macOS 适配器先缓存归档，再启动 Sparkle；Sparkle 2 在替换应用前验证 Ed25519 签名。Windows NSIS 与 Linux AppImage/deb 使用 `electron-updater`，关闭自动下载和退出时自动安装。Windows 便携版提供手动安装的发布页链接。
+
+## 应用诊断
+
+`DiagnosticLog` 在 `userData/logs` 中保存有界事件日志：四个文件，每个最多 1 MiB。记录启动、关闭、会话状态、更新状态和 main/renderer/IPC 错误，不订阅 PTY 输出或用户输入。写入磁盘和发送报告前均通过现有安全注册表进行机密脱敏。
+
+`diagnosticIpc` 仅接受受信任主 frame 的调用。用户明确点击后，通过 manifest 中配置的 HTTPS 地址发送报告，并核对返回的报告标识符。独立接收服务和域名配置说明见 [diagnostics.md](diagnostics.md)。没有自动上传。
+
 ## 进程边界
 
 CanvasTTY 遵循 Electron 的三层模型：

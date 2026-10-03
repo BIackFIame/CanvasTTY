@@ -220,7 +220,7 @@ export function keyboardPresetShortcuts(preset: Exclude<KeyboardPreset, "custom"
   return {
     ...DEFAULT_SHORTCUTS,
     toggleFullscreen: preset === "macos" ? "Meta+F" : "F11",
-    ...(preset === "windows" ? { terminalCopy: "Ctrl+Shift+C" } : {}),
+    ...(preset !== "macos" ? { terminalCopy: "Ctrl+Shift+C" } : {}),
     ...(preset === "macos" ? {
       commandPalette: "Meta+K", openSettings: "Meta+Comma",
       terminalCopy: "Meta+C", terminalPaste: "Meta+V", codexSelectAll: "Meta+A"
@@ -1498,7 +1498,6 @@ export interface LimitsSnapshot {
   providers: ProviderLimitsSnapshot[];
 }
 
-/** Self-update lifecycle; `unavailable` is the honest state for dev and offline runs. */
 export type UpdaterState =
   | { status: "idle" }
   | { status: "checking" }
@@ -1507,11 +1506,43 @@ export type UpdaterState =
   | { status: "downloaded"; version: string }
   | { status: "unavailable"; reason: "dev" | "offline" | "error" };
 
-export interface UpdaterStateEvent {
-  state: UpdaterState;
+export type UpdateStatus =
+  | { type: "idle" }
+  | { type: "checking" }
+  | { type: "available"; version: string; notes?: string; manualUrl?: string }
+  | { type: "downloading"; percent?: number }
+  | { type: "ready"; version: string }
+  | { type: "installing" }
+  | { type: "upToDate" }
+  | { type: "error"; message: string };
+
+export interface DiagnosticConfiguration { available: boolean; host: string | null }
+export interface DiagnosticReportReceipt { reportId: string }
+export const DIAGNOSTIC_IMAGE_MAX_BYTES = 2 * 1024 * 1024;
+export interface DiagnosticAttachment {
+  mimeType: "image/png" | "image/jpeg";
+  base64: string;
+}
+export interface DiagnosticRendererError {
+  kind: "render" | "window" | "unhandled-rejection";
+  message: string;
+  stack?: string;
+  componentStack?: string;
 }
 
 export interface CanvasTTYApi {
+  diagnostics: {
+    configuration(): Promise<DiagnosticConfiguration>;
+    send(description: string, attachment?: DiagnosticAttachment): Promise<DiagnosticReportReceipt>;
+    reportError(error: DiagnosticRendererError): void;
+  };
+  update: {
+    status(): Promise<UpdateStatus>;
+    check(): Promise<void>;
+    download(): Promise<void>;
+    install(): Promise<void>;
+    onStatus(listener: (status: UpdateStatus) => void): () => void;
+  };
   evenG2: import('./evenG2.ts').EvenG2Api;
   appVersion(): Promise<string>;
   clipboard: {
@@ -1676,16 +1707,11 @@ export interface CanvasTTYApi {
     /** A git risk report about a card that was closed (a live card carries its own on SessionMetadata.gitRisk). */
     onGitRisk(listener: (report: GitRiskReport) => void): () => void;
   };
-  updater: {
-    state(): Promise<UpdaterState>;
-    check(): Promise<void>;
-    install(): void;
-    onState(listener: (event: UpdaterStateEvent) => void): () => void;
-  };
   window: {
     isMacOS: boolean;
     /** The operating system (process.platform); the launcher uses it to know whether agent isolation exists here. */
     platform: string;
+    onOpenUpdates(listener: () => void): () => void;
     minimize(): void;
     toggleMaximize(): Promise<WindowState>;
     close(): void;
@@ -1695,14 +1721,14 @@ export interface CanvasTTYApi {
 }
 
 export const IPC = {
+  diagnosticsConfiguration: "diagnostics:configuration",
+  diagnosticsSend: "diagnostics:send",
+  diagnosticsRendererError: "diagnostics:renderer-error",
   clipboardRead: "clipboard:read",
   clipboardHasImage: "clipboard:has-image",
   clipboardWrite: "clipboard:write",
   externalOpenUrl: "external:open-url",
   terminalSetVisible: "terminal:set-visible",
-  updaterState: "updater:state",
-  updaterCheck: "updater:check",
-  updaterInstall: "updater:install",
   settingsGet: "settings:get",
   settingsUpdate: "settings:update",
   settingsChanged: "settings:changed",
@@ -1804,6 +1830,12 @@ export const IPC = {
   canvasNavigationPointerGesture: "canvas-navigation:pointer-gesture",
   canvasNavigationOverrideState: "canvas-navigation:override-state",
   appVersion: "app:version",
+  updateStatus: "update:status",
+  updateCheck: "update:check",
+  updateDownload: "update:download",
+  updateInstall: "update:install",
+  updateChanged: "update:changed",
+  windowOpenUpdates: "window:open-updates",
   githubAuthStatus: "github-auth:status",
   githubAuthStart: "github-auth:start",
   githubAuthSignOut: "github-auth:sign-out",

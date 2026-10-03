@@ -160,6 +160,8 @@ export class SettingsStore {
       this.hasPersistedLegacyWheelCapture = Object.hasOwn(source, "zoomOverApplications");
       const needsMigration = !("useScrollWheelToZoom" in source)
         || !("keyboardPreset" in source)
+        || (source.keyboardPreset === "linux"
+          && (source.shortcuts as Partial<ShortcutBindings> | undefined)?.terminalCopy === "Ctrl+C")
         || !("canvasNavigationOverride" in source)
         || !("canvasWheelOverride" in source)
         || !("canvasWheelCaptureMode" in source)
@@ -499,7 +501,13 @@ export function normalizeSettings(
       (provider): provider is AgentProviderId => AGENT_PROVIDER_SET.has(provider as AgentProviderId)
     )
     : fallback.acknowledgedDangerousProfiles;
-  const shortcuts = normalizeShortcuts(source.shortcuts, fallback.shortcuts);
+  // Only the named Linux preset inherits the corrected copy key; Custom keeps its saved binding.
+  const shortcuts = normalizeShortcuts(
+    source.keyboardPreset === "linux" && source.shortcuts?.terminalCopy === "Ctrl+C"
+      ? { ...source.shortcuts, terminalCopy: "Ctrl+Shift+C" }
+      : source.shortcuts,
+    fallback.shortcuts
+  );
   const navigationOverrideCandidate = source.canvasNavigationOverride === undefined
     ? fallback.canvasNavigationOverride
     : source.canvasNavigationOverride;

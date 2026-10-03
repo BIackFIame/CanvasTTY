@@ -1,22 +1,26 @@
 import "./stdio";
 import appIcon from "../../build/icon.png?asset";
+import appManifest from "../../package.json";
 import { ipcMain } from "electron";
 import { randomUUID } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
-import { app, BrowserWindow, dialog, net, Notification, protocol, safeStorage, session } from "electron";
+import { app, BrowserWindow, dialog, Menu, net, Notification, protocol, safeStorage, session } from "electron";
 import {
   IPC,
   type LocaleId,
   type PluginCanvasRequest,
   type PluginServiceEvent,
-  type SessionStatus,
-  type UpdaterState,
-  type UpdaterStateEvent
+  type SessionStatus
 } from "../shared/contracts";
 import { registerCriticalIpc, registerIpc } from "./ipc/registerIpc";
 import { IpcReadinessGate, type IpcRegistrar } from "./ipc/IpcReadinessGate";
+import { registerUpdateIpc } from "./ipc/updateIpc";
+import { registerDiagnosticIpc } from "./ipc/diagnosticIpc";
+import { DiagnosticLog } from "./services/DiagnosticLog";
+import { UpdateController, type UpdateAdapter } from "./services/updates/UpdateController";
+import { ManualReleaseAdapter } from "./services/updates/ManualReleaseAdapter";
 import { SettingsStore } from "./services/SettingsStore";
 import { SkinRegistry } from "./services/SkinRegistry";
 import { PixelSkinPackRegistry } from "./services/PixelSkinPackRegistry";
@@ -83,17 +87,24 @@ import {
 } from "./services/hermesConfig";
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
-import { lazyRequire } from "./lazyRequire";
-import { markMainBoot } from "./bootMarks";
+import { markMainBoot, mainBootMarks } from "./bootMarks";
+import { macApplicationMenuTemplate } from "./macApplicationMenu";
 
-// electron-updater (and what it pulls in) is loaded only by a packaged app that
-// checks for updates, never at startup of a dev build.
-const electronUpdater = lazyRequire<typeof import("electron-updater")>("electron-updater");
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
   app.setPath("userData", process.env.CANVASTTY_USER_DATA_DIR);
   delete process.env.CANVASTTY_USER_DATA_DIR;
 }
+
+const diagnostics = new DiagnosticLog(join(app.getPath("userData"), "logs"));
+diagnostics.captureConsole();
+diagnostics.record("info", "application", "process.started", {
+  version: app.getVersion(), platform: process.platform, architecture: process.arch,
+  electron: process.versions.electron, packaged: app.isPackaged
+});
+process.on("uncaughtExceptionMonitor", error => diagnostics.record("error", "main", "uncaught-exception", error));
+process.on("warning", warning => diagnostics.record("warn", "main", "process.warning", warning));
+let diagnosticContext: () => unknown = () => ({ servicesReady: false });
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -166,6 +177,12 @@ let agentRuntimeHelper: RuntimeHookHelperLaunch | null = null;
 let providerClis: ProviderCliRegistry | null = null;
 const pluginWindows = new Map<BrowserWindow, string>();
 let servicesReady = false;
+let appSurfaceReady = false;
+let pendingMenuUpdateCheck = false;
+let checkUpdatesFromMenu: (() => void) | null = null;
+let installMacMenu: (() => void) | null = null;
+let updateTimer: ReturnType<typeof setTimeout> | null = null;
+let updateInterval: ReturnType<typeof setInterval> | null = null;
 let startupRunning = false;
 let shutdownRunning = false;
 let shutdownComplete = false;
@@ -180,9 +197,6 @@ let mainWindowClosing = false;
 // session, so a burst of snapshots notifies once per transition. Cleared when
 // the session is removed (its removal event), never used as a status source.
 const notifiedAttentionStatus = new Map<string, SessionStatus>();
-// Self-update state; advanced by autoUpdater events and pushed to the renderer.
-let updaterState: UpdaterState = { status: "idle" };
-let updaterInitialized = false;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();
@@ -216,6 +230,7 @@ function createWindow(): BrowserWindow {
   mainWindow = window;
   markMainBoot("windowCreated");
   observeMainWindowState?.(window);
+  appSurfaceReady = false;
   // A fresh window is not closing; the previous one's flag must not leak in.
   mainWindowClosing = false;
 
@@ -244,9 +259,6 @@ function createWindow(): BrowserWindow {
     void loadApplicationSurface(window)
       .catch((error) => console.warn("CanvasTTY could not reload the application after a renderer crash.", error));
   });
-  // Seed the renderer's view of the updater on every (re)load, including the
-  // crash-recovery reload above.
-  window.webContents.on("did-finish-load", broadcastUpdaterState);
   window.on("blur", () => {
     canvasNavigationInput?.reset();
     browserService?.cancelCanvasNavigationGesture();
@@ -262,6 +274,7 @@ function createWindow(): BrowserWindow {
     mainWindowClosing = true;
     if (mainWindow === window) {
       mainWindow = null;
+      appSurfaceReady = false;
       observeMainWindowState?.(null);
     }
   });
@@ -326,6 +339,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   markMainBoot("criticalServicesReady");
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
+  diagnostics.configureRedaction(text => redaction.redact(text));
+  diagnosticContext = () => ({
+    servicesReady,
+    settings: { locale: settings.get().locale, keyboardPreset: settings.get().keyboardPreset,
+      uiScale: settings.get().uiScale, sessionRestoreMode: settings.get().sessionRestoreMode },
+    sessions: terminalManager?.list().map(({ provider, status, exitCode }) => ({ provider, status, exitCode })) ?? [],
+    plugins: pluginManager?.list().map(({ manifest, enabled }) => ({ id: manifest.id, version: manifest.version, enabled })) ?? []
+  });
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
@@ -563,6 +584,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     if (channel === IPC.terminalSession && "session" in payload) {
       const { id, status, title, provider } = payload.session;
       const previousStatus = notifiedAttentionStatus.get(id);
+      if (previousStatus !== status) diagnostics.record(status === "failed" ? "error" : "info", "terminal", "session.state", {
+        id, provider, status, exitCode: payload.session.exitCode
+      });
       notifiedAttentionStatus.set(id, status);
       const failureOrigin = status === "failed" ? terminalManager?.consumeFailureOrigin() ?? null : null;
       if ((status === "needs_approval" || status === "failed")
@@ -576,6 +600,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }).show();
       }
     } else if (channel === IPC.terminalRemoved && "id" in payload) {
+      diagnostics.record("info", "terminal", "session.closed", { id: payload.id });
       notifiedAttentionStatus.delete(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
@@ -763,6 +788,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {
       terminalManager?.setKeyboardShortcuts(next.shortcuts);
+      installMacMenu?.();
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
       terminalManager?.setLifecycleHooksEnabled(next.agentLifecycleHooksEnabled);
       // Awaited so the renderer's settings.update resolves with the endpoint live
@@ -792,11 +818,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     closePluginWindows,
     requestPluginLauncher,
     requestPluginCanvas,
-    broadcastPluginStorageChange,
-    updater: {
-      check: requestUpdaterCheck,
-      install: installUpdaterUpdate
-    }
+    broadcastPluginStorageChange
   });
   markMainBoot("coreServicesReady");
   // The Even G2 companion is the last group: nothing on the first frame needs it.
@@ -817,6 +839,61 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   };
   ipc.handle(IPC.evenG2State, event => { assertCompanionSender(event); return evenG2!.state(); });
   ipc.handle(IPC.evenG2Command, async (event, command) => { assertCompanionSender(event); return evenG2!.command(command); });
+  const manuallyInstalled = !app.isPackaged || (process.platform === "win32" && Boolean(process.env.PORTABLE_EXECUTABLE_FILE));
+  let updateAdapter: UpdateAdapter;
+  if (manuallyInstalled || (process.platform === "darwin" && process.arch !== "arm64")) {
+    updateAdapter = new ManualReleaseAdapter();
+  } else if (process.platform === "darwin") {
+    const { MacSparkleUpdater } = await import("./services/updates/MacSparkleUpdater");
+    updateAdapter = new MacSparkleUpdater(userDataPath, dirname(dirname(dirname(app.getPath("exe")))),
+      join(process.resourcesPath, "..", "MacOS", "canvastty-update-helper"),
+      join(process.resourcesPath, "updates", "mac-update-server.mjs"), app.getVersion());
+  } else {
+    const { ElectronUpdaterAdapter } = await import("./services/updates/ElectronUpdaterAdapter");
+    updateAdapter = new ElectronUpdaterAdapter();
+  }
+  const update = new UpdateController(updateAdapter, app.getVersion());
+  update.onStatus(status => diagnostics.record(status.type === "error" ? "error" : "info", "updates", "state.changed", {
+    type: status.type, ...(status.type === "error" ? { message: status.message } : {}),
+    ...(status.type === "available" || status.type === "ready" ? { version: status.version } : {}),
+    ...(status.type === "downloading" ? { percent: status.percent } : {})
+  }));
+  registerUpdateIpc(ipc, update, settings, terminalManager, () => mainWindow);
+  if (process.platform === "darwin") {
+    checkUpdatesFromMenu = () => {
+      const window = mainWindow;
+      if (!appSurfaceReady || !window || window.isDestroyed() || window.webContents.isDestroyed()) {
+        pendingMenuUpdateCheck = true;
+        if (!startupRunning && !shutdownRunning && !shutdownComplete) void startApplication();
+        return;
+      }
+      if (window.isMinimized()) window.restore();
+      window.show();
+      app.focus({ steal: true });
+      window.focus();
+      window.webContents.send(IPC.windowOpenUpdates);
+      void update.check().catch(error => console.warn("Menu update check failed:", error));
+    };
+    let installedLocale: string | null = null;
+    installMacMenu = () => {
+      const locale = settings.get().locale;
+      if (locale === installedLocale) return;
+      Menu.setApplicationMenu(Menu.buildFromTemplate(
+        macApplicationMenuTemplate("CanvasTTY", locale, () => checkUpdatesFromMenu?.())
+      ));
+      installedLocale = locale;
+    };
+  }
+  if (app.isPackaged) {
+    updateTimer = setTimeout(() => {
+      if (update.status().type !== "idle") return;
+      void update.check().catch(error => console.warn("Automatic update check failed:", error));
+    }, 30_000);
+    updateInterval = setInterval(() => {
+      if (["checking", "downloading", "ready", "installing"].includes(update.status().type)) return;
+      void update.check().catch(error => console.warn("Automatic update check failed:", error));
+    }, 60 * 60 * 1000);
+  }
   servicesReady = true;
   markMainBoot("servicesReady");
 }
@@ -905,11 +982,16 @@ function ipcReadinessGate(): IpcReadinessGate {
   if (ipcGate) return ipcGate;
   const ungated = new Set<string>([IPC.evenG2BrowserResponse, IPC.browserPageWheelDecision, IPC.browserPageWheel]);
   ipcGate = new IpcReadinessGate(ipcMain, {
+    onInvokeError: (channel, error) => diagnostics.record("error", "ipc", "invoke.failed", { channel, error }),
     channels: Object.values(IPC).filter((channel) => !ungated.has(channel)),
     // The renderer's synchronous sends block it until they are answered: before the
     // browser service is up there is no browser to route a wheel or focus change to.
     syncReplies: { [IPC.canvasNavigationOwnerWheel]: true, [IPC.browserSetInputFocused]: true }
   });
+  registerDiagnosticIpc(ipcGate, diagnostics, () => mainWindow,
+    !app.isPackaged && process.env.CANVASTTY_DIAGNOSTICS_URL
+      ? process.env.CANVASTTY_DIAGNOSTICS_URL : appManifest.diagnostics.reportUrl,
+    () => diagnosticContext());
   return ipcGate;
 }
 
@@ -947,7 +1029,13 @@ async function startApplication(): Promise<void> {
     }
     ipcGate?.settle();
     if (surface.status === "rejected") throw surface.reason;
-    initializeUpdater();
+    appSurfaceReady = true;
+    diagnostics.record("info", "startup", "ready", { marks: mainBootMarks() });
+    installMacMenu?.();
+    if (pendingMenuUpdateCheck) {
+      pendingMenuUpdateCheck = false;
+      checkUpdatesFromMenu?.();
+    }
     await runStartupSmokes(window);
   } catch (error) {
     // A load aborted by that same close surfaces here as ERR_FAILED or
@@ -957,6 +1045,7 @@ async function startApplication(): Promise<void> {
       console.warn("CanvasTTY startup stopped: its window is gone, the application is closing.", error);
       return;
     }
+    diagnostics.record("error", "startup", "failed", { error, marks: mainBootMarks() });
     if (startupWindow) await showStartupFailure(startupWindow, error);
     else {
       const detail = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -1035,95 +1124,6 @@ function attentionStatusLabel(status: "needs_approval" | "failed", locale: Local
   return locale === "ru" ? "Сессия завершилась с ошибкой" : "Session failed";
 }
 
-// Self-update. electron-updater is packaged-only: in dev, or when the feed
-// cannot be reached, the honest state is `unavailable` — never an exception.
-
-/** Pushes the current updater state; also runs on every renderer load. */
-function broadcastUpdaterState(): void {
-  const event: UpdaterStateEvent = { state: updaterState };
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(IPC.updaterState, event);
-  }
-}
-
-function publishUpdaterState(state: UpdaterState): void {
-  updaterState = state;
-  broadcastUpdaterState();
-}
-
-function initializeUpdater(): void {
-  if (updaterInitialized) return;
-  updaterInitialized = true;
-  if (!app.isPackaged) {
-    publishUpdaterState({ status: "unavailable", reason: "dev" });
-    return;
-  }
-
-  // The user decides when to download (the settings row), while an update that
-  // is already on disk installs itself on quit.
-  const { autoUpdater } = electronUpdater();
-  autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
-  let availableVersion = "";
-  autoUpdater.on("checking-for-update", () => publishUpdaterState({ status: "checking" }));
-  autoUpdater.on("update-available", (info) => {
-    availableVersion = info.version;
-    publishUpdaterState({ status: "available", version: info.version });
-  });
-  autoUpdater.on("update-not-available", () => publishUpdaterState({ status: "idle" }));
-  autoUpdater.on("download-progress", (progress) => {
-    publishUpdaterState({
-      status: "downloading",
-      version: availableVersion || app.getVersion(),
-      percent: Number.isFinite(progress.percent) ? Math.round(progress.percent) : null
-    });
-  });
-  autoUpdater.on("update-downloaded", (info) => publishUpdaterState({ status: "downloaded", version: info.version }));
-  // Without a listener EventEmitter would rethrow an updater error.
-  autoUpdater.on("error", (error) => {
-    publishUpdaterState({ status: "unavailable", reason: updaterFailureReason(error) });
-  });
-  void requestUpdaterCheck();
-}
-
-/**
- * Renderer "check for updates" intent. A release that was already found is
- * what the row's Download action fetches: autoDownload is off, so only this
- * second request actually pulls the update down.
- */
-async function requestUpdaterCheck(): Promise<void> {
-  if (!app.isPackaged) {
-    publishUpdaterState({ status: "unavailable", reason: "dev" });
-    return;
-  }
-  if (updaterState.status === "downloading" || updaterState.status === "downloaded") return;
-  try {
-    const { autoUpdater } = electronUpdater();
-    if (updaterState.status === "available") await autoUpdater.downloadUpdate();
-    else {
-      publishUpdaterState({ status: "checking" });
-      await autoUpdater.checkForUpdates();
-    }
-  } catch (error) {
-    publishUpdaterState({ status: "unavailable", reason: updaterFailureReason(error) });
-  }
-}
-
-/** Renderer "install" intent; only meaningful once a download finished. */
-function installUpdaterUpdate(): void {
-  if (updaterState.status !== "downloaded") return;
-  electronUpdater().autoUpdater.quitAndInstall();
-}
-
-function updaterFailureReason(error: unknown): "offline" | "error" {
-  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
-  const message = error instanceof Error ? error.message : String(error);
-  return /ENOTFOUND|EAI_AGAIN|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|ERR_INTERNET_DISCONNECTED|getaddrinfo/i
-    .test(`${code} ${message}`)
-    ? "offline"
-    : "error";
-}
-
 if (hasSingleInstanceLock) {
   void app.whenReady()
     .then(() => {
@@ -1187,8 +1187,11 @@ app.on("child-process-gone", (_event, details) => {
 void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
+  diagnostics.record("info", "application", "shutdown.started");
   agentChatHistory?.dispose();
   if (agentControl) await Promise.allSettled([agentControl.close()]);
+  if (updateTimer) clearTimeout(updateTimer);
+  if (updateInterval) clearInterval(updateInterval);
   for (const request of browserRequests.values()) { clearTimeout(request.timer); request.reject(new Error("App closing")); }
   browserRequests.clear();
   await evenG2?.close();
@@ -1204,6 +1207,8 @@ async function shutdownServices(): Promise<void> {
   if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
   await ptyExits;
+  diagnostics.record("info", "application", "shutdown.completed");
+  await diagnostics.flush();
 }
 
 async function openPluginWindow(pluginId: string, contributionId: string): Promise<void> {

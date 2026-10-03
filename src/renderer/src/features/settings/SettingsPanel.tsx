@@ -1,6 +1,5 @@
 import { EvenG2Controls } from "./EvenG2Controls";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import appManifest from "../../../../../package.json";
 import type {
   AppSettings,
   AppSkinId,
@@ -45,7 +44,6 @@ import type {
   TerminalBorderSkinListItem,
   TerminalLinkOpenMode,
   TerminalBorderSkinId,
-  UpdaterState,
   ZoomSensitivity
 } from "../../../../shared/contracts";
 import {
@@ -112,7 +110,7 @@ import type { PixelSkinThemeId } from "../skins/skinCatalog";
 import type { SkinDetailLevel } from "../skins/SkinLayout";
 import { PixelSkinPackCreator } from "./PixelSkinPackCreator";
 
-type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "updates" | "about";
+type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "browser" | "plugins" | "updates" | "about";
 
 const SHORTCUT_LABELS = {
   home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
@@ -133,6 +131,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "appearance", icon: "palette" },
   { id: "agents", icon: "terminal" },
   { id: "controls", icon: "sliders-horizontal" },
+  { id: "externalIntegrations", icon: "blocks" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
   { id: "updates", icon: "download" },
@@ -153,6 +152,7 @@ const CANVAS_COLOR_PREVIEWS: Record<CanvasColorId, string> = {
 
 interface SettingsPanelProps {
   open: boolean;
+  openUpdatesRequest: number;
   settings: AppSettings;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
@@ -182,6 +182,7 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({
   open,
+  openUpdatesRequest,
   settings,
   agentAvailability,
   onRecheckAgentClis,
@@ -214,6 +215,10 @@ export function SettingsPanel({
   const homeLimitProviders = resolveHomeLimitProviders(settings);
   const [section, setSection] = useState<SettingsSection>("general");
   const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (openUpdatesRequest > 0) setSection("updates");
+  }, [openUpdatesRequest]);
   const [capturing, setCapturing] = useState<ShortcutAction | null>(null);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [activity, setActivity] = useState<BrowserActivityEvent[]>([]);
@@ -221,7 +226,6 @@ export function SettingsPanel({
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearingBrowserData, setClearingBrowserData] = useState(false);
   const [browserDataMessage, setBrowserDataMessage] = useState<string | null>(null);
-  const [updaterState, setUpdaterState] = useState<UpdaterState>({ status: "idle" });
   const [pixelPacks, setPixelPacks] = useState<PixelSkinPackSummary[]>([]);
   const [pixelPacksState, setPixelPacksState] = useState<"loading" | "ready" | "error">("loading");
 
@@ -244,11 +248,6 @@ export function SettingsPanel({
     return () => { active = false; unsubscribe(); };
   }, []);
 
-  useEffect(() => {
-    const unsubscribe = window.canvasTTY.updater.onState(({ state }) => setUpdaterState(state));
-    void window.canvasTTY.updater.state().then(setUpdaterState);
-    return unsubscribe;
-  }, []);
   const [checkingAgentClis, setCheckingAgentClis] = useState(false);
   const [agentCliError, setAgentCliError] = useState<string | null>(null);
 
@@ -1058,9 +1057,12 @@ export function SettingsPanel({
             </>
           )}
 
+          {section === "externalIntegrations" && (
+            <EvenG2Controls locale={locale} open={open} />
+          )}
+
           {section === "controls" && (
             <>
-              <EvenG2Controls locale={locale} open={open} />
               <SettingGroup label={t(locale, "focusActivation")}>
                 <Segmented
                   value={settings.focusActivation}
@@ -1270,7 +1272,7 @@ export function SettingsPanel({
           )}
 
             {section === "updates" && (
-              <UpdatesSettings state={updaterState} locale={locale} currentVersion={appManifest.version} />
+              <UpdatesSettings locale={locale} />
             )}
 
             {section === "about" && <AboutSettings locale={locale} />}

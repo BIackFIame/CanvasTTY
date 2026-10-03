@@ -183,3 +183,26 @@ test("a store file that cannot be read at all is not replaced", { skip: process.
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("failed update installation restores sessions and keeps persistence active", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "canvastty-update-rollback-"));
+  try {
+    const store = new TerminalSessionStore(directory);
+    const calls = [];
+    const manager = new TerminalManager(
+      () => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls)
+    );
+    manager.configureSessionPersistence(store, "continue");
+    const first = manager.create({ provider: "terminal", profile: "normal", cwd: process.cwd(), position: { x: 1, y: 2 } });
+    const restore = await manager.shutdownForUpdate();
+    assert.deepEqual(manager.list(), []);
+    await restore();
+    assert.equal(manager.list().length, 1);
+    assert.equal(manager.list()[0].id, first.id);
+    const second = manager.create({ provider: "terminal", profile: "normal", cwd: process.cwd(), position: { x: 3, y: 4 } });
+    await manager.shutdown();
+    assert.deepEqual(new Set(store.get().map(session => session.id)), new Set([first.id, second.id]));
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

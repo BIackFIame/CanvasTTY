@@ -59,6 +59,6 @@ The active file is created with mode `0600`. Records include actor/provider/sess
 
 The active file rotates at 100 MB. Rotated files remain chained; files older than 30 days are pruned when the store initializes or rotates. Existing files are verified when the store opens, and an invalid chain makes subsequent appends fail. If an agent mutation's pre-action record cannot be stored, the agent receives `AUDIT_UNAVAILABLE` and the mutation side effect is not executed.
 
-There is no remote log collector or CanvasTTY-operated telemetry endpoint. The **Clear browser data** button leaves audit evidence intact. To remove it manually, fully quit CanvasTTY first and delete the whole `userData/browser/audit` directory, understanding that this permanently discards the local audit history.
+Browser audit records remain local and are not attached to the optional, user-submitted [application problem report](diagnostics.md). The **Clear browser data** button leaves audit evidence intact. To remove it manually, fully quit CanvasTTY first and delete the whole `userData/browser/audit` directory, understanding that this permanently discards the local audit history.
 
 For implementation ownership, read [Architecture](ARCHITECTURE.md). For canvas and interaction invariants, read the [UI contract](UI_CONTRACT.md). For installation paths and other local data, read [Installing, releases, and local data](installing-and-security.md).

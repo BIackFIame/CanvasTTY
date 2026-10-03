@@ -14,6 +14,20 @@ import "./styles/appSkins.css";
 import "./styles/patterns.css";
 
 const container = document.getElementById("root")!;
+window.addEventListener("error", (event) => {
+  try {
+    window.canvasTTY.diagnostics.reportError({ kind: "window", message: event.message,
+      stack: event.error instanceof Error ? event.error.stack : undefined });
+  } catch { /* A failed bridge must not create another uncaught exception. */ }
+});
+window.addEventListener("unhandledrejection", (event) => {
+  const error: unknown = event.reason;
+  try {
+    window.canvasTTY.diagnostics.reportError({ kind: "unhandled-rejection",
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined });
+  } catch { /* Keep the original rejection visible if reporting is unavailable. */ }
+});
 createRoot(container, {
   // React unmounts the whole tree on an uncaught render error while the renderer process lives on:
   // without this the window stays black and the main process has no crash to recover from.

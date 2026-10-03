@@ -2,7 +2,12 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## Unreleased
+## 1.7.1
+
+- Added built-in stable-release updates with explicit download and installation, active-session shutdown confirmation, and signed Sparkle updates on macOS. Install this first updater-enabled release manually; later compatible releases can be installed from the app.
+- Added rotating application diagnostics and user-initiated problem reports, with one optional PNG/JPEG attachment, a preview, and a report reference. Reports exclude terminal output and keyboard input; there is no automatic upload.
+- Moved the current keyboard preset's shortcut reference into a separate canvas overlay and restored `Ctrl+Shift+C` for the Linux preset's terminal copy action.
+- Fixed the minimap camera outline at maximum zoom-out. Moved glasses, local-network settings, and the Web companion into compact cards under **External integrations**, below **Controls**.
 
 ### What you'll notice after updating
 

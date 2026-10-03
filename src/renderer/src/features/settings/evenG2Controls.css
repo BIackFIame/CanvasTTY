@@ -389,6 +389,91 @@
 .g2-settings > button.g2-link {
   margin: 0 var(--g2-inset) var(--g2-inset);
 }
+.g2-controls {
+  display: grid;
+  gap: .8em;
+  padding-top: .65em;
+}
+.g2-controls > .g2-settings {
+  margin: 0;
+}
+.g2-controls--overview > .g2-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.g2-controls--overview .g2-settings__heading {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  gap: .75em;
+  padding: .9em;
+}
+.g2-controls--overview .g2-settings__heading > div {
+  min-width: 0;
+}
+.g2-controls--overview .g2-settings__heading h3 {
+  margin: 0 0 .3em;
+  font-size: 1.1em;
+}
+.g2-controls--overview .g2-settings__heading p {
+  font-size: .9em;
+  line-height: 1.4;
+}
+.g2-controls--overview .g2-settings__heading .g2-settings__hint {
+  margin-top: .3em;
+}
+.g2-controls--overview .g2-settings__icon {
+  width: 2.9em;
+  height: 2.9em;
+  border-radius: .7em;
+}
+.g2-controls--overview .g2-settings__icon svg {
+  max-width: 1.9em;
+}
+.g2-controls--overview .g2-settings__entry {
+  grid-column: 2;
+  grid-row: 1;
+  max-width: 14em;
+  padding: .9em .9em .9em 0;
+  gap: .5em;
+  background: transparent;
+}
+.g2-controls--overview .g2-settings__entry button {
+  min-width: 0;
+  flex-shrink: 1;
+  margin: 0;
+  font-size: .9em;
+}
+.g2-settings__connections {
+  min-width: 0;
+  grid-column: 1 / -1;
+}
+.g2-settings__connections > .g2-muted {
+  margin: 0 .9em .65em;
+  overflow-wrap: anywhere;
+}
+.g2-settings__connections > .g2-link {
+  margin: 0 .9em .65em;
+}
+.g2-settings__connections:empty {
+  display: none;
+}
+.g2-controls--overview .g2-settings__error {
+  grid-column: 1 / -1;
+}
+@container (max-width: 28rem) {
+  .g2-controls--overview .g2-settings__heading {
+    grid-column: 1 / -1;
+  }
+  .g2-controls--overview .g2-settings__entry {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    max-width: none;
+    padding: 0 .9em .9em;
+    align-items: stretch;
+  }
+}
 @container (max-width: 42rem) {
   .g2-settings > * {
     --g2-inset: 17px;

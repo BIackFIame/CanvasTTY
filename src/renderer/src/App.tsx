@@ -29,6 +29,7 @@ import type {
   SessionBounds,
   SessionSnapshot,
   StickyNote,
+  UpdateStatus,
   WindowState
 } from "../../shared/contracts";
 import {
@@ -48,6 +49,7 @@ import {
 import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 import { environmentOptions } from "./features/launcher/LaunchOptionsSection";
+import { UpdateNotice } from "./components/UpdateNotice";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
@@ -62,6 +64,7 @@ import { markBootOnce } from "./lib/bootMarks";
 import { afterNextPaint, loadCriticalSnapshot } from "./lib/bootSequence";
 import { t } from "./lib/i18n";
 import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "./lib/providers";
+import { updateNoticeForStatus, updateNoticeKey, type UpdateNoticeAction } from "./lib/updateNotice";
 import {
   mergeSessionSnapshots,
   upsertSession,
@@ -93,6 +96,8 @@ const TerminalLinkDialog = lazy(() =>
   import("./features/terminal/TerminalLinkDialog").then((module) => ({ default: module.TerminalLinkDialog })));
 const SettingsPanel = lazy(() =>
   import("./features/settings/SettingsPanel").then((module) => ({ default: module.SettingsPanel })));
+const ShortcutReference = lazy(() =>
+  import("./components/ShortcutReference").then((module) => ({ default: module.ShortcutReference })));
 
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
@@ -303,6 +308,8 @@ export function App(): React.JSX.Element {
   const [launchProvider, setLaunchProvider] = useState<ProviderId | null>(null);
   const [launchPosition, setLaunchPosition] = useState<Point | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [openUpdatesRequest, setOpenUpdatesRequest] = useState(0);
+  const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -310,6 +317,10 @@ export function App(): React.JSX.Element {
   const [fullscreenSessionId, setFullscreenSessionId] = useState<string | null>(null);
   const [pendingTerminalUrl, setPendingTerminalUrl] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>({ type: "idle" });
+  const [dismissedUpdateNotice, setDismissedUpdateNotice] = useState<string | null>(null);
+  const [updateNoticePending, setUpdateNoticePending] = useState(false);
+  const updateNoticePendingRef = useRef(false);
   /** Git risk reports about cards that were closed (GitRiskNotice): shown until the person answers them. */
   const [closedGitRisks, setClosedGitRisks] = useState<GitRiskReport[]>([]);
   // Boot phases (bootSequence.ts): `ready` once the critical snapshot (settings, CLI availability, session
@@ -325,6 +336,46 @@ export function App(): React.JSX.Element {
   });
 
   const showToast = useCallback((message: string): void => setToast(message), []);
+
+  const openUpdates = useCallback((): void => {
+    setSettingsOpen(true);
+    setOpenUpdatesRequest(request => request + 1);
+  }, []);
+
+  const runUpdateNoticeAction = useCallback((action: UpdateNoticeAction): void => {
+    if (updateNoticePendingRef.current) return;
+    let operation: Promise<void>;
+    if (action === "manual") {
+      if (updateStatus.type !== "available" || !updateStatus.manualUrl) return;
+      operation = window.canvasTTY.external.openUrl(updateStatus.manualUrl);
+    } else {
+      operation = action === "download" ? window.canvasTTY.update.download() : window.canvasTTY.update.install();
+    }
+    updateNoticePendingRef.current = true;
+    setUpdateNoticePending(true);
+    void operation.catch((error: unknown) => {
+      showToast(error instanceof Error ? error.message : settings.locale === "ru" ? "Не удалось выполнить действие с обновлением" : "Update action failed");
+      if (action !== "manual") openUpdates();
+    }).finally(() => {
+      updateNoticePendingRef.current = false;
+      setUpdateNoticePending(false);
+    });
+  }, [openUpdates, settings.locale, showToast, updateStatus]);
+
+  useEffect(() => window.canvasTTY.window.onOpenUpdates(openUpdates), [openUpdates]);
+
+  useEffect(() => {
+    let live = true;
+    let eventSeen = false;
+    const unsubscribe = window.canvasTTY.update.onStatus(status => {
+      eventSeen = true;
+      if (live) setUpdateStatus(status);
+    });
+    void window.canvasTTY.update.status().then(status => {
+      if (live && !eventSeen) setUpdateStatus(status);
+    }).catch(() => undefined);
+    return () => { live = false; unsubscribe(); };
+  }, []);
 
   useEffect(() => {
     browserCanvasRef.current = settings.browserCanvas;
@@ -1268,6 +1319,7 @@ export function App(): React.JSX.Element {
       setRenamingSessionId(activeSessionId);
     };
     const handleShortcut = (event: KeyboardEvent): void => {
+      if (shortcutReferenceOpen) return;
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
       if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
@@ -1291,6 +1343,7 @@ export function App(): React.JSX.Element {
     };
 
     const handlePointerShortcut = (event: PointerEvent): void => {
+      if (shortcutReferenceOpen) return;
       if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       const action = matchesPointerShortcut(event, settings.shortcuts.home)
         ? "home"
@@ -1311,7 +1364,7 @@ export function App(): React.JSX.Element {
       window.removeEventListener("keydown", handleShortcut, true);
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
     };
-  }, [activeSessionId, fullscreenSessionId, goHome, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, showToast, toggleSessionFullscreen]);
+  }, [activeSessionId, fullscreenSessionId, goHome, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, toggleSessionFullscreen]);
 
   const appearance = resolveAppearanceSettings(settings);
   const rootClasses = useMemo(
@@ -1361,12 +1414,13 @@ export function App(): React.JSX.Element {
           limitsLoadState={limitsLoadState}
           plugins={plugins}
           browser={browser}
-          browserViewVisible={!settingsOpen && launchProvider === null && pendingTerminalUrl === null}
+          browserViewVisible={!settingsOpen && !shortcutReferenceOpen && launchProvider === null && pendingTerminalUrl === null}
           homeEditing={homeEditDraft !== null}
           camera={cameraStore}
           onCameraChange={changeCamera}
           onGoHome={goHome}
           onOpenSettings={() => setSettingsOpen(true)}
+          onOpenShortcutReference={() => setShortcutReferenceOpen(true)}
           onOpenAgent={openAgent}
           onOpenTerminal={(position) => void openTerminal(position)}
           onOpenBrowser={openBrowserFromUi}
@@ -1420,6 +1474,8 @@ export function App(): React.JSX.Element {
       </main>
 
       <Suspense fallback={null}>
+        {shortcutReferenceOpen && <ShortcutReference settings={settings}
+          onClose={() => setShortcutReferenceOpen(false)} />}
         <AgentLaunchDialog
           provider={launchProvider}
           settings={settings}
@@ -1450,6 +1506,7 @@ export function App(): React.JSX.Element {
         />
         <SettingsPanel
           open={settingsOpen}
+          openUpdatesRequest={openUpdatesRequest}
           settings={settings}
           agentAvailability={agentAvailability}
           onRecheckAgentClis={recheckAgentClis}
@@ -1485,6 +1542,19 @@ export function App(): React.JSX.Element {
           ))}
         </div>
       )}
+      <UpdateNotice
+        status={settingsOpen ? null : updateNoticeForStatus(updateStatus, dismissedUpdateNotice)}
+        locale={settings.locale}
+        pending={updateNoticePending}
+        onOpen={() => {
+          if (updateStatus.type === "available" || updateStatus.type === "ready") setDismissedUpdateNotice(updateNoticeKey(updateStatus));
+          openUpdates();
+        }}
+        onAction={runUpdateNoticeAction}
+        onDismiss={() => {
+          if (updateStatus.type === "available" || updateStatus.type === "ready") setDismissedUpdateNotice(updateNoticeKey(updateStatus));
+        }}
+      />
       <Toast message={toast} />
     </div>
   );

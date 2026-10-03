@@ -32,6 +32,7 @@ export interface IpcReadinessGateOptions {
   syncReplies?: Readonly<Record<string, unknown>>;
   /** Queued fire-and-forget messages per channel before the oldest are dropped (a bound, not an expected load). */
   maxQueuedPerChannel?: number;
+  onInvokeError?(channel: string, error: unknown): void;
 }
 
 interface Waiter {
@@ -43,6 +44,7 @@ export class IpcReadinessGate implements IpcRegistrar {
   private readonly ipc: IpcMainLike;
   private readonly syncReplies: Readonly<Record<string, unknown>>;
   private readonly maxQueued: number;
+  private readonly onInvokeError: IpcReadinessGateOptions["onInvokeError"];
   private readonly invokeWaiters = new Map<string, Waiter[]>();
   private readonly invokePlaceholders = new Set<string>();
   private readonly sendPlaceholders = new Map<string, SendListener>();
@@ -55,6 +57,7 @@ export class IpcReadinessGate implements IpcRegistrar {
     this.ipc = ipc;
     this.syncReplies = options.syncReplies ?? {};
     this.maxQueued = options.maxQueuedPerChannel ?? 1_000;
+    this.onInvokeError = options.onInvokeError;
     this.unclaimed = new Set(options.channels);
     for (const channel of new Set(options.channels)) {
       this.invokePlaceholders.add(channel);
@@ -67,12 +70,16 @@ export class IpcReadinessGate implements IpcRegistrar {
 
   /** Registers the real invoke handler; calls already waiting on the channel run it now. */
   handle(channel: string, listener: InvokeListener): void {
+    const handler: InvokeListener = async (event, ...args) => {
+      try { return await listener(event, ...args); }
+      catch (error) { this.onInvokeError?.(channel, error); throw error; }
+    };
     this.unclaimed.delete(channel);
     if (this.invokePlaceholders.delete(channel)) this.ipc.removeHandler(channel);
-    this.ipc.handle(channel, listener);
+    this.ipc.handle(channel, handler);
     const waiters = this.invokeWaiters.get(channel);
     this.invokeWaiters.delete(channel);
-    for (const waiter of waiters ?? []) waiter.resolve(listener);
+    for (const waiter of waiters ?? []) waiter.resolve(handler);
   }
 
   /** Registers the real listener and replays, in order, what was sent to the channel before. */

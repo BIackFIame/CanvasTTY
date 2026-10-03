@@ -27,13 +27,12 @@ import type {
   PixelSkinZipInstallRequest,
   PixelSkinSlot,
   PixelTerminalBorderSkinId,
+  UpdateStatus,
   SessionBounds,
   SessionEvent,
   SessionRemovedEvent,
   GitRiskReport,
-  TerminalDataEvent,
-  UpdaterState,
-  UpdaterStateEvent
+  TerminalDataEvent
 } from "../shared/contracts";
 import { IPC } from "../shared/contracts";
 import { terminalFileDropText } from "../shared/terminalFileDrop";
@@ -51,14 +50,26 @@ ipcRenderer.on(IPC.terminalDataBatch, (_event: Electron.IpcRendererEvent, batch:
   for (const payload of batch) terminalData.dispatch(payload);
 });
 
-// Main pushes the updater state on every transition and on each renderer load,
-// so `state()` can answer from this cache instead of asking over IPC.
-let latestUpdaterState: UpdaterState = { status: "idle" };
-ipcRenderer.on(IPC.updaterState, (_event: Electron.IpcRendererEvent, payload: UpdaterStateEvent) => {
-  latestUpdaterState = payload.state;
+const openUpdateListeners = new Set<() => void>();
+let pendingOpenUpdates = false;
+ipcRenderer.on(IPC.windowOpenUpdates, () => {
+  if (openUpdateListeners.size === 0) pendingOpenUpdates = true;
+  else for (const listener of openUpdateListeners) listener();
 });
 
 const api: CanvasTTYApi = {
+  diagnostics: {
+    configuration: () => ipcRenderer.invoke(IPC.diagnosticsConfiguration),
+    send: (description, attachment) => ipcRenderer.invoke(IPC.diagnosticsSend, description, attachment),
+    reportError: (error) => ipcRenderer.send(IPC.diagnosticsRendererError, error)
+  },
+  update: {
+    status: () => ipcRenderer.invoke(IPC.updateStatus),
+    check: () => ipcRenderer.invoke(IPC.updateCheck),
+    download: () => ipcRenderer.invoke(IPC.updateDownload),
+    install: () => ipcRenderer.invoke(IPC.updateInstall),
+    onStatus: (listener) => subscribe<UpdateStatus>(IPC.updateChanged, listener)
+  },
   evenG2: {
     state: () => ipcRenderer.invoke(IPC.evenG2State),
     command: (command) => ipcRenderer.invoke(IPC.evenG2Command, command),
@@ -258,15 +269,14 @@ const api: CanvasTTYApi = {
     resolveGitRisk: (reportId: string, action: "neutralize" | "keep") => ipcRenderer.invoke(IPC.terminalResolveGitRisk, reportId, action),
     onGitRisk: (listener: (report: GitRiskReport) => void) => subscribe(IPC.terminalGitRisk, listener)
   },
-  updater: {
-    state: () => Promise.resolve(latestUpdaterState),
-    check: () => ipcRenderer.invoke(IPC.updaterCheck),
-    install: () => ipcRenderer.send(IPC.updaterInstall),
-    onState: (listener: (event: UpdaterStateEvent) => void) => subscribe(IPC.updaterState, listener)
-  },
   window: {
     isMacOS: process.platform === "darwin",
     platform: process.platform,
+    onOpenUpdates: (listener) => {
+      openUpdateListeners.add(listener);
+      if (pendingOpenUpdates) { pendingOpenUpdates = false; listener(); }
+      return () => { openUpdateListeners.delete(listener); };
+    },
     minimize: () => ipcRenderer.send(IPC.windowMinimize),
     toggleMaximize: () => ipcRenderer.invoke(IPC.windowToggleMaximize),
     close: () => ipcRenderer.send(IPC.windowClose),

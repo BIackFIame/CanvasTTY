@@ -1,12 +1,13 @@
 {
   "name": "canvastty",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "private": true,
   "description": "A spatial desktop for local AI agents and real terminal sessions.",
   "desktopName": "CanvasTTY",
   "author": "howdeploy",
   "license": "MIT",
   "homepage": "https://github.com/howdeploy/CanvasTTY",
+  "diagnostics": { "reportUrl": "https://canvastty.deploychan.webcam/canvastty/reports" },
   "repository": {
     "type": "git",
     "url": "https://github.com/howdeploy/CanvasTTY.git"
@@ -21,7 +22,8 @@
     "package:linux": "npm run build && electron-builder --linux AppImage deb --publish never",
     "prepackage:win": "node scripts/build-windows-agent-pipe-host.mjs --require-windows --self-test",
     "package:win": "npm run build && electron-builder --win nsis portable --publish never",
-    "package:mac": "npm run build && electron-builder --mac dmg zip --publish never",
+    "package:mac": "npm run build:mac-updater && npm run build && electron-builder --mac dmg zip --arm64 --publish never",
+    "build:mac-updater": "node scripts/build-mac-updater.mjs",
     "smoke:browser": "node scripts/smoke-browser-electron.mjs",
     "smoke:browser:providers": "node scripts/smoke-browser-providers.mjs --deterministic",
     "smoke:browser:provider-helper": "node scripts/smoke-browser-providers.mjs --direct",

@@ -57,6 +57,6 @@ Settings 中的活动列表是短期运行视图。主进程还会把 JSONL 审�
 
 活动文件达到 100 MB 时轮转。轮转文件继续保持 hash chain；超过 30 天的文件会在 store 初始化或轮转时清理。store 打开时会验证现有链，链无效后将拒绝继续追加。若智能体 mutation 的 pre-action audit 无法保存，智能体会收到 `AUDIT_UNAVAILABLE`，且不会执行 mutation 副作用。
 
-CanvasTTY 没有远程日志收集器或项目自营 telemetry endpoint。**清除浏览器数据**会保留审计证据。如需手动删除，请先完全退出 CanvasTTY，再删除整个 `userData/browser/audit` 目录；这会永久丢弃本地审计历史。
+浏览器审计记录保存在本地，不附加到用户主动发送的可选[应用问题报告](diagnostics.md)。**清除浏览器数据**会保留审计证据。如需手动删除，请先完全退出 CanvasTTY，再删除整个 `userData/browser/audit` 目录；这会永久丢弃本地审计历史。
 
 实现职责见[架构](ARCHITECTURE.zh-CN.md)，画布与交互约束见 [UI 契约](UI_CONTRACT.zh-CN.md)，其他本地数据路径见[安装、发布与本地数据](installing-and-security.zh-CN.md)。

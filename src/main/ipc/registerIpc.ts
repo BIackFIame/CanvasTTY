@@ -80,14 +80,6 @@ interface Dependencies {
   requestPluginLauncher(provider: ProviderId): void;
   requestPluginCanvas(request: PluginCanvasRequest): void;
   broadcastPluginStorageChange(pluginId: string, key: string, value: unknown): void;
-  /**
-   * Self-update actions owned by the main entry point (it holds the updater
-   * state machine); the IPC layer only forwards renderer intent.
-   */
-  updater: {
-    check(): Promise<void>;
-    install(): void;
-  };
 }
 
 /**
@@ -223,8 +215,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   closePluginWindows,
   requestPluginLauncher,
   requestPluginCanvas,
-  broadcastPluginStorageChange,
-  updater
+  broadcastPluginStorageChange
 }: Dependencies): void {
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
   // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
@@ -891,14 +882,6 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     terminals.setVisible(id, visible);
   });
 
-  ipcMain.handle(IPC.updaterCheck, (event) => {
-    assertMainRenderer(event, getMainWindow);
-    return updater.check();
-  });
-  ipcMain.on(IPC.updaterInstall, (event) => {
-    assertMainRenderer(event, getMainWindow);
-    updater.install();
-  });
 }
 
 function isCanvasNavigationPointerBindingInput(

@@ -67,6 +67,11 @@ function sessionStore(): Storage | null {
 }
 
 export function handleUncaughtRenderError(container: HTMLElement, error: unknown, componentStack?: string): void {
+  try {
+    window.canvasTTY.diagnostics.reportError({ kind: "render",
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined, componentStack });
+  } catch { /* Recovery must remain available when the preload bridge failed. */ }
   console.error("CanvasTTY hit an uncaught render error; recovering the application surface.", error, componentStack ?? "");
   const storage = sessionStore();
   recoverFromUncaughtError({

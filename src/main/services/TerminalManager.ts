@@ -74,6 +74,7 @@ import {
   persistedTerminalSession,
   type PersistedEnvironmentRef,
   type PersistedSessionExtras,
+  type PersistedTerminalSession,
   type TerminalSessionStore
 } from "./TerminalSessionStore.ts";
 import { chooseResume, planSessionRestore, restorableRecords, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
@@ -414,13 +415,17 @@ export class TerminalManager {
       return;
     }
 
+    await this.restoreSessionRecords(persisted, this.sessionRestoreMode);
+  }
+
+  private async restoreSessionRecords(persisted: PersistedTerminalSession[], mode: SessionRestoreMode): Promise<void> {
     // Environments resume first, only for cards that come back at all; a card whose environment stopped comes
     // back stopped with the plugin's reason and never runs locally instead. A card that does not come back (not
     // restored, or a subagent whose parent is gone) leaves the saved state now: its environment is released.
     const resumed = new Map<string, { ok: true } | { ok: false; reason: string }>();
     const environments = this.environments;
     if (environments) {
-      const restorable = new Set(restorableRecords(persisted, this.sessionRestoreMode, (id) => this.sessions.has(id)).map((record) => record.id));
+      const restorable = new Set(restorableRecords(persisted, mode, (id) => this.sessions.has(id)).map((record) => record.id));
       await Promise.all(persisted.map(async (record) => {
         if (!record.environment || !environments.available(record.environment)) return;
         if (!restorable.has(record.id)) {
@@ -433,7 +438,7 @@ export class TerminalManager {
     }
     // Then parents come first; a subagent whose owning session is gone restores
     // as nothing, since its parent's runtime state no longer exists.
-    const steps = planSessionRestore(persisted, this.sessionRestoreMode, {
+    const steps = planSessionRestore(persisted, mode, {
       isLiveSession: (id) => this.sessions.has(id),
       environmentAvailable: (environment, record) => resumed.get(record.id)?.ok ?? this.environmentUsable(environment),
       launchOptionsAvailable: (options) => this.unavailableLaunchPlugins(options).length === 0
@@ -475,6 +480,28 @@ export class TerminalManager {
     this.disposeAll();
     await Promise.allSettled(this.quitReleases.splice(0));
     if (this.sessionStore) await this.sessionStore.flush().catch(() => undefined);
+  }
+
+  async shutdownForUpdate(): Promise<() => Promise<void>> {
+    const sessions = [...this.sessions.values()].map(session => persistedTerminalSession(session.metadata, session.threadId, session.extras));
+    await this.shutdown();
+    let restored = false;
+    return async () => {
+      if (restored) return;
+      restored = true;
+      this.suppressPersistence = false;
+      this.quitting = false;
+      // A cancelled update returns every open card, including cards excluded from restart persistence.
+      await this.restoreSessionRecords(sessions.map(record => ({ ...record, restore: true })), "continue");
+      for (const descriptor of sessions) {
+        const session = this.sessions.get(descriptor.id);
+        if (session && !descriptor.restore) {
+          session.metadata.skipRestore = true;
+          this.emitSession(session.metadata);
+        }
+      }
+      await this.persistSessions();
+    };
   }
 
   /**
