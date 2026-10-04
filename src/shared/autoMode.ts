@@ -21,9 +21,7 @@ export type DefaultLaunchProfile = Exclude<LaunchProfile, "yolo">;
 /** The order the launcher offers them in. */
 export const LAUNCH_PROFILES: readonly LaunchProfile[] = ["auto", "normal", "acceptEdits", "plan", "yolo"];
 export const isLaunchProfile = (value: unknown): value is LaunchProfile => typeof value === "string" && (LAUNCH_PROFILES as readonly string[]).includes(value);
-export const isDefaultLaunchProfile = (value: unknown): value is DefaultLaunchProfile => (
-  value === "auto" || value === "acceptEdits" || value === "normal" || value === "plan"
-);
+export const isDefaultLaunchProfile = (value: unknown): value is DefaultLaunchProfile => isLaunchProfile(value) && value !== "yolo";
 
 /**
  * How much a profile lets an agent do without the person: a subagent never gets more than its orchestrator.
