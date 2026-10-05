@@ -16,7 +16,8 @@ import {
   PERMISSION_GATE,
   permissionGateTimings,
   RUNTIME_PROTOCOL_VERSION,
-  RUNTIME_STATES
+  RUNTIME_STATES,
+  toolOutcomeFromHook
 } from "../../../agent-runtime/runtime-protocol.mjs";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import {
@@ -60,11 +61,25 @@ export interface RuntimeLifecycleSignal {
   state: RuntimeLifecycleState;
   event: string;
   turnId: string | null;
+  /** Host-owned turn generation; advances once per accepted start, including providers without turn ids. */
+  turnEpoch: number;
   /** The provider's own conversation id (Codex thread, Claude or OpenCode session), as its hook reported it. */
   threadId?: string;
   result?: { text: string; truncated: boolean };
   lastAssistantMessage?: string;
+  /** Hash-only summary of an actual completed tool hook. */
+  toolOutcome?: RuntimeToolOutcome;
   answerCaptureGrantExpiresAt?: number;
+}
+
+export interface RuntimeToolOutcome {
+  toolName: string;
+  resultClass: "success" | "error" | "denied" | "unknown";
+  normalizedActionHash?: string;
+  errorHash?: string;
+  /** Hash of the tool's output for non-error results; lets loop detection see repeated output. */
+  outputHash?: string;
+  changedPathHashes: string[];
 }
 
 export interface RuntimeSessionCapability {
@@ -79,6 +94,8 @@ interface RuntimeLease {
   provider: Exclude<ProviderId, "terminal">;
   tokenDigest: Buffer;
   activeTurnId: string | null;
+  turnEpoch: number;
+  turnOpen: boolean;
   /** Turn ids this session already reported (bounded, oldest dropped): a late start of one of them is stale. */
   seenTurnIds: Set<string>;
   latest: RuntimeLifecycleSignal | null;
@@ -103,6 +120,10 @@ export interface RuntimePermissionRequest {
   truncated: boolean;
   /** The agent's current folder as its CLI reported it. */
   cwd: string | null;
+  /** Host-derived from the authenticated session's active lifecycle turn, never trusted from the permission packet. */
+  turnId?: string;
+  /** Host-owned generation for providers whose lifecycle hooks omit turn ids. */
+  turnEpoch: number;
 }
 
 /** `none`: no opinion, the CLI goes on as it would without CanvasTTY. */
@@ -121,6 +142,7 @@ interface ParsedLifecycleMessage {
   threadId?: string;
   result?: { text: string; truncated: boolean };
   lastAssistantMessage?: string;
+  toolOutcome?: RuntimeToolOutcome;
 }
 
 export interface RuntimeGatewayOptions {
@@ -157,6 +179,7 @@ export class RuntimeGateway {
   private readonly firstMessageTimeoutMs: number;
   private readonly checks = new Set<AbortController>();
   private readonly leases = new Map<string, RuntimeLease>();
+  private nextTurnEpoch = 0;
   private readonly sockets = new Set<AgentGatewaySocket>();
   private closed = false;
   private restartTimer: ReturnType<typeof setTimeout> | undefined;
@@ -276,6 +299,8 @@ export class RuntimeGateway {
       provider,
       tokenDigest: tokenDigest(capabilityToken),
       activeTurnId: null,
+      turnEpoch: 0,
+      turnOpen: false,
       seenTurnIds: new Set(),
       latest: null,
       captureResult: captureResultOrGrantExpiresAt === true,
@@ -294,6 +319,13 @@ export class RuntimeGateway {
 
   currentStatus(terminalSessionId: string): RuntimeLifecycleState | null {
     return this.leases.get(terminalSessionId)?.latest?.state ?? null;
+  }
+
+  /** Current host-owned turn generation for a live hook/permission stream; null between turns or after revoke. */
+  currentTurnEpoch(terminalSessionId: string): number | null {
+    const lease = this.leases.get(terminalSessionId);
+    if (!lease?.turnOpen) return null;
+    return lease.turnEpoch;
   }
 
   /**
@@ -469,28 +501,48 @@ export class RuntimeGateway {
       throw new Error("Answer capture is not authorized for this session.");
     }
 
-    if (message.turnId && isTurnStart(message.event)) {
+    const startsTurn = isTurnStart(message.event);
+    if (message.turnId && startsTurn) {
       // Each hook runs on its own connection, so a start of an earlier turn can arrive after the next turn began;
-      // it must not make that newer turn's events look stale.
+      // it must not make that newer turn's events look fresh. A duplicate start for the current open turn is inert.
       if (message.turnId !== lease.activeTurnId && lease.seenTurnIds.has(message.turnId)) return null;
+      if (message.turnId === lease.activeTurnId && !lease.turnOpen && lease.seenTurnIds.has(message.turnId)) return null;
+      if (message.turnId !== lease.activeTurnId) lease.turnEpoch = ++this.nextTurnEpoch;
       lease.activeTurnId = message.turnId;
+      lease.turnOpen = true;
       rememberTurn(lease, message.turnId);
-    } else if (
-      message.turnId
-      && lease.activeTurnId
-      && message.turnId !== lease.activeTurnId
-    ) {
-      return null;
-    } else if (message.turnId) {
+    } else if (message.turnId && lease.activeTurnId && message.turnId !== lease.activeTurnId) {
+      // A previously unseen id after an idle boundary can establish the current turn even if its start hook was
+      // unavailable; an old id or a conflicting id during an open turn is stale/out of order.
+      if (lease.turnOpen || lease.seenTurnIds.has(message.turnId)) return null;
+      lease.activeTurnId = message.turnId;
+      lease.turnEpoch = ++this.nextTurnEpoch;
+      lease.turnOpen = true;
       rememberTurn(lease, message.turnId);
+    } else if (message.turnId && !lease.activeTurnId) {
+      if (!lease.turnOpen) lease.turnEpoch = ++this.nextTurnEpoch;
+      lease.activeTurnId = message.turnId;
+      lease.turnOpen = true;
+      rememberTurn(lease, message.turnId);
+    } else if (!message.turnId && startsTurn) {
+      // With no provider id, only the first start while closed opens a generation. Approval/resume events and
+      // duplicate start hooks while a turn is open leave its identity unchanged.
+      if (!lease.turnOpen) {
+        lease.turnEpoch = ++this.nextTurnEpoch;
+        lease.activeTurnId = null;
+      }
+      lease.turnOpen = true;
     }
+    if (message.state === "idle") lease.turnOpen = false;
     const signal: RuntimeLifecycleSignal = {
       state: message.state,
       event: message.event,
       turnId: message.turnId,
+      turnEpoch: lease.turnEpoch,
       ...(message.threadId === undefined ? {} : { threadId: message.threadId }),
       ...(message.result === undefined ? {} : { result: message.result }),
-      ...(message.lastAssistantMessage === undefined ? {} : { lastAssistantMessage: message.lastAssistantMessage })
+      ...(message.lastAssistantMessage === undefined ? {} : { lastAssistantMessage: message.lastAssistantMessage }),
+      ...(message.toolOutcome === undefined ? {} : { toolOutcome: message.toolOutcome })
     };
     if (message.lastAssistantMessage !== undefined && lease.answerCaptureGrantExpiresAt !== null) {
       signal.answerCaptureGrantExpiresAt = lease.answerCaptureGrantExpiresAt;
@@ -500,6 +552,7 @@ export class RuntimeGateway {
       state: signal.state,
       event: signal.event,
       turnId: signal.turnId,
+      turnEpoch: signal.turnEpoch,
       ...(signal.threadId === undefined ? {} : { threadId: signal.threadId })
     };
     return { terminalSessionId: message.terminalSessionId, signal };
@@ -642,7 +695,7 @@ export class RuntimeGateway {
    * `unavailable`, so a fail-closed gate for a CLI that cannot ask denies it instead of letting the call run.
    */
   private acceptPermission(socket: AgentGatewaySocket, value: Record<string, unknown>, close: () => void): void {
-    let request: RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
+    let request: Omit<RuntimePermissionRequest, "turnEpoch"> & { terminalSessionId: string; capabilityToken: string };
     try {
       request = parsePermissionMessage(value);
     } catch {
@@ -651,7 +704,18 @@ export class RuntimeGateway {
     const lease = this.leases.get(request.terminalSessionId);
     if (!lease || lease.provider !== request.provider) return close();
     if (!tokenMatches(request.capabilityToken, lease.tokenDigest) || !lease.decisions) return close();
-    const { terminalSessionId, capabilityToken: _token, ...forwarded } = request;
+    const { terminalSessionId, capabilityToken: _token, turnId: _untrustedTurnId, ...forwardedFields } = request;
+    if (!lease.turnOpen) {
+      // Some providers report only tool permissions. Their first real permission hook opens a host turn; an
+      // untrusted turn id in the permission packet is never used to create or identify that turn.
+      lease.turnEpoch = ++this.nextTurnEpoch;
+      lease.activeTurnId = null;
+      lease.turnOpen = true;
+    }
+    const turnId = lease.activeTurnId && /^[A-Za-z0-9._:-]{1,160}$/u.test(lease.activeTurnId)
+      ? lease.activeTurnId
+      : undefined;
+    const forwarded: RuntimePermissionRequest = { ...forwardedFields, turnEpoch: lease.turnEpoch, ...(turnId ? { turnId } : {}) };
     let answered = false;
     const answer = (decision: RuntimePermissionDecision, unavailable = false): void => {
       if (answered) return;
@@ -743,6 +807,7 @@ function claudeLifecycleMessage(
     const text = boundedText(finalAnswer, MAX_RESULT_CHARS);
     result = { text, truncated: text.length < finalAnswer.length };
   }
+  const toolOutcome = toolOutcomeFromHook("claude", event, record);
   return {
     terminalSessionId,
     provider: "claude",
@@ -750,7 +815,8 @@ function claudeLifecycleMessage(
     event,
     turnId: turnId !== null && turnId.length <= 160 ? turnId : null,
     ...(threadId !== undefined ? { threadId } : {}),
-    ...(result === undefined ? {} : { result })
+    ...(result === undefined ? {} : { result }),
+    ...(toolOutcome === undefined ? {} : { toolOutcome })
   };
 }
 
@@ -793,8 +859,8 @@ const PERMISSION_KEYS = [
   "toolInputPreview", "toolInputSha256", "toolName", "truncated", "type", "v"
 ].sort().join(",");
 
-function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string } {
-  if (Object.keys(value).sort().join(",") !== PERMISSION_KEYS) throw new Error("Permission request has an invalid schema.");
+function parsePermissionMessage(value: Record<string, unknown>): Omit<RuntimePermissionRequest, "turnEpoch"> & { terminalSessionId: string; capabilityToken: string } {
+  if (Object.keys(value).filter((key) => key !== "turnId").sort().join(",") !== PERMISSION_KEYS) throw new Error("Permission request has an invalid schema.");
   if (value.v !== RUNTIME_PROTOCOL_VERSION || value.type !== "permission_request") throw new Error("Permission request version is unsupported.");
   if (
     typeof value.terminalSessionId !== "string" || !value.terminalSessionId || value.terminalSessionId.length > 160
@@ -805,6 +871,7 @@ function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissi
     || typeof value.toolInputSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.toolInputSha256)
     || typeof value.truncated !== "boolean"
     || (value.cwd !== null && (typeof value.cwd !== "string" || !value.cwd || value.cwd.length > 4_096))
+    || (value.turnId !== undefined && value.turnId !== null && (typeof value.turnId !== "string" || value.turnId.length > 160))
     || (value.toolInputPreview !== null && (typeof value.toolInputPreview !== "string" || value.toolInputPreview.length > PERMISSION_GATE.toolInputPreviewChars))
   ) throw new Error("Permission request fields are invalid.");
   // Cut input carries only its preview; whole input carries no preview and must match its hash.
@@ -814,7 +881,10 @@ function parsePermissionMessage(value: Record<string, unknown>): RuntimePermissi
   if (!value.truncated && createHash("sha256").update(JSON.stringify(value.toolInput), "utf8").digest("hex") !== value.toolInputSha256) {
     throw new Error("Permission request input does not match its hash.");
   }
-  return value as unknown as RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
+  // A hook may claim a turn identifier, but only authenticated lifecycle messages update the lease. Drop this
+  // untrusted field here; acceptPermission supplies the host's active turn when it forwards the request.
+  const { turnId: _untrustedTurnId, ...trustedFields } = value;
+  return trustedFields as unknown as RuntimePermissionRequest & { terminalSessionId: string; capabilityToken: string };
 }
 
 function isAnswerCaptureCheck(value: unknown): value is Record<string, unknown> {
@@ -834,6 +904,7 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
   ];
   if (value.result !== undefined) expected.push("result");
   if (value.threadId !== undefined) expected.push("threadId");
+  if (value.toolOutcome !== undefined) expected.push("toolOutcome");
   expected.sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw new Error("Runtime message has an invalid schema.");
@@ -870,7 +941,38 @@ function parseLifecycleMessage(value: unknown): ParsedLifecycleMessage {
     value.provider !== "codex" || value.event !== "Stop" || value.state !== "idle"
     || typeof value.lastAssistantMessage !== "string" || value.lastAssistantMessage.length > MAX_ANSWER_CHARS
   )) throw new Error("Runtime lastAssistantMessage is invalid.");
+  if (value.toolOutcome !== undefined) {
+    if (!isCompletedToolEvent(String(value.provider), String(value.event))) throw new Error("Runtime tool outcome event is invalid.");
+    parseToolOutcome(value.toolOutcome);
+  }
   return value as unknown as ParsedLifecycleMessage;
+}
+
+function parseToolOutcome(value: unknown): RuntimeToolOutcome {
+  if (!isRecord(value)) throw new Error("Runtime tool outcome must be an object.");
+  const keys = Object.keys(value).sort();
+  const expected = ["changedPathHashes", "resultClass", "toolName"];
+  if (value.normalizedActionHash !== undefined) expected.push("normalizedActionHash");
+  if (value.errorHash !== undefined) expected.push("errorHash");
+  if (value.outputHash !== undefined) expected.push("outputHash");
+  expected.sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new Error("Runtime tool outcome has an invalid schema.");
+  }
+  if (typeof value.toolName !== "string" || value.toolName.length === 0 || value.toolName.length > 80
+    || !["success", "error", "denied", "unknown"].includes(String(value.resultClass))
+    || !Array.isArray(value.changedPathHashes) || value.changedPathHashes.length > 16
+    || !value.changedPathHashes.every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash))
+    || (value.normalizedActionHash !== undefined && (typeof value.normalizedActionHash !== "string" || !/^[a-f0-9]{64}$/u.test(value.normalizedActionHash)))
+    || (value.errorHash !== undefined && (value.resultClass !== "error" || typeof value.errorHash !== "string" || !/^[a-f0-9]{64}$/u.test(value.errorHash)))
+    || (value.outputHash !== undefined && (value.resultClass === "error" || typeof value.outputHash !== "string" || !/^[a-f0-9]{64}$/u.test(value.outputHash)))
+  ) throw new Error("Runtime tool outcome fields are invalid.");
+  return value as unknown as RuntimeToolOutcome;
+}
+
+function isCompletedToolEvent(provider: string, event: string): boolean {
+  return event === "PostToolUse" || (provider === "claude" && event === "PostToolUseFailure")
+    || (provider === "hermes" && event === "post_tool_call");
 }
 
 function isTurnStart(event: string): boolean {

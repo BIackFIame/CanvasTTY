@@ -5,9 +5,12 @@ package main
 // always exits 0 with nothing on stdout.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"math"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -50,7 +53,9 @@ func runHook(args []string) int {
 		text := boundedText(*finalAnswer, maxAnswerChars)
 		lastAssistantMessage = &text
 	}
-	reportLifecycle(state, event, turnID, threadID, result, lastAssistantMessage)
+	provider, _ := env(envRuntimeProvider)
+	toolOutcome := nativeToolOutcome(provider, event, input)
+	reportLifecycle(state, event, turnID, threadID, result, lastAssistantMessage, toolOutcome)
 	return 0
 }
 
@@ -81,7 +86,7 @@ func firstString(values ...any) any {
 	return nil
 }
 
-func reportLifecycle(state, event string, turnID, threadID any, result *jsObject, lastAssistantMessage *string) bool {
+func reportLifecycle(state, event string, turnID, threadID any, result *jsObject, lastAssistantMessage *string, toolOutcome *jsObject) bool {
 	if !isRuntimeState(state) || event == "" || jsLength(event) > 80 {
 		return false
 	}
@@ -112,6 +117,9 @@ func reportLifecycle(state, event string, turnID, threadID any, result *jsObject
 	if result != nil {
 		message.set("result", result)
 	}
+	if toolOutcome != nil {
+		message.set("toolOutcome", toolOutcome)
+	}
 	expiresAt := envNumber(envCaptureAnswerExpiresAt)
 	shouldCheck := envEquals(envCaptureAnswer, "1") && isFinite(expiresAt) && expiresAt > nowMs() &&
 		provider == "codex" && event == "Stop" && state == "idle" && lastAssistantMessage != nil
@@ -125,6 +133,114 @@ func reportLifecycle(state, event string, turnID, threadID any, result *jsObject
 	return sendRuntimeMessage(address, payload, func(reply any) bool {
 		return field(reply, "type") == "ack"
 	})
+}
+
+func nativeToolOutcome(provider, event string, input any) *jsObject {
+	if event != "PostToolUse" && !(provider == "claude" && event == "PostToolUseFailure") && !(provider == "hermes" && event == "post_tool_call") {
+		return nil
+	}
+	rawToolName, _ := field(input, "tool_name").(string)
+	toolName := boundedText(stripToolNameControls(strings.TrimSpace(rawToolName)), 80)
+	if toolName == "" {
+		toolName = "unknown"
+	}
+	response := field(input, "tool_response")
+	resultClass := "unknown"
+	if provider == "claude" && event == "PostToolUse" {
+		resultClass = "success"
+	} else if provider == "claude" && event == "PostToolUseFailure" {
+		if field(input, "is_interrupt") != true {
+			resultClass = "error"
+		}
+	} else {
+		resultClass = explicitNativeToolResultClass(response)
+	}
+	outcome := obj("toolName", toolName, "resultClass", resultClass)
+	toolInput := field(input, "tool_input")
+	if !isUndefined(toolInput) {
+		action := strings.ToLower(toolName) + "\n" + jsonStringify(toolInput)
+		outcome.set("normalizedActionHash", hashToolOutcome(action))
+	}
+	errorText := firstToolOutcomeString(field(input, "error"), field(input, "tool_error"), field(input, "toolError"),
+		field(response, "error"), field(response, "tool_error"))
+	if resultClass == "error" && errorText != "" {
+		outcome.set("errorHash", hashToolOutcome(normalizeToolOutcomeText(boundedText(errorText, 8192))))
+	}
+	// Parity with runtime-protocol.mjs: a hash of the tool's output for non-error results; the text never leaves.
+	if resultClass != "error" && !isUndefined(response) && response != nil {
+		text, ok := response.(string)
+		if !ok {
+			text = jsonStringify(response)
+		}
+		outcome.set("outputHash", hashToolOutcome(normalizeToolOutcomeText(boundedText(text, 16384))))
+	}
+	paths := []any{}
+	if resultClass == "success" && (strings.EqualFold(strings.TrimSpace(rawToolName), "Edit") || strings.EqualFold(strings.TrimSpace(rawToolName), "Write")) {
+		if path, ok := field(response, "filePath").(string); ok {
+			path = strings.ReplaceAll(strings.TrimSpace(path), "\\", "/")
+			if path != "" {
+				paths = append(paths, hashToolOutcome(path))
+			}
+		}
+	}
+	outcome.set("changedPathHashes", paths)
+	return outcome
+}
+
+func explicitNativeToolResultClass(response any) string {
+	if !isPlainObject(response) {
+		return "unknown"
+	}
+	if field(response, "denied") == true || field(response, "status") == "denied" || field(response, "resultClass") == "denied" {
+		return "denied"
+	}
+	if field(response, "isError") == true || field(response, "is_error") == true || field(response, "success") == false ||
+		field(response, "status") == "error" || field(response, "status") == "failed" || field(response, "resultClass") == "error" {
+		return "error"
+	}
+	if field(response, "success") == true || field(response, "status") == "success" || field(response, "status") == "completed" || field(response, "resultClass") == "success" {
+		return "success"
+	}
+	exitCode := field(response, "exit_code")
+	if isUndefined(exitCode) {
+		exitCode = field(response, "exitCode")
+	}
+	if code, ok := exitCode.(float64); ok && !math.IsNaN(code) && !math.IsInf(code, 0) && math.Trunc(code) == code {
+		if code == 0 {
+			return "success"
+		}
+		return "error"
+	}
+	return "unknown"
+}
+
+func firstToolOutcomeString(values ...any) string {
+	for _, value := range values {
+		if text, ok := value.(string); ok && text != "" {
+			return text
+		}
+	}
+	return ""
+}
+
+func stripToolNameControls(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func normalizeToolOutcomeText(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n"))
+}
+
+func hashToolOutcome(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(sum[:])
 }
 
 func answerCaptureIsActive(address, terminalSessionID, provider, capability string) bool {

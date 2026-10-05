@@ -494,6 +494,10 @@ export type AgentChatHistoryResumeResult =
   | { error: { code: "invalid-id" | "cli-unavailable" | "conversation-missing" | "cwd-unknown" | "cwd-unavailable" | "resume-failed"; message: string } };
 
 export interface SessionMetadata {
+  /** Observed provider counters; missing fields are unknown, never inferred from limits. */
+  usage?: import("./backlog.ts").UsageSummary;
+  reviewUsage?: import("./backlog.ts").UsageSummary;
+  sessionReport?: {readyAt:number};
   /** Host-owned logical task identity for budgets and read-only reviewers. */
   taskScope?: {id:string;cwd:string;startedAt:number};
   reviewRequested?: boolean;
@@ -586,6 +590,14 @@ export interface TerminalDataEvent {
   audience?: TerminalDataAudience;
 }
 
+export interface TerminalOutputSearchResult {
+  matches:Array<{sessionId:string;line:number;text:string;offset:number}>;
+  prunedSessionIds:string[];
+}
+export interface TerminalOutputContext {
+  text:string;firstLine:number;targetLine:number;
+  historyTruncated:boolean;historyBaseOffset:number;
+}
 export interface TerminalBufferSnapshot {
   buffer: string;
   outputOffset: number;
@@ -1811,6 +1823,7 @@ export interface CanvasTTYApi {
     openUrl(url: string): Promise<void>;
   };
   terminal: {
+    onFocusRequested(listener: (id: string) => void): () => void;
     fileDropText(files: File[]): string;
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;

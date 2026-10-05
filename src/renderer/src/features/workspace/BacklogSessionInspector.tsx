@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LocaleId, SessionSnapshot } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n";
-import type { TaskBudgetSnapshot } from "../../../../shared/backlog";
+import type { NotificationPreferences, TaskBudgetSnapshot } from "../../../../shared/backlog";
 import { backlogApi, type BacklogTask } from "./backlogRendererApi";
 import { backlogText, type BacklogTextKey } from "./workspaceBacklogText";
+import { UsageBreakdownPanel } from "./UsageBreakdownPanel";
 import { InspectorLoadGate } from "./inspectorLoadGate";
 import { useDialogFocus } from "./useDialogFocus";
+import { downloadText } from "./workspaceDom";
 import { DraftRevision, shouldHydrateDraft } from "./workspaceAsyncState";
 import { useVisibleRefresh } from "./visibleRefresh";
 
-type InspectorTab = "tasks" | "budget" | "checkpoints";
-const TAB_LABELS: Record<InspectorTab, BacklogTextKey> = { tasks: "tabTasks", budget: "tabBudget", checkpoints: "tabCheckpoints" };
+type InspectorTab = "timeline" | "usage" | "report" | "checkpoints" | "tasks" | "budget" | "notifications";
+const TAB_LABELS:Record<InspectorTab,BacklogTextKey>={
+  timeline:"tabTimeline",usage:"tabUsage",report:"tabReport",checkpoints:"tabCheckpoints",
+  tasks:"tabTasks",budget:"tabBudget",notifications:"tabNotifications"
+};
 const TASK_STATUS_LABELS:Record<BacklogTask["status"],BacklogTextKey>={
   open:"taskOpen",claimed:"taskClaimed",done:"taskDone",closed:"taskClosed"
 };
@@ -19,20 +24,28 @@ interface BacklogSessionInspectorProps {
   session: SessionSnapshot;
   sessions: readonly SessionSnapshot[];
   locale: LocaleId;
-  initialTab?: InspectorTab;
+  initialTab?: "timeline" | "report";
   onClose(): void;
 }
 
-export function BacklogSessionInspector({ session, sessions, locale, initialTab = "tasks", onClose }: BacklogSessionInspectorProps): React.JSX.Element {
-  const timestampFormat = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
+export function BacklogSessionInspector({ session, sessions, locale, initialTab = "timeline", onClose }: BacklogSessionInspectorProps): React.JSX.Element {
   const bt = (key: Parameters<typeof backlogText>[1]): string => backlogText(locale, key);
   const [tab, setTab] = useState<InspectorTab>(initialTab);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [timeline, setTimeline] = useState<Awaited<ReturnType<ReturnType<typeof backlogApi>["timeline"]>> | null>(null);
+  const [timelineQuery, setTimelineQuery] = useState("");
+  const [timelineType, setTimelineType] = useState("");
+  const [timelineAgent, setTimelineAgent] = useState("");
+  const [timelineFilter, setTimelineFilter] = useState<{ query?: string; types?: string[]; sessionIds?: string[] }>({});
+  const [usage, setUsage] = useState<Awaited<ReturnType<ReturnType<typeof backlogApi>["usage"]>> | null>(null);
+  const [report, setReport] = useState("");
   const [checkpoints, setCheckpoints] = useState<Awaited<ReturnType<ReturnType<typeof backlogApi>["checkpoints"]>>>([]);
   const [preview, setPreview] = useState<{ id: string; text: string; changedFiles: string[] } | null>(null);
   const [tasks, setTasks] = useState<BacklogTask[]>([]);
   const [budget, setBudget] = useState<TaskBudgetSnapshot | null>(null);
+  const [notifications, setNotifications] = useState<NotificationPreferences | null>(null);
+  const [notificationBusy, setNotificationBusy] = useState(false);
   const [taskTitle, setTaskTitle] = useState("");
   const [taskDescription, setTaskDescription] = useState("");
   const [taskDependencies, setTaskDependencies] = useState("");
@@ -59,6 +72,12 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
   const taskMemberOptions = useMemo(() => taskMembers.map((member) => (
     <option key={member.id} value={member.id}>{member.title}</option>
   )), [taskMembers]);
+  const timestampFormat = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "medium", timeStyle: "short" }), [locale]);
+  const timelineAgents = useMemo(() => {
+    const agents = new Map<string, {id:string;title:string}>((timeline?.facets?.agents ?? []).map(row => [row.id, row]));
+    for (const member of taskMembers) agents.set(member.id, member);
+    return [...agents.values()];
+  }, [taskMembers, timeline?.facets]);
   const editBudgetDraft = (): void => {
     budgetDraftRevision.current.advance();
     budgetDraftDirty.current = true;
@@ -91,7 +110,21 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
     setLoading(true);
     setError("");
     try {
-      if (selected === "checkpoints") {
+      if (selected === "timeline") {
+        const page = await api.timeline(session.id, cursor, 50, timelineFilter);
+        if (!mounted.current) return;
+        setTimeline((current) => cursor && current
+          ? { ...current, ...page, items: [...current.items, ...page.items] }
+          : page);
+      } else if (selected === "usage") {
+        const next = await api.usage(rootSessionId);
+        if (!mounted.current) return;
+        setUsage(next);
+      } else if (selected === "report") {
+        const next = await api.report(session.id);
+        if (!mounted.current) return;
+        setReport(next);
+      } else if (selected === "checkpoints") {
         const next = await api.checkpoints(session.id);
         if (!mounted.current) return;
         setCheckpoints(next);
@@ -99,6 +132,11 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         const next = await api.tasks(rootSessionId);
         if (!mounted.current) return;
         setTasks(next.tasks);
+      } else if (selected === "notifications") {
+        const next = await api.notificationPreferences();
+        if (!mounted.current) return;
+        setNotifications(next);
+
       } else {
         const draftRevision = budgetDraftRevision.current.capture();
         const next = await api.budget(rootSessionId);
@@ -120,7 +158,7 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         setLoading(false);
       }
     }
-  }, [api, hydrateBudgetDraft, rootSessionId, session.id]);
+  }, [api, hydrateBudgetDraft, rootSessionId, session.id, timelineFilter]);
   loadTabRef.current = loadTab;
 
   useEffect(() => { void loadTab(tab); }, [loadTab, tab]);
@@ -146,10 +184,10 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         ownerSessionId: taskOwner || null
       });
       setTaskTitle(""); setTaskDescription(""); setTaskDependencies(""); setTaskOwner("");
-      await loadTab("tasks");
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
-    } finally { if (mounted.current) setLoading(false); }
+      setLoading(false);
+    }
   };
 
   const assignTask = async (taskId: string, ownerId: string): Promise<void> => {
@@ -217,6 +255,15 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
 
   const clearBudget = (): Promise<void> => updateBudget(() => api.clearBudget(rootSessionId));
 
+  const updateNotifications = (next: NotificationPreferences): Promise<void> => runAction(async () => {
+    const saved = await api.setNotificationPreferences(next);
+    if (mounted.current) setNotifications(saved);
+  }, setNotificationBusy);
+
+  const downloadReport = (): void => {
+    downloadText(report, `${safeFilename(session.title)}-report.md`, "text/markdown;charset=utf-8");
+  };
+
   const loadCheckpointPreview = (id: string): Promise<void> => runAction(async () => {
     const value = await api.previewCheckpoint(session.id, id);
     if (mounted.current) setPreview({ id, text: value.text, changedFiles: value.changedFiles ?? [] });
@@ -245,7 +292,7 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
           <button type="button" onClick={onClose} aria-label={t(locale, "close")}>×</button>
         </header>
         <nav className="backlog-inspector__tabs" aria-label={bt("inspectorTabs")}>
-          {(["tasks", "budget", "checkpoints"] as const).map((name) => (
+          {(["timeline", "usage", "report", "checkpoints", "tasks", "budget", "notifications"] as const).map((name) => (
             <button key={name} type="button" aria-pressed={tab === name} onClick={() => { setTab(name); setPreview(null); }}>
               {bt(TAB_LABELS[name])}
             </button>
@@ -254,6 +301,65 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         {loading && <p className="backlog-inspector__notice" role="status">{t(locale, "loading")}</p>}
         {error && <p className="backlog-inspector__error" role="alert">{error}</p>}
         <div className="backlog-inspector__body">
+          {tab === "timeline" && (
+            <>
+              <form className="backlog-timeline__filters" onSubmit={(event) => {
+                event.preventDefault();
+                setTimeline(null);
+                setTimelineFilter({
+                  ...(timelineQuery.trim() ? { query: timelineQuery.trim() } : {}),
+                  ...(timelineType ? { types: [timelineType] } : {}),
+                  ...(timelineAgent ? { sessionIds: [timelineAgent] } : {})
+                });
+              }}>
+                <input value={timelineQuery} placeholder={bt("timelineText")} aria-label={bt("timelineText")}
+                  onChange={(event) => setTimelineQuery(event.currentTarget.value)} />
+                <select value={timelineType} aria-label={bt("timelineType")} onChange={(event) => setTimelineType(event.currentTarget.value)}>
+                  <option value="">{bt("timelineAll")}</option>
+                  {[...new Set([...(timeline?.facets?.types ?? []), ...(timeline?.items ?? []).map((item) => item.type), ...(timelineType ? [timelineType] : [])])]
+                    .sort().map((type) => <option key={type} value={type}>{type}</option>)}
+                </select>
+                <select value={timelineAgent} aria-label={bt("timelineAgent")} onChange={(event) => setTimelineAgent(event.currentTarget.value)}>
+                  <option value="">{bt("timelineAll")}</option>
+                  {timelineAgents.map((member) => <option key={member.id} value={member.id}>{member.title}</option>)}
+                </select>
+                <button type="submit" disabled={loading}>{bt("timelineSearch")}</button>
+              </form>
+              {timeline && timeline.items.length === 0 && !loading && <p className="backlog-inspector__empty">{bt("noTimeline")}</p>}
+              {timeline && <>
+              <ol className="backlog-timeline">
+                {timeline.items.map((item) => (
+                  <li key={item.id}>
+                    <time dateTime={new Date(item.at).toISOString()}>{timestampFormat.format(item.at)}</time>
+                    <div><strong>{item.summary}</strong><small>{item.type}{item.source ? ` · ${item.source}` : ""}</small>
+                      {item.detail && <p>{item.detail}</p>}</div>
+                  </li>
+                ))}
+              </ol>
+              {timeline.nextCursor && <button className="backlog-inspector__secondary" type="button"
+                disabled={loading} onClick={() => void loadTab("timeline", timeline.nextCursor!)}>{bt("loadMore")}</button>}
+              </>}
+            </>
+          )}
+          {tab === "usage" && usage && (
+            <div className="backlog-usage-section">
+              <div className="backlog-usage">
+              <Metric label={bt("inputTokens")} value={usage.tokens.input} />
+              <Metric label={bt("outputTokens")} value={usage.tokens.output} />
+              <Metric label={bt("conversationTokens")} value={usage.tokens.total} />
+              <Metric label={bt("cost")} value={usage.cost} format={(value) => `${value.toFixed(2)} ${usage.currency ?? ""}`.trim()} />
+              <p>{usage.source ? `${bt("usageSource")}: ${usage.source}` : bt("usageUnknown")}</p>
+              </div>
+              <UsageBreakdownPanel sessionId={rootSessionId} filename={`${safeFilename(session.title)}-usage.csv`} locale={locale} onError={onPanelError} />
+            </div>
+          )}
+          {tab === "report" && report !== "" && (
+            <div className="backlog-report">
+              <button className="backlog-inspector__secondary" type="button" onClick={downloadReport}>{bt("exportReport")}</button>
+              <pre>{report}</pre>
+            </div>
+          )}
+          {tab === "report" && report === "" && !loading && !error && <p className="backlog-inspector__empty">{bt("noReport")}</p>}
           {tab === "checkpoints" && !preview && (
             <ol className="backlog-checkpoints">
               {checkpoints.map((checkpoint) => (
@@ -348,10 +454,54 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
               {!hasBudgetLimit(budget.limits) && <p className="backlog-inspector__empty">{bt("budgetNoLimits")}</p>}
             </div>
           )}
+          {tab === "notifications" && notifications && (
+            <div className="backlog-notifications">
+              <h3>{bt("notificationChannels")}</h3>
+              {(["desktop", "glasses"] as const).map((channel) => (
+                <label key={channel}>
+                  <input type="checkbox" disabled={notificationBusy} checked={notifications.channels[channel]}
+                    onChange={(event) => void updateNotifications({ ...notifications,
+                      channels: { ...notifications.channels, [channel]: event.currentTarget.checked } })} />
+                  {bt(channel === "desktop" ? "notificationDesktop" : "notificationGlasses")}
+                </label>
+              ))}
+              <h3>{bt("notificationDnd")}</h3>
+              <div role="group" aria-label={bt("notificationDnd")}>
+                {([
+                  ["off", null, "notificationDndOff"],
+                  ["hour", Date.now() + 60 * 60_000, "notificationDndHour"],
+                  ["until", Number.MAX_SAFE_INTEGER, "notificationDndUntilClear"]
+                ] as const).map(([id, quietUntil, key]) => {
+                  const active = id === "off" ? notifications.quietUntil === null
+                    : id === "hour" ? notifications.quietUntil !== null && notifications.quietUntil > Date.now()
+                      && notifications.quietUntil < Date.now() + 2 * 60 * 60_000
+                      : notifications.quietUntil !== null && notifications.quietUntil >= Date.now() + 2 * 60 * 60_000;
+                  return <button key={id} type="button" disabled={notificationBusy} aria-pressed={active}
+                    onClick={() => void updateNotifications({ ...notifications,
+                      quietUntil: id === "hour" ? Date.now() + 60 * 60_000 : quietUntil })}>{bt(key)}</button>;
+                })}
+              </div>
+              <label>
+                <input type="checkbox" disabled={notificationBusy} checked={notifications.importantOnly}
+                  onChange={(event) => void updateNotifications({ ...notifications, importantOnly: event.currentTarget.checked })} />
+                {bt("notificationImportantOnly")}
+              </label>
+              <label>
+                <input type="checkbox" disabled={notificationBusy}
+                  checked={notifications.sessionIds?.length === 1 && notifications.sessionIds[0] === session.id}
+                  onChange={(event) => void updateNotifications({ ...notifications, sessionIds: event.currentTarget.checked ? [session.id] : null })} />
+                {bt("notificationThisCard")}
+              </label>
+            </div>
+          )}
         </div>
       </section>
     </div>
   );
+}
+
+function Metric({ label, value, format }: { label: string; value: number | null; format?: (value: number) => string }): React.JSX.Element {
+  return <div><span>{label}</span><strong>{value === null ? "—" : format ? format(value) : value.toLocaleString()}</strong></div>;
 }
 
 function BudgetMetric({
@@ -382,6 +532,10 @@ function BudgetMetric({
       <span>{backlogText(locale, "budgetRemaining")}: {remainingText}</span>
     </section>
   );
+}
+
+function safeFilename(value: string): string {
+  return value.replace(/[^a-z0-9_-]+/giu, "-").replace(/^-+|-+$/gu, "").slice(0, 80) || "session";
 }
 
 function findSessionInspectorTrigger(sessionId: string): HTMLElement | null {

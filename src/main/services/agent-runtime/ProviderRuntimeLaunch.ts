@@ -406,6 +406,7 @@ const CLAUDE_HOOKS: readonly HookMapping[] = [
   { event: "UserPromptSubmit", state: "working" },
   { event: "PermissionRequest", state: "needs_approval" },
   { event: "PostToolUse", state: "working" },
+  { event: "PostToolUseFailure", state: "working" },
   { event: "Stop", state: "idle" },
   { event: "StopFailure", state: "idle" },
   { event: "SessionEnd", state: "idle" },

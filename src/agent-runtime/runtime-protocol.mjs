@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export const RUNTIME_PROTOCOL_VERSION = 1;
 export const MAX_RUNTIME_MESSAGE_BYTES = 64 * 1024;
 export const CAPTURE_RESULT_ENV = "CANVASTTY_RUNTIME_CAPTURE_RESULT";
@@ -10,6 +12,11 @@ export const MAX_ANSWER_CHARS = 4000;
 // of the wire cap: a large Stop payload must still yield its turn id and the
 // truncated answer instead of being dropped.
 export const MAX_HOOK_INPUT_BYTES = 512 * 1024;
+export const MAX_TOOL_OUTCOME_NAME_CHARS = 80;
+export const MAX_TOOL_OUTCOME_ERROR_CHARS = 8 * 1024;
+export const MAX_TOOL_OUTCOME_PATHS = 16;
+export const MAX_TOOL_OUTCOME_OUTPUT_CHARS = 16 * 1024;
+const TOOL_RESULT_CLASSES = new Set(["success", "error", "denied", "unknown"]);
 
 export const AGENT_RUNTIME_ENV = Object.freeze({
   address: "CANVASTTY_RUNTIME_ADDRESS",
@@ -84,6 +91,151 @@ export function permissionGateTimings(budgetMs) {
 export function helperDeadlineMs(env) {
   const raw = env?.[DECISION_BUDGET_ENV];
   return permissionGateTimings(typeof raw === "string" && /^\d{1,6}$/.test(raw) ? Number(raw) : undefined).helperMs;
+}
+
+/**
+ * Derives the small, non-text summary CanvasTTY may share with trusted plugin services after a real tool
+ * completion hook. Permission requests and denials are deliberately outside this path. Tool inputs, errors and
+ * paths are used only as hash inputs and are never returned or persisted.
+ */
+export function toolOutcomeFromHook(provider, event, input) {
+  if (!isCompletedToolEvent(provider, event)) return undefined;
+  const record = isRecord(input) ? input : {};
+  const rawToolName = typeof record.tool_name === "string" ? record.tool_name.trim() : "";
+  const toolName = boundedOutcomeText(rawToolName.replace(/[\u0000-\u001f\u007f]/gu, ""), MAX_TOOL_OUTCOME_NAME_CHARS) || "unknown";
+  const response = record.tool_response;
+  const error = firstHookString(record.error, record.tool_error, record.toolError,
+    isRecord(response) ? response.error : undefined,
+    isRecord(response) ? response.tool_error : undefined);
+  let resultClass = "unknown";
+  if (provider === "claude" && event === "PostToolUse") resultClass = "success";
+  else if (provider === "claude" && event === "PostToolUseFailure") {
+    resultClass = record.is_interrupt === true ? "unknown" : "error";
+  } else {
+    resultClass = explicitToolResultClass(response);
+  }
+
+  const normalizedActionHash = normalizedActionHashFromHook(rawToolName, record.tool_input);
+  const errorHash = resultClass === "error" && error !== null
+    ? sha256(normalizeHashText(error.slice(0, MAX_TOOL_OUTCOME_ERROR_CHARS)))
+    : undefined;
+
+  // A hash of what the tool printed lets a loop detector tell a shell loop that keeps producing the same output from
+  // one that is still learning something. The response text is never returned or stored.
+  const outputHash = resultClass !== "error" ? outputHashFromResponse(response) : undefined;
+
+  const changedPathHashes = [];
+  if (resultClass === "success" && isFileWriteTool(rawToolName) && isRecord(response)) {
+    const path = typeof response.filePath === "string" ? normalizePathForHash(response.filePath) : "";
+    if (path) changedPathHashes.push(sha256(path));
+  }
+  return {
+    toolName,
+    resultClass,
+    ...(normalizedActionHash ? { normalizedActionHash } : {}),
+    ...(errorHash ? { errorHash } : {}),
+    ...(outputHash ? { outputHash } : {}),
+    changedPathHashes
+  };
+}
+
+function outputHashFromResponse(response) {
+  if (response === undefined || response === null) return undefined;
+  let text;
+  if (typeof response === "string") text = response;
+  else { try { text = JSON.stringify(response); } catch { return undefined; } }
+  if (typeof text !== "string") return undefined;
+  let bounded = text.slice(0, MAX_TOOL_OUTCOME_OUTPUT_CHARS);
+  // Never hash half of a surrogate pair (the native helper's boundedText drops it the same way).
+  if (/[\uD800-\uDBFF]$/u.test(bounded)) bounded = bounded.slice(0, -1);
+  return sha256(normalizeHashText(bounded));
+}
+
+/** Hashes the same hook action shape for both the pretool activity and its completed-tool outcome. */
+export function normalizedActionHashFromHook(rawToolName, toolInput) {
+  if (toolInput === undefined) return undefined;
+  const toolName = typeof rawToolName === "string"
+    ? boundedOutcomeText(rawToolName.trim().replace(/[\u0000-\u001f\u007f]/gu, ""), MAX_TOOL_OUTCOME_NAME_CHARS) || "unknown"
+    : "unknown";
+  let serialized;
+  try { serialized = JSON.stringify(toolInput); } catch { return undefined; }
+  if (serialized === undefined) return undefined;
+  return sha256(`${toolName.toLowerCase()}\n${serialized}`);
+}
+
+/** Strips unexpected fields before the compact summary is allowed onto the authenticated lifecycle wire. */
+export function sanitizeToolOutcome(value) {
+  if (!isRecord(value)) return undefined;
+  const resultClass = value.resultClass;
+  if (!TOOL_RESULT_CLASSES.has(resultClass)) return undefined;
+  const toolName = typeof value.toolName === "string"
+    ? boundedOutcomeText(value.toolName.replace(/[\u0000-\u001f\u007f]/gu, ""), MAX_TOOL_OUTCOME_NAME_CHARS)
+    : "unknown";
+  const normalizedActionHash = typeof value.normalizedActionHash === "string" && /^[a-f0-9]{64}$/u.test(value.normalizedActionHash)
+    ? value.normalizedActionHash : undefined;
+  const errorHash = resultClass === "error" && typeof value.errorHash === "string" && /^[a-f0-9]{64}$/u.test(value.errorHash)
+    ? value.errorHash : undefined;
+  const outputHash = resultClass !== "error" && typeof value.outputHash === "string" && /^[a-f0-9]{64}$/u.test(value.outputHash)
+    ? value.outputHash : undefined;
+  const changedPathHashes = Array.isArray(value.changedPathHashes)
+    ? [...new Set(value.changedPathHashes.filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/u.test(hash)))].slice(0, MAX_TOOL_OUTCOME_PATHS)
+    : [];
+  return {
+    toolName: toolName || "unknown",
+    resultClass,
+    ...(normalizedActionHash ? { normalizedActionHash } : {}),
+    ...(errorHash ? { errorHash } : {}),
+    ...(outputHash ? { outputHash } : {}),
+    changedPathHashes
+  };
+}
+
+function isCompletedToolEvent(provider, event) {
+  if (event === "PostToolUse") return true;
+  if (provider === "claude" && event === "PostToolUseFailure") return true;
+  return provider === "hermes" && event === "post_tool_call";
+}
+
+function explicitToolResultClass(response) {
+  if (!isRecord(response)) return "unknown";
+  if (response.denied === true || response.status === "denied" || response.resultClass === "denied") return "denied";
+  if (response.isError === true || response.is_error === true || response.success === false
+    || response.status === "error" || response.status === "failed" || response.resultClass === "error") return "error";
+  if (response.success === true || response.status === "success" || response.status === "completed"
+    || response.resultClass === "success") return "success";
+  const exitCode = typeof response.exit_code === "number" ? response.exit_code
+    : typeof response.exitCode === "number" ? response.exitCode : undefined;
+  if (exitCode !== undefined && Number.isInteger(exitCode)) return exitCode === 0 ? "success" : "error";
+  return "unknown";
+}
+
+function isFileWriteTool(value) {
+  return typeof value === "string" && /^(?:Edit|Write)$/iu.test(value.trim());
+}
+
+function normalizePathForHash(value) {
+  return value.trim().replace(/\\/gu, "/");
+}
+
+function normalizeHashText(value) {
+  return value.replace(/\r\n?/gu, "\n").trim();
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function firstHookString(...values) {
+  return values.find((value) => typeof value === "string" && value.length > 0) ?? null;
+}
+
+function boundedOutcomeText(value, limit) {
+  const text = value.slice(0, limit);
+  return /[\uD800-\uDBFF]$/u.test(text) ? text.slice(0, -1) : text;
+}
+
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 // Claude Code's own HTTP hooks (`type: "http"`, measured with 2.1.281) carry the lifecycle events straight to the

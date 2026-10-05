@@ -10,7 +10,20 @@ export interface UsageSummary {
 }
 export interface UsagePrice {provider:string;model:string;inputPerMillion:number;outputPerMillion:number}
 export interface UsageBreakdown {sessionId:string;provider:string|null;model:string|null;accountId:string|null;taskId:string|null;tokens:{input:number|null;output:number|null;total:number|null};costUsd:number|null;costSource:"reported"|"human-price"|null;source:string;period:"all"|"day"|"week"}
+export type NotificationChannel = "desktop"|"phone"|"glasses";
+export interface NotificationPreferences {version:1;channels:Record<NotificationChannel,boolean>;quietUntil:number|null;importantOnly:boolean;sessionIds:string[]|null}
+export interface AttentionEvent {id:string;sessionId:string;title:string;kind:"response"|"approval"|"done"|"failed"|"budget"|"loop";at:number}
 export interface BacklogApi {
+  notificationPreferences():Promise<NotificationPreferences>;
+  setNotificationPreferences(value:NotificationPreferences):Promise<NotificationPreferences>;
+  notifications():Promise<AttentionEvent[]>;
+  timeline(sessionId: string, cursor?: string, limit?: number, filter?:{query?:string;types?:string[];sessionIds?:string[]}): Promise<{items: TimelineEvent[]; nextCursor: string | null; facets?: TimelineFacets}>;
+  usagePrices():Promise<UsagePrice[]>;
+  setUsagePrices(rows:UsagePrice[]):Promise<UsagePrice[]>;
+  usageBreakdown(sessionId:string|undefined,period:"all"|"day"|"week"):Promise<UsageBreakdown[]>;
+  usage(sessionId?: string): Promise<UsageSummary>;
+  report(sessionId: string): Promise<string>;
+
   onTaskBoardChanged(listener:(change:{rootSessionId:string;revision:number})=>void):()=>void;
   sendInstructions(sessionId:string,text:string):Promise<void>;
   tasks(sessionId: string): Promise<{revision:number;tasks: Array<{id:string;rootSessionId:string;title:string;description:string;progress:string;ownerSessionId:string|null;ownerName:string|null;status:"open"|"claimed"|"done"|"closed";dependencies:string[];result:string|null;createdBySessionId:string;createdAt:number;updatedAt:number}>}>;
@@ -40,6 +53,15 @@ export interface FlowTemplate {
   finalStep:string;expectedSubagents:number;builtIn:boolean;source?:string;trusted?:boolean;digest?:string;
 }
 export const BACKLOG_IPC = {
+  notificationPreferences:"backlog:notifications-preferences",
+  setNotificationPreferences:"backlog:notifications-set",
+  notifications:"backlog:notifications",
+  timeline: "backlog:timeline",
+  usagePrices:"backlog:usage-prices",
+  setUsagePrices:"backlog:usage-prices-set",
+  usageBreakdown:"backlog:usage-breakdown",
+  usage: "backlog:usage",
+  report: "backlog:report",
   checkpoints: "backlog:checkpoints", previewCheckpoint: "backlog:checkpoint-preview", restoreCheckpoint: "backlog:checkpoint-restore",
   sendInstructions:"backlog:instructions",
   tasks:"backlog:tasks",
@@ -57,3 +79,5 @@ export const BACKLOG_IPC = {
   redactText:"backlog:redact",
 } as const;
 export const BACKLOG_EVENTS={taskBoardChanged:"backlog:task-board-changed"} as const;
+
+export const BACKLOG_TERMINAL_IPC = {focusRequested: "terminal:focus-requested"} as const;

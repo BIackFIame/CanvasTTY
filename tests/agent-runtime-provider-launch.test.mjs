@@ -45,6 +45,8 @@ test("Claude and Codex receive automatic lifecycle hooks without prompt or respo
   assert.equal(settings.showStatusInTerminalTab, true);
   assert.match(settings.hooks.UserPromptSubmit[0].hooks[0].command, /working.*UserPromptSubmit/u);
   assert.match(settings.hooks.PermissionRequest[0].hooks[0].command, /needs_approval.*PermissionRequest/u);
+  assert.match(settings.hooks.PostToolUse[0].hooks[0].command, /PostToolUse/u);
+  assert.match(settings.hooks.PostToolUseFailure[0].hooks[0].command, /PostToolUseFailure/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /idle.*Stop/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /^ELECTRON_RUN_AS_NODE='1' /u);
   assert.equal(JSON.stringify(settings).includes('"prompt":'), false);

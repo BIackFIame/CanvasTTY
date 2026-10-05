@@ -150,7 +150,7 @@ try {
     providers: () => [envProvider]
   });
   const control = new AgentControlService(terminals, {
-    waitTiming: { checkMs: 5, settleMs: 5, quietMs: 10 },
+    currentTurnEpoch: () => 1,
     resolveSubagentEnvironment: request => { selected.push(request.liveChildren); return resolveEnvironment(request); }
   });
   const first = await control.spawn({ parentSessionId: rootSession.id, provider: "codex", cwd: project,
@@ -189,8 +189,7 @@ try {
     "neither worker writes through to the checked-out project");
 
   const firstPty = calls.find(call => call.options.cwd === firstContext.workingDirectory).process;
-  await control.send(first.id, "Retry fixture prompt", true);
-  assert.equal((await control.waitFor(first.id, { timeoutMs: 1000 })).reason, "quiet");
+  assert.equal(control.markLoopDetected(first.id), true);
   let stopCount = 0;
   let readOnlyDuringStop;
   firstPty.kill = () => { stopCount++; readOnlyDuringStop = control.isReadOnlyReviewer(first.id); firstPty.emitExit(137); };
@@ -208,7 +207,9 @@ try {
   assert.equal(retried.model, first.model, "retry preserves the selected model");
   assert.equal(calls.filter(call => call.options.cwd === firstContext.workingDirectory).length, 2,
     "retry launches in the same worktree without preparing another one");
+  assert.equal(control.observe(retried.id).loopDetected, undefined, "the prior attempt's loop marker does not authorize another retry");
 
+  assert.equal(control.markLoopDetected(retried.id), true);
   calls.findLast(call => call.options.cwd === firstContext.workingDirectory).process.emitExit(137);
   const retriedAgain = await control.retry(retried.id, "The second attempt stopped in the same worktree.");
   const secondRetryContext = terminals.pluginContext(retriedAgain.id);
@@ -219,8 +220,8 @@ try {
     "the worktree edit also survives a repeated retry");
   assert.equal(calls.filter(call => call.options.cwd === firstContext.workingDirectory).length, 3,
     "both retries launch without preparing or owning another worktree");
-  await control.send(retriedAgain.id, "Retry limit fixture prompt", true);
-  assert.equal((await control.waitFor(retriedAgain.id, { timeoutMs: 1000 })).reason, "quiet");
+  assert.equal(control.observe(retriedAgain.id).loopDetected, undefined, "each retry clears the prior loop marker");
+  assert.equal(control.markLoopDetected(retriedAgain.id), true);
   await assert.rejects(control.retry(retriedAgain.id), /limit of 2 retries/u, "the same worktree owner retains the finite retry limit");
   calls.findLast(call => call.options.cwd === firstContext.workingDirectory).process.emitExit(0);
 

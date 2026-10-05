@@ -561,6 +561,21 @@ export class TerminalManager {
     }
   }
 
+  setObservedUsage(id:string,usage:NonNullable<SessionMetadata["usage"]>,reviewUsage?:SessionMetadata["reviewUsage"]):void {
+    const session=this.sessions.get(id);if(!session)return;
+    if(JSON.stringify(session.metadata.usage)===JSON.stringify(usage) && JSON.stringify(session.metadata.reviewUsage)===JSON.stringify(reviewUsage))return;
+    session.metadata.usage=structuredClone(usage);
+    if(reviewUsage)session.metadata.reviewUsage=structuredClone(reviewUsage);else delete session.metadata.reviewUsage;
+    this.emitSession(session.metadata);
+  }
+
+  setSessionReport(id:string,readyAt:number|null):void {
+    const session=this.sessions.get(id);if(!session || session.metadata.sessionReport?.readyAt===readyAt)return;
+    if(readyAt===null){if(!session.metadata.sessionReport)return;delete session.metadata.sessionReport;}
+    else session.metadata.sessionReport={readyAt};
+    this.emitSession(session.metadata);
+  }
+
   taskScopeFor(sourceId:string):NonNullable<SessionMetadata["taskScope"]> {
     const source=this.sessions.get(sourceId);if(!source)throw new Error("Handoff card is unavailable.");
     let root=source;
@@ -881,11 +896,12 @@ export class TerminalManager {
     return this.sessions.get(id)?.outputOffset ?? null;
   }
 
-  readBuffer(id: string): TerminalBufferSnapshot {
+  readBuffer(id: string, maxChars = MAX_SCROLLBACK_CHARS): TerminalBufferSnapshot {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
+    if (!Number.isSafeInteger(maxChars) || maxChars < 0) throw new Error("Invalid terminal buffer limit.");
     return {
-      buffer: session.bufferChunks.slice(session.bufferStart).join(""),
+      buffer: scrollbackTail(session, Math.min(maxChars, MAX_SCROLLBACK_CHARS)),
       outputOffset: session.outputOffset
     };
   }

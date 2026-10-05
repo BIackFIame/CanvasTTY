@@ -1,3 +1,4 @@
+import type { AttentionEvent, NotificationChannel } from "../../../shared/backlog.ts";
 import {
   createServer,
   type Server,
@@ -160,8 +161,10 @@ export class EvenG2Controller {
   private pairingDiagnostics: string[] = [];
   private diagnosticsWrite = Promise.resolve();
   private limits: () => Promise<LimitsSnapshot>;
+  private readonly notifications:(channel:NotificationChannel,id:string)=>AttentionEvent[];
 
   constructor(options: {
+    notifications?: (channel:NotificationChannel,sessionId:string)=>AttentionEvent[];
     userDataPath: string;
     terminals: Terminals;
     webRoot: string;
@@ -194,6 +197,7 @@ export class EvenG2Controller {
         })
       : null;
     this.terminals = options.terminals;
+    this.notifications=options.notifications ?? (()=>[]);
     this.mobileRoot = options.mobileRoot ?? null;
     this.webRoot = options.webRoot;
     this.port = options.port ?? 3481;
@@ -1046,7 +1050,7 @@ export class EvenG2Controller {
       this.access.assertCurrent(grant);
       const session = this.terminals.listMetadata().find((s) => s.id === id);
       if (!session) return this.json(res, 404, { error: "not-found" });
-      return this.json(res, 200, { session: safeSession(session), ...view });
+      return this.json(res, 200, { session: {...safeSession(session),title:this.terminals.redactSecrets(session.title)}, ...view,attention:this.notifications("glasses",id).at(-1) ?? null });
     }
     if (req.method !== "POST")
       return this.json(res, 404, { error: "not-found" });

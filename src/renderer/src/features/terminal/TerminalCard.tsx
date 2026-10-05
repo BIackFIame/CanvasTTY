@@ -119,7 +119,7 @@ interface TerminalCardProps {
   restoreEnabled?: boolean;
   onOpenUrl(url: string): void;
   taskChildren?: readonly SessionSnapshot[];
-  onOpenInspector?(id: string): void;
+  onOpenInspector?(id: string, initialTab?: "timeline" | "report"): void;
   onGatherTask?(id: string): void;
 }
 
@@ -1154,7 +1154,7 @@ function TerminalCardView({
   );
   return (
     <article
-      className={`terminal-card ${session.role === "orchestrator" && (taskChildren.length > 0 || Boolean(session.taskBudget)) ? "terminal-card--with-task-summary" : ""} terminal-card--${session.provider} ${summaryMode ? "terminal-card--summary" : ""} ${selected || groupSelected ? "terminal-card--selected" : ""} ${session.status === "needs_approval" || session.status === "failed" ? "terminal-card--attention" : ""} ${fullscreen ? "terminal-card--fullscreen" : ""}`}
+      className={`terminal-card terminal-card--with-activity-summary ${session.role === "orchestrator" && (taskChildren.length > 0 || Boolean(session.taskBudget)) ? "terminal-card--with-task-summary" : ""} terminal-card--${session.provider} ${summaryMode ? "terminal-card--summary" : ""} ${selected || groupSelected ? "terminal-card--selected" : ""} ${session.status === "needs_approval" || session.status === "failed" ? "terminal-card--attention" : ""} ${fullscreen ? "terminal-card--fullscreen" : ""}`}
       data-interactive="true"
       data-canvas-layer-id={`terminal:${session.id}`}
       data-canvas-widget-id={terminalCanvasWidgetId(session.id)}
@@ -1309,6 +1309,16 @@ function TerminalCardView({
       </header>
       <TaskSummaryBar parent={session} children={taskChildren} locale={locale} onGather={() => onGatherTask?.(session.id)} />
       <div className="terminal-card__surface" data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost} />
+      <div className="terminal-card__activity-summary" data-interactive="true" role="group" aria-label={locale === "ru" ? "Расходы сессии" : "Session usage"}>
+        <span title={usageDetails(session.usage, locale)}>{locale === "ru" ? "Расход" : "Usage"}: {compactUsage(session.usage, locale)}</span>
+        {(session.reviewUsage || session.reviewRequested) && <span title={usageDetails(session.reviewUsage, locale)}>
+          {locale === "ru" ? "Проверяющий" : "Reviewer"}: {compactUsage(session.reviewUsage, locale)}
+        </span>}
+        {session.sessionReport && <button type="button" onPointerDown={(event) => event.stopPropagation()}
+          onClick={() => onOpenInspector?.(session.id, "report")} title={locale === "ru" ? "Открыть готовый отчёт" : "Open the completed report"}>
+          {locale === "ru" ? "Отчёт готов" : "Report ready"}
+        </button>}
+      </div>
       {pixelSkinTheme && (
         <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}
           width={size.width} height={size.height} detail={pixelDetail} surfaceBounds={pixelSurfaceBounds ?? undefined} />
@@ -1321,7 +1331,7 @@ function TerminalCardView({
       {pixelControls && terminalActions}
       {optionsOpen && hasOptions && (
         <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
-          {onOpenInspector && <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onOpenInspector(session.id); }}>{locale === "ru" ? "Задачи и точки отката…" : "Tasks and rollback points…"}</button>}
+          {onOpenInspector && <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onOpenInspector(session.id); }}>{locale === "ru" ? "События и задача…" : "Activity and task…"}</button>}
           {restoreEnabled && (
             <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
               <input
@@ -1483,6 +1493,31 @@ function terminalTheme(palette: PaletteId, pixelSkin: string | null = null): { b
     cursor: palette === "lilac" ? "#bfc9ee" : "#b8cf99",
     selectionBackground: "#7b789966"
   };
+}
+
+function compactUsage(summary: SessionSnapshot["usage"], locale: LocaleId): string {
+  if (!summary?.source) return locale === "ru" ? "неизвестно" : "unknown";
+  const tokens = summary.tokens.total === null
+    ? (locale === "ru" ? "токены неизвестны" : "tokens unknown")
+    : `${summary.tokens.total.toLocaleString(locale)} ${locale === "ru" ? "токенов" : "tokens"}`;
+  const cost = summary.cost === null
+    ? (locale === "ru" ? "стоимость неизвестна" : "cost unknown")
+    : `${summary.currency === "USD" ? "$" : `${summary.currency} `}${summary.cost.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
+  return `${tokens} · ${cost}`;
+}
+
+function usageDetails(summary: SessionSnapshot["usage"], locale: LocaleId): string {
+  if (!summary?.source) return locale === "ru" ? "Источник данных о расходе недоступен." : "Usage source is unavailable.";
+  const unknown = locale === "ru" ? "неизвестно" : "unknown";
+  const cost = summary.cost === null ? unknown : `${summary.currency} ${summary.cost.toLocaleString(locale, { minimumFractionDigits: 2, maximumFractionDigits: 6 })}`;
+  const value = (count: number | null): string => count === null ? unknown : count.toLocaleString(locale);
+  return [
+    `${locale === "ru" ? "Источник" : "Source"}: ${summary.source}`,
+    `${locale === "ru" ? "Вход" : "Input"}: ${value(summary.tokens.input)}`,
+    `${locale === "ru" ? "Выход" : "Output"}: ${value(summary.tokens.output)}`,
+    `${locale === "ru" ? "Всего" : "Total"}: ${value(summary.tokens.total)}`,
+    `${locale === "ru" ? "Стоимость" : "Cost"}: ${cost}`
+  ].join("\n");
 }
 
 function isCardControl(target: EventTarget): boolean {

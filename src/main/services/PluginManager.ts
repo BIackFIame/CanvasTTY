@@ -327,6 +327,12 @@ export class PluginManager {
     return this.list();
   }
 
+  /** The host's install record for one plugin: where it was installed from and what the person trusted. */
+  installRecord(pluginId: string): { sourceUrl: string; enabled: boolean; nativeCodeTrusted: boolean } | null {
+    const plugin = this.plugins.get(pluginId);
+    return plugin ? { sourceUrl: plugin.sourceUrl, enabled: plugin.enabled, nativeCodeTrusted: plugin.nativeCodeTrusted } : null;
+  }
+
   list(): InstalledPlugin[] {
     return [...this.plugins.values()]
       .sort((left, right) => left.manifest.name.localeCompare(right.manifest.name))

@@ -1,4 +1,4 @@
-import { BACKLOG_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
+import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
@@ -269,6 +269,7 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    onFocusRequested: (listener) => subscribe(BACKLOG_TERMINAL_IPC.focusRequested, listener),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),
       process.platform
