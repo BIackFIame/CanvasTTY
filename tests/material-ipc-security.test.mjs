@@ -8,7 +8,7 @@ const ipcPath = new URL("../src/main/ipc/registerMaterialIpc.ts", import.meta.ur
 test("every materials IPC channel validates the trusted main renderer", async () => {
   const source = await readFile(ipcPath, "utf8");
   const channels = Object.keys(IPC).filter((name) => name.startsWith("materials") && !name.endsWith("Changed"));
-  assert.ok(channels.length >= 10);
+  assert.ok(channels.length > 10);
   for (const channel of channels) {
     const start = source.indexOf(`IPC.${channel},`);
     assert.notEqual(start, -1, `${channel} handler is registered`);
