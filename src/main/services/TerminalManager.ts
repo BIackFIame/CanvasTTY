@@ -789,11 +789,44 @@ export class TerminalManager {
     return this.liveProcesses.size;
   }
 
-  private allProcessesExited(timeoutMs: number): Promise<boolean> {
+  /** Stops only this card's owned PTY and waits for its existing exit watcher before it can reuse a workspace. */
+  async stopSubagentPtyForRetry(id: string): Promise<void> {
+    const session = this.sessions.get(id);
+    if (!session || session.metadata.role !== "subagent" || session.metadata.provider === "terminal") {
+      throw new Error("The retry source is no longer an available subagent.");
+    }
+    const process = session.process;
+    if (!process) {
+      if (session.metadata.exitCode !== null) return;
+      throw new Error("The retry source has no observable PTY to stop safely.");
+    }
+    const exited = this.liveProcesses.get(process);
+    if (!exited) throw new Error("The retry source PTY has no host exit watcher; its workspace was not reused.");
+
+    const resumed = this.processTreePause.resume(process);
+    if (resumed.failed) throw new Error(`The retry source PTY could not be resumed before stopping: ${resumed.failed}`);
+    try { process.kill(); } catch { /* It may have exited as the quiet result was reported. */ }
+    if (await this.waitForOwnedProcess(exited, PTY_EXIT_WAIT_MS)) return;
+
+    try {
+      // On Windows a PTY accepts no signal. On other hosts force only this exact owned PTY after the grace period.
+      if (globalThis.process.platform === "win32") process.kill();
+      else process.kill("SIGKILL");
+    } catch { /* The captured exit promise below decides whether it stopped. */ }
+    if (!await this.waitForOwnedProcess(exited, PTY_KILL_WAIT_MS)) {
+      throw new Error("The retry source PTY did not exit; its workspace was not reused.");
+    }
+  }
+
+  private async waitForOwnedProcess(exited: Promise<void>, timeoutMs: number): Promise<boolean> {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<false>((resolve) => { timer = setTimeout(() => resolve(false), timeoutMs); });
-    const exited = Promise.all(this.liveProcesses.values()).then(() => true as const);
-    return Promise.race([exited, timedOut]).finally(() => clearTimeout(timer));
+    try { return await Promise.race([exited.then(() => true as const), timedOut]); }
+    finally { clearTimeout(timer); }
+  }
+
+  private allProcessesExited(timeoutMs: number): Promise<boolean> {
+    return this.waitForOwnedProcess(Promise.all(this.liveProcesses.values()).then(() => undefined), timeoutMs);
   }
 
   /**
@@ -2034,6 +2067,7 @@ export class TerminalManager {
       sessionId: id,
       provider,
       cwd: planned.cwd,
+      taskProjectRoot,
       command: planned.command,
       args: planned.args,
       env: planned.env,
@@ -2326,7 +2360,8 @@ export class TerminalManager {
     const choice = session.extras.environmentChoice;
     if (choice && !session.extras.environment) {
       if (!environments) return refuse("plugin environments are not available.");
-      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice });
+      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice,
+        projectRoot:metadata.taskScope?.cwd ?? this.taskProjectRoot(metadata.cwd,metadata.parentSessionId) });
       if (!live()) {
         // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
         // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.

@@ -1,7 +1,7 @@
 import { taskCardState } from "../workspace/workspaceTaskGraph";
 import { TaskSummaryBar } from "../workspace/TaskSummaryBar";
 import { backlogText } from "../workspace/workspaceBacklogText";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, memo, useCallback, useEffect, useRef, useState } from "react";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -31,6 +31,7 @@ import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { matchesShortcut } from "../../lib/shortcuts";
 import { GitRiskNotice } from "./GitRiskNotice";
+import type { PluginChangeReviewActionInput } from "./PluginChangesReviewDialog";
 import { isCustomTerminalBorderSkinId, terminalBorderSkinFallback } from "../../lib/skinStyles";
 import { sessionStatusLabel } from "../../lib/sessionStatus";
 import { attachTerminalMouseCoordinateAdapter, attachTerminalScrollbarCoordinateAdapter } from "./terminalMouseCoordinates";
@@ -70,6 +71,8 @@ import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
 import { isPixelSkinThemeId, pixelSkinStateForSession } from "../skins/skinCatalog";
 import { isPixelSkinPackId, usePixelSkinPackSummary } from "../skins/SkinAssets";
 import { pixelSkinControlLayout, pixelSkinSurfaceBounds, skinDetailLevel } from "../skins/SkinLayout";
+
+const PluginChangesReviewDialog = lazy(() => import("./PluginChangesReviewDialog").then((module) => ({ default: module.PluginChangesReviewDialog })));
 
 interface TerminalCardProps {
   session: SessionSnapshot;
@@ -250,12 +253,20 @@ function TerminalCardView({
   const pluginDecorations = usePluginCardDecorations(session);
   const [actionRunning, setActionRunning] = useState(false);
   const [actionToast, setActionToast] = useState<PluginCardActionResult | null>(null);
+  const [pluginReview, setPluginReview] = useState<{ pluginId: string; actionId: string; review: NonNullable<PluginCardActionResult["review"]> } | null>(null);
   const hasOptions = Boolean(onOpenInspector) || restoreEnabled || pluginDecorations.actions.length > 0;
   const runPluginAction = (action: PluginCardActionEntry): void => {
     setOptionsOpen(false);
     setActionRunning(true);
     void window.canvasTTY.plugins.invokeCardAction(action.pluginId, action.actionId, session.id)
-      .then((result) => setActionToast({ tone: result.tone, message: result.message ?? `${action.title}: ${t(locale, "cardActionDone")}` }))
+      .then((result) => {
+        if (result.review) {
+          setActionToast(null);
+          setPluginReview({ pluginId: action.pluginId, actionId: action.actionId, review: result.review });
+        } else {
+          setActionToast({ tone: result.tone, message: result.message ?? `${action.title}: ${t(locale, "cardActionDone")}` });
+        }
+      })
       .catch((error: unknown) => setActionToast({ tone: "error", message: error instanceof Error ? error.message : String(error) }))
       .finally(() => setActionRunning(false));
   };
@@ -1310,7 +1321,7 @@ function TerminalCardView({
       {pixelControls && terminalActions}
       {optionsOpen && hasOptions && (
         <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
-          {onOpenInspector && <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onOpenInspector(session.id); }}>{locale === "ru" ? "Задачи и бюджет…" : "Tasks and budget…"}</button>}
+          {onOpenInspector && <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onOpenInspector(session.id); }}>{locale === "ru" ? "Задачи и точки отката…" : "Tasks and rollback points…"}</button>}
           {restoreEnabled && (
             <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
               <input
@@ -1341,6 +1352,24 @@ function TerminalCardView({
           </button>
         </div>
       )}
+      {pluginReview && <Suspense fallback={null}>
+        <PluginChangesReviewDialog
+          key={`${pluginReview.pluginId}:${pluginReview.actionId}:${session.id}`}
+          cardSessionId={session.id}
+          reviewActionId={pluginReview.actionId}
+          review={pluginReview.review}
+          locale={locale}
+          invokeAction={(actionId: string, input?: PluginChangeReviewActionInput) => (
+            window.canvasTTY.plugins.invokeCardAction(pluginReview.pluginId, actionId, session.id, input)
+          )}
+          onReviewChange={(review) => setPluginReview((current) => current ? { ...current, review } : current)}
+          onActionResult={(result) => {
+            setPluginReview(null);
+            setActionToast({ tone: result.tone, message: result.message ?? t(locale, "cardActionDone") });
+          }}
+          onClose={() => setPluginReview(null)}
+        />
+      </Suspense>}
       {confirmClose && session.environment && (
         <div className="terminal-card__menu terminal-card__confirm" role="alertdialog" aria-label={t(locale, "environmentKeepTitle")}
           onKeyDown={(event) => { if (event.key === "Escape") setConfirmClose(false); }}>

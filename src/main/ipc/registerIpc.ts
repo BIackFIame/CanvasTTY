@@ -438,13 +438,13 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     return pluginCards.decorations();
   });
-  ipcMain.handle(IPC.pluginsInvokeCardAction, (event, pluginId: unknown, actionId: unknown, sessionId: unknown) => {
+  ipcMain.handle(IPC.pluginsInvokeCardAction, (event, pluginId: unknown, actionId: unknown, sessionId: unknown, input?: unknown) => {
     // Only the app window's own card menu invokes actions; plugin surfaces cannot reach this channel.
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string" || typeof actionId !== "string" || typeof sessionId !== "string") {
       throw new Error("Card action request is invalid.");
     }
-    return pluginCards.invoke(pluginId, actionId, sessionId);
+    return pluginCards.invoke(pluginId, actionId, sessionId, input);
   });
   ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
     // Only the app's own launcher asks; plugin surfaces cannot reach this channel.

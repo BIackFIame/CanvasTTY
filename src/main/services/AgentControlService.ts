@@ -2,6 +2,7 @@ import type {
   AgentProviderId,
   CreateSessionRequest,
   LaunchProfileId,
+  SessionEnvironmentChoice,
   SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
@@ -60,6 +61,7 @@ export interface SpawnAgentRequest {
   review?: boolean;
   /** Optional known model reserved for this worker's read-only reviewer. */
   reviewModel?: string;
+  isolate?: "worktree";
   /** Internal-only role: suppresses all agent/plugin tools for a Plan-profile reviewer. */
   readOnlyReview?: boolean;
 }
@@ -113,6 +115,14 @@ export interface AgentControlOptions {
   containment?: () => boolean;
   /** Persistent task budgets. Only usage from a real provider/timeline source is counted. */
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
+  /** Resolves an explicit or automatic subagent environment using the already trusted environments plugin. */
+  resolveSubagentEnvironment?: (request: {
+    parentSessionId: string;
+    projectRoot: string;
+    cwd: string;
+    liveChildren: number;
+    isolate?: "worktree";
+  }) => SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
   /** Returns a known model different from the worker's model. Null means a safe alternative is unavailable. */
   reviewModel?: (provider: AgentProviderId, workerModel: string | undefined) => string | null;
   /** Actual CLI model metadata/configuration, used when the worker kept its CLI default. */
@@ -217,8 +227,31 @@ export class AgentControlService {
     this.requireBudgetActive(parent.id);
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
-    this.assertSpawnCapacity(parent.id);
-    return this.createSubagent(parent, request, cwd.cwd, profile.profile, signal);
+    const { live } = this.assertSpawnCapacity(parent.id);
+    const resolveEnvironment = this.options.resolveSubagentEnvironment;
+    if (!resolveEnvironment) {
+      if (request.isolate === "worktree") throw new DelegationRefusal("The environments plugin does not provide a worktree for this launch.");
+      return this.createSubagent(parent, request, cwd.cwd, profile.profile, null, signal);
+    }
+    let environment: SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
+    try {
+      environment = resolveEnvironment({
+          parentSessionId: parent.id,
+          projectRoot: taskScope.cwd,
+          cwd: cwd.cwd,
+          liveChildren: live,
+          ...(request.isolate ? { isolate: request.isolate } : {})
+        });
+    } catch (error) {
+      throw new DelegationRefusal(`The environments plugin could not prepare this subagent: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+    if (environment && typeof (environment as Promise<SessionEnvironmentChoice | null>).then === "function") {
+      return Promise.resolve(environment).then(
+        (choice) => this.createSubagent(parent, request, cwd.cwd, profile.profile, choice, signal),
+        (error: unknown) => { throw new DelegationRefusal(`The environments plugin could not prepare this subagent: ${error instanceof Error ? error.message : "unknown error"}`); }
+      );
+    }
+    return this.createSubagent(parent, request, cwd.cwd, profile.profile, environment as SessionEnvironmentChoice | null, signal);
   }
 
   private createSubagent(
@@ -226,10 +259,15 @@ export class AgentControlService {
     request: SpawnAgentRequest,
     cwd: string,
     profile: LaunchProfile,
+    environment: SessionEnvironmentChoice | null,
     signal?: AbortSignal
   ): Promise<SessionMetadata> {
+    if (request.isolate === "worktree" && !environment) {
+      throw new DelegationRefusal("The environments plugin does not provide a worktree for this launch.");
+    }
     // A call cancelled before its agent starts launches nothing.
     if (signal?.aborted) return Promise.reject(spawnCanceled());
+    // An asynchronous environment lookup may race another spawn or a human budget change.
     // Recheck immediately before synchronous card creation, which reserves the live slot.
     this.requireSession(parent.id);
     this.requireBudgetActive(parent.id);
@@ -246,6 +284,7 @@ export class AgentControlService {
       ...(request.title !== undefined ? { title: request.title } : {}),
       role: "subagent",
       parentSessionId: parent.id,
+      ...(environment ? { environment } : {}),
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
@@ -532,11 +571,20 @@ export class AgentControlService {
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
     if (!capabilities?.send) throw new Error(`${session.provider} cannot receive prompts.`);
+    const hasWorktreeBadge = session.environment?.kind === "worktree";
+    const pluginContext = hasWorktreeBadge ? this.terminals.pluginContext(sessionId) : null;
+    if (hasWorktreeBadge && pluginContext?.environment?.kind !== "worktree") {
+      throw new DelegationRefusal("The agent's worktree environment is unavailable; its retry was not started locally.");
+    }
+    const reuseWorktree = hasWorktreeBadge;
     const failed = (session.exitCode !== null && session.exitCode !== 0) || session.status === "failed";
     if (!failed && !this.retryableQuiet.has(sessionId)) {
       throw new DelegationRefusal("retry_agent works only for a failed or quiet subagent; a running agent must finish or be canceled first.");
     }
     const sourceId = this.retryOrigins.get(sessionId) ?? sessionId;
+    if (reuseWorktree && (this.pendingRetries.get(sourceId) ?? 0) > 0) {
+      throw new DelegationRefusal("A retry for this worktree agent is already in progress.");
+    }
     const count = this.retryCounts.get(sourceId) ?? 0;
     if (count >= MAX_RETRY_COUNT) throw new DelegationRefusal(`This agent has already used its limit of ${MAX_RETRY_COUNT} retries.`);
     const original = this.launchRequests.get(sessionId) ?? this.launchRequests.get(sourceId);
@@ -552,11 +600,54 @@ export class AgentControlService {
       output ? `Masked output tail (up to ${MAX_RETRY_OUTPUT_BYTES} UTF-8 bytes):\n${output}` : "No terminal output was available."
     ].join("\n");
     const retryPrompt = `${original.initialPrompt ?? ""}${context}`;
+    const reviewWasRequested = this.reviewRequested.has(sessionId) || original.review === true;
+    const readOnlyReviewWasRequested = this.readOnlyReviewers.has(sessionId) || original.readOnlyReview === true;
     // Reserve synchronously: concurrent tool calls must share the same finite allowance.
     this.retryCounts.set(sourceId, count + 1);
     this.pendingRetries.set(sourceId, (this.pendingRetries.get(sourceId) ?? 0) + 1);
+    let restartedWorktree = false;
     try {
       if (signal?.aborted) throw spawnCanceled();
+      if (reuseWorktree) {
+        const parentId = session.parentSessionId ?? original.parentSessionId;
+        if (!parentId || session.parentSessionId !== parentId) {
+          throw new DelegationRefusal("The original parent session is no longer available for a safe worktree retry.");
+        }
+        const assertWorktreeRetryAllowed = (): void => {
+          const parent = this.requireSession(parentId);
+          const taskScope = this.taskRoot(parent.id);
+          const cwd = subagentFolder(taskScope.cwd, parent.cwd, original.cwd);
+          if ("error" in cwd) throw new DelegationRefusal(cwd.error);
+          this.requireBudgetActive(parent.id);
+          const profile = this.profileFor(parent.id, session.provider as AgentProviderId, original.profile);
+          if ("error" in profile) throw new DelegationRefusal(profile.error);
+          if (profile.profile !== session.profile) {
+            throw new DelegationRefusal("The parent no longer permits this agent's original launch mode; its worktree was left unchanged.");
+          }
+          this.assertSpawnCapacity(parent.id, sessionId);
+        };
+
+        // Recheck every spawn gate before stopping the existing worker. The retry replaces this card, so its own
+        // live slot and child-card place are excluded from capacity counts.
+        assertWorktreeRetryAllowed();
+        this.forgetSession(sessionId);
+        if (readOnlyReviewWasRequested) this.readOnlyReviewers.add(sessionId);
+        this.launchRequests.set(sessionId, original);
+        this.retryOrigins.set(sessionId, sourceId);
+        await this.terminals.stopSubagentPtyForRetry(sessionId);
+        if (signal?.aborted) throw spawnCanceled();
+        const current = this.requireSession(sessionId);
+        if (current.parentSessionId !== parentId || current.provider !== original.provider) {
+          throw new DelegationRefusal("The retry source changed while its PTY was stopping; its worktree was not reused.");
+        }
+        // Parent settings, the budget, and sibling capacity may have changed during the bounded PTY wait.
+        assertWorktreeRetryAllowed();
+        const restarted = this.terminals.restart(sessionId, { resume: false });
+        restartedWorktree = true;
+        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        await this.send(sessionId, retryPrompt, true, signal);
+        return this.terminals.getMetadata(sessionId) ?? restarted;
+      }
       const retried = await this.spawn({
         ...original,
         parentSessionId: session.parentSessionId ?? original.parentSessionId,
@@ -569,7 +660,17 @@ export class AgentControlService {
       if (original.review === true) this.reviewRequested.add(retried.id);
       return retried;
     } catch (error) {
-      this.retryCounts.set(sourceId, Math.max(0, (this.retryCounts.get(sourceId) ?? 1) - 1));
+      if (reuseWorktree && this.terminals.getMetadata(sessionId)) {
+        // `forgetSession` clears stale loop/quiet/review state without disposing this card or its environment.
+        // Restore only its launch identity and requested review so a failed relaunch can be retried deliberately.
+        this.launchRequests.set(sessionId, original);
+        this.retryOrigins.set(sessionId, sourceId);
+        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (readOnlyReviewWasRequested) this.readOnlyReviewers.add(sessionId);
+      }
+      if (!restartedWorktree) {
+        this.retryCounts.set(sourceId, Math.max(0, (this.retryCounts.get(sourceId) ?? 1) - 1));
+      }
       throw error;
     } finally {
       const pending = (this.pendingRetries.get(sourceId) ?? 1) - 1;

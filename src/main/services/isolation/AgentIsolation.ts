@@ -5,6 +5,7 @@ import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts";
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
+import { isPluginDataPath, worktreeGitAccess } from "./worktreeGitAccess.ts";
 import { isolationPaths } from "./isolationPaths.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments, projectHooks } from "./bubblewrap.ts";
@@ -22,6 +23,7 @@ export const BUBBLEWRAP_USERNS_DOCS = "docs/installing-and-security.md#linux-whe
 /** A failed bubblewrap check is repeated after this long, so allowing it takes effect without a restart. */
 const BUBBLEWRAP_PROBE_RETRY_MS = 60_000;
 export const ISOLATION_NOTE = "CanvasTTY agent isolation: files can be written only inside the project folder, $TMPDIR and this CLI's own folders; SSH/cloud keys, other agents' credentials and CanvasTTY's tokens cannot be read; other processes, apps and daemons are out of reach. \"Operation not permitted\" outside that is this rule: do the work inside the project, or tell the person what you need.";
+export const WORKTREE_GIT_NOTE = "A plugin worktree's Git metadata stays read-only under agent isolation to protect the shared repository and sibling worktrees. You can edit project files; git add and git commit are unavailable here. The host environment collects your file edits into a review for the user to accept.";
 
 /** Restricted reviewers keep HOME, TMPDIR and their profile together below CanvasTTY's private run directory. */
 function reviewerRunRoot(userDataPath: string): string {
@@ -200,6 +202,8 @@ export interface IsolationLaunch {
   sessionId: string;
   provider: ProviderId;
   cwd: string;
+  /** Original project root for validating a linked worktree. */
+  taskProjectRoot?: string;
   command: string;
   args: readonly string[];
   env: Record<string, string>;
@@ -324,6 +328,7 @@ export class AgentIsolation {
       chmodSync(folder, 0o700);
       const temp = join(folder, "tmp");
       mkdirSync(temp, { mode: 0o700 });
+      const requestedCwdInPluginData = isPluginDataPath(launch.cwd, this.options.userDataPath);
       const cwd = realpathSync(launch.cwd);
       // Avoid resolving an executable through a chain of HOME symlinks from inside the reviewer sandbox. The host
       // resolves only the selected executable; its file grant already covers this canonical spelling.
@@ -346,6 +351,10 @@ export class AgentIsolation {
       if (launch.deniedReadPaths && deniedReadPaths?.length !== launch.deniedReadPaths.length) {
         throw new LaunchRefusal("A reviewer isolation root could not be verified.");
       }
+      const trustedWorktree = worktreeGitAccess(cwd, launch.taskProjectRoot ?? cwd, this.options.userDataPath);
+      if ((requestedCwdInPluginData || isPluginDataPath(cwd, this.options.userDataPath)) && !trustedWorktree) {
+        throw new LaunchRefusal("The plugin environment worktree could not be verified against the task's original Git repository. The agent was not started.");
+      }
       const launchEnvironment = { ...launch.env };
       const accountHome = launch.accountHome === undefined
         ? undefined
@@ -365,6 +374,7 @@ export class AgentIsolation {
         ? reviewerRuntimeDependencies([launchCommand, ...(launch.runtimeReadable ?? [])], launchEnvironment)
         : [];
       const paths = isolationPaths({
+        ...(trustedWorktree ? { worktreeGitAccess: trustedWorktree } : {}),
         provider: launch.provider,
         cwd,
         sessionTemp: temp,
@@ -385,13 +395,15 @@ export class AgentIsolation {
       const gitTemplate = join(folder, "git-template");
       mkdirSync(gitTemplate, { mode: 0o500 });
       // An agent that meets "Operation not permitted" can read why here, instead of trying other ways around it.
-      const isolationNote = ISOLATION_NOTE;
+      const worktreeGitMetadataReadOnly = Boolean(trustedWorktree);
+      const isolationNote = worktreeGitMetadataReadOnly ? `${ISOLATION_NOTE} ${WORKTREE_GIT_NOTE}` : ISOLATION_NOTE;
       const env: Record<string, string> = { ...launchEnvironment, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: isolationNote };
+      if (worktreeGitMetadataReadOnly) env.GIT_OPTIONAL_LOCKS = "0";
       if (available.layer === "seatbelt") {
         const profilePath = join(folder, "profile.sb");
         writeFileSync(profilePath, seatbeltProfile(paths), { mode: 0o600, flag: "wx" });
         return { command: this.options.sandboxExecPath ?? SANDBOX_EXEC, args: ["-f", profilePath, launchCommand, ...launch.args], env,
-          cleanup };
+          ...(worktreeGitMetadataReadOnly ? { isolationReason: WORKTREE_GIT_NOTE } : {}), cleanup };
       }
       // bubblewrap mounts only what exists: the CLI's own missing folders are created and a missing protected file
       // gets a placeholder first (LinuxHostPaths), both undone by cleanup().
@@ -411,6 +423,7 @@ export class AgentIsolation {
         command: this.bubblewrap!,
         args,
         env,
+        ...(worktreeGitMetadataReadOnly ? { isolationReason: WORKTREE_GIT_NOTE } : {}),
         cleanup: () => {
           cleanup();
           // bwrap created an empty `.git/hooks` as the throwaway hooks mount point in a folder that had no repository:

@@ -775,10 +775,45 @@ export interface PluginCardDecorations {
   actions: PluginCardActionEntry[];
 }
 
-/** What a card action answered, shown as a toast on the card. */
+export interface PluginReviewTextPage {
+  label?: string;
+  text: string;
+  startLine: number;
+  totalLines: number;
+  hasMore: boolean;
+}
+
+export interface PluginChangeReviewFile {
+  path: string;
+  status?: string;
+  diff: string;
+  page?: number;
+  hasMore?: boolean;
+  truncated?: boolean;
+  conflict?: { current: PluginReviewTextPage; agent: PluginReviewTextPage };
+}
+
+export interface PluginChangeReviewGroup {
+  sessionId: string;
+  title: string;
+  files: PluginChangeReviewFile[];
+  error?: string;
+}
+
+/** Plain-text review supplied by an existing plugin; actions still require a human click. */
+export interface PluginChangeReview {
+  title: string;
+  groups: PluginChangeReviewGroup[];
+  acceptActionId?: string;
+  rejectActionId?: string;
+  nextOffset?: number;
+}
+
+/** What a card action answered, shown as a toast or a structured review on the card. */
 export interface PluginCardActionResult {
   message?: string;
   tone: PluginCardTone;
+  review?: PluginChangeReview;
 }
 
 export type PluginDecisionEvent = "pre-tool";
@@ -1706,7 +1741,7 @@ export interface CanvasTTYApi {
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
     cardDecorations(): Promise<PluginCardDecorations>;
     onCardDecorations(listener: (decorations: PluginCardDecorations) => void): () => void;
-    invokeCardAction(pluginId: string, actionId: string, sessionId: string): Promise<PluginCardActionResult>;
+    invokeCardAction(pluginId: string, actionId: string, sessionId: string, input?: Record<string, unknown>): Promise<PluginCardActionResult>;
     /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
     launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;

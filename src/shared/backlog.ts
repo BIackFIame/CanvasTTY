@@ -26,6 +26,9 @@ export interface BacklogApi {
   previewFlow(projectRoot:string, flowId:string): Promise<{instructions:string;digest:string|null}>;
   approveFlow(projectRoot:string, flowId:string, digest:string): Promise<void>;
   redactText(text: string): Promise<string>;
+  checkpoints(sessionId: string): Promise<Array<{id: string; at: number; label?: string}>>;
+  previewCheckpoint(sessionId: string, id: string): Promise<{text: string; changedFiles: string[]}>;
+  restoreCheckpoint(sessionId: string, id: string): Promise<{ok: boolean; message?: string}>;
 }
 export interface TaskBudgetSnapshot {
   rootSessionId:string;limits:{tokens:number|null;costUsd:number|null;durationMs:number|null};
@@ -37,6 +40,7 @@ export interface FlowTemplate {
   finalStep:string;expectedSubagents:number;builtIn:boolean;source?:string;trusted?:boolean;digest?:string;
 }
 export const BACKLOG_IPC = {
+  checkpoints: "backlog:checkpoints", previewCheckpoint: "backlog:checkpoint-preview", restoreCheckpoint: "backlog:checkpoint-restore",
   sendInstructions:"backlog:instructions",
   tasks:"backlog:tasks",
   addTask:"backlog:task-add",

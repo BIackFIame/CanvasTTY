@@ -1,5 +1,10 @@
 import type { LocaleId } from "../../../../shared/contracts";
 const text = {
+  tabCheckpoints: ["Точки отката", "Rollback points"],
+  restoreConfirm: ["Восстановить эту контрольную точку? Текущие изменения могут быть потеряны.", "Restore this checkpoint? Current changes may be lost."],
+  restoreFailed: ["Не удалось восстановить контрольную точку.", "Could not restore the checkpoint."],
+  checkpoint: ["Контрольная точка", "Checkpoint"], noCheckpoints: ["Контрольных точек нет.", "No checkpoints available."],
+  preview: ["Предпросмотр", "Preview"], restoreCheckpoint: ["Восстановить точку", "Restore checkpoint"], back: ["Назад к списку", "Back to list"],
   taskStateFailed: ["Ошибка", "Failed"],
   taskStateDone: ["Готово", "Done"],
   taskStateWaitingResponse: ["Ожидает ответа", "Waiting for response"],
@@ -29,7 +34,7 @@ const text = {
   flowName: ["Название workflow", "Workflow name"],
   flowSaved: ["Файл workflow сохранён", "Workflow file saved"],
   gatherTask: ["Собрать задачу", "Gather task"],
-  inspector: ["Задачи и бюджет", "Tasks and budget"],
+  inspector: ["Задачи и точки отката", "Tasks and rollback points"],
   inspectorTabs: ["Разделы задачи", "Task sections"],
   noTasks: ["В этой задаче нет подзадач.", "No subtasks in this task."],
   reviewRequested: ["Требуется проверка", "Review requested"],

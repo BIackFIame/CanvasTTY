@@ -9,8 +9,8 @@ import { useDialogFocus } from "./useDialogFocus";
 import { DraftRevision, shouldHydrateDraft } from "./workspaceAsyncState";
 import { useVisibleRefresh } from "./visibleRefresh";
 
-type InspectorTab = "tasks" | "budget";
-const TAB_LABELS: Record<InspectorTab, BacklogTextKey> = { tasks: "tabTasks", budget: "tabBudget" };
+type InspectorTab = "tasks" | "budget" | "checkpoints";
+const TAB_LABELS: Record<InspectorTab, BacklogTextKey> = { tasks: "tabTasks", budget: "tabBudget", checkpoints: "tabCheckpoints" };
 const TASK_STATUS_LABELS:Record<BacklogTask["status"],BacklogTextKey>={
   open:"taskOpen",claimed:"taskClaimed",done:"taskDone",closed:"taskClosed"
 };
@@ -24,10 +24,13 @@ interface BacklogSessionInspectorProps {
 }
 
 export function BacklogSessionInspector({ session, sessions, locale, initialTab = "tasks", onClose }: BacklogSessionInspectorProps): React.JSX.Element {
+  const timestampFormat = useMemo(() => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "medium" }), [locale]);
   const bt = (key: Parameters<typeof backlogText>[1]): string => backlogText(locale, key);
   const [tab, setTab] = useState<InspectorTab>(initialTab);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [checkpoints, setCheckpoints] = useState<Awaited<ReturnType<ReturnType<typeof backlogApi>["checkpoints"]>>>([]);
+  const [preview, setPreview] = useState<{ id: string; text: string; changedFiles: string[] } | null>(null);
   const [tasks, setTasks] = useState<BacklogTask[]>([]);
   const [budget, setBudget] = useState<TaskBudgetSnapshot | null>(null);
   const [taskTitle, setTaskTitle] = useState("");
@@ -88,7 +91,11 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
     setLoading(true);
     setError("");
     try {
-      if (selected === "tasks") {
+      if (selected === "checkpoints") {
+        const next = await api.checkpoints(session.id);
+        if (!mounted.current) return;
+        setCheckpoints(next);
+      } else if (selected === "tasks") {
         const next = await api.tasks(rootSessionId);
         if (!mounted.current) return;
         setTasks(next.tasks);
@@ -210,6 +217,24 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
 
   const clearBudget = (): Promise<void> => updateBudget(() => api.clearBudget(rootSessionId));
 
+  const loadCheckpointPreview = (id: string): Promise<void> => runAction(async () => {
+    const value = await api.previewCheckpoint(session.id, id);
+    if (mounted.current) setPreview({ id, text: value.text, changedFiles: value.changedFiles ?? [] });
+  });
+
+  const restoreCheckpoint = async (): Promise<void> => {
+    if (!preview) return;
+    const confirmed = window.confirm(backlogText(locale, "restoreConfirm"));
+    if (!confirmed) return;
+    await runAction(async () => {
+      const result = await api.restoreCheckpoint(session.id, preview.id);
+      if (!result.ok) throw new Error(result.message || backlogText(locale, "restoreFailed"));
+      if (!mounted.current) return;
+      setPreview(null);
+      await loadTab("checkpoints");
+    });
+  };
+
   return (
     <div className="backlog-inspector__backdrop" data-interactive="true" onPointerDown={(event) => {
       if (event.target === event.currentTarget) onClose();
@@ -220,8 +245,8 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
           <button type="button" onClick={onClose} aria-label={t(locale, "close")}>×</button>
         </header>
         <nav className="backlog-inspector__tabs" aria-label={bt("inspectorTabs")}>
-          {(["tasks", "budget"] as const).map((name) => (
-            <button key={name} type="button" aria-pressed={tab === name} onClick={() => { setTab(name); }}>
+          {(["tasks", "budget", "checkpoints"] as const).map((name) => (
+            <button key={name} type="button" aria-pressed={tab === name} onClick={() => { setTab(name); setPreview(null); }}>
               {bt(TAB_LABELS[name])}
             </button>
           ))}
@@ -229,6 +254,28 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         {loading && <p className="backlog-inspector__notice" role="status">{t(locale, "loading")}</p>}
         {error && <p className="backlog-inspector__error" role="alert">{error}</p>}
         <div className="backlog-inspector__body">
+          {tab === "checkpoints" && !preview && (
+            <ol className="backlog-checkpoints">
+              {checkpoints.map((checkpoint) => (
+                <li key={checkpoint.id}>
+                  <div><strong>{checkpoint.label || bt("checkpoint")}</strong><time>{timestampFormat.format(checkpoint.at)}</time></div>
+                  <button className="backlog-inspector__secondary" type="button" disabled={loading}
+                    onClick={() => void loadCheckpointPreview(checkpoint.id)}>{bt("preview")}</button>
+                </li>
+              ))}
+              {checkpoints.length === 0 && !loading && <p className="backlog-inspector__empty">{bt("noCheckpoints")}</p>}
+            </ol>
+          )}
+          {tab === "checkpoints" && preview && (
+            <div className="backlog-checkpoint-preview">
+              <button className="backlog-inspector__secondary" type="button" onClick={() => setPreview(null)}>{bt("back")}</button>
+              {preview.changedFiles.length > 0 && <p>{preview.changedFiles.join(" · ")}</p>}
+              <pre>{preview.text}</pre>
+              <button className="backlog-inspector__danger" type="button" disabled={loading} onClick={() => void restoreCheckpoint()}>
+                {bt("restoreCheckpoint")}
+              </button>
+            </div>
+          )}
           {tab === "tasks" && (
             <div className="backlog-taskboard">
               <h3>{bt("taskBoard")}</h3>

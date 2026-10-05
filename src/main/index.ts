@@ -2,6 +2,7 @@ import { UsagePrices } from "./services/UsagePrices";
 import { ProviderUsageSource } from "./services/ProviderUsageSource";
 import { SessionTimelineService } from "./services/SessionTimelineService";
 import { configuredModel } from "./services/configuredModel";
+import { subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
 import { GitCheckpoints } from "./services/GitCheckpoints";
 import { OrchestrationBudgetService } from "./services/OrchestrationBudgetService";
 import { OrchestrationTaskBoard } from "./services/OrchestrationTaskBoard";
@@ -399,7 +400,18 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await budgets.load();
   flushBudgets=()=>budgets.flush();
-  const checkpoints=new GitCheckpoints(text=>redaction.redact(text));
+  const checkpoints = new GitCheckpoints(text => redaction.redact(text),50,join(userDataPath,"checkpoints.json"));
+  const checkpointTurns = new Map<string,Promise<void>>();
+  const checkpointBeforeTurn = (id: string): Promise<void> => {
+    const row=terminalManager?.getMetadata(id);
+    if (!row || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
+    let pending=checkpointTurns.get(id);
+    if (!pending) {
+      pending=checkpoints.capture(id,row.cwd).catch(error => Promise.resolve(console.warn("Rollback point unavailable",redaction.redact(String(error)))));
+      checkpointTurns.set(id,pending);
+    }
+    return pending;
+  };
   diagnostics.configureRedaction(text => redaction.redact(text));
   diagnosticContext = () => ({
     servicesReady,
@@ -568,6 +580,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
           void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
         }
 
+        if (signal.state !== "working") checkpointTurns.delete(terminalSessionId);
+        else void checkpointBeforeTurn(terminalSessionId);
         terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
@@ -588,9 +602,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
-      onPermissionRequest: (terminalSessionId, request, signal) => {
+      onPermissionRequest: async (terminalSessionId, request, signal) => {
         try { budgetInputGate(terminalSessionId); }
         catch(error) { return {behavior:"deny",message:redaction.redact(error instanceof Error ? error.message : "Task budget is paused.")}; }
+        await checkpointBeforeTurn(terminalSessionId);
         return decisionHooks.decide(terminalSessionId, request, signal);
       },
       // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
@@ -675,6 +690,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }).show();
       }
     } else if (channel === IPC.terminalRemoved && "id" in payload) {
+      checkpointTurns.delete(payload.id);
       usageMembership.delete(payload.id);scheduleUsageRefresh();
       forgetOrchestrationSession(payload.id);
       diagnostics.record("info", "terminal", "session.closed", { id: payload.id });
@@ -752,6 +768,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       return actual?.model ?? configuredModel(worker.provider as AgentProviderId,{codex:resolveAgentHistoryPaths().codex,claude:join(app.getPath("home"),".claude"),opencode:join(process.env.XDG_CONFIG_HOME ?? join(app.getPath("home"),".config"),"opencode")});
     },
     reviewCost:id=>timeline.usage([id],usagePrices.get()).cost,
+    resolveSubagentEnvironment: subagentWorktreeResolver({
+      isGitProject: projectRoot => checkpoints.available(projectRoot),
+      providers: () => pluginManager!.environmentProviders()
+    }),
     reviewModel:(provider,model)=>model ? providerDirectorySources.models?.(provider)?.models.find(candidate=>candidate!==model) ?? null : null,
     reviewDiff:worker=>checkpoints.workingDiff(managedTerminals.pluginContext(worker.id)?.workingDirectory ?? worker.cwd),
     onReview:id=>managedTerminals.setTaskMetadata(id,{reviewRequested:true})
@@ -898,7 +918,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await materialService.load();
   registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
-  registerBacklogIpc(ipc,{board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
+  registerBacklogIpc(ipc,{checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
   registerIpc(ipc, {
     settings,
     recheckProviderClis: async () => {

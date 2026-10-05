@@ -39,8 +39,10 @@ export function bubblewrapArguments(
     seen.add(path);
     args.push("--bind", path, path);
   }
+  // Linux cannot permit atomic ref updates to one branch without making the containing directory writable (which
+  // also permits new sibling refs). Linked-worktree Git metadata therefore stays read-only under bubblewrap.
   for (const path of paths.writableFiles) {
-    if (exists(path) === "file") args.push("--bind", path, path);
+    if (exists(path) === "file" && ![...seen].some((folder) => within(path, folder))) args.push("--bind", path, path);
   }
   for (const path of paths.unreadable) {
     const kind = exists(path);

@@ -4,6 +4,7 @@ import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { otherSpellings } from "../onDiskPath.ts";
 import { openCodeConfigPaths } from "../inspectedConfig.ts";
+import type { WorktreeGitAccess } from "./worktreeGitAccess.ts";
 
 /**
  * The folders one isolated agent may write, the ones it may not read, and the sockets it may connect to. Pure: the
@@ -37,6 +38,8 @@ export interface IsolationPathInput {
   /** Exact host-created reviewer run folder; replaces the ordinary session launch-runs grant. */
   privateRunDirectory?: string;
   runtimeReadable?: readonly string[];
+  /** Host-derived from cwd + task root after validating a linked worktree; never supplied by a plugin. */
+  worktreeGitAccess?: WorktreeGitAccess | null;
 }
 
 export interface IsolationPaths {
@@ -153,7 +156,7 @@ function sensitiveHomeFolders(home: string, xdgConfig: string): string[] {
  * token-authenticated sockets and per-run hook settings the CLI must read.
  */
 export function privateAppData(userDataPath: string): string[] {
-  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", "plugin-data", "task-budgets.json", "usage-prices.json", "flow-approvals.json", "session-timeline"]
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", "plugin-data", "checkpoints.json", "checkpoint-objects", "task-budgets.json", "usage-prices.json", "flow-approvals.json", "session-timeline"]
     .map((name) => join(userDataPath, name));
 }
 
@@ -238,7 +241,9 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     privateRunDirectory = canonicalRun;
   }
   const grants = [...(input.grantedPrivate ?? []), privateRunDirectory ?? join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
-  const project = input.cwd;
+  const access=input.worktreeGitAccess;
+  const worktree=access && isWithin(input.cwd,access.cwd) ? access : null;
+  const project = worktree?.cwd ?? input.cwd;
   if (input.readOnlyProject) {
     const projectPaths = pathSpellings(project);
     const otherWritePaths = all([
@@ -337,21 +342,26 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       // A repository that exists keeps its config (hooksPath, fsmonitor, filters run code when the person uses git
       // later, outside the layer); a new one may be created, which writes its config.
       ...(existsSync(join(project, ".git", "config")) ? [join(project, ".git", "config"), join(project, ".git", "config.lock")] : []),
+      ...(worktree ? [
+        join(project, ".git"),
+        join(worktree.adminDir, "HEAD")
+      ] : []),
       ...(input.provider === "codex" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
       ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
       ...configSources.jsonFiles
     ]),
     protectedDirectories: all([
       ...configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")]),
+      ...(worktree ? [worktree.adminDir, worktree.commonDir] : [])
     ]),
-    gitHooks: all([join(project, ".git", "hooks")]),
+    gitHooks: all([join(project, ".git", "hooks"), ...(worktree ? [join(worktree.adminDir, "hooks"), join(worktree.commonDir, "hooks")] : [])]),
     projectRoots: input.readOnlyProject ? [] : all([project]),
     unreadable: all([
-      ...sensitive, ...others, ...privateData,
+      ...sensitive, ...others, ...privateData, ...(worktree ? worktree.otherAdminDirs : []),
       ...(input.restrictHomeReads ? [home, hostHome] : []),
       ...(input.deniedReadPaths ?? []),
     ]),
-    readableAgain: all([...grants, ...movedHomes,
+    readableAgain: all([...grants, ...movedHomes, ...(worktree ? [project, worktree.adminDir] : []),
       ...(input.restrictHomeReads ? [...ownFolders, ...own.files, input.sessionTemp, input.cwd,
         "/bin","/usr/bin","/sbin","/usr/sbin","/usr/lib","/usr/libexec","/usr/share","/System/Library","/System/Library/dyld",
         "/System/Volumes/Preboot/Cryptexes/OS","/dev","/private/var/db/dyld","/private/var/select/sh",
