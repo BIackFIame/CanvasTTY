@@ -143,7 +143,12 @@ test("authenticated orchestration gateway carries templates, routed review/retry
   await new Promise((resolve) => setTimeout(resolve, 20));
   workerProcess.emitExit(1);
 
-  const waited = await client.call("wait_for_agent", { sessionId: spawned.sessionId, timeoutSeconds: 1 });
+  let waited = await client.call("wait_for_agent", { sessionId: spawned.sessionId, timeoutSeconds: 1 });
+  assert.equal(waited.review.status, "pending", "the tool does not wait indefinitely for review");
+  for (let i = 0; waited.review?.status === "pending" && i < 100; i++) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    waited = await client.call("wait_for_agent", { sessionId: spawned.sessionId, timeoutSeconds: 1 });
+  }
   assert.equal(waited.reason, "failed");
   assert.equal(waited.review.status, "accepted");
   assert.equal(reviewerAnswerRecorded, true);
