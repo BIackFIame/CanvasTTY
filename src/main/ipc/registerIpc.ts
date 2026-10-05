@@ -45,6 +45,7 @@ import type { GithubAuthService } from "../services/GithubAuthService";
 import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { readHomeMedia } from "../services/homeMedia";
+import { openTerminalFile } from "../services/terminalFileEditor";
 
 interface CriticalDependencies {
   settings: SettingsStore;
@@ -827,6 +828,13 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   ipcMain.handle(IPC.terminalList, (event) => {
     assertMainRenderer(event, getMainWindow);
     return terminals.list();
+  });
+  ipcMain.handle(IPC.terminalOpenFile, (event, id: unknown, reference: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session ID is required.");
+    const session = terminals.getMetadata(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    return openTerminalFile(reference, session.cwd);
   });
   ipcMain.handle(IPC.terminalReadBuffer, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);

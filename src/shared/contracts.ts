@@ -1767,6 +1767,7 @@ export interface CanvasTTYApi {
     openUrl(url: string): Promise<void>;
   };
   terminal: {
+    openFile(id: string, reference: string): Promise<void>;
     fileDropText(files: File[]): string;
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
@@ -1936,6 +1937,7 @@ export const IPC = {
   githubAuthSignOut: "github-auth:sign-out",
   githubAuthOpenUrl: "github-auth:open-url",
   terminalList: "terminal:list",
+  terminalOpenFile: "terminal:open-file",
   terminalReadBuffer: "terminal:read-buffer",
   terminalCreate: "terminal:create",
   agentsAvailability: "agents:availability",
