@@ -304,7 +304,7 @@ test("the skill tells the orchestrator to pass a model the person names", async 
   assert.match(skill, /If the person names a model, pass it as `model`/u);
 });
 
-test("the tool clamps long waits to 100 seconds and never blocks on a separate review", async () => {
+test("OpenCode waits return within 50 seconds and never block on a separate review", async () => {
   const { control } = setup();
   let received;
   control.waitFor = async (_id, request) => {
@@ -314,7 +314,7 @@ test("the tool clamps long waits to 100 seconds and never blocks on a separate r
   control.resultWithReview = () => { throw new Error("must not wait beyond the tool deadline"); };
   const handler = new ScopedOrchestrationHandler(control);
   const result = await call(handler, "wait_for_agent", { sessionId: "child", timeoutSeconds: 600 });
-  assert.equal(received.timeoutMs, 100000);
+  assert.equal(received.timeoutMs, 50000);
   assert.equal(received.deferReview, true);
   assert.equal(result.output, "progress");
   assert.match(result.message, /Call wait_for_agent again/);

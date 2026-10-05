@@ -229,9 +229,11 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
     this.requireOwned(orchestratorId, target);
     const seconds = typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : DEFAULT_AGENT_WAIT_SECONDS;
+    // OpenCode's MCP client can impose a 60-second request deadline, even when the helper allows longer.
+    const clientLimitMs = this.control.status(orchestratorId).provider === "opencode" ? 50_000 : 100_000;
     try {
       const result = await this.control.waitFor(target, {
-        timeoutMs: Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000,
+        timeoutMs: Math.min(clientLimitMs, Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000),
         deferReview: true,
         ...(signal ? { signal } : {})
       });
