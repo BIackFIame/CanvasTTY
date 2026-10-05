@@ -1174,12 +1174,11 @@ export class TerminalManager {
   }
 
   /**
-   * The one delivery rule for text another agent, a plugin or a controller sends to a card (spawn_agent's first
-   * prompt, send_to_agent, plugin sessions.send). A running card gets it at once. A card whose launch plugins are
-   * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
-   * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
-   * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
-   * it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing either.
+   * Serialize controller prompts within one launch, waiting for the PTY and supported CLI readiness.
+   * Confirm hooked CLI input through a new turn or an echoed unsubmitted prompt. Submitted text is
+   * written once; only Enter may be retried after a complete echo. A failed acknowledgement is ambiguous
+   * and asks the caller to inspect the card. Cancellation, restart and deadlines never replay queued text
+   * into a later launch. Unhooked terminals retain ordinary PTY delivery.
    */
   deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
     const session = this.sessions.get(id);
@@ -1264,11 +1263,15 @@ export class TerminalManager {
     const text = data.replace(/\r$/u, "").replace(/\s+/gu, "");
     let submits = 1;
     let retryAt = Date.now() + 1000;
+    let observedOffset = offset;
+    let echoed = false;
     while (valid() && Date.now() < deadline) {
       if ((session.turnStarts ?? 0) > mark) return { delivered: true };
-      const output = session.bufferChunks.slice(session.bufferStart).join("");
-      const fresh = output.slice(Math.max(0, output.length - (session.outputOffset - offset)));
-      const echoed = text.length > 0 && stripVTControlCharacters(fresh).replace(/\s+/gu, "").includes(text);
+      if (session.outputOffset !== observedOffset) {
+        observedOffset = session.outputOffset;
+        const fresh = scrollbackTail(session, observedOffset - offset);
+        echoed = text.length > 0 && stripVTControlCharacters(fresh).replace(/\s+/gu, "").includes(text);
+      }
       if (echoed && !data.endsWith("\r")) return { delivered: true };
       if (echoed && session.metadata.status === "idle" && Date.now() >= retryAt && submits < 3) {
         if (!this.inputChecked(id, "\r")) break;
