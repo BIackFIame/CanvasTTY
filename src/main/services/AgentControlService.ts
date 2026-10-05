@@ -504,11 +504,15 @@ export class AgentControlService {
     };
   }
 
-  /** Gets a result and, when requested, completes its second-agent review before returning it. */
-  async resultWithReview(sessionId: string): Promise<AgentResult> {
+  /** Gets a result with its review; tool calls defer unfinished reviews to stay within client deadlines. */
+  async resultWithReview(sessionId: string, options: { deferReview?: boolean } = {}): Promise<AgentResult> {
     const current = this.result(sessionId);
     if (!this.reviewRequested.has(sessionId)) return current;
     if (current.status !== "idle" && current.status !== "done" && current.status !== "failed" && current.exitCode === null) {
+      return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
+    }
+    if (options.deferReview) {
+      void this.ensureReview(sessionId);
       return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
     }
     const review = await this.ensureReview(sessionId);

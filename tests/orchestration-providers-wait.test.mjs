@@ -319,3 +319,21 @@ test("OpenCode waits return within 50 seconds and never block on a separate revi
   assert.equal(result.output, "progress");
   assert.match(result.message, /Call wait_for_agent again/);
 });
+
+
+test("get_agent_result returns pending during a slow review and reuses its final outcome", { timeout: 1000 }, async () => {
+  const { terminals, control, handler } = setup();
+  terminals.sessions.get("child").status = "idle";
+  control.reviewRequested.add("child");
+  let finish;
+  let reviews = 0;
+  control.performReview = () => { reviews++; return new Promise((resolve) => { finish = resolve; }); };
+  const pending = await call(handler, "get_agent_result", { sessionId: "child" });
+  assert.equal(pending.review.status, "pending");
+  assert.equal((await call(handler, "get_agent_result", { sessionId: "child" })).review.status, "pending");
+  assert.equal(reviews, 1);
+  finish({ status: "accepted", costUsd: null });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await call(handler, "get_agent_result", { sessionId: "child" })).review.status, "accepted");
+  assert.equal(reviews, 1);
+});

@@ -94,7 +94,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "get_agent_result",
-    "Get one of this session's subagents' result: answer (its last turn's final reply as the agent reported it, for Codex and OpenCode subagents; truncated:true when only the end was kept), status (idle once its turn ended), the exit state (running | done | failed; an interactive CLI stays running after a task) and the masked terminal tail as output. Prefer answer; the terminal tail is raw screen output.",
+    "Get one of this session's subagents' result: answer (its last turn's final reply as the agent reported it, for Codex and OpenCode subagents; truncated:true when only the end was kept), status (idle once its turn ended), the exit state (running | done | failed; an interactive CLI stays running after a task) and the masked terminal tail as output. Prefer answer; the terminal tail is raw screen output. An unfinished review returns status pending immediately; call get_agent_result later for its outcome.",
     { sessionId },
     ["sessionId"]
   ),

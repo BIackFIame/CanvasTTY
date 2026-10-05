@@ -375,7 +375,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
 
   private async result(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.requireOwned(orchestratorId, args.sessionId as string);
-    const result = await this.control.resultWithReview(args.sessionId as string);
+    const result = await this.control.resultWithReview(args.sessionId as string, { deferReview: true });
     return {
       sessionId: result.sessionId,
       state: result.state,
