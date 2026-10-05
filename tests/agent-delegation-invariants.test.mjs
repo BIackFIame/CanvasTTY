@@ -214,7 +214,7 @@ test("a restored subagent never comes back with more than its orchestrator allow
 test("no agent-facing tool changes CanvasTTY's settings, protection, profiles or isolation", async () => {
   // The orchestration tools an agent can call: agents only, no settings, no profile or trust changes.
   assert.deepEqual([...ORCHESTRATION_TOOL_NAMES].sort(),
-    ["apply_orchestration_template", "cancel_agent", "claim_task", "complete_task", "get_agent_result", "get_task_budget", "list_agents", "list_orchestration_templates", "list_providers", "list_tasks", "observe_agent", "request_secret", "retry_agent", "run_secret_request", "send_to_agent", "spawn_agent", "update_task", "wait_for_agent"]);
+    ["apply_orchestration_template", "ask_user", "cancel_agent", "claim_task", "complete_task", "get_agent_result", "get_task_budget", "list_agents", "list_orchestration_templates", "list_providers", "list_tasks", "observe_agent", "request_secret", "retry_agent", "run_secret_request", "send_to_agent", "spawn_agent", "update_task", "wait_for_agent"]);
   // The control gateway writes only the pixel theme to settings, and only for the person's own connection.
   const gateway = await readFile(new URL("../src/main/services/agent-control/AgentControlGateway.ts", import.meta.url), "utf8");
   const updates = [...gateway.matchAll(/settings\.update\(\{\s*([a-zA-Z]+)/gu)].map((match) => match[1]);

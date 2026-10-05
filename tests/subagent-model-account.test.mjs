@@ -40,7 +40,10 @@ async function setup(t, { delegable = true, router = true } = {}) {
   let routed = 0;
   const handler = new ScopedOrchestrationHandler(control, null,
     { cli: () => "available", limits: () => null, models: () => ({ models: ["zai/glm-5.3"], checkedAt: Date.now() }), checkModel: async () => null },
-    {});
+    {
+      ...(router ? { router: { async route(request) { routed += 1; return { candidateId: request.candidates.find((item) => item.model)?.id, reason: "listed" }; } } } : {}),
+      onRouting: (id, route) => terminals.setTaskMetadata(id, { modelRoute: route })
+    });
   const orchestrator = (launchOptions) => terminals.create({ provider: "opencode", profile: "normal", cwd: root, position: at, role: "orchestrator",
     ...(launchOptions ? { launchOptions } : {}) });
   const spawn = (parent, args) => handler.execute(parent.id, { id: `c-${Math.random()}`, tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, prompt: "Small task", ...args } });
@@ -56,6 +59,7 @@ test("a subagent spawned without an account runs on its orchestrator's model acc
   await s.settle();
   assert.equal(s.routed(), 0, "the router is not asked: the inherited account decides the model");
   assert.deepEqual(child.servedBy, { provider: "opencode", account: "glm-flash", accountSource: "inherited", model: "set by model account glm-flash" });
+  assert.match(child.routing.reason, /Model account glm-flash \(inherited from the orchestrator\) decides the model/u);
   const childPrepare = s.prepared.find((entry) => entry.sessionId === child.sessionId);
   assert.deepEqual(childPrepare, { sessionId: child.sessionId, chosen: true, options: { account: "glm-flash" } });
   const launched = s.calls.at(-1).args;
@@ -74,7 +78,7 @@ test("no account is an explicit choice; an orchestrator without an account says 
   assert.equal(own.servedBy.accountSource, "none");
   assert.equal(s.terminals.modelAccountOf(own.sessionId), undefined);
   assert.ok(!s.calls.at(-1).args.some((arg) => arg.startsWith("canvastty_")), "explicit none: no account model");
-  assert.match(own.servedBy.model, /OpenCode's default model/u);
+  assert.equal(own.servedBy.model, own.model, "the installed router chose its model; the answer names it");
 
   // Without a router and without an account the CLI's default serves it: the answer and the card say so.
   const bare = await setup(t, { router: false });
@@ -84,7 +88,8 @@ test("no account is an explicit choice; an orchestrator without an account says 
   assert.equal(child.servedBy.account, null);
   assert.equal(child.servedBy.accountSource, "none");
   assert.match(child.servedBy.model, /OpenCode Zen model on opencode\.ai/u);
-
+  assert.match(bare.terminals.getMetadata(child.sessionId).modelRoute.reason, /No model account: served by opencode's own sign-in and OpenCode's default model/u,
+    "the card shows it too");
 });
 
 test("another account needs the plugin's delegable declaration; the orchestrator's own account does not", async (t) => {

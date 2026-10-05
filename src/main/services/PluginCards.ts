@@ -18,6 +18,7 @@ export interface CardActionProvider {
 }
 
 export interface PluginCardsDependencies {
+  invokeWithConsent?<T>(pluginId: string, actionId: string, sessionId: string, action: () => Promise<T>): Promise<T>;
   providers(): CardActionProvider[];
   /** Plugins whose services run now (native code trusted); badges of others are not shown. */
   trustedPlugins(): ReadonlySet<string>;
@@ -143,7 +144,9 @@ export class PluginCards {
     let timer: NodeJS.Timeout | undefined;
     try {
       const answer = await Promise.race([
-        this.deps.call(pluginId, provider.serviceId, "canvastty.cards.invoke", params, timeoutMs),
+        this.deps.invokeWithConsent
+          ? this.deps.invokeWithConsent(pluginId,actionId,sessionId,() => this.deps.call(pluginId, provider.serviceId, "canvastty.cards.invoke", params, timeoutMs))
+          : this.deps.call(pluginId, provider.serviceId, "canvastty.cards.invoke", params, timeoutMs),
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => reject(new Error("The plugin did not answer in time.")), timeoutMs);
         })

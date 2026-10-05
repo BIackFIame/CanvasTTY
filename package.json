@@ -49,7 +49,10 @@
     "build:helpers": "node scripts/build-native-helpers.mjs",
     "pack:even": "npm run pack --workspace integrations/even-g2",
     "smoke:terminal-hidden": "node scripts/smoke-hidden-terminal-electron.mjs",
+    "smoke:backlog": "node scripts/smoke-backlog-electron.mjs",
     "smoke:plugin-review": "node scripts/smoke-plugin-review-electron.mjs",
+    "smoke:accounts-limit": "node scripts/smoke-accounts-limit-electron.mjs",
+    "test:mutation:backlog": "node scripts/mutation-backlog.mjs",
     "bench:terminal-hidden-renderer": "node scripts/smoke-hidden-terminal-electron.mjs --benchmark"
   },
   "dependencies": {

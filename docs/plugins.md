@@ -369,7 +369,7 @@ A foreign or unknown id gets the same error, so a plugin cannot probe other card
 
 ### Card badges and actions (`cards:decorate`)
 
-A service with `cards:decorate` can put a badge on any card and declare up to 8 `cardActions`:
+A service with `cards:decorate` can put a badge on any card and declare up to 16 `cardActions`:
 
 ```json
 "permissions": ["cards:decorate"],
@@ -384,6 +384,10 @@ A service with `cards:decorate` can put a badge on any card and declare up to 8 
 - No HTML anywhere: badges, titles and messages are rendered as text.
 
 The full example is [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): the card action **Show changes** on cards in the `worktree` environment (from `env-worktree`) shows `git diff --stat` of the worktree and sets a "N changed" badge, and the tool `collect-demo__diffstat` gives orchestrators the same for their own folder or a subagent's, which it learns about from session events.
+
+### Model routing (`model:route`)
+
+A service with `model:route` and `"modelRouter": true` can choose the model and effort for a subagent that an orchestrator starts without `model`. The host calls `canvastty.model.route` with the masked task (up to 8,000 characters), provider, profile, folder, any requested effort, the task budget and a list of `candidates` (`id`, `model`, `reasoningEffort`, `default`) built from what `list_providers` reports. The service answers `{ candidateId, reason }` within two seconds. The host accepts only a listed candidate that keeps an explicitly requested effort; an invalid answer, an error or no answer in time leaves the provider default, and the card shows why. An explicit `model` is never routed.
 
 ### Browser engines (`browser:engine`)
 
@@ -427,6 +431,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch |
 | `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
+| `model:route` | A service's `modelRouter` and `canvastty.model.route` | Receives the masked task text and budget of subagents started without a model; can only pick one of the offered candidates |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
@@ -541,6 +546,8 @@ Context updates include the active CanvasTTY locale and palette. Plugins own the
 The current installer intentionally rejects private repositories, GitHub `/tree/branch/subdirectory` links, and repositories that require a build step. Publish a ready-to-run static package at the repository root.
 
 Browsing and searching the showcase work without an account through GitHub's public search API. Signing in is optional and only raises GitHub's search limits; when the anonymous limit is reached, CanvasTTY shows when to try again. The optional showcase sign-in uses GitHub's OAuth device flow. Build maintainers can [register an OAuth App and enable Device Flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app), then store its public client ID in the `CANVASTTY_GITHUB_CLIENT_ID` GitHub Actions repository variable. Official builds bake in that value when configured; local builds can use `GITHUB_OAUTH_CLIENT_ID` or `CANVASTTY_GITHUB_CLIENT_ID`, and either variable can also override the bundled value at runtime. No client secret is shipped or required. Sign-in opens GitHub in CanvasTTY's built-in Browser by default and offers the system browser as an explicit fallback. Without a client ID the UI reports that OAuth is unavailable, while direct repository inspection and installation continue to work. Signing out removes the encrypted local session; revoke the OAuth grant separately under [GitHub application settings](https://github.com/settings/applications) when needed.
+
+An active sign-in has a Cancel action. Denial, expiry, provider failure, and cancellation clear the old code, show the outcome, and offer sign-in again. Cancelling a pending flow preserves an existing local account; if authorization finishes first, the completed sign-in is retained.
 
 ## Author checklist
 

@@ -125,6 +125,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
   radialLauncherEnabled: false,
   agentLifecycleHooksEnabled: true,
+  experimentalBacklogEnabled: false,
   baseProtectionEnabled: true,
   uiScale: DEFAULT_UI_SCALE,
   canvasColor: "sage",

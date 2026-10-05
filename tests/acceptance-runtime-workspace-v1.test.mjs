@@ -153,8 +153,9 @@ test("host import opens a v1 workspace with absent newer card fields, remaps tas
   await timeline.append("unknown-closed", "file", "Legacy child with no proven task");
   const foreign = terminals.create({provider: "codex", profile: "normal", cwd: project, position: {x: 0, y: 0}});
   await timeline.append(foreign.id, "loop", "Unrelated task warning");
-  const continuation = root;
-  terminals.dispose(child.id); terminals.dispose(foreign.id);
+  const continuation = terminals.create({provider: "codex", profile: "normal", cwd: project, position: {x: 0, y: 0}});
+  terminals.inheritTaskScope(root.id, continuation.id);
+  terminals.dispose(child.id); terminals.dispose(root.id); terminals.dispose(foreign.id);
   await timeline.load();
   const page = await handlers.get(BACKLOG_IPC.timeline)(event, continuation.id, undefined, 1);
   assert.equal(page.items[0].summary, "Parent command");

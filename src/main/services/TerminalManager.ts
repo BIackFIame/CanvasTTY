@@ -492,8 +492,9 @@ export class TerminalManager {
     return account === "default" ? undefined : account;
   }
 
-  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"reviewRequested">): void {
+  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"modelRoute"|"reviewRequested">): void {
     const session=this.sessions.get(id);if (!session) return;
+    if (patch.modelRoute) session.metadata.modelRoute={...patch.modelRoute,reason:this.redactSecrets(patch.modelRoute.reason).slice(0,500)};
     if (patch.reviewRequested !== undefined) session.metadata.reviewRequested=patch.reviewRequested;
     this.schedulePersistence();
     this.emitSession(session.metadata);
@@ -577,6 +578,11 @@ export class TerminalManager {
     this.emitSession(session.metadata);
   }
 
+  /** Host-only: the replacement retains the old task's budget/board identity before it receives input. */
+  inheritTaskScope(sourceId:string,replacementId:string):void {
+    const replacement=this.sessions.get(replacementId);if(!replacement)throw new Error("Handoff card is unavailable.");
+    replacement.metadata.taskScope=this.taskScopeFor(sourceId);this.emitSession(replacement.metadata);this.schedulePersistence();
+  }
   taskScopeFor(sourceId:string):NonNullable<SessionMetadata["taskScope"]> {
     const source=this.sessions.get(sourceId);if(!source)throw new Error("Handoff card is unavailable.");
     let root=source;
@@ -610,6 +616,20 @@ export class TerminalManager {
     }
     return this.sessions.get(session.metadata.id)===session && session.metadata.exitCode===null;
   }
+  /** Move live children before disposing the old orchestrator; closing it must not terminate the task. */
+  completeTaskContinuation(sourceId:string,replacementId:string):void {
+    if(!this.sessions.has(sourceId) || !this.sessions.has(replacementId))throw new Error("Handoff card is unavailable.");
+    const source=this.sessions.get(sourceId)!,replacement=this.sessions.get(replacementId)!;
+    if(source.extras.environment?.kind==="worktree") {
+      replacement.extras.environment=source.extras.environment;replacement.environmentReady=source.environmentReady;
+      if(source.metadata.environment)replacement.metadata.environment={...source.metadata.environment};
+      delete source.extras.environment;
+      this.emitSession(replacement.metadata);
+    }
+    for(const row of this.sessions.values())if(row.metadata.parentSessionId===sourceId){row.metadata.parentSessionId=replacementId;this.emitSession(row.metadata);}
+    this.schedulePersistence();
+  }
+
   /** Masks known secrets and key shapes in text another agent reads (observe, result, control screen, failures). */
   redactSecrets<T extends string | null>(text: T): T {
     return (text === null ? text : this.redaction.redact(text)) as T;
@@ -1628,6 +1648,7 @@ export class TerminalManager {
       ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
       ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
       ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {}),
+      ...(descriptor.modelRoute ? {modelRoute:{...descriptor.modelRoute}} : {}),
       ...(descriptor.reviewRequested !== undefined ? {reviewRequested:descriptor.reviewRequested} : {})
     };
     const extras: PersistedSessionExtras = {

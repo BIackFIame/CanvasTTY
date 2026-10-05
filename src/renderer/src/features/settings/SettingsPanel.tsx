@@ -966,6 +966,16 @@ export function SettingsPanel({
                 onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
               />
               <SettingGroup
+                label={t(locale, "experimentalBacklogEnabled")}
+                description={t(locale, "experimentalBacklogEnabledDescription")}
+              >
+                <Segmented
+                  value={settings.experimentalBacklogEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ experimentalBacklogEnabled: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup
                 label={t(locale, "agentControlEnabled")}
                 description={t(locale, "agentControlEnabledDescription")}
               >

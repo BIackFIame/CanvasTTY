@@ -67,9 +67,10 @@ const provider = (extra = {}) => ({
 });
 
 /** A registry over scripted answers: `answers[step]` is a value or (params) => value/promise. */
-function registryFixture({ providers = () => [provider()], answers = {}, secrets = {}, timeouts } = {}) {
+function registryFixture({ providers = () => [provider()], answers = {}, secrets = {}, timeouts, experimentalEnabled } = {}) {
   const requests = [];
   const registry = new EnvironmentRegistry({
+    experimentalEnabled,
     providers,
     call: async (pluginId, serviceId, method, params, budget) => {
       const step = method.replace("canvastty.environment.", "");
@@ -148,6 +149,7 @@ test("manifests declare environments (kinds unique across the plugin's services)
   });
   assert.deepEqual(split.services.map((service) => service.environments[0].kind), ["worktree", "remote"]);
   const { registry, requests } = registryFixture({
+    experimentalEnabled: () => true,
     providers: () => [provider(), provider({ serviceId: "remote-svc", kinds: [{ kind: "remote", label: "Remote" }] })],
     answers: { prepare: { ref: {}, label: "x" } }
   });

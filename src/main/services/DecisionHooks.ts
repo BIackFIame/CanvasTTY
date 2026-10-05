@@ -4,7 +4,7 @@ import type { AgentProviderId, LaunchProfileId, SessionRole } from "../../shared
 import type { RuntimePermissionDecision, RuntimePermissionRequest } from "./agent-runtime/RuntimeGateway.ts";
 import { actionFromHook, checkBaseProtection } from "./safety/baseProtection.ts";
 import type { PrivateData } from "./safety/commandFacts.ts";
-import { DEFAULT_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import { DEFAULT_DECIDE_TIMEOUT_MS, MAX_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
 
 /** A trusted plugin service that declared `decide` (PluginManager.decisionServices). */
 export interface DecisionService {
@@ -44,6 +44,14 @@ export interface DecisionHooksDependencies {
   services(): DecisionService[];
   call(pluginId: string, serviceId: string, method: "canvastty.decide", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): DecisionSession | null;
+  /** Core-owned human approval path; never exposed as a plugin capability. */
+  humanApprovalEnabled?(): boolean;
+  resolveHumanAsk?(
+    sessionId: string,
+    request: RuntimePermissionRequest,
+    decision: RuntimePermissionDecision,
+    signal: AbortSignal
+  ): Promise<"allow" | "deny" | null>;
   home?: string;
   /** CanvasTTY's own tokens, secret stores and sockets (canvasTtyPrivateData of its userData folder). */
   privateData?: PrivateData;
@@ -82,10 +90,9 @@ const MAX_SERVICES = 8;
 
 /**
  * Decision hooks (EP-5). For every shell or file-writing tool call an agent's hook reports, base protection runs
- * first and its deny is final. Then every trusted decision service that applies answers deny, ask, allow or
- * nothing, in parallel, within 3 s. Any deny wins; else any ask (a timeout, an error or an unreadable answer is an
- * ask); else an allow counts only from a plugin the person separately let allow; else no verdict and the agent goes
- * on as it would without CanvasTTY. Nothing here ever turns a failure into an allow.
+ * first and its deny is final. Then trusted decision services run in parallel within their configured budgets; any
+ * deny wins. An ask can be resolved only by the trusted core human path when enabled. Otherwise Claude keeps its
+ * native ask and other CLIs are denied. An allow counts only from a plugin the person separately let allow.
  */
 export class DecisionHooks {
   private readonly deps: DecisionHooksDependencies;
@@ -101,9 +108,13 @@ export class DecisionHooks {
     return services === null || services.length > 0;
   }
 
-  /** The longest wait a decision service of this agent asked for: the session's gate is sized for it at launch. */
+  /** The longest plugin or human wait for this agent: the session's gate is sized for it at launch. */
   budgetMs(provider: AgentProviderId): number {
-    return Math.max(DECIDE_TIMEOUT_MS, ...(this.applicable(provider) ?? []).map((service) => this.timeoutFor(service)));
+    return Math.max(
+      DECIDE_TIMEOUT_MS,
+      ...(this.humanApprovalEnabled() ? [MAX_DECIDE_TIMEOUT_MS] : []),
+      ...(this.applicable(provider) ?? []).map((service) => this.timeoutFor(service))
+    );
   }
 
   private timeoutFor(service: DecisionService): number {
@@ -157,11 +168,36 @@ export class DecisionHooks {
       return this.ask(service, { ...params, budgetMs: timeoutMs }, timeoutMs, signal);
     }));
     const merged = mergeDecisions(answers, request.truncated);
+    if (merged.behavior === "ask") {
+      const human = await this.resolveHumanAsk(sessionId, request, merged, signal);
+      if (human) return { behavior: human, message: human === "allow" ? "Approved by the person." : "Denied by the person." };
+    }
     // An agent that cannot ask would go on as if nobody objected: the person has to approve, so it is stopped.
     if (merged.behavior === "ask" && !hookCanAsk(session.provider)) {
       return { behavior: "deny", message: `${merged.message ?? "CanvasTTY asks the person about this tool call."} ${session.provider} cannot ask the person from here, so it was not run: tell the person what you want to do and why, and let them decide.` };
     }
     return merged;
+  }
+
+  private humanApprovalEnabled(): boolean {
+    try { return this.deps.humanApprovalEnabled?.() === true; } catch { return false; }
+  }
+
+  private async resolveHumanAsk(
+    sessionId: string,
+    request: RuntimePermissionRequest,
+    decision: RuntimePermissionDecision,
+    signal: AbortSignal
+  ): Promise<"allow" | "deny" | null> {
+    const resolver = this.deps.resolveHumanAsk;
+    if (!this.humanApprovalEnabled() || !resolver || signal.aborted) return null;
+    try {
+      const result = await resolver(sessionId, request, decision, signal);
+      if (signal.aborted || result !== "allow" && result !== "deny") return null;
+      return result;
+    } catch {
+      return null;
+    }
   }
 
   private protects(): boolean {

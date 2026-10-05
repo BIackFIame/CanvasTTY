@@ -33,6 +33,8 @@ Agents start in **Auto** by default: the CLI's own auto mode (Claude Code, Codex
 
 An **Orchestrator** session gets the `canvastty_agents` tools: `list_providers` (installed agents, sign-in state, models, efforts, profiles), `spawn_agent` with optional `model`, `effort` and `profile`, `wait_for_agent` (up to 100 s per call, capped at 50 s for OpenCode) and `get_agent_result`, which returns a Codex or OpenCode subagent's final reply as `answer` (up to 4,096 characters, masked). See [agent orchestration and isolation](docs/agent-orchestration.md) and [protection layers](docs/installing-and-security.md#agent-protection-layers).
 
+Beyond single subagents, an orchestrator can follow a built-in or person-approved project flow, share a task board with its subagents (`list_tasks`, `claim_task`, `update_task`, `complete_task`), ask for a reviewer or a separate git worktree, retry a failed subagent (`retry_agent`), ask the person a question (`ask_user`) and, with the person's approval, use a provider key for typed API requests without seeing it (`request_secret`). The person sets time, token and cost budgets per task tree and a network policy per project; each card's details hold its timeline, usage, report and git checkpoints.
+
 ## Windows shells and provider CLIs
 
 On Windows, the Terminal launcher uses the built-in Windows PowerShell with a clean `-NoLogo -NoProfile` session, then falls back to `pwsh` or `cmd.exe`. Codex, Claude, Qwen Code, Kimi, OpenCode, Hermes, and Grok Build are resolved to a concrete `.exe`, `.com`, `.cmd`, or `.bat` launcher from the user's `PATH` or standard per-user CLI directories before they are passed to `node-pty`/ConPTY.

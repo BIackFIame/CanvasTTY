@@ -373,7 +373,7 @@ button { border: 0; }
 .terminal-card__task-status--waiting { background: rgba(226,179,71,.25); color: #f2d386; }
 .terminal-card__task-status--failed { background: rgba(229,89,98,.25); color: #ff9fa4; }
 .terminal-card__task-status--done { background: rgba(80,178,119,.22); color: #9de0b5; }
-.terminal-card__review-requested { flex: none; max-width: 190px; overflow: hidden; padding: .15em .5em; border-radius: .5em; color: #d9c9ff; background: rgba(153,117,224,.2); font-size: .68em; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-card__model-route, .terminal-card__review-requested { flex: none; max-width: 190px; overflow: hidden; padding: .15em .5em; border-radius: .5em; color: #d9c9ff; background: rgba(153,117,224,.2); font-size: .68em; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-card__review-requested { color: #ffd398; background: rgba(217,143,43,.2); }
 .terminal-card--with-task-summary { --terminal-task-summary-height: 30px; }
 .terminal-card--with-activity-summary { --terminal-activity-summary-height: 26px; }

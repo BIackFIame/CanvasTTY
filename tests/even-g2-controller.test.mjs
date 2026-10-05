@@ -30,6 +30,7 @@ async function fixture(t, extra = {}) {
     creates = [],
     renames = [];
   const terminals = {
+    redactSecrets: value => value,
     listMetadata: () => sessions.map((s) => ({ ...s })),
     geometry: () => ({ cols: 100, rows: 30 }),
     readBuffer: () => ({ buffer: "Ready\r\n", outputOffset: 7 }),
@@ -67,6 +68,7 @@ async function fixture(t, extra = {}) {
     { id: "test:127.0.0.1", name: "test", address: "127.0.0.1" },
   ];
   const options = {
+    experimentalEnabled: () => true,
     ...extra,
     userDataPath: directory,
     terminals,
@@ -125,10 +127,10 @@ async function fixture(t, extra = {}) {
     );
     return { status: response.status, data: await response.json() };
   };
-  const pending = async () => {
+  const pending = async (pairFields = {}) => {
     await controller.command({ type: "begin-pairing" });
     const response = await call("/g2/api/pair", {
-      body: { code: controller.state().pairing.code, name: "Even test" },
+      body: { code: controller.state().pairing.code, name: "Even test", ...pairFields },
     });
     assert.equal(response.status, 202);
     return response.data;
@@ -191,6 +193,117 @@ test("integration defaults off; the short code creates no access before desktop 
     (await f.call("/g2/api/pair-status", { token: pending.token })).data.state,
     "approved",
   );
+});
+
+test("pair requests cannot self-select phone mode; LAN G2 access follows desktop configuration", async t => {
+  const f=await fixture(t);await f.enable();
+  const pending=await f.pending({name:"CanvasTTY Web Companion",summaryOnly:true});
+  await f.controller.command({type:"approve",id:pending.id});
+  assert.equal((await f.call("/g2/api/pair-status",{token:pending.token})).data.state,"approved");
+  assert.equal((await f.call("/g2/api/home",{token:pending.token})).status,200);
+  assert.equal((await f.call("/g2/api/terminal?id=one",{token:pending.token})).status,200);
+  assert.equal((await f.call("/g2/api/terminal?id=private",{token:pending.token})).status,409);
+  const saved=JSON.parse(await readFile(join(f.directory,"even-g2.json"),"utf8"));
+  assert.equal(saved.peers[0].clientType,"even-g2");
+});
+
+test("an Even G2 peer regains its desktop-approved routes after a phone-only transport round trip", async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  const { token } = await f.pair();
+  assert.equal((await f.call("/g2/api/home", { token })).status, 200);
+
+  await f.controller.command({ type: "configure", config: {
+    ...f.controller.state().config,
+    publicOrigin: "https://computer.tailnet.ts.net",
+  } });
+  assert.equal((await f.call("/g2/api/home", { token })).status, 403,
+    "the active HTTPS phone transport restricts every peer");
+
+  await f.controller.command({ type: "configure", config: {
+    ...f.controller.state().config,
+    publicOrigin: "",
+    interfaceName: "test",
+  } });
+  assert.equal((await f.call("/g2/api/home", { token })).status, 200,
+    "returning to LAN restores the original host-approved Even G2 routes");
+  assert.equal((await f.call("/g2/api/terminal?id=one", { token })).status, 200);
+  const saved = JSON.parse(await readFile(join(f.directory, "even-g2.json"), "utf8"));
+  assert.equal(saved.peers[0].clientType, "even-g2");
+});
+
+for (const mode of ["usb", "tailscale"]) test(`an Even G2 peer keeps its LAN permissions, including the project browser, after a ${mode} round trip`, async (t) => {
+  const f = await fixture(t);
+  await f.enable({ allowBrowser: true });
+  const { token } = await f.pair();
+  let home = await f.call("/g2/api/home", { token });
+  assert.equal(home.status, 200);
+  assert.equal(home.data.features.projectBrowser, true);
+
+  const publicOrigin = mode === "usb" ? `http://127.0.0.1:${f.controller.state().port}` : "https://computer.tailnet.ts.net";
+  // The settings screen submits the state it last read, as the person switches transports.
+  await f.controller.command({ type: "configure", config: { ...f.controller.state().config, publicOrigin } });
+  assert.equal(f.controller.state().peers[0].grant.allowBrowser, false, "web transports never grant the project browser");
+  assert.equal((await f.call("/g2/api/home", { token })).status, 403, "the phone-only transport restricts the glasses");
+
+  await f.controller.command({ type: "configure", config: { ...f.controller.state().config, publicOrigin: "", interfaceName: "test" } });
+  home = await f.call("/g2/api/home", { token });
+  assert.equal(home.status, 200, "returning to LAN restores the glasses' routes");
+  assert.equal(home.data.features.projectBrowser, true, "returning to LAN restores the person's browser permission");
+  assert.equal(f.controller.state().config.allowBrowser, true);
+  assert.equal((await f.call("/g2/api/terminal?id=one", { token })).status, 200);
+});
+
+test("the desktop-selected phone pairing target is summary-only and ignores client role claims", async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  await f.controller.command({ type: "begin-pairing", target: "phone" });
+  const response = await f.call("/g2/api/pair", { body: {
+    code: f.controller.state().pairing.code,
+    name: "Phone client",
+    clientType: "even-g2",
+    target: "even-g2",
+    summaryOnly: false,
+  } });
+  assert.equal(response.status, 202);
+  const pending = response.data;
+  await f.controller.command({ type: "approve", id: pending.id });
+  assert.equal((await f.call("/g2/api/home", { token: pending.token })).status, 403);
+  assert.equal((await f.call("/g2/api/terminal?id=one", { token: pending.token })).status, 403);
+  const saved = JSON.parse(await readFile(join(f.directory, "even-g2.json"), "utf8"));
+  assert.equal(saved.peers[0].clientType, "phone");
+  await assert.rejects(f.controller.command({
+    type: "set-peer-type", id: pending.id, clientType: "even-g2",
+  }), /not-ambiguous/);
+});
+
+test("legacy summary-only peers stay restricted until the desktop resolves their device type", async (t) => {
+  const f = await fixture(t);
+  await f.enable();
+  const { token, id } = await f.pair();
+  const path = join(f.directory, "even-g2.json");
+  const legacy = JSON.parse(await readFile(path, "utf8"));
+  delete legacy.peers[0].clientType;
+  legacy.peers[0].summaryOnly = true;
+  await writeFile(path, JSON.stringify(legacy));
+  await f.controller.close();
+
+  const restored = new EvenG2Controller(f.options);
+  await restored.load();
+  t.after(() => restored.close());
+  assert.equal(restored.state().peers[0].clientType, "phone");
+  assert.equal(restored.state().peers[0].needsReclassification, true);
+  const localCall = async (controller, route) => fetch(
+    `http://127.0.0.1:${controller.state().port}${route}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+  );
+  assert.equal((await localCall(restored, "/g2/api/home")).status, 403);
+
+  await restored.command({ type: "set-peer-type", id, clientType: "even-g2" });
+  assert.equal((await localCall(restored, "/g2/api/home")).status, 200);
+  const saved = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(saved.peers[0].clientType, "even-g2");
+  assert.equal(saved.peers[0].needsReclassification, undefined);
 });
 
 test("text is written once; changed payload, missing freshness, stale and unshared requests never write", async (t) => {
@@ -925,4 +1038,32 @@ test("a configure that cannot be saved changes nothing; a revoke that cannot be 
   await f.controller.close();
   const saved = JSON.parse(await readFile(join(f.directory, "even-g2.json"), "utf8"));
   assert.deepEqual(saved.peers.map((peer) => peer.id), [], "the revoke reached the disk once it could");
+});
+
+test("default experimental opt-out preserves Even G2 access and blocks phone pairing", async t => {
+  const f = await fixture(t, { experimentalEnabled: undefined });
+  await f.enable();
+  const { token } = await f.pair();
+  assert.equal((await f.call("/g2/api/home", { token })).status, 200);
+  assert.equal((await f.call("/g2/api/terminal?id=one", { token })).status, 200);
+  await assert.rejects(f.controller.command({ type: "begin-pairing", target: "phone" }), /disabled/);
+  assert.equal(f.controller.canReply("one"), false);
+});
+
+test("saved phone peers remain blocked after restart without experimental opt-in", async t => {
+  const f = await fixture(t);
+  await f.enable({ allowInput: true });
+  await f.controller.command({ type: "begin-pairing", target: "phone" });
+  const response = await f.call("/g2/api/pair", { body: { code: f.controller.state().pairing.code, name: "Phone" } });
+  const phone = response.data;
+  await f.controller.command({ type: "approve", id: phone.id });
+  assert.equal(f.controller.canReply("one"), true);
+  await f.controller.close();
+  const restored = new EvenG2Controller({ ...f.options, experimentalEnabled: undefined });
+  await restored.load();
+  t.after(() => restored.close());
+  assert.equal(restored.state().peers[0].clientType, "phone");
+  assert.equal(restored.canReply("one"), false);
+  const result = await fetch(`http://127.0.0.1:${restored.state().port}/g2/api/pair-status`, { headers: { Authorization: `Bearer ${phone.token}` } });
+  assert.equal(result.status, 403);
 });

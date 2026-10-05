@@ -13,6 +13,12 @@ A session launched from the desktop with the **Orchestrator** role gets the `can
 | `wait_for_agent` | `{ sessionId, timeoutSeconds ≤ 100 }` (default 55; OpenCode caps each call at 50 seconds). A timeout returns progress while the agent continues; call again to keep waiting. Pending reviews do not extend this deadline. Returns when the subagent is `idle` (after a prompt: only once a turn that started after the latest delivered prompt has ended, so the CLI's startup idle does not count), `needs_approval`, `done`/`failed` (exited), `quiet` (reports no status and its screen stopped changing), `closed`, or on `timeout`, with `status`, `exitCode`, `waitedMs` and the masked terminal tail (masked before it is cut). Only this orchestrator's own subagents; it stops at once when the call is canceled or the orchestrator disconnects. |
 | `get_agent_result`, `observe_agent` | `get_agent_result`: `answer`, the final reply of the subagent's last turn as the agent itself reported it (Codex through its Stop hook, OpenCode through CanvasTTY's plugin reading the session's last assistant message at `session.idle`; at most 4,096 characters with the end kept, masked, in memory only and cleared when the next turn starts), plus `status`, the exit state and the masked terminal tail. Other providers have no `answer`: their tail is raw screen output. An unfinished review returns `review.status: "pending"` immediately; call `get_agent_result` later for its outcome. `observe_agent`: the current status and tail. |
 | `send_to_agent`, `cancel_agent`, `list_agents` | Follow-up prompts, disposing a subagent, listing this session's subagents. |
+| `retry_agent` | Restarts one failed or quiet subagent with its original prompt, profile, model and folder plus a short masked failure tail; at most two retries per original agent. |
+| `ask_user` | A question for the person (up to 8 options or free text) that waits for the person's answer; eligible questions also reach the paired phone. |
+| `list_tasks`, `claim_task`, `update_task`, `complete_task` | The task board of this orchestration tree. Claiming is atomic and waits for dependencies; only the owner or the root orchestrator completes a task, and only the root reassigns tasks or changes dependencies. |
+| `get_task_budget` | The tree's limits, usage and remaining budget. Agents can read it; only the person changes it. |
+| `list_orchestration_templates`, `apply_orchestration_template` | Built-in flows and the project's `.canvastty/flows/*.yaml`. A project flow's instructions are returned only after the person has approved its current content. |
+| `request_secret`, `run_secret_request` | Ask the person for one configured provider key, then send typed HTTPS API requests with it. The key is never returned to the agent. |
 
 ### Subagent profiles
 
@@ -35,6 +41,14 @@ The control CLI's `create --profile auto|normal|acceptEdits|plan|yolo` is the eq
 The workflow is `list_providers` → `spawn_agent` (one per part) → `wait_for_agent` → `get_agent_result`. Agents should not explore the filesystem for agent CLIs or their configuration; the MCP server's instructions, the tool descriptions and the refusal messages say so.
 
 The control CLI below is a separate surface for automation; `providers` is its equivalent of `list_providers`.
+
+## Teams, budgets and review
+
+`spawn_agent` also takes `review: true`, which starts a separate reviewer in Plan once the worker's turn ends and adds its verdict to the result (if no reviewer can start, the result says so), and `isolate: "worktree"`, which runs the subagent in its own git worktree from an environments plugin. A subagent started without `model` can have its model and effort chosen by a trusted plugin with `model:route`, only among the candidates `list_providers` reports; the card shows the choice and its reason.
+
+The person sets time, token and cost limits for a task tree in the orchestrator card's details. At 80 % the card warns; at the limit the tree gets no new input or subagents and its POSIX process groups, and every descendant found by parent process at that moment (including ones that started their own session), are paused until the person raises or clears the limit. A process already re-parented away before the pause cannot be attributed, and Windows only blocks new input and launches; it cannot pause running work. Usage a CLI does not report counts as no data.
+
+Each card's details show a masked timeline of hook events, usage by model, account and task, a Markdown report, git checkpoints taken before each turn (restore asks for confirmation and keeps untracked files), notification settings, secret grants and the project's network policy.
 
 ## Delegation rules
 

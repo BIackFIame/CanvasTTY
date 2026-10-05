@@ -19,9 +19,9 @@ export type BacklogTextKey =
   | "budgetLimits" | "budgetTokens" | "budgetCost" | "budgetMinutes" | "budgetUsage" | "budgetRemaining" | "budgetDataNone" | "budgetDataPartial" | "budgetCostPartialPause"
   | "budgetPaused" | "budgetWarning" | "budgetSet" | "budgetRaise" | "budgetClear" | "budgetNoLimits" | "budgetReason"
   | "taskStateWaitingResponse" | "taskStateWorking" | "taskStateWaiting" | "taskStateDone" | "taskStateFailed" | "delete"
-  | "tabNotifications" | "tabSecrets" | "notificationChannels" | "notificationDesktop" | "notificationGlasses"
+  | "tabNotifications" | "tabSecrets" | "notificationChannels" | "notificationDesktop" | "notificationPhone" | "notificationGlasses"
   | "notificationDnd" | "notificationDndOff" | "notificationDndHour" | "notificationDndUntilClear" | "notificationImportantOnly" | "notificationThisCard"
-  | "saveTaskFlow" | "flowName" | "flowSaved" | "conversationTokens" | "reviewRequested"
+  | "saveTaskFlow" | "flowName" | "flowSaved" | "conversationTokens" | "modelRoute" | "reviewRequested"
   | "timelineText" | "timelineType" | "timelineAgent" | "timelineSearch" | "timelineAll" | "sendGroupPrompt";
 
 const text: Record<BacklogTextKey, readonly [string, string]> = {
@@ -75,12 +75,12 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   budgetSet: ["Сохранить лимиты", "Save limits"], budgetRaise: ["Поднять лимиты на 25%", "Raise limits by 25%"], budgetClear: ["Снять бюджет", "Clear budget"],
   budgetNoLimits: ["Лимиты не заданы.", "No limits set."], budgetReason: ["Причина паузы", "Pause reason"], delete: ["Удалить", "Delete"],
   tabNotifications: ["Уведомления", "Notifications"], tabSecrets: ["Защита и ключи", "Safety & secrets"], notificationChannels: ["Каналы", "Channels"],
-  notificationDesktop: ["Рабочий стол", "Desktop"], notificationGlasses: ["Очки", "Glasses"],
+  notificationDesktop: ["Рабочий стол", "Desktop"], notificationPhone: ["Телефон", "Phone"], notificationGlasses: ["Очки", "Glasses"],
   notificationDnd: ["Не беспокоить", "Do not disturb"], notificationDndOff: ["Выключено", "Off"],
   notificationDndHour: ["На 1 час", "For 1 hour"], notificationDndUntilClear: ["Пока не выключу", "Until cleared"],
   notificationImportantOnly: ["Только важные события", "Important events only"], notificationThisCard: ["Только эта карточка", "This card only"],
   saveTaskFlow: ["Сохранить подзадачи как workflow…", "Save subtasks as workflow…"], flowName: ["Название workflow", "Workflow name"],
-  flowSaved: ["Файл workflow сохранён", "Workflow file saved"],
+  flowSaved: ["Файл workflow сохранён", "Workflow file saved"], modelRoute: ["Маршрут модели", "Model route"],
   reviewRequested: ["Требуется проверка", "Review requested"]
 };
 

@@ -195,7 +195,7 @@ test("the orchestration handler lists core tools only for orchestrators and rout
     redact: (text) => text.replaceAll(SECRET, "[redacted]")
   });
   const handler = new ScopedOrchestrationHandler(new AgentControlService(terminals), plugin);
-  const optionalTools = new Set(["request_secret", "run_secret_request", "list_tasks", "claim_task", "update_task", "complete_task", "get_task_budget", "list_orchestration_templates", "apply_orchestration_template"]);
+  const optionalTools = new Set(["ask_user", "list_tasks", "claim_task", "update_task", "complete_task", "request_secret", "run_secret_request", "get_task_budget", "list_orchestration_templates", "apply_orchestration_template"]);
   assert.deepEqual(handler.listTools(orchestrator.id).map((tool) => tool.name), [...ORCHESTRATION_TOOL_NAMES.filter(name=>!optionalTools.has(name)), "collect-demo__diffstat"]);
   assert.deepEqual(handler.listTools(agent.id).map((tool) => tool.name), ["collect-demo__diffstat"]);
   // A plain agent never gets the core tools, even by name.
@@ -291,7 +291,12 @@ test("a session a plugin tool applies to gets the bridge with exactly its tools 
   const helper = { command: "/node", args: ["/h.mjs"] };
   assert.match(codexMcpArgs(helper, helper, ["collect-demo__diffstat"]).join(" "), /enabled_tools=\["collect-demo__diffstat"\]/u);
   assert.match(qwenMcpArgs(helper, helper, ["collect-demo__diffstat"]).join(" "), /mcp__canvastty_agents__collect-demo__diffstat/u);
-  assert.match(codexMcpArgs(helper, helper).join(" "), /enabled_tools=\["list_providers","spawn_agent"/u);
+  const orchestrationConfig = codexMcpArgs(helper, helper).at(-1);
+  const enabledToolsMatch = orchestrationConfig.match(/enabled_tools=(\[[^\]]*\])/u);
+  assert.ok(enabledToolsMatch);
+  const enabledTools = JSON.parse(enabledToolsMatch[1]);
+  assert.ok(enabledTools.includes("list_providers"));
+  assert.ok(enabledTools.includes("spawn_agent"));
 });
 
 test("session events carry card metadata, never screen text without sessions:read-screen", async () => {

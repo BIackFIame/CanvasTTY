@@ -16,23 +16,35 @@ import {
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { listProviderDirectory, type ProviderDirectorySources } from "../providerDirectory.ts";
 import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
+import type { ModelRouteCandidate, ModelRouteRequest, ModelRouter, ModelRoutingInfo } from "../ModelRouter.ts";
 import type { OrchestrationBudgetService } from "../OrchestrationBudgetService.ts";
 import type { OrchestrationTaskBoard, OrchestrationTaskPatch } from "../OrchestrationTaskBoard.ts";
 import type { OrchestrationTemplateService } from "../OrchestrationTemplateService.ts";
-
 import type { SecretGrantService } from "../SecretGrantService.ts";
-
-const SECRET_TOOL_NAMES = new Set(["request_secret", "run_secret_request"]);
+import { HumanQuestionError, type HumanQuestionRequest, type HumanQuestionService } from "../HumanQuestionService.ts";
 
 const TASK_TOOL_NAMES = new Set(["list_tasks", "claim_task", "update_task", "complete_task"]);
 const ORCHESTRATOR_ONLY_ADDITIONAL_TOOLS = new Set(["retry_agent"]);
+const SECRET_TOOL_NAMES = new Set(["request_secret", "run_secret_request"]);
 
 export interface ScopedOrchestrationIntegrations {
+  router?: ModelRouter;
   taskBoard?: OrchestrationTaskBoard;
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
   templates?: OrchestrationTemplateService;
   /** Main-process grant manager; approval/revocation APIs are never exposed through agent tools. */
   secretGrants?: Pick<SecretGrantService, "requestSecret" | "runSecretRequest">;
+  /** A bounded, memory-only human question channel; replies never grant permissions. */
+  humanQuestions?: Pick<HumanQuestionService, "request">;
+  /** Timeline persistence records how the route was selected on the child session. */
+  onRouting?(sessionId: string, route: ModelRoutingInfo, task?: string): void;
+  onReview?(sessionId: string, review: AgentReviewResult): void;
+  onRouteOutcome?(sessionId: string, outcome: {
+    parentSessionId: string;
+    task: string;
+    status: "failed" | "accepted" | "rejected" | "rework";
+  }): void;
+  routeTimeoutMs?: number;
 }
 
 /**
@@ -46,6 +58,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
   private readonly providers: ProviderDirectorySources;
   private readonly integrations: ScopedOrchestrationIntegrations;
+  private readonly routedTasks = new Map<string, { parentSessionId: string; task: string; review: boolean; attempt: number }>();
+  private readonly routeWatchers = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  private readonly reviewCallbacksSent = new Set<string>();
+  private readonly outcomeCallbacksSent = new Set<string>();
 
   constructor(
     control: AgentControlService,
@@ -64,10 +80,11 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (this.control.isReadOnlyReviewer(sessionId)) return [];
     const session = this.control.status(sessionId);
     const core = ORCHESTRATION_TOOL_DEFINITIONS.filter((tool) => {
-      if (SECRET_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.secretGrants) && session.provider !== "terminal";
+      if (tool.name === "ask_user") return Boolean(this.integrations.humanQuestions) && session.provider !== "terminal";
       if (TASK_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.taskBoard);
       if (tool.name === "get_task_budget") return Boolean(this.integrations.budget);
       if (tool.name === "list_orchestration_templates" || tool.name === "apply_orchestration_template") return Boolean(this.integrations.templates);
+      if (SECRET_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.secretGrants) && session.provider !== "terminal";
       if (ORCHESTRATOR_ONLY_ADDITIONAL_TOOLS.has(tool.name)) return session.role === "orchestrator";
       return session.role === "orchestrator";
     });
@@ -77,6 +94,15 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     ];
   }
 
+  /** Forget per-session route state when TerminalManager removes the corresponding card. */
+  forgetSession(sessionId: string): void {
+    this.routeWatchers.get(sessionId)?.controller.abort();
+    this.routeWatchers.delete(sessionId);
+    this.routedTasks.delete(sessionId);
+    for (const key of this.reviewCallbacksSent) if (key.startsWith(`${sessionId}:`)) this.reviewCallbacksSent.delete(key);
+    for (const key of this.outcomeCallbacksSent) if (key.startsWith(`${sessionId}:`)) this.outcomeCallbacksSent.delete(key);
+  }
+
   async execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>> {
     try {
       if (signal?.aborted) throw canceledError();
@@ -84,6 +110,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (this.control.isReadOnlyReviewer(sessionId)) {
         throw orchestrationBridgeError("INVALID_REQUEST", "Read-only reviewers cannot call agent or plugin tools.", false);
       }
+      if (request.tool === "ask_user") return await this.askUser(sessionId, request.arguments, signal);
       if (SECRET_TOOL_NAMES.has(request.tool)) return await this.secretTool(sessionId, request.tool, request.arguments);
       if (isPluginOrchestrationTool(request.tool)) return await this.plugin(sessionId, session, request);
       if (TASK_TOOL_NAMES.has(request.tool)) {
@@ -166,6 +193,24 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       throw new Error("Unsupported secret operation.");
     } catch (error) {
       throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : "Secret operation failed.", false);
+    }
+  }
+
+  private async askUser(sessionId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const service = this.integrations.humanQuestions;
+    if (!service) throw orchestrationBridgeError("INVALID_REQUEST", "Human questions are not configured.", false);
+    if (this.control.status(sessionId).provider === "terminal") {
+      throw orchestrationBridgeError("INVALID_REQUEST", "Plain terminal sessions cannot ask human questions.", false);
+    }
+    if (signal?.aborted) throw canceledError();
+    try {
+      return { ...await service.request(sessionId, args as unknown as HumanQuestionRequest, signal) };
+    } catch (error) {
+      if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw canceledError();
+      if (error instanceof HumanQuestionError) {
+        throw orchestrationBridgeError(error.code, error.message, error.code === "TIMEOUT");
+      }
+      throw orchestrationBridgeError("INTERNAL_ERROR", error instanceof Error ? error.message : "The human question failed.", true);
     }
   }
 
@@ -279,6 +324,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         ...(signal ? { signal } : {})
       });
       if (result.reason === "closed") return { ...result };
+      this.publishResult(target, { ...this.control.result(target), ...(result.review ? { review: result.review } : {}) });
       return { ...result, ...(result.reason === "timeout" || result.review?.status === "pending"
         ? { message: "Still running. Call wait_for_agent again for progress." } : {}) };
     } catch (error) {
@@ -292,7 +338,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
     const provider = args.provider as AgentProviderId;
-    const hasExplicitModel = args.model !== undefined;
+    const hasExplicitModel = args.model !== undefined && args.model !== "auto";
     const problem = (hasExplicitModel ? launchModelProblem(provider, args.model) : null)
       ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
     if (problem) throw orchestrationBridgeError("INVALID_REQUEST", `${problem} Call list_providers for what ${provider} takes.`, false);
@@ -315,6 +361,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
     let model = hasExplicitModel ? args.model as string : undefined;
     let effort = args.effort as SpawnAgentRequest["effort"] | undefined;
+    let routing: ModelRoutingInfo | undefined;
+    if (hasExplicitModel) routing = { source: "explicit", reason: "The spawn_agent call supplied a model; the router did not override it." };
     if (!hasExplicitModel && this.control.taskBudget(orchestratorId)?.paused) {
       throw orchestrationBridgeError("INVALID_REQUEST", this.control.taskBudget(orchestratorId)?.reason ?? "This task's budget is exhausted.", false);
     }
@@ -331,8 +379,18 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       }
     }
     const accountId = selectedAccountId(launchOptions as Record<string, unknown> | undefined);
-    // A model account supplies its model and remains visible in the launch result.
+    // A model account passes its own --model: the router must not add a second one (OpenCode crashed on two).
     const accountChosen = accountId !== "default";
+    if (!hasExplicitModel && accountChosen) {
+      routing = { source: "default", reason: `Model account ${accountId.slice(0, 40)}${accountSource === "inherited" ? " (inherited from the orchestrator)" : ""} decides the model; the router was not asked.` };
+    } else if (!hasExplicitModel && this.integrations.router) {
+      const route = await this.routeModel(orchestratorId, provider, args, profile.profile, signal);
+      model = route.model;
+      effort = route.effort;
+      routing = route.info;
+    } else if (args.model === "auto") {
+      routing = { source: "default", reason: this.integrations.router ? "No listed models are available to route." : "No model router is installed; using the provider default." };
+    }
     if (args.reviewModel !== undefined && model === args.reviewModel) {
       throw orchestrationBridgeError("INVALID_REQUEST", "The review model must differ from the selected worker model.", false);
     }
@@ -346,9 +404,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(launchOptions !== undefined ? { launchOptions } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(effort !== undefined ? { effort } : {}),
-      ...(args.isolate === "worktree" ? { isolate: "worktree" as const } : {}),
       ...(args.review === true ? { review: true } : {}),
       ...(typeof args.reviewModel === "string" ? { reviewModel: args.reviewModel } : {}),
+      ...(args.isolate === "worktree" ? { isolate: "worktree" as const } : {}),
       profile: profile.profile
     }, signal).catch((error: unknown) => {
       if (signal?.aborted) throw canceledError();
@@ -369,6 +427,19 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       accountSource: accountChosen ? accountSource : "none",
       model: created.model ?? (accountChosen ? `set by model account ${accountId.slice(0, 40)}` : defaultModelText(provider))
     };
+    if (!routing && !accountChosen) {
+      // Nothing routed it: the card still says which provider and model serve it.
+      const reason = `No model account: served by ${provider}'s own sign-in and ${servedBy.model}.`;
+      try { this.integrations.onRouting?.(created.id, { source: "default", reason }, undefined); } catch { /* display only */ }
+    }
+    if (routing) {
+      const safeRouting = { ...routing, reason: this.control.maskText(routing.reason, 500) };
+      const task = this.control.maskText(String(args.prompt ?? ""), 8_000);
+      this.routedTasks.set(created.id, { parentSessionId: orchestratorId, task, review: args.review === true, attempt: 0 });
+      try { this.integrations.onRouting?.(created.id, safeRouting, task); } catch { /* timeline failures do not undo a launch */ }
+      this.scheduleRouteWatch(created.id);
+      routing = safeRouting;
+    }
     return {
       sessionId: created.id,
       provider: created.provider,
@@ -378,10 +449,128 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(profile.inherited ? { profileInherited: true } : {}),
       ...(created.model !== undefined ? { model: created.model } : {}),
       ...(created.effort !== undefined ? { effort: created.effort } : {}),
+      ...(routing ? { routing } : {}),
       servedBy,
       ...(args.review === true ? { reviewRequested: true } : {}),
-      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {}),
+      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {})
     };
+  }
+
+  private async routeModel(
+    sessionId: string,
+    provider: AgentProviderId,
+    args: Record<string, unknown>,
+    profile: string,
+    signal?: AbortSignal
+  ): Promise<{ model?: string; effort?: SpawnAgentRequest["effort"]; info: ModelRoutingInfo }> {
+    const directory = listProviderDirectory(this.providers);
+    const entry = directory.providers.find((candidate) => candidate.id === provider);
+    const listedModels = entry?.model.known ?? [];
+    const models = [...new Set(listedModels)].slice(0, 64);
+    if (!entry || models.length === 0) {
+      return { ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
+        info: { source: "default", reason: "The provider did not list known models; using its default." } };
+    }
+    const requestedEffort = args.effort as SpawnAgentRequest["effort"] | undefined;
+    const effortChoices: Array<SpawnAgentRequest["effort"] | undefined> = requestedEffort
+      ? [requestedEffort]
+      : [undefined, ...((entry.efforts ?? []) as SpawnAgentRequest["effort"][])];
+    const candidates: ModelRouteCandidate[] = [];
+    const makeCandidate = (id: string, model?: string, reasoningEffort?: SpawnAgentRequest["effort"], isDefault = false): ModelRouteCandidate => ({
+      id,
+      provider,
+      ...(model !== undefined ? { model } : {}),
+      ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
+      available: entry.available,
+      ...(isDefault ? { default: true } : {})
+    });
+    for (const model of models.slice(0, 32)) {
+      for (const candidateEffort of effortChoices) {
+        if (candidates.length >= 191) break;
+        const suffix = candidateEffort ?? "default";
+        candidates.push(makeCandidate(`m${candidates.length}-${suffix}`, model, candidateEffort));
+      }
+    }
+    for (const candidateEffort of effortChoices) {
+      if (candidates.length >= 192) break;
+      candidates.push(makeCandidate(`provider-default-${candidateEffort ?? "default"}`, undefined, candidateEffort, true));
+    }
+    if (signal?.aborted) throw canceledError();
+    const budget = this.control.taskBudget(sessionId);
+    const routeRequest: ModelRouteRequest = {
+      sessionId,
+      task: this.control.maskText(String(args.prompt ?? ""), 8_000),
+      provider,
+      profile: profile as ModelRouteRequest["profile"],
+      cwd: String(args.cwd ?? ""),
+      requested: {
+        ...(typeof args.model === "string" && args.model !== "auto" ? { model: args.model } : {}),
+        ...(requestedEffort ? { reasoningEffort: requestedEffort } : {})
+      },
+      candidates,
+      // An effort is a constraint on every candidate, not an explicit choice of model. Explicit models bypass
+      // routeModel entirely; keeping this null lets installed rules/Jev choose among the listed candidates.
+      humanChoice: null,
+      ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {})
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let removeAbort: (() => void) | undefined;
+    try {
+      const response = await Promise.race([
+        this.integrations.router!.route(routeRequest),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Model router timed out after 2 seconds.")), this.integrations.routeTimeoutMs ?? 2_000);
+          timer.unref?.();
+          if (signal) {
+            const onAbort = (): void => reject(canceledError());
+            signal.addEventListener("abort", onAbort, { once: true });
+            removeAbort = () => signal.removeEventListener("abort", onAbort);
+          }
+        })
+      ]);
+      if (!response || typeof response !== "object" || typeof response.candidateId !== "string") {
+        throw orchestrationBridgeError("INVALID_REQUEST", "The model router returned an invalid candidate id.", false);
+      }
+      const selected = candidates.find((candidate) => candidate.id === response.candidateId);
+      if (!selected || selected.provider !== provider || selected.available === false) {
+        throw orchestrationBridgeError("INVALID_REQUEST", "The model router selected a model or effort that was not listed for this provider.", false);
+      }
+      if (requestedEffort && selected.reasoningEffort !== requestedEffort) {
+        throw orchestrationBridgeError("INVALID_REQUEST", "The model router tried to replace the explicitly requested reasoning effort.", false);
+      }
+      if (selected.model && (!models.includes(selected.model) || launchModelProblem(provider, selected.model))) {
+        throw orchestrationBridgeError("INVALID_REQUEST", "The model router selected a model that is not in list_providers.", false);
+      }
+      if (selected.reasoningEffort && (!(entry.efforts ?? []).includes(selected.reasoningEffort)
+        || launchEffortProblem(provider, selected.reasoningEffort))) {
+        throw orchestrationBridgeError("INVALID_REQUEST", "The model router selected an effort that is not in list_providers.", false);
+      }
+      if (selected.model && selected.observed !== true) {
+        const unknown = await this.providers.checkModel?.(provider, selected.model) ?? null;
+        if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
+      }
+      const reason = typeof response.reason === "string" ? response.reason.trim().slice(0, 500) : "Model router selected a listed candidate.";
+      return {
+        ...(selected.model ? { model: selected.model } : {}),
+        ...(selected.reasoningEffort ? { effort: selected.reasoningEffort } : {}),
+        info: {
+          source: "router",
+          candidateId: selected.id,
+          reason,
+          ...(response.escalated === true ? { escalated: true } : {})
+        }
+      };
+    } catch (error) {
+      if (signal?.aborted) throw canceledError();
+      const reason = error instanceof Error && /timed out/u.test(error.message) ? "The model router timed out; the provider default was used." : "The model router failed; the provider default was used.";
+      return {
+        ...(requestedEffort ? { effort: requestedEffort } : {}),
+        info: { source: "default", reason }
+      };
+    } finally {
+      clearTimeout(timer);
+      removeAbort?.();
+    }
   }
 
   private async send(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
@@ -398,6 +587,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       throw error;
     }
     if (signal?.aborted) throw canceledError();
+    const route = this.routedTasks.get(args.sessionId as string);
+    if (route) route.attempt += 1;
+    this.scheduleRouteWatch(args.sessionId as string);
     return { sessionId: args.sessionId as string, sent: true };
   }
 
@@ -419,6 +611,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private async result(orchestratorId: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
     this.requireOwned(orchestratorId, args.sessionId as string);
     const result = await this.control.resultWithReview(args.sessionId as string, { deferReview: true });
+    this.publishResult(args.sessionId as string, result);
     return {
       sessionId: result.sessionId,
       state: result.state,
@@ -429,6 +622,64 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(result.answer ? { answer: result.answer } : {}),
       ...(result.review ? { review: result.review } : {})
     };
+  }
+
+  private publishResult(sessionId: string, result: AgentResult, waitReason?: string): void {
+    const route = this.routedTasks.get(sessionId);
+    if (!route) return;
+    if (result.review) {
+      const reviewKey = `${sessionId}:${route.attempt}:${result.review.reviewerSessionId ?? result.review.status}`;
+      if (!this.reviewCallbacksSent.has(reviewKey)) {
+        this.reviewCallbacksSent.add(reviewKey);
+        try { this.integrations.onReview?.(sessionId, result.review); } catch { /* a plugin observer cannot affect results */ }
+      }
+    }
+    let status: "failed" | "accepted" | "rejected" | "rework" | undefined;
+    if (result.state === "failed" || waitReason === "quiet") status = "failed";
+    else if (result.review?.status === "accepted") status = "accepted";
+    else if (result.review?.status === "rejected") status = "rejected";
+    else if (result.review?.status === "revise") status = "rework";
+    else if (!route.review && (result.state === "done" || result.status === "idle")) status = "accepted";
+    if (!status) return;
+    const key = `${sessionId}:${route.attempt}:${status}:${result.review?.reviewerSessionId ?? "worker"}`;
+    if (this.outcomeCallbacksSent.has(key)) return;
+    this.outcomeCallbacksSent.add(key);
+    try { this.integrations.onRouteOutcome?.(sessionId, { parentSessionId: route.parentSessionId, task: route.task, status }); }
+    catch { /* a plugin observer cannot affect results */ }
+  }
+
+  private scheduleRouteWatch(sessionId: string): void {
+    if (!this.routedTasks.has(sessionId) || this.routeWatchers.has(sessionId)) return;
+    const controller = new AbortController();
+    let watcher: { controller: AbortController; promise: Promise<void> };
+    const promise = (async () => {
+      for (;;) {
+        if (controller.signal.aborted) return;
+        let session;
+        try { session = this.control.status(sessionId); } catch { return; }
+        if (session.exitCode !== null) {
+          const final = await this.control.resultWithReview(sessionId);
+          this.publishResult(sessionId, final, session.exitCode === 0 ? "done" : "failed");
+          return;
+        }
+        const waited = await this.control.waitFor(sessionId, {
+          timeoutMs: MAX_AGENT_WAIT_SECONDS * 1_000,
+          signal: controller.signal
+        }).catch(() => null);
+        if (!waited || waited.reason === "closed") return;
+        if (waited.reason === "timeout" || waited.reason === "needs_approval") {
+          await new Promise((resolve) => setTimeout(resolve, waited.reason === "timeout" ? 0 : 1_000));
+          continue;
+        }
+        const final = await this.control.resultWithReview(sessionId);
+        this.publishResult(sessionId, final, waited.reason);
+        return;
+      }
+    })().catch(() => undefined).finally(() => {
+      if (this.routeWatchers.get(sessionId) === watcher) this.routeWatchers.delete(sessionId);
+    });
+    watcher = { controller, promise };
+    this.routeWatchers.set(sessionId, watcher);
   }
 
   private cancel(orchestratorId: string, args: Record<string, unknown>): Record<string, unknown> {

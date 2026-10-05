@@ -69,6 +69,16 @@ function fixture() {
   });
   return { access, writes, closed, host, service, request };
 }
+test("phone summaries never read terminal buffers and revocation still wins",async()=>{
+  const f=fixture();
+  f.host.output=()=>{throw new Error("private output must never be read");};
+  f.host.read=async()=>{throw new Error("private screen must never be read");};
+  const summary=await f.service.dispatch("phone",f.request({type:"session.read",sessionId:"one"}),{summaryOnly:true});
+  assert.match(summary.body,/Status: idle/);assert.doesNotMatch(summary.body,/PRIVATE BUFFER|private\/path/);
+  const output=await f.service.dispatch("phone",f.request({type:"session.output",sessionId:"one",cursor:null}),{summaryOnly:true});
+  assert.equal(output.hasMore,false);assert.match(output.data,/Status: idle/);
+  f.access.revoke("phone");await assert.rejects(f.service.dispatch("phone",f.request({type:"session.read",sessionId:"one"}),{summaryOnly:true}),/not-paired/);
+});
 
 test("only shared sessions and public metadata leave the host", async () => {
   const f = fixture();

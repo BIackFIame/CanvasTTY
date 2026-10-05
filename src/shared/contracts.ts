@@ -348,6 +348,8 @@ export interface AppSettings {
   radialLauncherEnabled: boolean;
   radialLauncherItems: RadialLauncherItemId[];
   agentLifecycleHooksEnabled: boolean;
+  /** F06/F08/F28/F30 integrations: opt-in, not verified live. */
+  experimentalBacklogEnabled: boolean;
   /** Base protection: deny-only hard rules for agents' tool calls (writes outside the folder, sudo, …). */
   baseProtectionEnabled: boolean;
   uiScale: number;
@@ -500,12 +502,12 @@ export interface SessionMetadata {
   usage?: import("./backlog.ts").UsageSummary;
   reviewUsage?: import("./backlog.ts").UsageSummary;
   sessionReport?: {readyAt:number};
-  /** Host-owned logical task identity for budgets and read-only reviewers. */
+  /** Host-owned logical task identity, retained across an approved account handoff. */
   taskScope?: {id:string;cwd:string;startedAt:number};
+  modelRoute?: {source:"explicit"|"router"|"default";candidateId?:string;reason:string;escalated?:boolean};
   reviewRequested?: boolean;
   /** `processesKeepRunning`: the pause blocks input and launches only, because the platform cannot suspend processes. */
   taskBudget?: {tokens:number|null;costUsd:number|null;durationMs:number|null;paused:boolean;warning:boolean;processesKeepRunning?:boolean};
-
   id: string;
   revision: number;
   provider: ProviderId;
@@ -629,6 +631,7 @@ export const PLUGIN_API_VERSION = 2;
 export type PluginApiVersion = 1 | typeof PLUGIN_API_VERSION;
 
 export type PluginPermission =
+  | "model:route"
   | "storage"
   | "secrets"
   | "sessions:read"
@@ -711,6 +714,8 @@ export interface PluginAgentHook {
  * separate supervised process after the user trusts the plugin's native code (apiVersion 2).
  */
 export interface PluginService {
+  /** Selects only an offered model/effort; never permissions or folders (`model:route`). */
+  modelRouter?: boolean;
   id: string;
   title: string;
   description?: string;

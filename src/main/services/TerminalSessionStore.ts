@@ -58,12 +58,21 @@ export interface PersistedTerminalSession {
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
+  modelRoute?: SessionMetadata["modelRoute"];
   reviewRequested?: boolean;
   /** An isolated session ran since then and its repositories were not audited yet, or a report is still open. */
   gitAuditSince?: number;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
+
+function validModelRoute(value:unknown):value is NonNullable<SessionMetadata["modelRoute"]> {
+  if (!value || typeof value !== "object") return false;
+  const route=value as NonNullable<SessionMetadata["modelRoute"]>;
+  return ["explicit","router","default"].includes(route.source) && typeof route.reason==="string" && route.reason.length<=500
+    && (route.candidateId===undefined || typeof route.candidateId==="string" && route.candidateId.length<=500)
+    && (route.escalated===undefined || typeof route.escalated==="boolean");
+}
 
 export interface PersistedEnvironmentRef {
   pluginId: string;
@@ -256,6 +265,7 @@ export function persistedTerminalSession(
     ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}),
+    ...(metadata.modelRoute ? { modelRoute: { ...metadata.modelRoute } } : {}),
     ...(metadata.reviewRequested !== undefined ? { reviewRequested: metadata.reviewRequested } : {})
   };
 }
@@ -342,6 +352,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
         ? { model: session.model } : {}),
       ...(session.provider !== "terminal" && session.effort !== undefined && launchEffortProblem(session.provider as ProviderId, session.effort) === null
         ? { effort: session.effort } : {}),
+      ...(validModelRoute(session.modelRoute) ? { modelRoute: { ...session.modelRoute } } : {}),
       ...(typeof session.reviewRequested === "boolean" ? { reviewRequested: session.reviewRequested } : {})
     });
     ids.add(session.id);

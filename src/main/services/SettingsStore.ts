@@ -173,6 +173,7 @@ export class SettingsStore {
         || !("canvasLauncherItems" in source)
         || !("radialLauncherItems" in source)
         || !("radialLauncherEnabled" in source)
+        || !("experimentalBacklogEnabled" in source)
         || !("agentLifecycleHooksEnabled" in source)
         || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
@@ -371,6 +372,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
     radialLauncherEnabled: false,
     agentLifecycleHooksEnabled: true,
+    experimentalBacklogEnabled: false,
     baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
@@ -604,6 +606,7 @@ export function normalizeSettings(
     radialLauncherEnabled: typeof source.radialLauncherEnabled === "boolean"
       ? source.radialLauncherEnabled
       : fallback.radialLauncherEnabled ?? false,
+    experimentalBacklogEnabled: source.experimentalBacklogEnabled === true,
     agentLifecycleHooksEnabled: typeof source.agentLifecycleHooksEnabled === "boolean"
       ? source.agentLifecycleHooksEnabled
       : fallback.agentLifecycleHooksEnabled,
