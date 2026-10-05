@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import pty from "node-pty";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
@@ -63,8 +63,9 @@ test("a subagent whose CLI is killed by SIGKILL is failed (128+9) with the signa
   const live = s.spawned.at(-1);
   // sandbox-exec execs the CLI: the PTY's own process is the CLI, not a wrapper that could exit 0 after it.
   // (node-pty's spawn-helper and then sandbox-exec exec in place first.)
-  const command = await until(() => { const comm = execFileSync("/bin/ps", ["-o", "comm=", "-p", String(live.pid)], { encoding: "utf8" }).trim(); return comm === "/bin/sleep" ? comm : null; });
-  assert.equal(command, "/bin/sleep");
+  // macOS reports an executable path; Linux ps reports only the command name.
+  const command = await until(() => { const comm = execFileSync("/bin/ps", ["-o", "comm=", "-p", String(live.pid)], { encoding: "utf8" }).trim(); return basename(comm) === "sleep" ? comm : null; });
+  assert.equal(basename(command), "sleep");
   assert.deepEqual(descendants(live.pid), [], "no process below the CLI");
   process.kill(live.pid, "SIGKILL");
   const ended = await until(() => { const m = s.terminals.getMetadata(child.id); return m.exitCode !== null ? m : null; });
