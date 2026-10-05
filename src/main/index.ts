@@ -61,6 +61,7 @@ import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { experimentalModelRouter } from "./services/ModelRouter";
+import { ACCOUNTS_PLUGIN_ID } from "./services/accountHomeIsolation";
 import { DecisionHooks } from "./services/DecisionHooks";
 import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
 import { canvasTtyPrivateData } from "./services/safety/baseProtection";
@@ -1017,6 +1018,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       if(!provider)throw new Error("No trusted model router is running.");
       return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.route",request,2000) as {candidateId:string;reason:string;escalated?:boolean};
     }}, experimentalEnabled),
+    // F-06: with the opt-in on, an inherited subagent may be routed to another delegable model account.
+    accountCandidates:async provider=>experimentalEnabled() && launchPipeline.delegable(ACCOUNTS_PLUGIN_ID)
+      ? ((await launchPipeline.fieldOptions(ACCOUNTS_PLUGIN_ID,provider)).account ?? []).map(option=>({id:option.value,label:option.label}))
+      : [],
     onRouting:(id,route)=>{managedTerminals.setTaskMetadata(id,{modelRoute:route});void timeline.append(id,"model-route",route.source,route.reason,"core").catch(console.warn);},
     onRouteOutcome:(id,outcome)=>sessionsForPlugins.activity({type:"route.outcome",sessionId:id,at:Date.now(),...outcome})
   });

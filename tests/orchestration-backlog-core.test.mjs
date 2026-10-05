@@ -719,3 +719,27 @@ test("a subagent on a model account is not routed to a second model (the account
   const launched = calls.at(-1).args;
   assert.equal(launched.filter((arg) => arg === "--model").length, 1, launched.join(" "));
 });
+
+test("a cancelled or closed routed subagent is not reported as failed work (no routing escalation)", async (t) => {
+  const root = await temp(t, "ctty-route-closed-");
+  const { terminals } = manager(t);
+  const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator" });
+  const control = new AgentControlService(terminals, { waitTiming: { checkMs: 5, settleMs: 5, quietMs: 60_000 } });
+  const outcomes = [];
+  const handler = new ScopedOrchestrationHandler(control, null, {
+    cli: () => "available", limits: () => null,
+    models: (provider) => provider === "opencode" ? { models: ["zai-coding-plan/glm-5.3-flash"], checkedAt: Date.now() } : null,
+    checkModel: async () => null
+  }, {
+    router: { async route(request) { return { candidateId: request.candidates.find((item) => item.model).id, reason: "listed model" }; } },
+    onRouteOutcome: (_id, outcome) => outcomes.push(outcome)
+  });
+  const spawn = (id) => handler.execute(orchestrator.id, { id, tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, model: "auto", prompt: "Complete a short task." } });
+  const cancelled = await spawn("route-cancel");
+  const closed = await spawn("route-close");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await handler.execute(orchestrator.id, { id: "cancel", tool: "cancel_agent", arguments: { sessionId: cancelled.sessionId } });
+  terminals.dispose(closed.sessionId);   // the person closes the card
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(outcomes, [], "closing or cancelling a card says nothing about the routed model");
+});

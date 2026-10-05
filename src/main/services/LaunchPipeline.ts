@@ -124,6 +124,11 @@ export class LaunchPipeline {
     this.timeoutMs = dependencies.timeoutMs ?? LAUNCH_PREPARE_TIMEOUT_MS;
   }
 
+  /** Whether this plugin declared its launch options safe for an orchestrator to choose (`launch.delegable`). */
+  delegable(pluginId: string): boolean {
+    return this.dependencies.contributors().some((candidate) => candidate.pluginId === pluginId && candidate.launch.delegable === true);
+  }
+
   /** Removes file folders left by a previous run of the app. */
   clearRuns(): Promise<void> {
     return rm(this.dependencies.runsRoot, { recursive: true, force: true });

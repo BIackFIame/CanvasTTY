@@ -17,7 +17,7 @@ import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 const at = { x: 0, y: 0 };
 const ACCOUNTS = "canvastty-accounts";
 
-async function setup(t, { delegable = true, router = true } = {}) {
+async function setup(t, { delegable = true, router = true, accountCandidates, route } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ctty-sub-account-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
@@ -38,17 +38,19 @@ async function setup(t, { delegable = true, router = true } = {}) {
   }));
   const control = new AgentControlService(terminals);
   let routed = 0;
+  const requests = [];
   const handler = new ScopedOrchestrationHandler(control, null,
     { cli: () => "available", limits: () => null, models: () => ({ models: ["zai/glm-5.3"], checkedAt: Date.now() }), checkModel: async () => null },
     {
-      ...(router ? { router: { async route(request) { routed += 1; return { candidateId: request.candidates.find((item) => item.model)?.id, reason: "listed" }; } } } : {}),
+      ...(router ? { router: { async route(request) { routed += 1; requests.push(request); return route ? route(request) : { candidateId: request.candidates.find((item) => item.model)?.id, reason: "listed" }; } } } : {}),
+      ...(accountCandidates ? { accountCandidates, routeTimeoutMs: 200 } : {}),
       onRouting: (id, route) => terminals.setTaskMetadata(id, { modelRoute: route })
     });
   const orchestrator = (launchOptions) => terminals.create({ provider: "opencode", profile: "normal", cwd: root, position: at, role: "orchestrator",
     ...(launchOptions ? { launchOptions } : {}) });
   const spawn = (parent, args) => handler.execute(parent.id, { id: `c-${Math.random()}`, tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, prompt: "Small task", ...args } });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
-  return { root, calls, prepared, terminals, control, handler, orchestrator, spawn, settle, routed: () => routed };
+  return { root, calls, prepared, terminals, control, handler, orchestrator, spawn, settle, routed: () => routed, requests };
 }
 
 test("a subagent spawned without an account runs on its orchestrator's model account, never on the CLI default", async (t) => {
@@ -121,4 +123,69 @@ test("AgentControlService.spawn applies the same inheritance for every caller", 
   const child = await s.control.spawn({ parentSessionId: parent.id, provider: "opencode", cwd: s.root });
   await s.settle();
   assert.equal(s.terminals.modelAccountOf(child.id), "glm-flash");
+});
+
+const GLM_ACCOUNTS = async (provider) => provider === "opencode"
+  ? [{ id: "glm-flash", label: "GLM 5.3 Flash · Z.AI Coding Plan · glm-5.3-flash" }, { id: "glm-53", label: "GLM 5.3 · Z.AI Coding Plan · glm-5.3" }]
+  : [];
+const pick = (model) => (request) => ({ candidateId: request.candidates.find((item) => item.model === model).id, reason: `picked ${model}` });
+
+test("with delegable accounts the router chooses the inherited subagent's ACCOUNT; the account sets the only --model", async (t) => {
+  const s = await setup(t, { accountCandidates: GLM_ACCOUNTS, route: pick("glm-5.3") });
+  const parent = s.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
+  await s.settle();
+  const child = await s.spawn(parent, { model: "auto", prompt: "Design a migration for the public API" });
+  await s.settle();
+  assert.equal(s.routed(), 1);
+  const request = s.requests[0];
+  assert.deepEqual(request.candidates.map((item) => [item.model, item.default === true]), [["glm-5.3-flash", true], ["glm-5.3", false]],
+    "the candidates are the accounts (their model only labels them); the inherited account is the default");
+  assert.equal(request.task, "Design a migration for the public API");
+  assert.equal(child.model, undefined, "no model is added next to the account's own");
+  assert.equal(child.routing.source, "router");
+  assert.match(child.routing.reason, /Model account glm-53 sets the model/u);
+  assert.deepEqual(child.servedBy, { provider: "opencode", account: "glm-53", accountSource: "routed", model: "set by model account glm-53" });
+  assert.deepEqual(s.prepared.find((entry) => entry.sessionId === child.sessionId).options, { account: "glm-53" });
+  const launched = s.calls.at(-1).args;
+  assert.ok(launched.includes("canvastty_glm-53/glm-5.3-flash"), launched.join(" "));
+  assert.equal(launched.filter((arg) => arg === "--model").length, 1, launched.join(" "));
+  assert.equal(s.terminals.modelAccountOf(child.sessionId), "glm-53");
+});
+
+test("account routing keeps the inherited account when the router keeps it, fails, times out or invents an id", async (t) => {
+  for (const [name, route] of [
+    ["keeps", pick("glm-5.3-flash")],
+    ["fails", () => { throw new Error("router down"); }],
+    ["times out", () => new Promise(() => {})],
+    ["invents", () => ({ candidateId: "glm-53", reason: "raw id" })]
+  ]) {
+    const s = await setup(t, { accountCandidates: GLM_ACCOUNTS, route });
+    const parent = s.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
+    await s.settle();
+    const child = await s.spawn(parent, {});
+    await s.settle();
+    assert.equal(child.servedBy.account, "glm-flash", name);
+    assert.equal(s.terminals.modelAccountOf(child.sessionId), "glm-flash", name);
+    assert.equal(s.calls.at(-1).args.filter((arg) => arg === "--model").length, 1, name);
+    if (name !== "keeps") assert.equal(child.routing.source, "default", name);
+  }
+});
+
+test("account routing never overrides an explicit account or model, and needs two delegable accounts", async (t) => {
+  const s = await setup(t, { accountCandidates: GLM_ACCOUNTS, route: pick("glm-5.3") });
+  const parent = s.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
+  await s.settle();
+  const explicit = await s.spawn(parent, { launchOptions: { [ACCOUNTS]: { account: "glm-flash" } } });
+  assert.equal(explicit.servedBy.account, "glm-flash");
+  assert.equal(s.routed(), 0, "an explicit account is a choice, not a routing question");
+  const one = await setup(t, { accountCandidates: async () => [{ id: "glm-flash", label: "GLM · glm-5.3-flash" }], route: pick("glm-5.3") });
+  const p1 = one.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
+  await one.settle();
+  const single = await one.spawn(p1, {});
+  assert.equal(single.servedBy.account, "glm-flash");
+  assert.equal(one.routed(), 0);
+  const none = await setup(t, { accountCandidates: async () => [], route: pick("glm-5.3") });
+  const p2 = none.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
+  await none.settle();
+  assert.equal((await none.spawn(p2, {})).servedBy.account, "glm-flash", "not delegable (no candidates): unchanged");
 });

@@ -1,5 +1,5 @@
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
-import { selectedAccountId } from "../accountHomeIsolation.ts";
+import { ACCOUNTS_PLUGIN_ID, selectedAccountId } from "../accountHomeIsolation.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
 import type { AgentProviderId, ProviderId, SessionRole } from "../../../shared/contracts.ts";
 import { launchEffortProblem, launchModelProblem } from "../../../shared/launchModel.ts";
@@ -45,6 +45,19 @@ export interface ScopedOrchestrationIntegrations {
     status: "failed" | "accepted" | "rejected" | "rework";
   }): void;
   routeTimeoutMs?: number;
+  /**
+   * The model accounts an orchestrator may delegate for a provider (the accounts plugin's launch choices, only when
+   * it declared them delegable). With two or more, a subagent that would inherit its orchestrator's account lets the
+   * router choose among them; the chosen ACCOUNT then sets the model, so no second --model is ever added.
+   */
+  accountCandidates?(provider: AgentProviderId): Promise<Array<{ id: string; label: string }>>;
+}
+
+const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/u;
+/** The model an account label names ("GLM 5.3 Flash · Z.AI · glm-5.3-flash"): its last " · " part, for ranking only. */
+function accountModelLabel(label: string): string | undefined {
+  const tail = label.split(" · ").at(-1)?.trim() ?? "";
+  return /^[A-Za-z0-9._:/-]{1,100}$/u.test(tail) ? tail : undefined;
 }
 
 /**
@@ -368,7 +381,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
     // A spawn without an account runs on the orchestrator's account (never silently on the CLI's default model).
     let launchOptions = args.launchOptions as SpawnAgentRequest["launchOptions"];
-    let accountSource: "inherited" | "explicit" | "none" = "none";
+    let accountSource: "inherited" | "explicit" | "routed" | "none" = "none";
     if (typeof this.control.subagentAccount === "function") {
       try {
         const account = this.control.subagentAccount(orchestratorId, provider, launchOptions);
@@ -378,10 +391,20 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : String(error), false);
       }
     }
-    const accountId = selectedAccountId(launchOptions as Record<string, unknown> | undefined);
+    let accountId = selectedAccountId(launchOptions as Record<string, unknown> | undefined);
     // A model account passes its own --model: the router must not add a second one (OpenCode crashed on two).
     const accountChosen = accountId !== "default";
-    if (!hasExplicitModel && accountChosen) {
+    if (!hasExplicitModel && accountChosen && accountSource === "inherited" && this.integrations.router && this.integrations.accountCandidates) {
+      // The router may move an inherited subagent to another delegable account; it never adds a model.
+      const route = await this.routeAccount(orchestratorId, provider, args, profile.profile, accountId, signal);
+      if (route.account && route.account !== accountId) {
+        const current = (launchOptions as Record<string, Record<string, unknown>> | undefined)?.[ACCOUNTS_PLUGIN_ID] ?? {};
+        launchOptions = { ...(launchOptions ?? {}), [ACCOUNTS_PLUGIN_ID]: { ...current, account: route.account } } as SpawnAgentRequest["launchOptions"];
+        accountId = route.account;
+        accountSource = "routed";
+      }
+      routing = route.info;
+    } else if (!hasExplicitModel && accountChosen) {
       routing = { source: "default", reason: `Model account ${accountId.slice(0, 40)}${accountSource === "inherited" ? " (inherited from the orchestrator)" : ""} decides the model; the router was not asked.` };
     } else if (!hasExplicitModel && this.integrations.router) {
       const route = await this.routeModel(orchestratorId, provider, args, profile.profile, signal);
@@ -453,6 +476,77 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       servedBy,
       ...(args.review === true ? { reviewRequested: true } : {}),
       ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {})
+    };
+  }
+
+  /** Asks the router with the host deadline; null on timeout or failure (the caller keeps its default). */
+  private async askRouter(request: ModelRouteRequest, signal?: AbortSignal): Promise<{ candidateId: string; reason: string; escalated?: boolean } | null> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let removeAbort: (() => void) | undefined;
+    try {
+      const response = await Promise.race([
+        this.integrations.router!.route(request),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Model router timed out after 2 seconds.")), this.integrations.routeTimeoutMs ?? 2_000);
+          timer.unref?.();
+          if (signal) {
+            const onAbort = (): void => reject(canceledError());
+            signal.addEventListener("abort", onAbort, { once: true });
+            removeAbort = () => signal.removeEventListener("abort", onAbort);
+          }
+        })
+      ]);
+      return response && typeof response === "object" && typeof response.candidateId === "string" ? response : null;
+    } catch (error) {
+      if (signal?.aborted) throw canceledError();
+      return null;
+    } finally {
+      clearTimeout(timer);
+      removeAbort?.();
+    }
+  }
+
+  /** Account routing: candidates are the delegable accounts for this provider; the current (inherited) one is the default. */
+  private async routeAccount(
+    sessionId: string,
+    provider: AgentProviderId,
+    args: Record<string, unknown>,
+    profile: string,
+    currentAccount: string,
+    signal?: AbortSignal
+  ): Promise<{ account?: string; info: ModelRoutingInfo }> {
+    const keep = (reason: string) => ({ info: { source: "default" as const, reason: `${reason} Model account ${currentAccount.slice(0, 40)} (inherited from the orchestrator) decides the model.` } });
+    let offered: Array<{ id: string; label: string }> = [];
+    try { offered = await this.integrations.accountCandidates!(provider); } catch { offered = []; }
+    const seen = new Set<string>();
+    const accounts = (Array.isArray(offered) ? offered : []).filter((item) => item && typeof item.id === "string" && ACCOUNT_ID.test(item.id)
+      && typeof item.label === "string" && !seen.has(item.id) && seen.add(item.id)).slice(0, 32);
+    if (accounts.length < 2 || !accounts.some((item) => item.id === currentAccount)) return keep("No other delegable model account to route to.");
+    const candidates: ModelRouteCandidate[] = accounts.map((item, index) => {
+      const model = accountModelLabel(item.label);
+      return { id: `account-${index}`, provider, ...(model ? { model } : {}), available: true, ...(item.id === currentAccount ? { default: true } : {}) };
+    });
+    if (signal?.aborted) throw canceledError();
+    const budget = this.control.taskBudget(sessionId);
+    const response = await this.askRouter({
+      sessionId,
+      task: this.control.maskText(String(args.prompt ?? ""), 8_000),
+      provider,
+      profile: profile as ModelRouteRequest["profile"],
+      cwd: String(args.cwd ?? ""),
+      requested: {},
+      candidates,
+      humanChoice: null,
+      ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {})
+    }, signal);
+    const index = response ? candidates.findIndex((candidate) => candidate.id === response.candidateId) : -1;
+    if (!response || index < 0) return keep(response ? "The model router chose an account that was not offered." : "The model router failed or timed out.");
+    const account = accounts[index]!.id;
+    const reason = typeof response.reason === "string" ? response.reason.trim().slice(0, 400) : "Model router selected a listed account.";
+    return {
+      account,
+      info: { source: "router", candidateId: response.candidateId, reason: `${reason} Model account ${account.slice(0, 40)} sets the model.`,
+        ...(response.escalated === true ? { escalated: true } : {}) }
     };
   }
 
