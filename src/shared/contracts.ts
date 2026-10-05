@@ -494,6 +494,12 @@ export type AgentChatHistoryResumeResult =
   | { error: { code: "invalid-id" | "cli-unavailable" | "conversation-missing" | "cwd-unknown" | "cwd-unavailable" | "resume-failed"; message: string } };
 
 export interface SessionMetadata {
+  /** Host-owned logical task identity for budgets and read-only reviewers. */
+  taskScope?: {id:string;cwd:string;startedAt:number};
+  reviewRequested?: boolean;
+  /** `processesKeepRunning`: the pause blocks input and launches only, because the platform cannot suspend processes. */
+  taskBudget?: {tokens:number|null;costUsd:number|null;durationMs:number|null;paused:boolean;warning:boolean;processesKeepRunning?:boolean};
+
   id: string;
   revision: number;
   provider: ProviderId;
@@ -1602,6 +1608,7 @@ export interface DiagnosticRendererError {
 }
 
 export interface CanvasTTYApi {
+  backlog: import("./backlog.ts").BacklogApi;
   diagnostics: {
     configuration(): Promise<DiagnosticConfiguration>;
     send(description: string, attachment?: DiagnosticAttachment): Promise<DiagnosticReportReceipt>;

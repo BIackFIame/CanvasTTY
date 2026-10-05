@@ -29,7 +29,7 @@ export function bubblewrapArguments(
     "--die-with-parent",
     "--unshare-pid",
     "--unshare-ipc",
-    "--ro-bind", "/", "/",
+    ...(paths.restrictReads ? ["--tmpfs","/",...paths.readableAgain.flatMap(path=>exists(path) ? ["--ro-bind",path,path] : [])] : ["--ro-bind", "/", "/"]),
     "--dev-bind", "/dev", "/dev",
     "--proc", "/proc"
   ];

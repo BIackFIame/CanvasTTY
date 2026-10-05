@@ -6,6 +6,7 @@ export const MAX_ORCHESTRATION_PAYLOAD_BYTES = 128 * 1024;
 const string = (options = {}) => ({ type: "string", ...options });
 const boolean = () => ({ type: "boolean" });
 const integer = (options = {}) => ({ type: "integer", ...options });
+const array = (items, options = {}) => ({ type: "array", items, ...options });
 const object = (properties, required = []) => ({
   type: "object",
   properties,
@@ -58,7 +59,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "spawn_agent",
-    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. profile: without it the subagent gets this session's launch profile, or the next lower one its CLI has; a subagent never gets more than this session (plan < normal < acceptEdits < auto) and never YOLO. "auto" lets it work without asking the person for each edit or command inside the project; CanvasTTY's outer layers (agent isolation, base protection) still stop writes outside the project, secrets and system changes. The answer says the profile it got. cwd must be this project's folder or a folder inside it. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked), for plugins that allow an orchestrator to choose them. Refusals say why (a limit the person set, a folder outside the project, a profile above this session's): change the request instead of retrying it. Then call wait_for_agent and get_agent_result.`,
+    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); omit model to keep the selected account or provider default. effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. profile: without it the subagent gets this session's launch profile, or the next lower one its CLI has; a subagent never gets more than this session (plan < normal < acceptEdits < auto) and never YOLO. "auto" lets it work without asking the person for each edit or command inside the project; CanvasTTY's outer layers (agent isolation, base protection) still stop writes outside the project, secrets and system changes. The answer says the profile it got. cwd must be this project's folder or a folder inside it. review: true asks CanvasTTY to run a read-only review after this agent finishes; reviewModel optionally selects a different known model for the reviewer. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked), for plugins that allow an orchestrator to choose them. Without a model account in launchOptions the subagent runs on this session's own model account when this session has one; {"canvastty-accounts":{"account":"none"}} explicitly runs it on the CLI's own sign-in and default model. The answer's servedBy says which provider, account and model serve it. Refusals say why (a limit the person set, a folder outside this session's project, a profile above this session's): change the request instead of retrying it. Then call wait_for_agent and get_agent_result.`,
     {
       provider,
       cwd: string({ minLength: 1, maxLength: 4_096 }),
@@ -67,6 +68,8 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
       profile: string({ enum: ["auto", "normal", "acceptEdits", "plan"] }),
       model: string({ minLength: 1, maxLength: 200 }),
       effort: string({ enum: [...REASONING_EFFORT_IDS] }),
+      review: boolean(),
+      reviewModel: string({ minLength: 1, maxLength: 200 }),
       launchOptions
     },
     ["provider", "cwd"]
@@ -103,6 +106,63 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   tool(
     "list_agents",
     "List this session's subagents with provider, status, and title."
+  ),
+  tool(
+    "retry_agent",
+    "Retry one failed or quiet subagent with its original prompt, launch profile, model and folder plus a short masked failure tail. CanvasTTY allows at most two retries per original agent.",
+    { sessionId, reason: string({ maxLength: 500 }) },
+    ["sessionId"]
+  ),
+  tool(
+    "list_tasks",
+    "List the shared task board for this orchestration. Subagents see only tasks belonging to their own root orchestrator.",
+    {},
+    []
+  ),
+  tool(
+    "claim_task",
+    "Atomically claim one open task whose dependencies are all complete. If another agent owns it, the current owner is returned.",
+    { taskId: string({ minLength: 1, maxLength: 160 }) },
+    ["taskId"]
+  ),
+  tool(
+    "update_task",
+    "Update the task you own. Only the root orchestrator can reassign tasks or change dependencies; complete work with complete_task.",
+    {
+      taskId: string({ minLength: 1, maxLength: 160 }),
+      title: string({ minLength: 1, maxLength: 240 }),
+      description: string({ minLength: 1, maxLength: 8_000 }),
+      progress: string({ minLength: 1, maxLength: 4_000 }),
+      status: string({ enum: ["open", "claimed"] }),
+      ownerSessionId: string({ minLength: 1, maxLength: 160 }),
+      ownerName: string({ minLength: 1, maxLength: 160 }),
+      dependencies: array(string({ minLength: 1, maxLength: 80 }), { maxItems: 64 })
+    },
+    ["taskId"]
+  ),
+  tool(
+    "complete_task",
+    "Mark a task complete and record its result. Only its owner or the root orchestrator can complete it, and dependencies must be complete.",
+    { taskId: string({ minLength: 1, maxLength: 160 }), result: string({ minLength: 1, maxLength: 8_000 }) },
+    ["taskId", "result"]
+  ),
+  tool(
+    "get_task_budget",
+    "Read the budget for this orchestration tree. Unknown provider token or cost usage is returned as no data; only a person can change or remove limits.",
+    {},
+    []
+  ),
+  tool(
+    "list_orchestration_templates",
+    "List built-in and project orchestration flows from .canvastty/flows. Invalid files are returned as line-numbered errors.",
+    {},
+    []
+  ),
+  tool(
+    "apply_orchestration_template",
+    "Get the roles, expected number of subagents and final-step instructions for a flow, ready to apply to a task.",
+    { templateId: string({ minLength: 1, maxLength: 64 }), task: prompt },
+    ["templateId", "task"]
   )
 ]);
 
@@ -173,6 +233,21 @@ export function validateOrchestrationArguments(toolName, args) {
       else if (property.minimum !== undefined && candidate < property.minimum) errors.push(`${key} is below the minimum.`);
       else if (property.maximum !== undefined && candidate > property.maximum) errors.push(`${key} is above the maximum.`);
       else value[key] = candidate;
+    } else if (property.type === "array") {
+      if (!Array.isArray(candidate) || candidate.length > (property.maxItems ?? Number.MAX_SAFE_INTEGER)) {
+        errors.push(`${key} must be an array of at most ${property.maxItems ?? "the allowed number of"} items.`);
+      } else {
+        const items = [];
+        for (let index = 0; index < candidate.length; index += 1) {
+          const item = candidate[index];
+          if (property.items?.type === "string") {
+            if (typeof item !== "string") errors.push(`${key}[${index}] must be a string.`);
+            else if (item.length < (property.items.minLength ?? 0) || item.length > (property.items.maxLength ?? Number.MAX_SAFE_INTEGER)) errors.push(`${key}[${index}] has an invalid length.`);
+            else items.push(item);
+          } else errors.push(`${key} has an unsupported item type.`);
+        }
+        value[key] = items;
+      }
     }
   }
   for (const key of Object.keys(args)) {

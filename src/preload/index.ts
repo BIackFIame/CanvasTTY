@@ -1,3 +1,4 @@
+import { BACKLOG_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
@@ -289,6 +290,10 @@ const api: CanvasTTYApi = {
     resolveGitRisk: (reportId: string, action: "neutralize" | "keep") => ipcRenderer.invoke(IPC.terminalResolveGitRisk, reportId, action),
     onGitRisk: (listener: (report: GitRiskReport) => void) => subscribe(IPC.terminalGitRisk, listener)
   },
+  backlog: {
+    ...Object.fromEntries(Object.entries(BACKLOG_IPC).map(([name, channel]) => [name, (...args: unknown[]) => ipcRenderer.invoke(channel, ...args)])),
+    onTaskBoardChanged:(listener)=>subscribe(BACKLOG_EVENTS.taskBoardChanged,listener)
+  } as BacklogApi,
   window: {
     isMacOS: process.platform === "darwin",
     platform: process.platform,

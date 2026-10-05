@@ -1,4 +1,5 @@
 import type { ProviderId } from "../../../shared/contracts.ts";
+import { dirname, isAbsolute, join } from "node:path";
 import {
   AGENT_RUNTIME_ENV,
   CAPTURE_ANSWER_ENV,
@@ -38,6 +39,7 @@ export interface PreparedAgentRuntimePtyLaunch {
 export interface AgentRuntimeLaunchCoordinator {
   prepareLaunch(input: PrepareAgentRuntimeLaunchInput): PreparedAgentRuntimePtyLaunch;
   currentStatus(terminalSessionId: string): RuntimeLifecycleState | null;
+  readableRuntimePaths?(): readonly string[];
 }
 
 export interface AgentRuntimeBridgeOptions extends ProviderRuntimeLaunchOptions {
@@ -52,6 +54,7 @@ export interface AgentRuntimeBridgeOptions extends ProviderRuntimeLaunchOptions 
 }
 
 export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
+  private readonly runtimeReadPaths: readonly string[];
   private readonly gateway: RuntimeGateway;
   private readonly providers: ProviderRuntimeLaunchAdapters;
   /** Running sessions and whether each got the decision hook. */
@@ -68,9 +71,20 @@ export class AgentRuntimeBridge implements AgentRuntimeLaunchCoordinator {
     this.decisionBudgetMs = options.decisionBudgetMs;
     this.claudeHttpHooks = options.claudeHttpHooks;
     this.providers = new ProviderRuntimeLaunchAdapters(options);
+    // File grants, never the containing source tree: a reviewer may review CanvasTTY itself.
+    const helpers = [options.helper, ...(options.permissionGate ? [options.permissionGate] : []),
+      ...(options.pluginHooks ? [options.pluginHooks.runner] : [])];
+    const runtimeFiles = ["hook-helper.mjs", "permission-gate.mjs", "runtime-client.mjs", "runtime-protocol.mjs",
+      "ndjson.mjs", "path-inside.mjs", "opencode-plugin.mjs", "opencode-final-answer.mjs", "opencode-decisions.mjs", "omp-extension.mjs",
+      "plugin-hook-runner.mjs", "plugin-hook-dispatch.mjs"];
+    this.runtimeReadPaths = Object.freeze([...new Set([
+      ...helpers.flatMap(helper => [helper.command, ...helper.args.filter(isAbsolute)]),
+      ...runtimeFiles.map(file => join(dirname(options.openCodePluginPath), file))])]);
     this.coreHooksEnabled = options.coreHooksEnabled !== false;
     if (options.recoverOnStart) this.providers.recoverConfigurations();
   }
+
+  readableRuntimePaths(): readonly string[] { return this.runtimeReadPaths; }
 
   prepareLaunch(input: PrepareAgentRuntimeLaunchInput): PreparedAgentRuntimePtyLaunch {
     // The decision hook talks to the gateway over its own capability, with or without agent status hooks.
