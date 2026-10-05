@@ -188,7 +188,7 @@ export class MaterialService {
     return this.serial(async () => {
       const result: MaterialsAddResult = { added: [], existing: [], rejected: [] };
       if (!this.writable) {
-        result.rejected = paths.slice(0, MAX_PATHS_PER_ADD).map((path) => ({
+        result.rejected = paths.slice(0, MATERIAL_LIMIT).map((path) => ({
           name: typeof path === "string" ? displayName(path) : "file", reason: "unreadable"
         }));
         return result;
@@ -348,7 +348,6 @@ export class MaterialService {
       this.watchers.untrack(id);
       await this.collect();
       this.changed();
-      await this.collect();
     });
   }
 

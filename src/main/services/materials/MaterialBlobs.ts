@@ -76,7 +76,7 @@ export class MaterialBlobs {
     }
     let bytes = 0;
     for (const entry of entries) {
-      if (!SHA256_FILE.test(entry) && !entry.startsWith(TEMP_PREFIX)) continue;
+      if (!SHA256_PATTERN.test(entry) && !entry.startsWith(TEMP_PREFIX)) continue;
       const info = await stat(join(this.root, entry));
       if (info.isFile()) bytes += info.size;
     }
