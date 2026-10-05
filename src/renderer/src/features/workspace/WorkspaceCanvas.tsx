@@ -106,6 +106,7 @@ import { snapMove } from "./snap";
 import { useCanvasPointerNavigation } from "./useCanvasPointerNavigation";
 import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
+import { useRemarkPopoverRect } from "./useRemarkPopoverRect";
 import { webglContextPool } from "../terminal/webglContextPool";
 
 const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
@@ -608,13 +609,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     : selectedRemark
       ? renderedMaterials.find((material) => material.id === selectedRemark.target.materialId) ?? null
       : null;
-  const popoverRect = useCameraSelector(camera, (current) => (
-    popoverMaterial && !homeEditing && !remarkDraft?.picking ? remarkPopoverRect(
-      canvasScreenRect(popoverMaterial, current),
-      viewport.current?.getBoundingClientRect() ?? null,
-      settings.uiScale
-    ) : null
-  ));
+  const popoverRect = useRemarkPopoverRect(
+    camera,
+    !homeEditing && !remarkDraft?.picking ? popoverMaterial : null,
+    viewport,
+    settings.uiScale
+  );
   // A boolean derived from the camera: the workspace renders only when it flips.
   const browserUnderOverlay = useCameraSelector(camera, (current) => {
     if (renderedBrowserCanvas === null) return false;
@@ -1592,27 +1592,4 @@ function acceptsMaterialDrop(event: React.DragEvent<HTMLElement>): boolean {
     && !(event.target instanceof Element && event.target.closest(
       "[data-canvas-layer-id], .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, .home-editor-toolbar"
     ));
-}
-
-function remarkPopoverRect(card: SessionBounds, viewportBounds: DOMRect | null, uiScale: number): SessionBounds {
-  const width = 360 * uiScale;
-  const height = 300 * uiScale;
-  const viewportWidth = viewportBounds?.width ?? 1360;
-  const viewportHeight = viewportBounds?.height ?? 820;
-  const gap = 12;
-  const inset = 12;
-  const clampX = (x: number): number => Math.min(Math.max(inset, x), Math.max(inset, viewportWidth - width - inset));
-  const clampY = (y: number): number => Math.min(Math.max(inset, y), Math.max(inset, viewportHeight - height - inset));
-  const right = card.position.x + card.size.width;
-  const bottom = card.position.y + card.size.height;
-  const candidates: Point[] = [
-    { x: card.position.x, y: bottom + gap },
-    { x: right + gap, y: card.position.y },
-    { x: card.position.x - gap - width, y: card.position.y },
-    { x: card.position.x, y: card.position.y - gap - height }
-  ];
-  const fits = candidates.find((candidate) => candidate.x >= inset && candidate.y >= inset
-    && candidate.x + width <= viewportWidth - inset && candidate.y + height <= viewportHeight - inset);
-  const chosen = fits ?? candidates[0];
-  return { position: { x: clampX(chosen.x), y: clampY(chosen.y) }, size: { width, height } };
 }
