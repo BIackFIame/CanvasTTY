@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import { connect as connectSocket } from "node:net";
@@ -194,6 +194,7 @@ test("fixed worker fetch honors the host isolation HTTPS proxy", async (t) => {
   const fixtureRoot = await mkdtemp(join(tmpdir(), "canvastty-secret-proxy-"));
   const keyPath = join(fixtureRoot, "fixture-key.pem");
   const certPath = join(fixtureRoot, "fixture-cert.pem");
+  const configPath = join(fixtureRoot, "fixture-openssl.cnf");
   const serverSockets = new Set();
   let proxyConnections = 0;
   let receivedRequest;
@@ -204,11 +205,17 @@ test("fixed worker fetch honors the host isolation HTTPS proxy", async (t) => {
     await Promise.all([closeServer(proxyServer), closeServer(tlsServer)]);
     await rm(fixtureRoot, { recursive: true, force: true });
   });
+  // Host OpenSSL defaults can duplicate extensions supplied on the command line,
+  // producing a certificate that Electron correctly rejects (notably with LibreSSL).
+  await writeFile(configPath, [
+    "[req]", "distinguished_name = subject", "x509_extensions = fixture_extensions",
+    "[subject]", "[fixture_extensions]", "subjectAltName = DNS:api.example.com",
+    "basicConstraints = critical,CA:TRUE", ""
+  ].join("\n"));
   try {
     execFileSync("openssl", [
       "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certPath,
-      "-days", "1", "-subj", "/CN=api.example.com", "-addext", "subjectAltName=DNS:api.example.com",
-      "-addext", "basicConstraints=critical,CA:TRUE"
+      "-days", "1", "-subj", "/CN=api.example.com", "-config", configPath
     ], { stdio: "ignore" });
   } catch {
     t.skip("OpenSSL is unavailable for the local synthetic HTTPS certificate fixture");
