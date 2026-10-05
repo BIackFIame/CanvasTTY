@@ -42,6 +42,9 @@ for (const [name, damage] of [
   ["malformed JSON", () => "{broken"],
   ["newer schema", (state) => JSON.stringify({ ...state, version: 99 })],
   ["invalid shape", () => JSON.stringify({ version: 1, materials: "broken" })],
+  ["unknown state fields", (state) => JSON.stringify({ ...state, futureData: [] })],
+  ["unknown material fields", (state) => { state.materials[0].futureData = []; return JSON.stringify(state); }],
+  ["unknown version fields", (state) => { state.materials[0].versions[0].futureData = []; return JSON.stringify(state); }],
   ["invalid material", (state) => { state.materials[0].kind = "unknown"; return JSON.stringify(state); }],
   ["invalid version", (state) => { state.materials[0].versions[0].reason = "unknown"; return JSON.stringify(state); }]
 ]) {

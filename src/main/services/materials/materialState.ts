@@ -62,15 +62,23 @@ export function restoreMaterialState(candidate: unknown): StoredMaterialState {
   if (!isRecord(candidate) || candidate.version !== MATERIAL_STATE_VERSION || !Array.isArray(candidate.materials)) {
     throw new Error("Unsupported materials state.");
   }
-  const materials = candidate.materials;
   const state = normalizeMaterialState(candidate);
-  if (state.materials.length !== materials.length || state.materials.some((material, index) => {
-    const stored = materials[index];
-    return !isRecord(stored) || !Array.isArray(stored.versions) || stored.versions.length !== material.versions.length;
-  })) {
-    throw new Error("Invalid materials state.");
-  }
+  if (!preservesStoredFields(candidate, state)) throw new Error("Invalid materials state.");
   return state;
+}
+
+function preservesStoredFields(stored: unknown, normalized: unknown): boolean {
+  if (Array.isArray(stored)) {
+    if (!Array.isArray(normalized) || stored.length !== normalized.length) return false;
+    const byId = new Map(normalized.filter(isRecord).map((entry) => [entry.id, entry]));
+    return stored.every((entry, index) => preservesStoredFields(entry,
+      isRecord(entry) && typeof entry.id === "string" ? byId.get(entry.id) : normalized[index]));
+  }
+  if (isRecord(stored)) {
+    return isRecord(normalized) && Object.keys(stored).every((key) =>
+      Object.hasOwn(normalized, key) && preservesStoredFields(stored[key], normalized[key]));
+  }
+  return normalized !== undefined && (stored === null || normalized !== null);
 }
 
 export function normalizeMaterialState(candidate: unknown): StoredMaterialState {
