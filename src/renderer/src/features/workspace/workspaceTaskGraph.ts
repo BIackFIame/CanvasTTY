@@ -1,5 +1,5 @@
 import type { SessionSnapshot } from "../../../../shared/contracts";
-import type { WorkspaceLayoutItem } from "./workspaceTaskLayout";
+import type { WorkspaceLayoutItem } from "./workspaceLayout";
 
 export type TaskCardState = "waiting" | "working" | "waiting-response" | "done" | "failed";
 

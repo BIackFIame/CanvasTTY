@@ -13,7 +13,6 @@ import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
-import { backlogApi } from "../workspace/backlogRendererApi";
 import { LaunchOptionsSection } from "./LaunchOptionsSection";
 import {
   autoKind,
@@ -23,6 +22,7 @@ import {
   resolveDefaultLaunchProfile
 } from "../../../../shared/autoMode";
 import type { TranslationKey } from "../../lib/i18n";
+import { backlogApi } from "../workspace/backlogRendererApi";
 
 /** The mode the launcher starts in for this CLI: the person's default, else the next one the CLI has. */
 export function initialProfile(provider: ProviderId, settings: AppSettings, platform: string): LaunchProfileId {

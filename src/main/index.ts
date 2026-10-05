@@ -1,3 +1,4 @@
+import { WorkspaceArchive } from "./services/WorkspaceArchive";
 import { configuredApiDomains, apiProfileDomains } from "./services/isolation/configuredApiDomains";
 import { registerNetworkPolicyIpc } from "./ipc/registerNetworkPolicyIpc";
 import { NetworkPolicyManager } from "./services/isolation/networkPolicy";
@@ -1068,7 +1069,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await materialService.load();
   registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
-  registerBacklogIpc(ipc,{secretGrants,reports,usagePrices,attention,timeline,checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
   registerIpc(ipc, {
     settings,
     recheckProviderClis: async () => {
@@ -1133,6 +1133,13 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     broadcastPluginStorageChange
   });
   markMainBoot("coreServicesReady");
+  const workspace = new WorkspaceArchive(userDataPath,{
+    descriptors: () => terminalSessionStore.get(),
+    create: request => managedTerminals.create(request), setBounds: (id,bounds) => managedTerminals.setBounds(id,bounds),
+    available: provider => provider === "terminal" || providerCliAvailability(providerClis!)[provider as AgentProviderId] === true,
+    redact: text => redaction.redact(text)
+  });
+  registerBacklogIpc(ipc,{outputHistory,reports,secretGrants,usagePrices,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),attention,terminals:managedTerminals,timeline,checkpoints,workspace,getMainWindow:()=>mainWindow});
   registerNetworkPolicyIpc(ipc,{manager:networkPolicies,getMainWindow:()=>mainWindow,
     taskRoot:id=>agentControlService.taskRoot(id),
     revokeBrowserCapabilities:cwd=>{managedTerminals.revokeBrowserCapabilitiesForStrictNetwork(cwd);},

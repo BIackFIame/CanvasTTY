@@ -1,7 +1,4 @@
-import { taskCardState } from "../workspace/workspaceTaskGraph";
-import { TaskSummaryBar } from "../workspace/TaskSummaryBar";
-import { backlogText } from "../workspace/workspaceBacklogText";
-import { lazy, Suspense, memo, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -71,6 +68,11 @@ import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
 import { isPixelSkinThemeId, pixelSkinStateForSession } from "../skins/skinCatalog";
 import { isPixelSkinPackId, usePixelSkinPackSummary } from "../skins/SkinAssets";
 import { pixelSkinControlLayout, pixelSkinSurfaceBounds, skinDetailLevel } from "../skins/SkinLayout";
+import { TaskSummaryBar } from "../workspace/TaskSummaryBar";
+import type { WorkspaceDropPayload } from "../workspace/workspaceContextDrop";
+import { backlogTerminalApi } from "../workspace/backlogRendererApi";
+import { backlogText } from "../workspace/workspaceBacklogText";
+import { taskCardState } from "../workspace/workspaceTaskGraph";
 
 const PluginChangesReviewDialog = lazy(() => import("./PluginChangesReviewDialog").then((module) => ({ default: module.PluginChangesReviewDialog })));
 
@@ -96,6 +98,9 @@ interface TerminalCardProps {
   forceMasterDetail: boolean;
   /** Multi-select group member: gets the selected outline without focus/WebGL side effects. */
   groupSelected?: boolean;
+  taskChildren?: readonly SessionSnapshot[];
+  broadcastTarget?: boolean;
+  externalSearchRequest?: { query: string; line: number; offset: number; requestId: number };
   /**
    * The card is CSS-hidden by an ancestor (HOME editing hides the whole window layer). One of the
    * inputs of the card's surface lifecycle (surfaceLifecycle.ts): a hidden card is suspended.
@@ -118,9 +123,9 @@ interface TerminalCardProps {
   /** Saving sessions is on, so the per-card "Don't restore" choice applies. */
   restoreEnabled?: boolean;
   onOpenUrl(url: string): void;
-  taskChildren?: readonly SessionSnapshot[];
-  onOpenInspector?(id: string, initialTab?: "timeline" | "report"): void;
-  onGatherTask?(id: string): void;
+  onOpenInspector(id: string, initialTab?: "timeline" | "report"): void;
+  onGatherTask(id: string): void;
+  onDropContext(id: string, payload: WorkspaceDropPayload, point: Point): void;
 }
 
 interface DragState {
@@ -179,6 +184,9 @@ function TerminalCardView({
   selected,
   forceMasterDetail,
   groupSelected,
+  taskChildren = [],
+  broadcastTarget = false,
+  externalSearchRequest,
   hidden = false,
   renaming,
   fullscreen,
@@ -193,9 +201,9 @@ function TerminalCardView({
   onRestart,
   onDispose,
   onOpenUrl,
-  taskChildren = [],
   onOpenInspector,
   onGatherTask,
+  onDropContext,
   restoreEnabled = false
 }: TerminalCardProps): React.JSX.Element {
   const borderSkin = terminalBorderSkinFallback(selectedBorderSkin);
@@ -254,7 +262,7 @@ function TerminalCardView({
   const [actionRunning, setActionRunning] = useState(false);
   const [actionToast, setActionToast] = useState<PluginCardActionResult | null>(null);
   const [pluginReview, setPluginReview] = useState<{ pluginId: string; actionId: string; review: NonNullable<PluginCardActionResult["review"]> } | null>(null);
-  const hasOptions = Boolean(onOpenInspector) || restoreEnabled || pluginDecorations.actions.length > 0;
+  const hasOptions = true;
   const runPluginAction = (action: PluginCardActionEntry): void => {
     setOptionsOpen(false);
     setActionRunning(true);
@@ -390,19 +398,31 @@ function TerminalCardView({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatches, setSearchMatches] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
+  const externalSearchRequestRef = useRef(externalSearchRequest);
+  externalSearchRequestRef.current = externalSearchRequest;
+  const searchQueryRef = useRef(searchQuery);
+  searchQueryRef.current = searchQuery;
+  const [historicalOutput, setHistoricalOutput] = useState<{
+    text: string;
+    firstLine: number;
+    targetLine: number;
+    loading: boolean;
+    historyTruncated?: boolean;
+    error?: string;
+  } | null>(null);
   // Last OSC 0/2 title the shell reported; display-only, never persisted.
   const [oscTitle, setOscTitle] = useState<string | null>(null);
   const titleSource = { title: session.title, titleCustomized: session.titleCustomized, oscTitle };
   const visibleTitle = visibleTerminalTitle({ ...titleSource, cwdLabel: compactPath(session.cwd) });
   // Same precedence, but the tooltip shows the full path when the cwd is the label.
   const visibleTitleTooltip = visibleTerminalTitle({ ...titleSource, cwdLabel: session.cwd });
+  const visibleTitleRef = useRef(visibleTitle);
+  visibleTitleRef.current = visibleTitle;
   const taskState = session.parentSessionId ? taskCardState(session) : null;
   const taskStateLabel = taskState === "working" ? "taskStateWorking"
     : taskState === "waiting" ? "taskStateWaiting"
       : taskState === "waiting-response" ? "taskStateWaitingResponse"
         : taskState === "done" ? "taskStateDone" : "taskStateFailed";
-  const visibleTitleRef = useRef(visibleTitle);
-  visibleTitleRef.current = visibleTitle;
 
   restartAction.current = async (resume = false) => {
     if (restarting || !sessionExited.current) return;
@@ -719,6 +739,20 @@ function TerminalCardView({
         current: resultCount > 0 && resultIndex >= 0 ? resultIndex + 1 : 0,
         total: resultCount
       });
+      const requested = externalSearchRequestRef.current;
+      if (resultCount > 0) {
+        setHistoricalOutput(null);
+      } else if (requested && searchQueryRef.current === requested.query) {
+        setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: true });
+        void backlogTerminalApi().readOutputContext(session.id, requested.offset).then((context) => {
+          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
+          setHistoricalOutput({ ...context, loading: false });
+        }).catch((reason: unknown) => {
+          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
+          setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: false,
+            error: reason instanceof Error ? reason.message : String(reason) });
+        });
+      }
     });
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
@@ -1064,7 +1098,9 @@ function TerminalCardView({
 
   const runSearch = (query: string, direction: "next" | "previous", incremental: boolean): void => {
     const addon = searchAddonRef.current;
+    searchQueryRef.current = query;
     setSearchQuery(query);
+    setHistoricalOutput(null);
     if (!addon) return;
     if (!query) {
       addon.clearDecorations();
@@ -1076,10 +1112,21 @@ function TerminalCardView({
     else addon.findPrevious(query, options);
   };
 
+  useEffect(() => {
+    if (!externalSearchRequest || summaryMode) return;
+    searchQueryRef.current = externalSearchRequest.query;
+    setHistoricalOutput(null);
+    setSearchOpen(true);
+    setSearchQuery(externalSearchRequest.query);
+    searchAddonRef.current?.findNext(externalSearchRequest.query, { decorations: SEARCH_DECORATIONS });
+    terminalRef.current?.focus();
+  }, [externalSearchRequest, summaryMode]);
+
   const closeSearch = (): void => {
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMatches({ current: 0, total: 0 });
+    setHistoricalOutput(null);
     searchAddonRef.current?.clearDecorations();
     // Hand the keyboard back to the terminal so the next keystrokes reach the PTY.
     if (!renaming && !summaryMode) terminalRef.current?.focus();
@@ -1154,7 +1201,7 @@ function TerminalCardView({
   );
   return (
     <article
-      className={`terminal-card terminal-card--with-activity-summary ${session.role === "orchestrator" && (taskChildren.length > 0 || Boolean(session.taskBudget)) ? "terminal-card--with-task-summary" : ""} terminal-card--${session.provider} ${summaryMode ? "terminal-card--summary" : ""} ${selected || groupSelected ? "terminal-card--selected" : ""} ${session.status === "needs_approval" || session.status === "failed" ? "terminal-card--attention" : ""} ${fullscreen ? "terminal-card--fullscreen" : ""}`}
+      className={`terminal-card terminal-card--${session.provider} ${summaryMode ? "terminal-card--summary" : ""} ${selected || groupSelected ? "terminal-card--selected" : ""} ${session.status === "needs_approval" || session.status === "failed" ? "terminal-card--attention" : ""} ${broadcastTarget ? "terminal-card--broadcast-target" : ""} ${session.role === "orchestrator" && (taskChildren.length > 0 || Boolean(session.taskBudget)) ? "terminal-card--with-task-summary" : ""} terminal-card--with-activity-summary ${fullscreen ? "terminal-card--fullscreen" : ""}`}
       data-interactive="true"
       data-canvas-layer-id={`terminal:${session.id}`}
       data-canvas-widget-id={terminalCanvasWidgetId(session.id)}
@@ -1183,25 +1230,25 @@ function TerminalCardView({
       onClick={activateCard}
       onDoubleClick={activateCardDouble}
       onDragOver={(event) => {
-        if (!event.dataTransfer.types.includes("Files")) return;
+        if (!event.dataTransfer.types.includes("Files")
+          && !event.dataTransfer.types.includes("text/plain")
+          && !event.dataTransfer.types.includes("text/uri-list")) return;
         event.preventDefault();
         event.stopPropagation();
         event.dataTransfer.dropEffect = sessionExited.current || renaming ? "none" : "copy";
       }}
       onDrop={(event) => {
-        if (!event.dataTransfer.types.includes("Files")) return;
+        if (!event.dataTransfer.types.includes("Files")
+          && !event.dataTransfer.types.includes("text/plain")
+          && !event.dataTransfer.types.includes("text/uri-list")) return;
         event.preventDefault();
         event.stopPropagation();
-        const terminal = terminalRef.current;
-        if (!terminal || sessionExited.current || renaming) return;
-        try {
-          const text = window.canvasTTY.terminal.fileDropText(Array.from(event.dataTransfer.files));
-          onSelect(session.id);
-          terminal.focus();
-          terminal.paste(text);
-        } catch {
-          terminal.write(`\r\n[CanvasTTY] ${t(locale, "terminalFileDropFailed")}\r\n`);
-        }
+        if (sessionExited.current || renaming) return;
+        onDropContext(session.id, {
+          files: Array.from(event.dataTransfer.files),
+          url: event.dataTransfer.getData("text/uri-list").split("\n").find((line) => line && !line.startsWith("#")) ?? "",
+          text: event.dataTransfer.getData("text/plain")
+        }, { x: event.clientX, y: event.clientY });
       }}
       style={{
         width: size.width,
@@ -1282,7 +1329,7 @@ function TerminalCardView({
           )}
           {session.isolation && (
             <span className={`terminal-card__role terminal-card__isolation terminal-card__isolation--${session.isolation.state}`} data-isolation={session.isolation.state}
-              title={session.isolation.state === "on" ? t(locale, "isolationOnNote") : session.isolation.reason ?? ""}>
+              title={session.isolation.state === "on" ? [t(locale, "isolationOnNote"), session.isolation.reason].filter(Boolean).join("\n") : session.isolation.reason ?? ""}>
               {t(locale, session.isolation.state === "on" ? "isolationOn" : session.isolation.state === "off" ? "isolationOff"
                 : session.isolation.state === "environment" ? "isolationEnvironment" : "isolationUnavailable")}
             </span>
@@ -1292,7 +1339,12 @@ function TerminalCardView({
               {t(locale, "configuredModeBadge")}: {session.configuredMode.mode}
             </span>
           )}
-          {session.reviewRequested && <span className="terminal-card__review-requested" title={backlogText(locale, "reviewRequested")}>{backlogText(locale, "reviewRequested")}</span>}
+          {session.isolation?.network && <span className="terminal-card__role" title={session.isolation.network.domains.join(", ")}>
+            {locale==="ru" ? "Сеть" : "Network"}: {session.isolation.network.mode==="open" ? (locale==="ru" ? "открыта" : "open") : session.isolation.network.mode==="offline" ? (locale==="ru" ? "отключена" : "offline") : (locale==="ru" ? "разрешённые домены" : "allowed domains")}
+          </span>}
+          {session.reviewRequested && <span className="terminal-card__review-requested" title={backlogText(locale, "reviewRequested")}>
+            {backlogText(locale, "reviewRequested")}
+          </span>}
           {session.environment && (
             <span className="terminal-card__environment" title={session.environment.detail ?? `${session.environment.pluginId} · ${session.environment.kind}`}>
               {session.environment.label}
@@ -1307,7 +1359,7 @@ function TerminalCardView({
         </div>
         {!pixelControls && terminalActions}
       </header>
-      <TaskSummaryBar parent={session} children={taskChildren} locale={locale} onGather={() => onGatherTask?.(session.id)} />
+      <TaskSummaryBar parent={session} children={taskChildren} locale={locale} onGather={() => onGatherTask(session.id)} />
       <div className="terminal-card__surface" data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost} />
       <div className="terminal-card__activity-summary" data-interactive="true" role="group" aria-label={locale === "ru" ? "Расходы сессии" : "Session usage"}>
         <span title={usageDetails(session.usage, locale)}>{locale === "ru" ? "Расход" : "Usage"}: {compactUsage(session.usage, locale)}</span>
@@ -1315,7 +1367,7 @@ function TerminalCardView({
           {locale === "ru" ? "Проверяющий" : "Reviewer"}: {compactUsage(session.reviewUsage, locale)}
         </span>}
         {session.sessionReport && <button type="button" onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => onOpenInspector?.(session.id, "report")} title={locale === "ru" ? "Открыть готовый отчёт" : "Open the completed report"}>
+          onClick={() => onOpenInspector(session.id, "report")} title={locale === "ru" ? "Открыть готовый отчёт" : "Open the completed report"}>
           {locale === "ru" ? "Отчёт готов" : "Report ready"}
         </button>}
       </div>
@@ -1331,7 +1383,10 @@ function TerminalCardView({
       {pixelControls && terminalActions}
       {optionsOpen && hasOptions && (
         <div className="terminal-card__menu" role="menu" onKeyDown={(event) => { if (event.key === "Escape") setOptionsOpen(false); }}>
-          {onOpenInspector && <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => { setOptionsOpen(false); onOpenInspector(session.id); }}>{locale === "ru" ? "События и задача…" : "Activity and task…"}</button>}
+          <button className="terminal-card__menu-action" type="button" role="menuitem" onClick={() => {
+            setOptionsOpen(false);
+            onOpenInspector(session.id);
+          }}>{locale === "ru" ? "События и задача…" : "Activity and task…"}</button>
           {restoreEnabled && (
             <label role="menuitemcheckbox" aria-checked={session.skipRestore === true}>
               <input
@@ -1454,6 +1509,28 @@ function TerminalCardView({
             <UiIcon name="close" size="1em" />
           </button>
         </div>
+      )}
+      {historicalOutput && !summaryMode && (
+        <section className="terminal-card__historical-output" aria-label={backlogText(locale, "historicalOutput")}>
+          <header><div><strong>{backlogText(locale, "historicalOutput")}</strong><span>{backlogText(locale, "historicalOutputContext")}</span></div>
+            <button type="button" onClick={() => { setHistoricalOutput(null); closeSearch(); }} aria-label={t(locale, "close")}>
+              <UiIcon name="close" size="1em" />
+            </button>
+          </header>
+          {historicalOutput.loading && <p role="status">{backlogText(locale, "historicalOutputLoading")}</p>}
+          {historicalOutput.error && <p role="alert">{historicalOutput.error}</p>}
+          {!historicalOutput.loading && !historicalOutput.error && (
+            <>
+            {historicalOutput.historyTruncated && <p role="status">{backlogText(locale, "outputHistoryPruned")}</p>}
+            <pre>{historicalOutput.text.split(/\r?\n/u).map((line, index) => {
+              const lineNumber = historicalOutput.firstLine + index;
+              return <span key={`${lineNumber}:${index}`} data-target={lineNumber === historicalOutput.targetLine ? "true" : undefined}>
+                <small>{lineNumber}</small>{line || " "}{"\n"}
+              </span>;
+            })}</pre>
+            </>
+          )}
+        </section>
       )}
       <button
         className="terminal-card__summary"

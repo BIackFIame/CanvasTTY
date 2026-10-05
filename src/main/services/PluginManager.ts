@@ -1,4 +1,3 @@
-import { ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
@@ -57,6 +56,7 @@ import type { AgentToolProvider } from "./PluginAgentTools.ts";
 import type { CardActionProvider } from "./PluginCards.ts";
 import type { BrowserEngineProvider } from "./browser/BrowserEngineTabs.ts";
 import { AGENT_PROVIDERS } from "../../shared/contracts.ts";
+import { ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -222,15 +222,13 @@ export class PluginManager {
   private readonly downloadRepository: DownloadRepository;
   private readonly downloadFullRepository: DownloadRepository;
   private readonly downloadModuleFiles: DownloadModuleFiles;
-  private tokenProvider: () => Promise<string | null>;
   private registryWrite = Promise.resolve();
   private versionsWrite = Promise.resolve();
 
   constructor(
     userDataPath: string,
     downloadRepository?: DownloadRepository,
-    downloadModuleFiles: DownloadModuleFiles = downloadGithubModuleFiles,
-    tokenProvider?: () => Promise<string | null>
+    downloadModuleFiles: DownloadModuleFiles = downloadGithubModuleFiles
   ) {
     this.pluginRoot = join(userDataPath, "plugins");
     this.stagingRoot = join(userDataPath, "plugin-staging");
@@ -242,23 +240,10 @@ export class PluginManager {
     this.downloadRepository = downloadRepository ?? downloadGithubManifest;
     this.downloadFullRepository = downloadRepository ?? downloadGithubRepository;
     this.downloadModuleFiles = downloadModuleFiles;
-    this.tokenProvider = tokenProvider ?? (async () => null);
-  }
-
-  /** Resolves the GitHub token from env, then the OAuth session (if any). */
-  private async githubToken(): Promise<string | null> {
-    const envToken = process.env.GITHUB_TOKEN ?? process.env.CANVASTTY_GITHUB_TOKEN;
-    if (envToken) return envToken;
-    try {
-      return await this.tokenProvider();
-    } catch {
-      return null;
-    }
   }
 
   /** Registers the OAuth-backed token provider used by module-level helpers. */
   registerTokenProvider(provider: () => Promise<string | null>): void {
-    this.tokenProvider = provider;
     registerGithubTokenProvider(provider);
   }
 
@@ -2536,13 +2521,6 @@ async function fetchRemoteManifestVersions(sourceUrls: readonly string[]): Promi
     }
   }
   return versions;
-}
-
-async function fetchRemoteManifestVersion(sourceUrl: string): Promise<string> {
-  const versions = await fetchRemoteManifestVersions([sourceUrl]);
-  const version = versions.get(sourceUrl);
-  if (version === undefined) throw new Error("GitHub manifest could not be fetched.");
-  return version;
 }
 
 async function downloadGithubModuleFiles(

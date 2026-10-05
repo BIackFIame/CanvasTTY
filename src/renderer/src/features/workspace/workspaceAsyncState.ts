@@ -70,3 +70,7 @@ export function shouldHydrateDraft(
 ): boolean {
   return requestRevision === currentRevision && (!initialized || !dirty);
 }
+
+export function clearDraftIfUnchanged(current: string, submitted: string): string {
+  return current === submitted ? "" : current;
+}

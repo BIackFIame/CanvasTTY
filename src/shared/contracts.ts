@@ -1830,6 +1830,10 @@ export interface CanvasTTYApi {
     openUrl(url: string): Promise<void>;
   };
   terminal: {
+    paste(id: string, text: string): Promise<void>;
+    describeFileDrop(files: File[], sessionId: string): Promise<{text:string;paths:string[];outsideProject:string[]}>;
+    searchOutput(query: string, sessionIds?: string[]): Promise<TerminalOutputSearchResult>;
+    readOutputContext(id: string, offset: number): Promise<TerminalOutputContext>;
     onFocusRequested(listener: (id: string) => void): () => void;
     fileDropText(files: File[]): string;
     list(): Promise<SessionSnapshot[]>;

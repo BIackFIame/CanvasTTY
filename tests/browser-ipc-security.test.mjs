@@ -69,6 +69,7 @@ test("channels that change settings, plugins, secrets or terminals accept only t
     "pluginsPlaylistsList",
     "pluginsPlaylistsRead",
     "pluginsPlaylistsWrite",
+    "githubAuthCancel",
     "pluginsHermesHudStatus",
     "pluginsHermesHudOpen",
     "pluginsHermesHudClose",

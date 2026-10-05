@@ -1,5 +1,5 @@
-import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import type {
   AppSettings,
   BrowserActivityStateEvent,
@@ -270,6 +270,10 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    paste: (id, text) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.paste, id, text),
+    describeFileDrop: (files, sessionId) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.describeFileDrop, files.map((file) => webUtils.getPathForFile(file)), sessionId),
+    searchOutput: (query, sessionIds) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.searchOutput, query, sessionIds),
+    readOutputContext: (id, offset) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.readOutputContext,id,offset),
     onFocusRequested: (listener) => subscribe(BACKLOG_TERMINAL_IPC.focusRequested, listener),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),

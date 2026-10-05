@@ -1,32 +1,37 @@
-import type { SecretGrantDuration } from "../../shared/backlog.ts";
-import type { SecretGrantService } from "../services/SecretGrantService.ts";
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
-import { BACKLOG_IPC, BACKLOG_EVENTS, type NotificationPreferences, type UsagePrice } from "../../shared/backlog.ts";
+import { realpath } from "node:fs/promises";
+import { isAbsolute, relative } from "node:path";
+import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type WorkspacePreset, type NotificationPreferences, type UsagePrice, type SecretGrantDuration } from "../../shared/backlog.ts";
+import { terminalFileDropText } from "../../shared/terminalFileDrop.ts";
 import type { IpcRegistrar } from "./IpcReadinessGate.ts";
 import type { TerminalManager } from "../services/TerminalManager.ts";
 import type { SessionTimelineService } from "../services/SessionTimelineService.ts";
 import type { GitCheckpoints } from "../services/GitCheckpoints.ts";
+import type { WorkspaceArchive } from "../services/WorkspaceArchive.ts";
+import type { TerminalOutputHistory } from "../services/TerminalOutputHistory.ts";
 
 import type { AttentionService } from "../services/AttentionService.ts";
 
 import type { OrchestrationTaskBoard, NewOrchestrationTask } from "../services/OrchestrationTaskBoard.ts";
 import type { OrchestrationBudgetService, OrchestrationBudgetLimits } from "../services/OrchestrationBudgetService.ts";
 import type { OrchestrationTemplateService } from "../services/OrchestrationTemplateService.ts";
+import type { SecretGrantService } from "../services/SecretGrantService.ts";
 
 import type { UsagePrices } from "../services/UsagePrices.ts";
 import type {SessionReports} from "../services/SessionReports.ts";
 interface Dependencies {
-  secretGrants?: SecretGrantService;
   reports?:SessionReports;
   usagePrices:UsagePrices;
   board:OrchestrationTaskBoard; budgets:OrchestrationBudgetService; flows:OrchestrationTemplateService;
   taskRoot(id:string):{id:string;cwd:string;startedAt:number};
   attention: AttentionService;
-  terminals: TerminalManager; timeline: SessionTimelineService; checkpoints: GitCheckpoints;
+  secretGrants?: SecretGrantService;
+  outputHistory: TerminalOutputHistory;
+  terminals: TerminalManager; timeline: SessionTimelineService; checkpoints: GitCheckpoints; workspace: WorkspaceArchive;
   getMainWindow(): BrowserWindow | null;
 }
 export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void {
-  const {terminals,timeline,checkpoints} = deps;
+  const {terminals,timeline,checkpoints,workspace,outputHistory} = deps;
   deps.board.subscribe(change=>{
     const window=deps.getMainWindow();
     if(!window || window.isDestroyed() || window.webContents.isDestroyed())return;
@@ -43,6 +48,17 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   const handle = (channel: string, fn: (...args: any[]) => unknown) => ipc.handle(channel, (event, ...args) => {trust(event);return fn(...args);});
   const root=(id:string)=>{session(id);return deps.taskRoot(id);};
   const masked=(value:unknown):unknown=>typeof value==="string" ? terminals.redactSecrets(value) : Array.isArray(value) ? value.map(masked) : value && typeof value==="object" ? Object.fromEntries(Object.entries(value).map(([key,row])=>[key,masked(row)])) : value;
+  handle(BACKLOG_IPC.broadcast,(ids:unknown,text:unknown)=>{
+    if(!Array.isArray(ids) || ids.length>100 || ids.some(id=>typeof id!=="string") || typeof text!=="string" || !text.trim() || text.length>16_000)throw new Error("Invalid broadcast input.");
+    const data=terminals.redactSecrets(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,"");
+    const delivered:string[]=[],skipped:string[]=[];
+    for(const id of new Set<string>(ids)){
+      const row=terminals.getMetadata(id);
+      if(!row || row.exitCode!==null || row.status!=="idle" && row.status!=="working"){skipped.push(id);continue;}
+      try{if(terminals.inputChecked(id,`\x1b[200~${data}\x1b[201~\r`))delivered.push(id);else skipped.push(id);}catch{skipped.push(id);}
+    }
+    return {delivered,skipped};
+  });
   handle(BACKLOG_IPC.tasks,(id:string)=>{const task=root(id);return deps.board.listTasks(task.cwd,task.id);});
   handle(BACKLOG_IPC.addTask,async(id:string,input:NewOrchestrationTask)=>{
     const task=root(id);
@@ -186,5 +202,52 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   handle(BACKLOG_IPC.restoreCheckpoint, async (id: string, ref: string) => {
     const row=session(id); if (row.status === "working" || row.status === "needs_approval") throw new Error("Stop the active turn before restoring files.");
     const result=await checkpoints.restore(id,row.cwd,ref); await timeline.append(id,"checkpoint","Person restored a checkpoint",ref); return result;
+  });
+  handle(BACKLOG_IPC.exportWorkspace, async () => {
+    const value=JSON.parse(workspace.export()),roots=new Map<string,{id:string;cwd:string;startedAt:number}>();
+    const rows=terminals.listMetadata(),rootCards=new Map(rows.filter(row=>!row.parentSessionId).map(row=>[row.taskScope?.id ?? row.id,row.id]));
+    for(const row of rows){const task=root(row.id);roots.set(task.id,task);}
+    value.tasks=await Promise.all([...roots.values()].map(async task=>({rootSessionId:rootCards.get(task.id) ?? task.id,tasks:(await deps.board.listTasks(task.cwd,task.id)).tasks})));
+    return JSON.stringify(masked(value),null,2);
+  });
+  handle(BACKLOG_IPC.previewImport, (text: string) => workspace.preview(text));
+  handle(BACKLOG_IPC.importWorkspace, async (text: string, options: {confirmBypass?:unknown}) => {
+    // Version/size/session validation runs before any JSON extras are considered.
+    await workspace.preview(text);
+    const value=JSON.parse(text),groups=value.tasks;
+    if(groups!==undefined && (!Array.isArray(groups) || groups.length>100))throw new Error("Invalid workspace task groups.");
+    const result=await workspace.import(text,options?.confirmBypass === true);
+    for(const group of groups ?? []) {
+      if(!group || typeof group.rootSessionId!=="string") {result.warnings.push("An invalid task group was skipped.");continue;}
+      const restored=result.restoredIds[group.rootSessionId];if(!restored)continue;
+      try{await deps.board.importGroup(session(restored).cwd,restored,masked(group.tasks),result.restoredIds);}
+      catch(error){result.warnings.push(`Task board: ${error instanceof Error ? error.message : "could not be restored"}`);}
+    }
+    return {warnings:result.warnings,sessions:result.sessions};
+  });
+  handle(BACKLOG_IPC.workspacePresets, () => workspace.presets());
+  handle(BACKLOG_IPC.saveWorkspacePreset, (preset: WorkspacePreset) => workspace.savePreset(preset));
+  handle(BACKLOG_IPC.deleteWorkspacePreset, (id: string) => workspace.deletePreset(id));
+  handle(BACKLOG_TERMINAL_IPC.describeFileDrop, async (paths: unknown, id: string) => {
+    if (!Array.isArray(paths) || paths.length > 100 || !paths.every((entry) => typeof entry === "string" && entry.length < 4096)) throw new Error("Invalid dropped files.");
+    const row=session(id), root=await realpath(terminals.pluginContext(row.id)?.workingDirectory ?? row.cwd);
+    const canonical=await Promise.all(paths.map((path: string) => realpath(path)));
+    const outsideProject=canonical.filter((path) => {const rel=relative(root,path);return rel === ".." || rel.startsWith("../") || rel.startsWith("..\\") || isAbsolute(rel);});
+    return {text:terminals.redactSecrets(terminalFileDropText(canonical,process.platform)),paths:canonical,outsideProject};
+  });
+  handle(BACKLOG_TERMINAL_IPC.paste, (id: string, text: unknown) => {
+    session(id); if (typeof text !== "string" || text.length > 16_000) throw new Error("Context paste is limited to 16,000 characters.");
+    const clean=terminals.redactSecrets(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,"");
+    if (!terminals.inputChecked(id,`\x1b[200~${clean}\x1b[201~`)) throw new Error("The card cannot accept input right now.");
+  });
+  handle(BACKLOG_TERMINAL_IPC.searchOutput, async (query: unknown, requested?: unknown) => {
+    if (typeof query !== "string" || query.length > 200 || !query.trim()) return {matches:[],prunedSessionIds:[]};
+    if (requested !== undefined && (!Array.isArray(requested) || requested.length>256 || requested.some((id) => typeof id !== "string"))) throw new Error("Invalid session list.");
+    return outputHistory.search(query,Array.isArray(requested) ? requested as string[] : undefined);
+  });
+  handle(BACKLOG_TERMINAL_IPC.readOutputContext, async (id: string, offset: unknown) => {
+    session(id);
+    if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new Error("Invalid output offset.");
+    return outputHistory.readContext(id,offset);
   });
 }
