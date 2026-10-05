@@ -7,6 +7,8 @@ import {
   shouldPreventCanvasNavigationInput
 } from "../src/main/services/CanvasNavigationOverride.ts";
 
+import { trackTerminalEditFocus } from "../src/renderer/src/lib/shortcuts.ts";
+
 const input = (type, key, modifiers = {}) => ({
   type,
   key,
@@ -470,4 +472,60 @@ test("macOS Command+C/V/A keep the Edit menu in ordinary fields and plugin pages
   assert.deepEqual(ignored, [true, false, true, false]);
   pressV();
   assert.deepEqual(ignored, [true, false, true, false]);
+});
+
+
+test("focused shortcut recorders receive Command+A/C/V while ordinary fields keep native editing", (t) => {
+  const previousElement = globalThis.Element;
+  class FakeElement {
+    constructor(selector) { this.selector = selector; }
+    closest(query) { return query.includes(this.selector) ? this : null; }
+  }
+  globalThis.Element = FakeElement;
+  t.after(() => {
+    if (previousElement === undefined) delete globalThis.Element;
+    else globalThis.Element = previousElement;
+  });
+  const top = {};
+  const contents = new EventEmitter();
+  const ignored = [];
+  contents.isDestroyed = () => false;
+  contents.setIgnoreMenuShortcuts = (active) => ignored.push(active);
+  contents.mainFrame = top;
+  contents.focusedFrame = top;
+  const controller = new CanvasNavigationInputController({ wheelBinding: "Meta", navigationBinding: "Alt" }, () => undefined);
+  controller.attach(contents, { captureMacEditShortcuts: true });
+  // The canvas-navigation recorder suspends these bindings while listening for its new chord.
+  controller.setShortcutCaptureActive(true);
+  const listeners = new Map();
+  const doc = {
+    activeElement: new FakeElement("input"),
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+    defaultView: { addEventListener() {}, removeEventListener() {} }
+  };
+  const stop = trackTerminalEditFocus(doc, (focused) => controller.setTerminalEditFocus(contents, focused));
+  t.after(stop);
+  const pressEditKeys = () => {
+    for (const key of ["a", "c", "v"]) {
+      const event = { preventDefault: () => assert.fail("the renderer must receive recorder keyboard events") };
+      contents.emit("before-input-event", event, input("keyDown", key, { code: `Key${key.toUpperCase()}`, meta: true }));
+      contents.emit("before-input-event", event, input("keyUp", key, { code: `Key${key.toUpperCase()}`, meta: true }));
+    }
+  };
+  pressEditKeys();
+  assert.deepEqual(ignored, [], "ordinary inputs retain the native Edit menu");
+  doc.activeElement = new FakeElement('[data-shortcut-capture="true"]');
+  listeners.get("focusin")();
+  pressEditKeys();
+  assert.deepEqual(ignored, [true, false, true, false, true, false], "all three chords bypass the menu for the recorder");
+  ignored.length = 0;
+  contents.focusedFrame = {};
+  pressEditKeys();
+  assert.deepEqual(ignored, [], "a focused plugin frame still uses native editing even with a stale recorder report");
+  contents.focusedFrame = top;
+  doc.activeElement = new FakeElement("textarea");
+  listeners.get("focusin")();
+  pressEditKeys();
+  assert.deepEqual(ignored, [], "leaving the recorder restores native editing");
 });

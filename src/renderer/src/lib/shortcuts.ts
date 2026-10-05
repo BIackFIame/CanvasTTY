@@ -63,15 +63,16 @@ export function isRenameInputTarget(target: EventTarget | null): boolean {
 }
 
 /**
- * A terminal surface implements Command+C/V (and Codex Command+A) itself, so only while one has focus does the main
- * process keep those keys from the Edit menu. Ordinary fields and plugin pages (an iframe is the active element) use
- * the menu's native editing.
+ * Renderer-owned editing includes terminal surfaces and shortcut recorders: both need Command+C/V/A delivered
+ * as keyboard events. The terminal-named focus API also covers these recorder controls. Ordinary fields and plugin
+ * pages (an iframe is the active element) use the menu's native editing.
  */
 export function isTerminalEditTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest(".terminal-card__surface, .xterm"));
+  return isShortcutCaptureTarget(target)
+    || (target instanceof Element && Boolean(target.closest(".terminal-card__surface, .xterm")));
 }
 
-/** Calls `report` with each change of terminal keyboard focus in `doc` (macOS edit-shortcut routing). */
+/** Reports changes in renderer-owned edit focus, including shortcut recorders (macOS edit-shortcut routing). */
 export function trackTerminalEditFocus(doc: Document, report: (focused: boolean) => void): () => void {
   let last: boolean | null = null;
   const update = (): void => {

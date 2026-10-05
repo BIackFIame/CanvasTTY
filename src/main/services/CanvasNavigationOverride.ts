@@ -200,7 +200,7 @@ export class CanvasNavigationInputController {
   private readonly attachedContents = new Set<WebContents>();
   private readonly onActiveChange: (state: CanvasNavigationOverrideState) => void;
   private menuShortcutContents: WebContents | null = null;
-  /** Contents whose renderer reported that a terminal surface has keyboard focus. */
+  /** Contents whose renderer reported keyboard focus in a terminal surface or shortcut recorder. */
   private readonly terminalEditFocus = new WeakSet<WebContents>();
 
   constructor(
@@ -236,9 +236,9 @@ export class CanvasNavigationInputController {
   }
 
   /**
-   * The renderer reports whether a terminal surface (which implements its own Command+C/V and Codex Command+A) has
-   * keyboard focus. Only then are those shortcuts kept from the Edit menu; every other field, in the app or in a
-   * plugin page, keeps the menu's native Copy, Paste and Select All.
+   * The renderer reports whether a terminal surface or shortcut recorder has keyboard focus. Both consume
+   * Command+C/V/A themselves, so those shortcuts bypass the Edit menu. The terminal-named API covers both;
+   * ordinary fields and plugin pages keep the menu's native Copy, Paste and Select All.
    */
   setTerminalEditFocus(contents: WebContents, focused: boolean): void {
     if (focused) this.terminalEditFocus.add(contents);
