@@ -6,6 +6,7 @@ export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
 /** "auto" only for agents with a native auto mode (autoMode.ts); "normal" is the default. */
 export type LaunchProfileId = import("./autoMode.ts").LaunchProfile;
+export type DefaultLaunchProfile = import("./autoMode.ts").DefaultLaunchProfile;
 export type ReasoningEffort = import("./launchModel.ts").ReasoningEffort;
 /**
  * What a session is for, independent of its normal/YOLO profile: an ordinary
@@ -428,8 +429,10 @@ export interface AppSettings {
   orchestrationMaxDepth: number;
   /** How many live subagents one top-level orchestrator may have at once, all levels together (1–32, 8 by default). */
   orchestrationMaxSubagents: number;
-  /** The mode the launcher starts in (auto by default); a CLI without it starts in the next one it has. */
-  defaultLaunchProfile: LaunchProfileId;
+  /** The common mode the launcher starts in (auto by default); a CLI without it starts in the next one it has. */
+  defaultLaunchProfile: DefaultLaunchProfile;
+  /** Optional per-agent overrides for the common launch mode. */
+  defaultLaunchProfiles: Partial<Record<AgentProviderId, DefaultLaunchProfile>>;
 }
 
 export type AgentIsolationSetting = "on" | "off";
