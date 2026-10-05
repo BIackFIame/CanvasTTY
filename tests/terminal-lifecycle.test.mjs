@@ -377,7 +377,9 @@ test("failed PTYs preserve their final sanitized output as failure details", asy
 
   // Masked whole before the last lines are chosen (a cut inside a secret would leave its tail readable).
   assert.match(source, /terminalFailureDetails\(this\.redactSecrets\(current\.bufferChunks\.slice\(current\.bufferStart\)\.join\(""\)\)\)/);
-  assert.match(source, /current\.metadata\.failureDetails = exitCode === 0/);
+  assert.match(source, /const details = exitCode === 0/);
+  // A signal death (node-pty: exitCode 0 plus the signal) is a failure named by its signal, not a clean exit.
+  assert.match(source, /const exitCode = killedBy \? 128 \+ killedBy : reportedExitCode;/);
 });
 
 function effectDependenciesContaining(source, marker) {
