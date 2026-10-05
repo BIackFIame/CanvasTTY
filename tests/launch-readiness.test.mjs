@@ -273,3 +273,20 @@ test("cancellation and restart while awaiting CLI readiness never deliver queued
   assert.equal((await replaced).delivered, false);
   assert.ok(calls.every(call => call.written.length === 0));
 });
+
+test("OpenCode's first home prompt becomes ready before a conversation lifecycle hook exists", async (t) => {
+  const calls = [];
+  const runtime = { prepareLaunch: () => ({ args: [], environment: {}, cleanup() {} }), currentStatus: () => null };
+  const terminals = new TerminalManager(() => {}, clis(), undefined, runtime, true, spawner(calls));
+  t.after(() => terminals.disposeAll());
+  const session = terminals.create({ provider: "opencode", profile: "normal", cwd, position: at });
+  const pending = terminals.deliverInput(session.id, "home screen task\r", 1000);
+  calls[0].emit("Ask anything…");
+  await tick();
+  assert.deepEqual(calls[0].written, []);
+  calls[0].emit("\x1b[32mctrl+p\x1b[0m commands");
+  for (let i = 0; i < 30 && !calls[0].written.length; i++) await tick();
+  assert.deepEqual(calls[0].written, ["home screen task\r"]);
+  terminals.applyProviderSignal(session.id, { state: "working", event: "UserPromptSubmit" });
+  assert.equal((await pending).delivered, true);
+});

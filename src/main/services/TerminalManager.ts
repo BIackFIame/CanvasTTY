@@ -153,6 +153,8 @@ interface ManagedSession {
   /** Input waiting for this launch to start (deliverInput): woken whenever the launch moves on. */
   launchWaiters: Set<() => void>;
   inputQueue?: Promise<InputDelivery>;
+  cliInputReady?: boolean;
+  readinessOutput?: string;
   /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
   restored?: boolean;
   /** What the CLI's own title last showed (Claude: spinner working, «✳» no turn running). */
@@ -1245,10 +1247,10 @@ export class TerminalManager {
       });
     };
     if (confirm) {
-      while (valid() && !(session.hookSignals || session.titleState) && Date.now() < deadline) await poll();
+      while (valid() && !(session.hookSignals || session.titleState || session.cliInputReady) && Date.now() < deadline) await poll();
       if (signal?.aborted) return canceled;
       if (!valid()) return { delivered: false, reason: "The session closed, exited or restarted before CLI readiness." };
-      if (!(session.hookSignals || session.titleState)) return { delivered: false, reason: "The CLI did not become ready before the delivery deadline; no text was sent." };
+      if (!(session.hookSignals || session.titleState || session.cliInputReady)) return { delivered: false, reason: "The CLI did not become ready before the delivery deadline; no text was sent." };
     }
     if (Date.now() >= deadline) return { delivered: false, reason: "The input delivery deadline expired; no text was sent." };
     // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
@@ -2552,6 +2554,16 @@ export class TerminalManager {
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
 
+      // OpenCode creates its first conversation only after submission, so a fresh home screen has no
+      // session.created hook yet. Its rendered prompt and command hints are the startup readiness signal.
+      if (current.metadata.provider === "opencode" && !current.cliInputReady) {
+        current.readinessOutput = ((current.readinessOutput ?? "") + data).slice(-16_000);
+        const screen = stripVTControlCharacters(current.readinessOutput);
+        if (/Ask anything[….]/u.test(screen) && /ctrl\+p\s*commands/u.test(screen)) {
+          current.cliInputReady = true;
+          delete current.readinessOutput;
+        }
+      }
       const lifecycleState = current.lifecycle?.push(data);
       if (lifecycleState) current.titleState = lifecycleState;
       if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
@@ -2709,6 +2721,8 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.turnStarts;
   delete session.promptTurnMark;
   delete session.hookSignals;
+  delete session.cliInputReady;
+  delete session.readinessOutput;
   delete session.titleState;
   if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
   session.answeredPromptTimer = undefined;
