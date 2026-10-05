@@ -95,6 +95,23 @@ test("preserves an unreadable state", async () => {
   });
 });
 
+test("does not treat stored captures as a new store", async () => {
+  await withStore(async ({ statePath, create, capture, blobs }) => {
+    const first = create();
+    await first.load();
+    await capture(first);
+    await first.dispose();
+    const before = await blobs();
+    await rm(statePath);
+    const next = create();
+    await next.load();
+    assert.equal(next.snapshot().loadError, "unreadable");
+    await next.dispose();
+    await assert.rejects(readFile(statePath), { code: "ENOENT" });
+    assert.deepEqual(await blobs(), before);
+  });
+});
+
 test("collects after a valid load", async () => {
   await withStore(async ({ root, create, capture, blobs }) => {
     const first = create();

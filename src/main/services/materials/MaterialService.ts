@@ -115,7 +115,9 @@ export class MaterialService {
       await mkdir(this.root, { recursive: true, mode: 0o700 });
       state = restoreMaterialState(JSON.parse(await readFile(this.statePath, "utf8")));
     } catch (error) {
-      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+      const newStore = Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT")
+        && await this.blobs.usedBytes().then((bytes) => bytes === 0, () => false);
+      if (!newStore) {
         console.warn("CanvasTTY materials could not be loaded and are left on disk as they are.", error);
         this.loadError = "unreadable";
         this.changed(false);
