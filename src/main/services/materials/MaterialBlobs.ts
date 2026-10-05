@@ -48,6 +48,23 @@ export class MaterialBlobs {
     }
   }
 
+  async usedBytes(): Promise<number> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.root);
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return 0;
+      throw error;
+    }
+    let bytes = 0;
+    for (const entry of entries) {
+      if (!SHA256_FILE.test(entry) && !entry.startsWith(TEMP_PREFIX)) continue;
+      const info = await stat(join(this.root, entry));
+      if (info.isFile()) bytes += info.size;
+    }
+    return bytes;
+  }
+
   async writeFromFile(source: string, maxBytes: number, available: number): Promise<StoredBlob> {
     const flags = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
     let handle;

@@ -1640,6 +1640,9 @@ export function App(): React.JSX.Element {
           if (updateStatus.type === "available" || updateStatus.type === "ready") setDismissedUpdateNotice(updateNoticeKey(updateStatus));
         }}
       />
+      {materials.snapshot.loadError && (
+        <div className="materials-load-error" role="alert">{t(settings.locale, "materialsLoadFailed")}</div>
+      )}
       <Toast message={toast} />
     </div>
   );

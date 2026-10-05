@@ -58,6 +58,21 @@ export function emptyMaterialState(): StoredMaterialState {
   return { version: MATERIAL_STATE_VERSION, materials: [] };
 }
 
+export function restoreMaterialState(candidate: unknown): StoredMaterialState {
+  if (!isRecord(candidate) || candidate.version !== MATERIAL_STATE_VERSION || !Array.isArray(candidate.materials)) {
+    throw new Error("Unsupported materials state.");
+  }
+  const materials = candidate.materials;
+  const state = normalizeMaterialState(candidate);
+  if (state.materials.length !== materials.length || state.materials.some((material, index) => {
+    const stored = materials[index];
+    return !isRecord(stored) || !Array.isArray(stored.versions) || stored.versions.length !== material.versions.length;
+  })) {
+    throw new Error("Invalid materials state.");
+  }
+  return state;
+}
+
 export function normalizeMaterialState(candidate: unknown): StoredMaterialState {
   const state = emptyMaterialState();
   if (!isRecord(candidate) || candidate.version !== MATERIAL_STATE_VERSION || !Array.isArray(candidate.materials)) {

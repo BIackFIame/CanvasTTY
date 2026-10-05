@@ -295,6 +295,7 @@ export interface CanvasMaterial extends SessionBounds {
 
 export interface MaterialsSnapshot {
   revision: number;
+  loadError?: "unreadable";
   materials: CanvasMaterial[];
 }
 

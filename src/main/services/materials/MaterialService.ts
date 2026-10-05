@@ -28,9 +28,8 @@ import { IMAGE_HEADER_BYTES, imageDimensions } from "./imageDimensions.ts";
 import {
   emptyMaterialState,
   MATERIAL_STATE_VERSION,
-  normalizeMaterialState,
-  type StoredMaterial,
-  type StoredVersion
+  restoreMaterialState,
+  type StoredMaterial
 } from "./materialState.ts";
 import { DirectoryWatchSet, nodeWatchFactory, type WatchFactory } from "./materialWatch.ts";
 import { MaterialBlobError, MaterialBlobs } from "./MaterialBlobs.ts";
@@ -38,6 +37,7 @@ import { MaterialBlobError, MaterialBlobs } from "./MaterialBlobs.ts";
 const MAX_PATHS_PER_ADD = 64;
 const MAX_NAME = 255;
 const MATERIAL_CAPTURE_MAX_BYTES = 32 * 1024 * 1024;
+const MATERIAL_STORAGE_LIMIT_BYTES = 1024 * 1024 * 1024;
 const PERSIST_DELAY_MS = 250;
 const REFRESH_DELAY_MS = 150;
 const POLL_INTERVAL_MS = 10_000;
@@ -54,6 +54,7 @@ export interface MaterialServiceOptions {
   watchFactory?: WatchFactory;
   now?(): number;
   pollIntervalMs?: number;
+  storageLimitBytes?: number;
 }
 
 interface LiveState {
@@ -89,6 +90,10 @@ export class MaterialService {
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private loading: Promise<void> | null = null;
+  private disposing: Promise<void> | null = null;
+  private writable = false;
+  private loadError: "unreadable" | undefined;
   private disposed = false;
 
   constructor(options: MaterialServiceOptions) {
@@ -99,26 +104,34 @@ export class MaterialService {
     this.watchers = new DirectoryWatchSet(options.watchFactory ?? nodeWatchFactory, (ids) => this.scheduleRefresh(ids));
   }
 
-  async load(): Promise<void> {
-    await mkdir(this.root, { recursive: true, mode: 0o700 });
+  load(): Promise<void> {
+    this.loading ??= this.restore();
+    return this.loading;
+  }
+
+  private async restore(): Promise<void> {
     let state = emptyMaterialState();
     try {
-      state = normalizeMaterialState(JSON.parse(await readFile(this.statePath, "utf8")));
+      await mkdir(this.root, { recursive: true, mode: 0o700 });
+      state = restoreMaterialState(JSON.parse(await readFile(this.statePath, "utf8")));
     } catch (error) {
-      if (!isMissing(error)) console.warn("CanvasTTY materials could not be loaded.", error);
+      if (!error || typeof error !== "object" || !("code" in error) || error.code !== "ENOENT") {
+        console.warn("CanvasTTY materials could not be loaded and are left on disk as they are.", error);
+        this.loadError = "unreadable";
+        this.changed(false);
+        return;
+      }
     }
     if (!this.options.persist()) state = emptyMaterialState();
     for (const material of state.materials) {
-      if (material.path === null && material.versions.length === 0) continue;
-      const versions: StoredVersion[] = [];
-      for (const version of material.versions) if (await this.blobs.has(version.sha256)) versions.push(version);
-      material.versions = versions;
-      if (material.path === null && versions.length === 0) continue;
       this.materials.set(material.id, material);
     }
+    this.writable = true;
     await this.collect();
+    if (this.disposed) return;
     for (const material of this.materials.values()) {
       await this.refreshLive(material);
+      if (this.disposed) return;
       this.watchers.track(material.id, material.path);
     }
     const interval = this.options.pollIntervalMs ?? POLL_INTERVAL_MS;
@@ -135,6 +148,7 @@ export class MaterialService {
   snapshot(): MaterialsSnapshot {
     return {
       revision: this.revision,
+      ...(this.loadError ? { loadError: this.loadError } : {}),
       materials: [...this.materials.values()].map((material) => this.publicMaterial(material))
     };
   }
@@ -146,6 +160,12 @@ export class MaterialService {
   addPaths(paths: readonly unknown[], point: unknown): Promise<MaterialsAddResult> {
     return this.serial(async () => {
       const result: MaterialsAddResult = { added: [], existing: [], rejected: [] };
+      if (!this.writable) {
+        result.rejected = paths.slice(0, MAX_PATHS_PER_ADD).map((path) => ({
+          name: typeof path === "string" ? displayName(path) : "file", reason: "unreadable"
+        }));
+        return result;
+      }
       const fresh: StoredMaterial[] = [];
       const infos = new Map<string, Stats>();
       for (const candidate of paths.slice(0, MAX_PATHS_PER_ADD)) {
@@ -219,10 +239,11 @@ export class MaterialService {
 
   addCapture(input: MaterialCaptureInput): Promise<MaterialCreateResult> {
     return this.serial(async () => {
+      if (!this.writable) return failure("unreadable");
       if (this.materials.size >= MATERIAL_LIMIT) return failure("material-limit");
       let blob;
       try {
-        blob = await this.blobs.writeFromBytes(input.bytes, MATERIAL_CAPTURE_MAX_BYTES, this.availableBytes());
+        blob = await this.blobs.writeFromBytes(input.bytes, MATERIAL_CAPTURE_MAX_BYTES, await this.availableBytes());
       } catch (error) {
         return failure(blobFailure(error));
       }
@@ -260,6 +281,7 @@ export class MaterialService {
   }
 
   setBounds(id: string, bounds: unknown): void {
+    if (!this.writable || this.disposed) return;
     const material = this.materials.get(id);
     if (!material || !isBounds(bounds)) return;
     material.position = { x: bounds.position.x, y: bounds.position.y };
@@ -268,6 +290,7 @@ export class MaterialService {
   }
 
   setBoundsBatch(entries: unknown): void {
+    if (!this.writable || this.disposed) return;
     if (!Array.isArray(entries)) return;
     let any = false;
     for (const entry of entries) {
@@ -289,6 +312,7 @@ export class MaterialService {
       this.pendingRefresh.delete(id);
       this.watchers.untrack(id);
       this.changed();
+      await this.collect();
     });
   }
 
@@ -354,6 +378,8 @@ export class MaterialService {
   }
 
   async flush(strict = false): Promise<void> {
+    await this.loading;
+    await this.queue;
     if (this.persistTimer !== null) {
       clearTimeout(this.persistTimer);
       this.persistTimer = null;
@@ -361,13 +387,18 @@ export class MaterialService {
     await this.writeState(strict);
   }
 
-  async dispose(): Promise<void> {
+  dispose(): Promise<void> {
+    this.disposing ??= this.close();
+    return this.disposing;
+  }
+
+  private async close(): Promise<void> {
     this.disposed = true;
     if (this.pollTimer !== null) clearInterval(this.pollTimer);
     if (this.refreshTimer !== null) clearTimeout(this.refreshTimer);
-    this.watchers.close();
     await this.flush();
-    if (!this.options.persist()) await this.blobs.collect(new Set());
+    this.watchers.close();
+    if (this.writable && !this.options.persist()) await this.collect();
   }
 
   private scheduleRefresh(ids: readonly string[]): void {
@@ -393,7 +424,9 @@ export class MaterialService {
   private async refreshLive(material: StoredMaterial, forceRevision = false): Promise<boolean> {
     const previous = this.live.get(material.id);
     const next = material.path === null
-      ? captureLive(material)
+      ? await this.blobs.has(material.versions.at(-1)?.sha256 ?? "")
+        ? captureLive(material)
+        : unavailable("unreadable", previous)
       : await inspectWorkingFile(material, previous);
     const changedContent = next.signature !== (previous?.signature ?? null);
     const revision = previous
@@ -441,7 +474,7 @@ export class MaterialService {
   }
 
   private schedulePersist(): void {
-    if (this.disposed) return;
+    if (this.disposed || !this.writable) return;
     if (this.persistTimer !== null) clearTimeout(this.persistTimer);
     this.persistTimer = setTimeout(() => {
       this.persistTimer = null;
@@ -451,6 +484,7 @@ export class MaterialService {
   }
 
   private writeState(strict = false): Promise<void> {
+    if (!this.writable) return strict ? Promise.reject(new Error("CanvasTTY materials state is not writable.")) : this.writeQueue;
     const state = this.options.persist()
       ? { version: MATERIAL_STATE_VERSION, materials: [...this.materials.values()] }
       : emptyMaterialState();
@@ -468,6 +502,7 @@ export class MaterialService {
   }
 
   private serial<T>(task: () => Promise<T>): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error("CanvasTTY materials are closed."));
     const run = this.queue.catch(() => undefined).then(task);
     this.queue = run.catch(() => undefined);
     return run;
@@ -477,8 +512,8 @@ export class MaterialService {
     return this.options.now?.() ?? Date.now();
   }
 
-  private availableBytes(): number {
-    return Number.MAX_SAFE_INTEGER;
+  private async availableBytes(): Promise<number> {
+    return Math.max(0, (this.options.storageLimitBytes ?? MATERIAL_STORAGE_LIMIT_BYTES) - await this.blobs.usedBytes());
   }
 
   private async collect(): Promise<void> {
@@ -487,7 +522,7 @@ export class MaterialService {
     } catch {
       return;
     }
-    await this.blobs.collect(this.referencedHashes());
+    await this.blobs.collect(this.disposed && !this.options.persist() ? new Set() : this.referencedHashes());
   }
 
   private referencedHashes(): Set<string> {
