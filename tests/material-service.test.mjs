@@ -72,6 +72,33 @@ test("file identity is stored as exact dev/ino strings and survives a rename", a
   });
 });
 
+test("legacy cards survive identity migration", async () => {
+  for (const identity of [{ dev: 1, ino: 2 }, { dev: 1, ino: 9007199254740992 }]) {
+    await withMaterials(async ({ work, service, userData, create }) => {
+      await service.dispose();
+      const state = JSON.parse(await readFile(new URL("./fixtures/material-state-v1.json", import.meta.url), "utf8"));
+      state.materials[0].path = join(work, "missing.png");
+      state.materials[0].identity = identity;
+      const captured = state.materials[1];
+      const version = captured.versions[0];
+      await mkdir(join(userData, "materials/versions"), { recursive: true });
+      await writeFile(join(userData, "materials/versions", version.sha256), pngBytes(4, 4));
+      await writeFile(join(userData, "materials/state.json"), JSON.stringify(state));
+
+      const restored = await create();
+      const snapshot = restored.snapshot();
+      assert.equal(snapshot.loadError, undefined);
+      assert.deepEqual(snapshot.materials.map((material) => material.id), state.materials.map((material) => material.id));
+      assert.deepEqual(await body(await restored.protocolResponse(new Request(materialUrl(captured.id, version.id)))), pngBytes(4, 4));
+      const saved = JSON.parse(await readFile(join(userData, "materials/state.json"), "utf8"));
+      assert.deepEqual(saved.materials[0].identity, identity.ino === 2 ? { dev: "1", ino: "2" } : null);
+      const fresh = join(work, "fresh.png");
+      await writeFile(fresh, pngBytes(8, 8));
+      assert.equal((await restored.addPaths([fresh], { x: 0, y: 0 })).added.length, 1);
+    });
+  }
+});
+
 test("files past the canvas limit in one drop are reported, not dropped silently", async () => {
   await withMaterials(async ({ work, service }) => {
     const files = [];

@@ -31,10 +31,10 @@ export function containedRect(box: Size, natural: Size | null): BoxRect {
 export function dragAnchor(start: Point, end: Point, rect: BoxRect): RemarkAnchor | null {
   if (!(rect.width > 0) || !(rect.height > 0)) return null;
   const clamp = (value: number): number => Math.min(1, Math.max(0, value));
-  const x0 = clamp((start.x - rect.left) / rect.width);
-  const y0 = clamp((start.y - rect.top) / rect.height);
-  const x1 = clamp((end.x - rect.left) / rect.width);
-  const y1 = clamp((end.y - rect.top) / rect.height);
+  const x0 = round(clamp((start.x - rect.left) / rect.width));
+  const y0 = round(clamp((start.y - rect.top) / rect.height));
+  const x1 = round(clamp((end.x - rect.left) / rect.width));
+  const y1 = round(clamp((end.y - rect.top) / rect.height));
   if (Math.abs(end.x - start.x) < POINT_DRAG_THRESHOLD && Math.abs(end.y - start.y) < POINT_DRAG_THRESHOLD) {
     return { kind: "point", x: round(x0), y: round(y0) };
   }
@@ -48,7 +48,7 @@ export function dragAnchor(start: Point, end: Point, rect: BoxRect): RemarkAncho
     if (!startInside) return null;
     return { kind: "point", x: round(x0), y: round(y0) };
   }
-  return { kind: "region", x: round(x), y: round(y), width: round(Math.min(width, 1 - x)), height: round(Math.min(height, 1 - y)) };
+  return { kind: "region", x, y, width: round(width), height: round(height) };
 }
 
 export function anchorPercentages(anchor: RemarkAnchor): { left: string; top: string; width?: string; height?: string } | null {

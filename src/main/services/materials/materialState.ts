@@ -81,9 +81,28 @@ export function restoreMaterialState(candidate: unknown): StoredMaterialState {
   if (!isRecord(candidate) || candidate.version !== MATERIAL_STATE_VERSION || !Array.isArray(candidate.materials)) {
     throw new Error("Unsupported materials state.");
   }
-  const state = normalizeMaterialState(candidate);
-  if (!preservesStoredFields(candidate, state)) throw new Error("Invalid materials state.");
+  const migrated = { ...candidate, materials: migrateLegacyIdentities(candidate.materials) };
+  const state = normalizeMaterialState(migrated);
+  if (!preservesStoredFields(migrated, state)) throw new Error("Invalid materials state.");
   return state;
+}
+
+function migrateLegacyIdentities(materials: unknown[]): unknown[] {
+  return materials.map((material) => {
+    if (!isRecord(material) || !isRecord(material.identity)) return material;
+    const identity = material.identity;
+    const keys = Object.keys(identity);
+    if (keys.length !== 2 || keys.some((key) => key !== "dev" && key !== "ino")
+      || ![identity.dev, identity.ino].every((value) => typeof value === "number" && Number.isInteger(value) && value >= 0)) {
+      return material;
+    }
+    return {
+      ...material,
+      identity: Number.isSafeInteger(identity.dev) && Number.isSafeInteger(identity.ino)
+        ? { dev: String(identity.dev), ino: String(identity.ino) }
+        : null
+    };
+  });
 }
 
 function preservesStoredFields(stored: unknown, normalized: unknown): boolean {

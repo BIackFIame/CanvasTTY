@@ -13,6 +13,7 @@ import {
   remarkStatusClass
 } from "../src/renderer/src/features/materials/materialRemarksModel.ts";
 import { remarkDrawable, remarkPickable } from "../src/renderer/src/features/materials/materialCardModel.ts";
+import { normalizeAnchor } from "../src/main/services/materials/materialState.ts";
 
 test("an image sits letterboxed inside its box, and a drag inside it becomes a clamped share of the picture", () => {
   const rect = containedRect({ width: 400, height: 300 }, { width: 1600, height: 900 });
@@ -23,6 +24,19 @@ test("an image sits letterboxed inside its box, and a drag inside it becomes a c
   assert.equal(dragAnchor({ x: -50, y: 20 }, { x: -10, y: 280 }, rect), null);
   assert.deepEqual(anchorPercentages({ kind: "region", x: 0.25, y: 0.1, width: 0.5, height: 0.333333 }), { left: "25%", top: "10%", width: "50%", height: "33.3333%" });
   assert.equal(anchorPercentages({ kind: "lines", start: 1, end: 2 }), null);
+});
+
+test("edge regions pass storage validation", () => {
+  const rect = { left: 0, top: 0, width: 320, height: 320 };
+  for (const [start, end] of [
+    [{ x: 10, y: 10 }, { x: 320, y: 180 }],
+    [{ x: 10, y: 10 }, { x: 180, y: 320 }],
+    [{ x: 320, y: 320 }, { x: 10, y: 10 }]
+  ]) {
+    const anchor = dragAnchor(start, end, rect);
+    assert.equal(anchor.kind, "region");
+    assert.deepEqual(normalizeAnchor(anchor), anchor);
+  }
 });
 
 test("remarks are grouped per material in their numbered order", () => {
