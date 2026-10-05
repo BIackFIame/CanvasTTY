@@ -2,6 +2,7 @@ import { canonicalStringify } from "./tool-catalog.mjs";
 
 export const ORCHESTRATION_MCP_SERVER_NAME = "canvastty_agents";
 export const MAX_ORCHESTRATION_PAYLOAD_BYTES = 128 * 1024;
+const MAX_SECRET_API_BODY_BYTES = 64 * 1024;
 
 const string = (options = {}) => ({ type: "string", ...options });
 const boolean = () => ({ type: "boolean" });
@@ -35,6 +36,11 @@ export const MAX_AGENT_WAIT_SECONDS = 100;
 export const DEFAULT_AGENT_WAIT_SECONDS = 55;
 /** spawn_agent.effort: every level some CLI takes (src/shared/launchModel.ts REASONING_EFFORTS; a test keeps them equal). */
 export const REASONING_EFFORT_IDS = Object.freeze(["minimal", "low", "medium", "high", "xhigh", "max"]);
+/** Keep in sync with ProviderSecretId; the main-process service verifies again against ProviderSecretsService. */
+export const PROVIDER_SECRET_IDS = Object.freeze([
+  "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GOOGLE_API_KEY", "ZAI_API_KEY",
+  "MINIMAX_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "DEVIN_API_KEY", "CURSOR_API_KEY"
+]);
 const provider = string({ minLength: 1, maxLength: 32, enum: [...AGENT_PROVIDER_IDS] });
 
 /** The refusal for a provider id CanvasTTY does not know; names list_providers. */
@@ -160,6 +166,25 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
     []
   ),
   tool(
+    "request_secret",
+    "Ask the person to approve temporary use of one configured provider secret for typed provider API requests. This only creates a pending UI request; never ask the person to paste a key into chat or tool arguments. Approval is scoped to this session and lasts 10 minutes, until this turn ends, or until the session ends.",
+    { secretId: string({ enum: [...PROVIDER_SECRET_IDS] }), reason: string({ minLength: 1, maxLength: 1_000 }) },
+    ["secretId", "reason"]
+  ),
+  tool(
+    "run_secret_request",
+    "Send a typed HTTPS API request using a configured provider secret for which this session has current human approval. secretId selects the approved key; apiProfileId optionally selects a human-saved profile using that same key. The host chooses the profile base URL and protocol authentication. Supply only a relative API path, method and optional JSON body; custom origins, headers, redirects and executable commands are unavailable. The response body is masked and capped, and the host may refuse if it cannot enforce isolation.",
+    {
+      secretId: string({ enum: [...PROVIDER_SECRET_IDS] }),
+      apiProfileId: string({ minLength: 1, maxLength: 64 }),
+      method: string({ enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] }),
+      path: string({ minLength: 1, maxLength: 2_048 }),
+      body: { type: "object", maxProperties: 1_024, additionalProperties: true },
+      timeoutMs: integer({ minimum: 1_000, maximum: 300_000 })
+    },
+    ["secretId", "method", "path"]
+  ),
+  tool(
     "apply_orchestration_template",
     "Get the roles, expected number of subagents and final-step instructions for a flow, ready to apply to a task.",
     { templateId: string({ minLength: 1, maxLength: 64 }), task: prompt },
@@ -234,6 +259,22 @@ export function validateOrchestrationArguments(toolName, args) {
       else if (property.minimum !== undefined && candidate < property.minimum) errors.push(`${key} is below the minimum.`);
       else if (property.maximum !== undefined && candidate > property.maximum) errors.push(`${key} is above the maximum.`);
       else value[key] = candidate;
+    } else if (property.type === "object") {
+      if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+        errors.push(`${key} must be an object.`);
+        continue;
+      }
+      if (property.maxProperties !== undefined && Object.keys(candidate).length > property.maxProperties) {
+        errors.push(`${key} has too many properties.`);
+        continue;
+      }
+      let encoded;
+      try { encoded = canonicalStringify(candidate); } catch { errors.push(`${key} must contain JSON values.`); continue; }
+      if (Buffer.byteLength(encoded, "utf8") > MAX_SECRET_API_BODY_BYTES) {
+        errors.push(`${key} exceeds 64 KB.`);
+        continue;
+      }
+      value[key] = JSON.parse(encoded);
     } else if (property.type === "array") {
       if (!Array.isArray(candidate) || candidate.length > (property.maxItems ?? Number.MAX_SAFE_INTEGER)) {
         errors.push(`${key} must be an array of at most ${property.maxItems ?? "the allowed number of"} items.`);

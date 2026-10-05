@@ -1003,7 +1003,7 @@ button { border: 0; }
 .plugin-github-flow-actions, .plugin-github-signin-actions { display: inline-flex; flex-wrap: wrap; gap: 7px; }
 .plugin-github-flow-actions button { min-height: 30px; padding: 5px 10px; border-radius: 8px; color: var(--text-dark); background: var(--primary); font-size: 11px; font-weight: 850; cursor: pointer; }
 .plugin-github-flow-actions button:last-child, .plugin-github-signin-secondary { background: rgba(255,255,255,.5); }
-.plugin-github-unavailable { margin: 8px 0 2px; color: var(--text-muted); font-size: 11px; font-weight: 750; line-height: 1.4; }
+.plugin-github-unavailable, .plugin-github-flow-notice { margin: 8px 0 2px; color: var(--text-muted); font-size: 11px; font-weight: 750; line-height: 1.4; }
 .plugin-github-optional { margin: 8px 0 2px; color: var(--text-muted); font-size: 11px; font-weight: 650; line-height: 1.45; }
 .plugin-github-code { cursor: pointer; user-select: none; position: relative; padding-right: 4px; font-size: 14px; font-weight: 850; }
 .plugin-github-code:hover strong { text-decoration: underline; text-underline-offset: 3px; }
@@ -1414,4 +1414,27 @@ button { border: 0; }
   .plugin-changes-review__header, .plugin-changes-review__body { padding-inline: 10px; }
   .plugin-changes-review__actions { padding-inline: 10px; }
   .plugin-changes-review__actions > button { flex: 1 1 100%; }
+}
+
+.backlog-safety-panels { display: grid; gap: 18px; }
+.backlog-secret-grants, .backlog-network-policy { display: grid; gap: 12px; padding: 12px; border: 1px solid rgba(255,255,255,.1); border-radius: 10px; background: rgba(255,255,255,.025); }
+.backlog-secret-grants > header, .backlog-network-policy > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.backlog-secret-grants h3, .backlog-secret-grants h4, .backlog-network-policy h4 { margin: 0; font-size: 14px; }
+.backlog-secret-grants__note { margin: 0; opacity: .7; font-size: 12px; }
+.backlog-network-policy label { display: grid; gap: 4px; font-size: 11px; }
+.backlog-network-policy input, .backlog-network-policy textarea, .backlog-network-policy select { min-width: 0; padding: 7px; border: 1px solid rgba(255,255,255,.14); border-radius: 7px; color: white; background: #30323f; font: inherit; }
+.backlog-secret-grants > section { display: grid; gap: 7px; }
+.backlog-secret-grants__list { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
+.backlog-secret-grants__list > li { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 9px; border-radius: 8px; background: rgba(255,255,255,.05); }
+.backlog-secret-grants__list > li > div { min-width: 0; display: grid; gap: 4px; }
+.backlog-secret-grants__list small, .backlog-secret-grants__list time { opacity: .68; font-size: 11px; overflow-wrap: anywhere; }
+.backlog-secret-grants__request p { margin: 2px 0; overflow-wrap: anywhere; }
+.backlog-secret-grants__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.backlog-network-policy { align-items: start; }
+.backlog-network-policy > label { width: min(100%, 520px); }
+.backlog-network-policy textarea { resize: vertical; }
+.backlog-network-policy p { margin: 0; opacity: .7; font-size: 12px; }
+@media (max-width: 700px) {
+  .backlog-secret-grants__list > li { grid-template-columns: minmax(0,1fr); }
+  .backlog-secret-grants__actions { justify-content: flex-start; }
 }

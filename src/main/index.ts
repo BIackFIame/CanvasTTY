@@ -1,3 +1,8 @@
+import { configuredApiDomains, apiProfileDomains } from "./services/isolation/configuredApiDomains";
+import { registerNetworkPolicyIpc } from "./ipc/registerNetworkPolicyIpc";
+import { NetworkPolicyManager } from "./services/isolation/networkPolicy";
+import { SecretGrantService } from "./services/SecretGrantService";
+import { secretApiRequestExecutor } from "./services/SecretCommandExecutor";
 import { runShutdownSteps } from "./services/shutdownSteps";
 import { BACKLOG_TERMINAL_IPC } from "../shared/backlog";
 import { AttentionService } from "./services/AttentionService";
@@ -104,7 +109,7 @@ import {
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
-import { agentHelperLaunches } from "./services/agentHelpers";
+import { agentHelperLaunches, nativeHelperPath } from "./services/agentHelpers";
 import {
   recoverHermesConfigurationOnStartup,
   resolveHermesHomeDirectory
@@ -188,6 +193,8 @@ async function showCompanionBrowser():Promise<{title:string;url:string}> {
 let disposeBudgetObservers:(()=>void)|null=null;
 let flushBudgets:(()=>Promise<void>)|null=null;
 let sessionTimeline:SessionTimelineService|null=null;
+let networkPolicies: NetworkPolicyManager | null = null;
+let secretGrants: SecretGrantService | null = null;
 let sessionReports:SessionReports|null=null;
 let terminalOutputHistory:TerminalOutputHistory|null=null;
 let terminalManager: TerminalManager | null = null;
@@ -487,6 +494,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         broadcastPluginServiceEvent({ pluginId, serviceId, event, data: broadcastData });
       },
       registerSecrets: (pluginId, values) => redaction.add(`plugin:${pluginId}`, values),
+      maskSecrets: text => redaction.redact(text),
       secretGet: (pluginId, key) => {
         if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
         return pluginSecretsService.get(pluginId, key);
@@ -634,6 +642,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         void timeline.append(terminalSessionId,"lifecycle",signal.event ?? signal.state,undefined,"provider-hook").catch(console.warn);
         if (signal.state !== "working") {
           checkpointTurns.delete(terminalSessionId);
+          if (signal.state === "idle") secretGrants?.turnEnded(terminalSessionId);
         }
         else void checkpointBeforeTurn(terminalSessionId);
         terminalManager?.applyProviderSignal(terminalSessionId, {
@@ -765,6 +774,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         const snapshot=terminalManager?.readBuffer(id);
         if(!shutdownRunning && snapshot?.buffer)void outputHistory.append(id,snapshot.buffer,snapshot.outputOffset).catch(outputHistoryError);
       }
+      if (payload.session.exitCode !== null) secretGrants?.sessionEnded(id);
       const oldSafety=reportedSafety.get(id) ?? {};
       const nextSafety={isolation:payload.session.isolation ? JSON.stringify(payload.session.isolation) : undefined,gitRisk:payload.session.gitRisk ? JSON.stringify(payload.session.gitRisk) : undefined};
       if(nextSafety.isolation && nextSafety.isolation!==oldSafety.isolation)void timeline.append(id,"isolation","Effective session protection",nextSafety.isolation,"core").catch(console.warn);
@@ -798,6 +808,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       notifiedAttentionStatus.delete(payload.id);
       reportedSafety.delete(payload.id);
       checkpointTurns.delete(payload.id);
+      secretGrants?.sessionEnded(payload.id);
       forgetOrchestrationSession(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
@@ -809,7 +820,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
   // The operating-system isolation layer (Settings → Agents → Agent isolation) and YOLO only where the person
   // acknowledged it: both decided here, in the main process, for every launch whoever asks for it.
-  terminalManager.configureIsolation(new AgentIsolation({ userDataPath, enabled: () => settings.get().agentIsolation !== "off" }));
+  const configuredDomains=configuredApiDomains({...process.env,HOME:app.getPath("home")});
+  networkPolicies = new NetworkPolicyManager({ userDataPath,providerDomains:provider=>[...(configuredDomains[provider] ?? []),...apiProfileDomains(settings.get().apiProfiles)] });
+  await networkPolicies.start().catch(error => console.warn("Restricted-network proxy unavailable:", String(error)));
+  const isolation = new AgentIsolation({
+    userDataPath, enabled: () => settings.get().agentIsolation !== "off", networkPolicy: networkPolicies,
+    networkHelperPath: nativeHelperPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath(), execPath: process.execPath })
+  });
+  terminalManager.configureIsolation(isolation);
   terminalManager.configureYoloAcknowledgement((provider) => settings.get().acknowledgedDangerousProfiles.includes(provider as AgentProviderId));
   // OpenCode's auto profile runs shell commands without asking only while base protection guards them.
   terminalManager.configureBaseProtection(() => settings.get().baseProtectionEnabled);
@@ -887,6 +905,22 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   budgetInputGate=id=>agentControlService.assertInputAllowed(id);
   markLoopDetected=id=>agentControlService.markLoopDetected(id);
   managedTerminals.configureInputGate(budgetInputGate);
+  secretGrants = new SecretGrantService({
+    getSecret: id => providerSecretsService!.get(id),
+    getApiProfiles: () => settings.get().apiProfiles,
+    getSession: id => {
+      const context = managedTerminals.pluginContext(id);
+      if (!context || context.environment && context.environment.kind !== "worktree") return null;
+      budgetInputGate(id);
+      const row = context.metadata;
+      return { provider: row.provider, cwd: context.workingDirectory, networkProjectRoot: agentControlService.taskRoot(id).cwd, profile: row.profile, active: row.exitCode === null && row.status !== "failed" && row.status !== "done" };
+    },
+    execute: secretApiRequestExecutor(isolation),
+    rememberSecret: value => redaction.add("vault", [value]), redact: text => redaction.redact(text),
+    onRequest: request => { notifyAttention(request.sessionId, "approval"); void timeline.append(request.sessionId,"secret-request",request.secretId,request.reason,"core").catch(console.warn); },
+    onDecision: event => { void timeline.append(event.request.sessionId,"secret-decision",`${event.decision}: ${event.request.secretId}`,event.duration,"human").catch(console.warn); },
+    onRevoke: event => { void timeline.append(event.sessionId,"secret-revoked",event.secretId,event.reason,"core").catch(console.warn); }
+  });
   let usageRefreshPending=false;
   const refreshUsage=()=>{
     const rows=managedTerminals.listMetadata(),scopes=agentControlService.taskRoots(rows);
@@ -921,7 +955,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const offUsage=timeline.subscribeUsage(scheduleUsageRefresh),offPrices=usagePrices.subscribe(scheduleUsageRefresh),offBudgets=budgets.subscribe(scheduleUsageRefresh);
   disposeBudgetObservers=()=>{offUsage();offPrices();offBudgets();budgets.dispose();scheduleUsageRefresh=()=>undefined;};
   scheduleUsageRefresh();
-  const orchestrationHandler=new ScopedOrchestrationHandler(agentControlService, pluginTools, providerDirectorySources,{budget:budgets,taskBoard,templates});
+  const orchestrationHandler=new ScopedOrchestrationHandler(agentControlService, pluginTools, providerDirectorySources,{budget:budgets,taskBoard,templates,secretGrants});
   forgetOrchestrationSession=id=>agentControlService.forgetSession(id);
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
@@ -934,7 +968,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
-  terminalManager.configureAgentTools((role, provider) => [...(provider!=="terminal" ? ["list_tasks","claim_task","update_task","complete_task","get_task_budget"] : []),...pluginTools.names(role, provider)]);
+  terminalManager.configureAgentTools((role, provider) => [...(provider!=="terminal" ? ["list_tasks","claim_task","update_task","complete_task","get_task_budget", "request_secret", "run_secret_request"] : []),...pluginTools.names(role, provider)]);
 
   const launchPipeline = new LaunchPipeline({
     contributors: () => pluginManager!.launchContributors(),
@@ -947,7 +981,12 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   terminalManager.configureEnvironments(new EnvironmentRegistry({
     providers: () => pluginManager!.environmentProviders(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
-    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key)
+    secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key),
+    onRetained:(id,environment,reason)=>{
+      const detail=redaction.redact(`${environment.label}: ${reason}`);
+      void timeline.append(id,"environment-retained","Unreviewed worktree retained",detail,"core").catch(console.warn);
+      if(settings.get().attentionNotifications && Notification.isSupported())new Notification({title:settings.get().locale==="ru" ? "Worktree сохранён" : "Worktree retained",body:detail}).show();
+    }
   }));
   // Every host API a service may call exists now (sessions, cards, tools, secrets, launch, environments): services
   // start, and one that subscribes on initialize does so before the restored cards' events. Restored cards with
@@ -1029,7 +1068,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await materialService.load();
   registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
-  registerBacklogIpc(ipc,{reports,usagePrices,attention,timeline,checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
+  registerBacklogIpc(ipc,{secretGrants,reports,usagePrices,attention,timeline,checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
   registerIpc(ipc, {
     settings,
     recheckProviderClis: async () => {
@@ -1094,6 +1133,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     broadcastPluginStorageChange
   });
   markMainBoot("coreServicesReady");
+  registerNetworkPolicyIpc(ipc,{manager:networkPolicies,getMainWindow:()=>mainWindow,
+    taskRoot:id=>agentControlService.taskRoot(id),
+    revokeBrowserCapabilities:cwd=>{managedTerminals.revokeBrowserCapabilitiesForStrictNetwork(cwd);},
+    audit:(id,policy)=>{if(id)void timeline.append(id,"network-policy","Person changed project network policy",JSON.stringify(policy),"human").catch(console.warn);}
+  });
   // The Even G2 companion is the last group: nothing on the first frame needs it.
   evenG2 = new EvenG2Controller({
     notifications:(channel,id)=>attention.list(channel,id),
@@ -1468,7 +1512,9 @@ async function shutdownServices(): Promise<void> {
   await runShutdownSteps([
     {name:"Even G2",run:()=>evenG2?.close()},
     {name:"terminal processes",run:()=>terminalManager?.shutdown()},
+    {name:"network proxy",run:()=>networkPolicies?.close()}
   ]);
+  networkPolicies = null;
   // The hung-up PTYs exit while the other services close; quitting waits for them (see waitForProcessExits).
   const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
     if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);

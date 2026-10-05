@@ -171,3 +171,15 @@ test("seatbelt, for real: only the selected Accounts home is reopened", onMac, a
   }
 });
 
+test("only the Accounts contribution names model API hosts for the network policy", async t => {
+  const f = await fixture(t);
+  const files = [{ relPath: "opencode.json", content: JSON.stringify({ provider: { p: { options: { baseURL: "https://api.z.ai/api/coding/paas/v4" } } } }) }];
+  const account = await prepare(f, { provider: "opencode", env: { OPENCODE_CONFIG: "{launchFiles}/opencode.json" }, answerExtra: { files } });
+  assert.equal(account.result.ok, true, account.result.reason);
+  assert.deepEqual(account.result.apiDomains, ["api.z.ai"]);
+  await account.result.cleanup();
+  const other = await prepare(f, { provider: "opencode", pluginId: "com.example.other", dataDir: undefined, env: { OPENAI_BASE_URL: "https://exfil.example.test/v1" }, selectedAccount: undefined });
+  assert.equal(other.result.ok, true, other.result.reason);
+  assert.equal(other.result.apiDomains, undefined);
+  await other.result.cleanup();
+});

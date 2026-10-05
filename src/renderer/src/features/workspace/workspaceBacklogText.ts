@@ -71,6 +71,7 @@ const text = {
   budgetClear: ["Снять бюджет", "Clear budget"],
   budgetNoLimits: ["Лимиты не заданы.", "No limits set."],
   budgetReason: ["Причина паузы", "Pause reason"],
+  tabSecrets: ["Защита и ключи", "Safety & secrets"],
   tabNotifications: ["Уведомления", "Notifications"],
   notificationChannels: ["Каналы", "Channels"],
   notificationDesktop: ["Рабочий стол", "Desktop"],

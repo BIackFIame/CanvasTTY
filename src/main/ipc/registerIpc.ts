@@ -821,6 +821,10 @@ export function registerIpc(ipcMain: IpcRegistrar, {
       expiresAt: flow.expiresAt
     };
   });
+  ipcMain.handle(IPC.githubAuthCancel, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return githubAuth.cancelDeviceFlow();
+  });
   ipcMain.handle(IPC.githubAuthSignOut, (event) => {
     assertMainRenderer(event, getMainWindow);
     return githubAuth.signOut();

@@ -1,5 +1,13 @@
 import type { IsolationPaths } from "./isolationPaths.ts";
 
+export interface SeatbeltNetworkPolicy {
+  mode: "allowed-domains" | "offline";
+  /** Loopback TCP port of the per-app CONNECT proxy (allowed-domains). */
+  proxyPort?: number;
+  /** Narrow CanvasTTY HTTP-hook ports already present in this launch's provider config. */
+  loopbackPorts?: readonly number[];
+}
+
 /**
  * The macOS seatbelt profile (SBPL, read by /usr/bin/sandbox-exec) of one isolated agent. Everything is allowed
  * except what is listed, and a later rule wins over an earlier one:
@@ -12,11 +20,12 @@ import type { IsolationPaths } from "./isolationPaths.ts";
  * - no other process may be signalled; no application opened through Launch Services (`open`), no Apple events
  *   (`osascript` driving Terminal), no preference writes through cfprefsd (`defaults write`, which would otherwise
  *   write outside the layer on the agent's behalf);
- * - Unix sockets: DNS (mDNSResponder), syslog, this launch's temporary folder and CanvasTTY's own gateways.
+ * - Unix sockets: normally DNS (mDNSResponder), syslog, this launch's own temporary folder and CanvasTTY's own
+ *   token-authenticated gateways; strict network modes remove the DNS exception and keep only explicit host sockets.
  *
- * The CLI keeps its provider network access. Diff-only reviewers receive narrowly scoped read grants.
+ * Strict network modes deny direct connections and inbound IP listeners, and do not inherit the DNS socket exception.
  */
-export function seatbeltProfile(paths: IsolationPaths): string {
+export function seatbeltProfile(paths: IsolationPaths, network?: SeatbeltNetworkPolicy): string {
   const lines: string[] = [
     "(version 1)",
     "(allow default)",
@@ -87,9 +96,30 @@ export function seatbeltProfile(paths: IsolationPaths): string {
     "(deny user-preference-write)",
     "(deny network-outbound (remote unix-socket))"
   );
+  if (network) {
+    // Network isolation cannot rely on a DNS service deny-list: other host brokers remain reachable through Mach.
+    // Strict launches deny Mach lookups entirely; their explicit loopback and Unix-socket grants remain independent.
+    lines.push("(deny mach-lookup)");
+    // The deny is applied to the agent process tree; the host proxy is a separate app process, outside this sandbox.
+    // SBPL's remote-tcp predicate accepts localhost:port patterns (not 127.0.0.1:port), so only the one proxy
+    // listener and a capability-bearing CanvasTTY lifecycle hook can use loopback. No arbitrary listener is reachable.
+    lines.push("(deny network-outbound (remote ip))");
+    lines.push("(deny network-inbound (local ip))");
+    const ports = new Set(network.loopbackPorts ?? []);
+    if (network.mode === "allowed-domains") {
+      if (!Number.isInteger(network.proxyPort) || network.proxyPort! < 1 || network.proxyPort! > 65_535) {
+        throw new Error("The allowed-domains proxy port is missing or invalid.");
+      }
+      ports.add(network.proxyPort!);
+    }
+    for (const port of ports) {
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("A CanvasTTY loopback exception has an invalid port.");
+      lines.push(`(allow network-outbound (remote tcp "localhost:${port}"))`);
+    }
+  }
   // One filter per rule: `remote unix-socket` does not take a list (measured: only one of several listed matched).
   const sockets = [
-    "(path-literal \"/private/var/run/mDNSResponder\")",
+    ...(!network ? ["(path-literal \"/private/var/run/mDNSResponder\")"] : []),
     "(path-literal \"/private/var/run/syslog\")",
     ...paths.socketFolders.map((path) => `(subpath ${quote(path)})`),
     ...paths.socketPrefixes.map((prefix) => `(regex ${regex(`^${escapeRegex(prefix)}[^/]*/`)})`)

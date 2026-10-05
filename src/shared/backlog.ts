@@ -1,3 +1,4 @@
+import type { ProviderSecretId } from "./contracts.ts";
 
 export interface TimelineEvent {
   id: string; sessionId: string; at: number; type: string; summary: string;
@@ -13,7 +14,18 @@ export interface UsageBreakdown {sessionId:string;provider:string|null;model:str
 export type NotificationChannel = "desktop"|"phone"|"glasses";
 export interface NotificationPreferences {version:1;channels:Record<NotificationChannel,boolean>;quietUntil:number|null;importantOnly:boolean;sessionIds:string[]|null}
 export interface AttentionEvent {id:string;sessionId:string;title:string;kind:"response"|"approval"|"done"|"failed"|"budget"|"loop";at:number}
+export type SecretGrantDuration = "10m" | "turn" | "session";
+export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number}
+export interface SecretGrant {sessionId:string;secretId:ProviderSecretId;duration:SecretGrantDuration;approvedAt:number;expiresAt:number|null}
+export interface AgentNetworkPolicy {mode:"open"|"allowed-domains"|"offline";providerApis:boolean;packageRegistries:boolean;domains:string[]}
 export interface BacklogApi {
+  networkPolicy(sessionId?:string):Promise<{policy:AgentNetworkPolicy;available:boolean;reason?:string;projectRoot?:string}>;
+  setNetworkPolicy(sessionId:string|undefined,policy:AgentNetworkPolicy):Promise<AgentNetworkPolicy>;
+  secretRequests(sessionId:string):Promise<SecretGrantRequest[]>;
+  secretGrants(sessionId:string):Promise<SecretGrant[]>;
+  approveSecretRequest(sessionId:string,requestId:string,duration:SecretGrantDuration):Promise<SecretGrant>;
+  denySecretRequest(sessionId:string,requestId:string):Promise<void>;
+  revokeSecretGrant(sessionId:string,grantSessionId:string,secretId:ProviderSecretId):Promise<number>;
   notificationPreferences():Promise<NotificationPreferences>;
   setNotificationPreferences(value:NotificationPreferences):Promise<NotificationPreferences>;
   notifications():Promise<AttentionEvent[]>;
@@ -53,6 +65,13 @@ export interface FlowTemplate {
   finalStep:string;expectedSubagents:number;builtIn:boolean;source?:string;trusted?:boolean;digest?:string;
 }
 export const BACKLOG_IPC = {
+  networkPolicy:"backlog:network-policy",
+  setNetworkPolicy:"backlog:network-policy-set",
+  secretRequests:"backlog:secret-requests",
+  secretGrants:"backlog:secret-grants",
+  approveSecretRequest:"backlog:secret-approve",
+  denySecretRequest:"backlog:secret-deny",
+  revokeSecretGrant:"backlog:secret-revoke",
   notificationPreferences:"backlog:notifications-preferences",
   setNotificationPreferences:"backlog:notifications-set",
   notifications:"backlog:notifications",
