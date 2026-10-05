@@ -271,6 +271,7 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    openFile: (id: string, reference: string) => ipcRenderer.invoke(IPC.terminalOpenFile, id, reference),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),
       process.platform
