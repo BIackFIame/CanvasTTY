@@ -230,7 +230,7 @@ test("modifier-only Meta full override does not swallow ordinary Command shortcu
   assert.equal(prevented, false);
 });
 
-test("macOS Select All, Copy and Paste reach the renderer without capturing other Command shortcuts", () => {
+test("macOS Select All, Copy and Paste reach a focused terminal without capturing other Command shortcuts", () => {
   const contents = new EventEmitter();
   const ignored = [];
   contents.isDestroyed = () => false;
@@ -240,6 +240,7 @@ test("macOS Select All, Copy and Paste reach the renderer without capturing othe
     navigationBinding: null
   }, () => undefined);
   controller.attach(contents, { captureMacEditShortcuts: true });
+  controller.setTerminalEditFocus(contents, true);
 
   let prevented = false;
   const event = { preventDefault: () => { prevented = true; } };
@@ -429,4 +430,44 @@ test("changing a binding resets pressed state instead of activating it retroacti
     reserved: false
   });
   assert.equal(tracker.active, false);
+});
+
+test("macOS Command+C/V/A keep the Edit menu in ordinary fields and plugin pages; only a focused terminal captures them", () => {
+  const top = { name: "top" };
+  const pluginFrame = { name: "plugin iframe" };
+  const contents = new EventEmitter();
+  const ignored = [];
+  contents.isDestroyed = () => false;
+  contents.setIgnoreMenuShortcuts = (active) => ignored.push(active);
+  contents.mainFrame = top;
+  contents.focusedFrame = top;
+  const controller = new CanvasNavigationInputController({ wheelBinding: null, navigationBinding: null }, () => undefined);
+  controller.attach(contents, { captureMacEditShortcuts: true });
+  const event = { preventDefault: () => assert.fail("editing keys are never cancelled") };
+  const pressV = () => {
+    contents.emit("before-input-event", event, input("keyDown", "v", { code: "KeyV", meta: true }));
+    contents.emit("before-input-event", event, input("keyUp", "v", { code: "KeyV", meta: true }));
+  };
+
+  // An app field (no terminal focus reported): the menu's native Paste must run.
+  pressV();
+  assert.deepEqual(ignored, [], "an ordinary field keeps Edit > Paste");
+
+  // A plugin page's field: the iframe has focus, even if a terminal had focus before.
+  controller.setTerminalEditFocus(contents, true);
+  contents.focusedFrame = pluginFrame;
+  pressV();
+  assert.deepEqual(ignored, [], "a plugin iframe keeps Edit > Paste");
+
+  // Back in the terminal: captured for xterm's own paste.
+  contents.focusedFrame = top;
+  pressV();
+  assert.deepEqual(ignored, [true, false]);
+
+  // Focus leaves the terminal while the capture is held: it is released at once.
+  contents.emit("before-input-event", event, input("keyDown", "c", { code: "KeyC", meta: true }));
+  controller.setTerminalEditFocus(contents, false);
+  assert.deepEqual(ignored, [true, false, true, false]);
+  pressV();
+  assert.deepEqual(ignored, [true, false, true, false]);
 });

@@ -92,6 +92,7 @@ import {
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
 import { markMainBoot, mainBootMarks } from "./bootMarks";
+import { attachEditContextMenu } from "./editContextMenu";
 import { macApplicationMenuTemplate } from "./macApplicationMenu";
 
 if (process.env.CANVASTTY_USER_DATA_DIR) {
@@ -194,6 +195,8 @@ let appSurfaceReady = false;
 let pendingMenuUpdateCheck = false;
 let checkUpdatesFromMenu: (() => void) | null = null;
 let installMacMenu: (() => void) | null = null;
+/** The locale of the text right-click menu; startApplication points it at the settings once they are loaded. */
+let editMenuLocale: () => LocaleId = () => (app.getLocale().toLowerCase().startsWith("ru") ? "ru" : "en");
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let updateInterval: ReturnType<typeof setInterval> | null = null;
 let startupRunning = false;
@@ -256,6 +259,8 @@ function createWindow(): BrowserWindow {
     preventMouseBindings: false,
     captureMacEditShortcuts: process.platform === "darwin"
   });
+  attachEditContextMenu(window.webContents, () => editMenuLocale(),
+    (template, contents) => Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined }));
   // Crash recovery: a dead renderer must never leave the user staring at a
   // blank window. The application surface is reloaded in place — the same entry
   // startup loads — so services, sessions and their scrollback stay untouched
@@ -327,6 +332,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   recoverKimiConfigurationOnStartup(kimiHomeDirectory);
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
+  editMenuLocale = () => settings.get().locale;
   const terminalBorderSkins = new SkinRegistry(userDataPath);
   const pixelSkinPacks = new PixelSkinPackRegistry(userDataPath);
   pluginManager = new PluginManager(userDataPath);
@@ -835,6 +841,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     setCanvasNavigationShortcutCapture: (active) => {
       if (active) browserService?.cancelCanvasNavigationGesture();
       canvasNavigationInput?.setShortcutCaptureActive(active);
+    },
+    setCanvasNavigationTerminalEditFocus: (contents, active) => {
+      canvasNavigationInput?.setTerminalEditFocus(contents, active);
     },
     setCanvasNavigationPointerBinding: (input) => {
       canvasNavigationInput?.updatePointerBinding(input);
