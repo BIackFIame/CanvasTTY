@@ -1,5 +1,6 @@
 import { constants as osConstants } from "node:os";
 import { randomUUID } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import { realpathSync, statSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { isPathInside } from "../../agent-runtime/path-inside.mjs";
@@ -151,6 +152,7 @@ interface ManagedSession {
   budgetDeferredLaunch?: boolean;
   /** Input waiting for this launch to start (deliverInput): woken whenever the launch moves on. */
   launchWaiters: Set<() => void>;
+  inputQueue?: Promise<InputDelivery>;
   /** Brought back from the saved sessions at startup (plugins see a "restored" event, not "created"). */
   restored?: boolean;
   /** What the CLI's own title last showed (Claude: spinner working, «✳» no turn running). */
@@ -1177,7 +1179,25 @@ export class TerminalManager {
    * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
    * it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing either.
    */
-  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
+  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
+    const session = this.sessions.get(id);
+    if (!session) return Promise.resolve({ delivered: false, reason: "The session does not exist." });
+    const epoch = session.launchEpoch;
+    const deadline = Date.now() + waitMs;
+    const previous = session.inputQueue;
+    const run = async (): Promise<InputDelivery> => {
+      if (this.sessions.get(id) !== session || session.launchEpoch !== epoch) {
+        return { delivered: false, reason: "The session was closed or restarted before delivery." };
+      }
+      return this.deliverQueuedInput(id, data, Math.max(0, deadline - Date.now()), signal);
+    };
+    const pending = previous ? previous.then(run, run) : run();
+    session.inputQueue = pending;
+    void pending.finally(() => { if (session.inputQueue === pending) delete session.inputQueue; }).catch(() => {});
+    return pending;
+  }
+
+  private async deliverQueuedInput(id: string, data: string, waitMs: number, signal?: AbortSignal): Promise<InputDelivery> {
     const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
     if (signal?.aborted) return canceled;
     const session = this.sessions.get(id);
@@ -1211,11 +1231,52 @@ export class TerminalManager {
         ? `The session did not start: ${this.redactSecrets(session.metadata.failureDetails)}`
         : "The session has already exited." };
     }
+    // Only these providers have a startup hook and a turn acknowledgement. Without an installed runtime
+    // (e.g. hooks disabled or a remote environment) keep the ordinary PTY delivery contract.
+    const confirm = this.lifecycleHooksEnabled && session.agentRuntime !== null
+      && ["opencode", "claude", "codex"].includes(session.metadata.provider);
+    const valid = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
+      && session.metadata.exitCode === null && !signal?.aborted;
+    const poll = async (): Promise<void> => {
+      await new Promise<void>((resolve) => {
+        const wake = (): void => { clearTimeout(timer); signal?.removeEventListener("abort", wake); resolve(); };
+        const timer = setTimeout(wake, Math.max(0, Math.min(50, deadline - Date.now())));
+        signal?.addEventListener("abort", wake, { once: true });
+      });
+    };
+    if (confirm) {
+      while (valid() && !(session.hookSignals || session.titleState) && Date.now() < deadline) await poll();
+      if (signal?.aborted) return canceled;
+      if (!valid()) return { delivered: false, reason: "The session closed, exited or restarted before CLI readiness." };
+      if (!(session.hookSignals || session.titleState)) return { delivered: false, reason: "The CLI did not become ready before the delivery deadline; no text was sent." };
+    }
+    if (Date.now() >= deadline) return { delivered: false, reason: "The input delivery deadline expired; no text was sent." };
     // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
+    const offset = session.outputOffset;
     const mark = session.turnStarts ?? 0;
     if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
     if (data.endsWith("\r")) session.promptTurnMark = mark;
-    return { delivered: true };
+    if (!confirm) return { delivered: true };
+    // Never replay the text on an ambiguous acknowledgement: that can run a task twice. Retry only Enter,
+    // and only after observing the complete text echoed by an idle CLI (the text itself was accepted).
+    const text = data.replace(/\r$/u, "").replace(/\s+/gu, "");
+    let submits = 1;
+    let retryAt = Date.now() + 1000;
+    while (valid() && Date.now() < deadline) {
+      if ((session.turnStarts ?? 0) > mark) return { delivered: true };
+      const output = session.bufferChunks.slice(session.bufferStart).join("");
+      const fresh = output.slice(Math.max(0, output.length - (session.outputOffset - offset)));
+      const echoed = text.length > 0 && stripVTControlCharacters(fresh).replace(/\s+/gu, "").includes(text);
+      if (echoed && !data.endsWith("\r")) return { delivered: true };
+      if (echoed && session.metadata.status === "idle" && Date.now() >= retryAt && submits < 3) {
+        if (!this.inputChecked(id, "\r")) break;
+        submits++;
+        retryAt = Date.now() + 1000;
+      }
+      await poll();
+    }
+    if (signal?.aborted) return canceled;
+    return { delivered: false, reason: "The CLI did not confirm accepting the prompt before the delivery deadline. Inspect the card before sending again; the text was not replayed." };
   }
 
   private wakeLaunchWaiters(session: ManagedSession): void {

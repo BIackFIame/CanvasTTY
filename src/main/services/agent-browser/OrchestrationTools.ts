@@ -232,11 +232,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     try {
       const result = await this.control.waitFor(target, {
         timeoutMs: Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000,
+        deferReview: true,
         ...(signal ? { signal } : {})
       });
       if (result.reason === "closed") return { ...result };
-      const final = await this.control.resultWithReview(target);
-      return { ...result, ...(final.review ? { review: final.review } : {}) };
+      return { ...result, ...(result.reason === "timeout" || result.review?.status === "pending"
+        ? { message: "Still running. Call wait_for_agent again for progress." } : {}) };
     } catch (error) {
       if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw canceledError();
       throw error;

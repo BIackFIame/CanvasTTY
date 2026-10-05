@@ -598,7 +598,7 @@ export class AgentControlService {
    * closed, or the timeout passed. Only reads metadata and the output offset while it waits; the tail is read and
    * masked once, as it returns. Rejects with an AbortError once `signal` aborts.
    */
-  async waitFor(sessionId: string, request: { timeoutMs: number; signal?: AbortSignal; quietMs?: number }): Promise<AgentWaitResult> {
+  async waitFor(sessionId: string, request: { timeoutMs: number; signal?: AbortSignal; quietMs?: number; deferReview?: boolean }): Promise<AgentWaitResult> {
     const { signal } = request;
     signal?.throwIfAborted();
     const first = this.requireSession(sessionId);
@@ -618,7 +618,10 @@ export class AgentControlService {
       const finalAnswer: AgentAnswer | null = reason === "timeout" || reason === "needs_approval" ? null : this.answer(sessionId);
       let review: AgentReviewResult | undefined;
       if (this.reviewRequested.has(sessionId) && (reason === "idle" || reason === "done" || reason === "failed" || reason === "quiet")) {
-        review = this.reviewWithCost(await this.ensureReview(sessionId));
+        if (request.deferReview) {
+          void this.ensureReview(sessionId);
+          review = this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
+        } else review = this.reviewWithCost(await this.ensureReview(sessionId));
       }
       return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
         ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(finalAnswer ? { answer: finalAnswer } : {}), ...(review ? { review } : {}) };

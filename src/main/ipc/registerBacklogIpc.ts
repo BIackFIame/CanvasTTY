@@ -77,7 +77,7 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   });
   handle(BACKLOG_IPC.sendInstructions, async (id:string,text:unknown) => {
     session(id);if(typeof text!=="string" || text.length>32_000)throw new Error("Invalid instructions.");
-    const result=await terminals.deliverInput(id,`${terminals.redactSecrets(text)}\r`);if(!result.delivered)throw new Error("Agent did not accept the instructions.");
+    const result=await terminals.deliverInput(id,`${terminals.redactSecrets(text)}\r`);if(!result.delivered)throw new Error(`Agent did not accept the instructions: ${result.reason}`);
   });
   handle(BACKLOG_IPC.redactText, (text: unknown) => {
     if (typeof text !== "string" || text.length > 1_000_000) throw new Error("Text is invalid or too large."); return terminals.redactSecrets(text);

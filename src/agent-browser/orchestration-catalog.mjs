@@ -31,7 +31,7 @@ export const AGENT_PROVIDER_IDS = Object.freeze([
 ]);
 /** wait_for_agent: the longest wait one call may ask for, and the wait without timeoutSeconds (some MCP clients
  *  end a tool call after 60 seconds). */
-export const MAX_AGENT_WAIT_SECONDS = 600;
+export const MAX_AGENT_WAIT_SECONDS = 100;
 export const DEFAULT_AGENT_WAIT_SECONDS = 55;
 /** spawn_agent.effort: every level some CLI takes (src/shared/launchModel.ts REASONING_EFFORTS; a test keeps them equal). */
 export const REASONING_EFFORT_IDS = Object.freeze(["minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -88,7 +88,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "wait_for_agent",
-    `Wait until one of this session's subagents stops working, instead of polling observe_agent or get_agent_result; nothing is sent to it while it waits. Returns reason "idle" (the turn that answers your latest prompt ended and it waits for input; an idle before that turn started does not count), "needs_approval" (its card shows a prompt only the person may answer; never answer it yourself), "done" or "failed" (its process exited), "quiet" (it reports no status or no turn start and its screen stopped changing, so judge from output), "closed" (its card was closed) or "timeout" after timeoutSeconds (default ${DEFAULT_AGENT_WAIT_SECONDS}, at most ${MAX_AGENT_WAIT_SECONDS}), with status, exitCode, waitedMs, the masked terminal tail as output, and answer (the final reply of the turn that ended, for Codex and OpenCode subagents); when the subagent's process exited (for example at once, on a model its CLI does not know), exitLines holds the last lines of its screen as plain text, which say why. After a timeout, call it again. Then read get_agent_result.`,
+    `Wait until one of this session's subagents stops working, instead of polling observe_agent or get_agent_result; nothing is sent to it while it waits. Returns reason "idle" (the turn that answers your latest prompt ended and it waits for input; an idle before that turn started does not count), "needs_approval" (its card shows a prompt only the person may answer; never answer it yourself), "done" or "failed" (its process exited), "quiet" (it reports no status or no turn start and its screen stopped changing, so judge from output), "closed" (its card was closed) or "timeout" after timeoutSeconds (default ${DEFAULT_AGENT_WAIT_SECONDS}, at most ${MAX_AGENT_WAIT_SECONDS}), with status, exitCode, waitedMs, the masked terminal tail as output, and answer (the final reply of the turn that ended, for Codex and OpenCode subagents); when the subagent's process exited (for example at once, on a model its CLI does not know), exitLines holds the last lines of its screen as plain text, which say why. A timeout means it is still running: use output as progress and call wait_for_agent again. Pending reviews also return within this deadline. Then read get_agent_result.`,
     { sessionId, timeoutSeconds: integer({ minimum: 1, maximum: MAX_AGENT_WAIT_SECONDS }) },
     ["sessionId"]
   ),
