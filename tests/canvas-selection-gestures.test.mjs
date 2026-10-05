@@ -11,6 +11,7 @@ import {
   canvasMarqueeRect,
   canvasPressIntent,
   canvasWorldRect,
+  materialLayerId,
   noteLayerId,
   parseCanvasLayerId,
   pastCanvasDragThreshold,
@@ -22,7 +23,7 @@ const pointerNavigationPath = new URL("../src/renderer/src/features/workspace/us
 const workspacePath = new URL("../src/renderer/src/features/workspace/WorkspaceCanvas.tsx", import.meta.url);
 
 /** Every window kind, each named the way its own card root names it. */
-const everyLayerId = [terminalLayerId("a"), pluginLayerId("p"), browserLayerId, noteLayerId("n")];
+const everyLayerId = [terminalLayerId("a"), pluginLayerId("p"), browserLayerId, noteLayerId("n"), materialLayerId("m")];
 
 /** A primary press on empty canvas, overridden per test. */
 function press(overrides = {}) {
@@ -123,13 +124,14 @@ test("a layer id round-trips every window kind and nothing else parses", () => {
     [terminalLayerId("s-1"), { kind: "terminal", targetId: "s-1" }],
     [pluginLayerId("p-1"), { kind: "plugin", targetId: "p-1" }],
     [browserLayerId, { kind: "browser", targetId: null }],
-    [noteLayerId("n-1"), { kind: "note", targetId: "n-1" }]
+    [noteLayerId("n-1"), { kind: "note", targetId: "n-1" }],
+    [materialLayerId("m-1"), { kind: "material", targetId: "m-1" }]
   ];
   for (const [layerId, expected] of cases) {
     assert.deepEqual(parseCanvasLayerId(layerId), expected, `${layerId} must resolve to its own kind`);
   }
   assert.deepEqual(parseCanvasLayerId(terminalLayerId("s:1")), { kind: "terminal", targetId: "s:1" });
-  for (const junk of ["", "terminal", "terminal:", "plugin:", "note:", ":a", "session:a", "browser:", "browser:first", "browser:second", "Browser"]) {
+  for (const junk of ["", "terminal", "terminal:", "plugin:", "note:", "material:", ":a", "session:a", "browser:", "browser:first", "browser:second", "Browser"]) {
     assert.equal(parseCanvasLayerId(junk), null, `"${junk}" is not a layer id`);
   }
 });
@@ -216,4 +218,10 @@ test("a travelled group drag commits one delta once and suppresses exactly one f
   const bail = finish.indexOf("if (!state.active) return;");
   assert.notEqual(bail, -1, "only a travelled drag may commit");
   assert.ok(bail < finish.indexOf("suppressClick.current = true"), "a jitter press must not suppress the click");
+});
+
+test("media players on material cards are controls, so pressing play never anchors a group drag", () => {
+  assert.equal(selectorCovers({ tag: "video" }), true);
+  assert.equal(selectorCovers({ tag: "audio" }), true);
+  assert.equal(selectorCovers({ tag: "img" }), false, "an image body stays a drag surface");
 });

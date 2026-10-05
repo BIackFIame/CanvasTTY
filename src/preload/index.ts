@@ -14,6 +14,7 @@ import type {
   CanvasTTYApi,
   CustomTerminalBorderSkinId,
   CreateSessionRequest,
+  MaterialsSnapshot,
   PluginBrowserOpenRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
@@ -22,6 +23,7 @@ import type {
   PluginCardDecorations,
   PluginStorageChangeEvent,
   PluginUpdateStatus,
+  Point,
   ProviderId,
   PixelSkinPackInstallRequest,
   PixelSkinZipInstallRequest,
@@ -33,8 +35,8 @@ import type {
   SessionRemovedEvent,
   GitRiskReport,
   TerminalDataEvent
-} from "../shared/contracts";
-import { IPC } from "../shared/contracts";
+} from "../shared/contracts.ts";
+import { IPC } from "../shared/contracts.ts";
 import { terminalFileDropText } from "../shared/terminalFileDrop";
 import { TerminalDataRouter } from "../shared/terminalDataRouter";
 
@@ -117,6 +119,23 @@ const api: CanvasTTYApi = {
   },
   media: {
     read: (path: string) => ipcRenderer.invoke(IPC.mediaRead, path)
+  },
+  materials: {
+    snapshot: () => ipcRenderer.invoke(IPC.materialsSnapshot),
+    addFiles: (files: File[], point: Point) => ipcRenderer.invoke(
+      IPC.materialsAddPaths,
+      files.map((file) => webUtils.getPathForFile(file)),
+      point
+    ),
+    pick: (point: Point) => ipcRenderer.invoke(IPC.materialsPick, point),
+    paste: (point: Point) => ipcRenderer.invoke(IPC.materialsPaste, point),
+    setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.materialsSetBounds, id, bounds),
+    setBoundsBatch: (entries: { id: string; bounds: SessionBounds }[]) => ipcRenderer.send(IPC.materialsSetBoundsBatch, entries),
+    remove: (id: string) => ipcRenderer.invoke(IPC.materialsRemove, id),
+    reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
+    relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
+    acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
+    onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
   },
   limits: {
     get: () => ipcRenderer.invoke(IPC.limitsGet)

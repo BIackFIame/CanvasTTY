@@ -910,7 +910,7 @@ function isMainRenderer(
   }
 }
 
-function assertMainRenderer(
+export function assertMainRenderer(
   event: IpcMainEvent | IpcMainInvokeEvent,
   getMainWindow: () => BrowserWindow | null
 ): void {
