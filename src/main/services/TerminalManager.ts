@@ -36,6 +36,7 @@ import type {
 } from "./agent-browser/AgentBrowserBridge.ts";
 import { AGENT_BROWSER_ENV } from "./agent-browser/AgentBrowserBridge.ts";
 import { ORCHESTRATION_TOOL_NAMES } from "../../agent-browser/orchestration-catalog.mjs";
+import { isExecutionGoal, normalizeExecutionStrategy } from "../../shared/executionStrategy.ts";
 import type { OrchestrationLaunchCoordinator, PreparedOrchestrationPtyLaunch } from "./agent-browser/OrchestrationBridge.ts";
 import type {
   AgentRuntimeLaunchCoordinator,
@@ -453,7 +454,8 @@ export class TerminalManager {
     const taskRoot = this.taskScopeFor(input.taskRootSessionId);
     addDirectory(taskRoot.cwd);
     for (const session of this.sessions.values()) {
-      addDirectory(session.metadata.cwd);
+      // A completed host reviewer has already removed its disposable diff workspace.
+      if (!(session.reviewWorkspace && session.metadata.exitCode !== null)) addDirectory(session.metadata.cwd);
       addDirectory(session.metadata.taskScope?.cwd ?? this.taskScopeFor(session.metadata.id).cwd);
     }
     if (denied.size === 0) throw new LaunchRefusal("No project roots were available to isolate the diff-only reviewer.");
@@ -492,9 +494,13 @@ export class TerminalManager {
     return account === "default" ? undefined : account;
   }
 
-  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"modelRoute"|"reviewRequested">): void {
+  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"modelRoute"|"reviewRequested"|"executionStrategy">): void {
     const session=this.sessions.get(id);if (!session) return;
     if (patch.modelRoute) session.metadata.modelRoute={...patch.modelRoute,reason:this.redactSecrets(patch.modelRoute.reason).slice(0,500)};
+    if (patch.executionStrategy) {
+      const strategy = normalizeExecutionStrategy(patch.executionStrategy);
+      if (strategy) session.metadata.executionStrategy = { ...strategy, reason: this.redactSecrets(strategy.reason) };
+    }
     if (patch.reviewRequested !== undefined) session.metadata.reviewRequested=patch.reviewRequested;
     this.schedulePersistence();
     this.emitSession(session.metadata);
@@ -581,6 +587,12 @@ export class TerminalManager {
   /** Host-only: the replacement retains the old task's budget/board identity before it receives input. */
   inheritTaskScope(sourceId:string,replacementId:string):void {
     const replacement=this.sessions.get(replacementId);if(!replacement)throw new Error("Handoff card is unavailable.");
+    const source = this.sessions.get(sourceId)?.metadata;
+    if (source) {
+      replacement.metadata.executionGoal = source.executionGoal;
+      replacement.metadata.executionTask = source.executionTask;
+      replacement.metadata.executionStrategy = source.executionStrategy ? { ...source.executionStrategy } : undefined;
+    }
     replacement.metadata.taskScope=this.taskScopeFor(sourceId);this.emitSession(replacement.metadata);this.schedulePersistence();
   }
   taskScopeFor(sourceId:string):NonNullable<SessionMetadata["taskScope"]> {
@@ -825,6 +837,12 @@ export class TerminalManager {
     return this.liveProcesses.size;
   }
 
+  /** Retain the completed review card so delayed provider usage remains attributable to the shared task. */
+  async finishReadOnlyReviewer(id: string): Promise<void> {
+    if (!this.sessions.get(id)?.reviewWorkspace) throw new Error("Only a host-owned read-only reviewer can be completed this way.");
+    await this.stopSubagentPtyForRetry(id);
+  }
+
   /** Stops only this card's owned PTY and waits for its existing exit watcher before it can reuse a workspace. */
   async stopSubagentPtyForRetry(id: string): Promise<void> {
     const session = this.sessions.get(id);
@@ -991,6 +1009,7 @@ export class TerminalManager {
     // The isolation layer decides before anything starts: a subagent without it runs in normal, a launch that
     // needs it and cannot have it is refused.
     // Host consent supplies continuation identity before any process or capability is launched.
+    const executionSource = control.continueTaskFrom ? this.sessions.get(control.continueTaskFrom)?.metadata : undefined;
     const continuationScope=control.continueTaskFrom ? this.taskScopeFor(control.continueTaskFrom) : undefined;
     const inheritedTaskRootId=continuationScope?.id ?? (request.parentSessionId ? this.taskScopeFor(request.parentSessionId).id : undefined);
     if(inheritedTaskRootId && this.budgetPausedTaskRoots.has(inheritedTaskRootId)) {
@@ -1024,6 +1043,8 @@ export class TerminalManager {
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
       status: initialSessionStatus(request.provider),
       startedAt,
+      ...(executionSource ? { executionGoal: executionSource.executionGoal, executionTask: executionSource.executionTask, executionStrategy: executionSource.executionStrategy }
+        : !request.parentSessionId && request.executionGoal ? { executionGoal: request.executionGoal, ...(request.executionTask ? { executionTask: this.redactSecrets(request.executionTask).slice(0, 8000) } : {}) } : {}),
       ...(continuationScope ? {taskScope:continuationScope} : environmentChoice && !request.parentSessionId ? {taskScope:{id,cwd:request.cwd,startedAt}} : {}),
       exitCode: null,
       failureDetails: null,
@@ -1640,6 +1661,7 @@ export class TerminalManager {
       role: descriptor.role,
       ...(descriptor.parentSessionId !== undefined ? { parentSessionId: descriptor.parentSessionId } : {}),
       ...(descriptor.taskScope ? {taskScope:{...descriptor.taskScope}} : {}),
+      ...(descriptor.executionGoal ? { executionGoal: descriptor.executionGoal, executionTask: descriptor.executionTask, executionStrategy: descriptor.executionStrategy } : {}),
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -2945,6 +2967,8 @@ function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown
 
 function assertCreateRequest(request: CreateSessionRequest, containment: boolean): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
+  if (request.executionGoal !== undefined && (!isExecutionGoal(request.executionGoal) || request.provider === "terminal" || request.parentSessionId !== undefined || request.role !== "orchestrator")) throw new Error("An execution goal requires a root orchestrator.");
+  if (request.executionTask !== undefined && (typeof request.executionTask !== "string" || request.executionTask.length > 8000)) throw new Error("The overall execution task must be at most 8000 characters.");
   if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
   if (!profileAvailable(request.provider, request.profile, containment) && !(request.provider === "terminal" && request.profile === "yolo")) {
     throw new LaunchRefusal(request.profile === "auto"

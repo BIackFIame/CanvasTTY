@@ -14,6 +14,8 @@ import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
 import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
+import { isExecutionGoal, normalizeExecutionStrategy } from "../../shared/executionStrategy.ts";
+
 const TERMINAL_SESSION_STORE_VERSION = 2;
 /**
  * A bound against a damaged or hostile file, far above what a canvas holds: every open card is saved (a cap that cut
@@ -25,6 +27,9 @@ export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
 
 export interface PersistedTerminalSession {
+  executionGoal?: SessionMetadata["executionGoal"];
+  executionTask?: string;
+  executionStrategy?: SessionMetadata["executionStrategy"];
   taskScope?:{id:string;cwd:string;startedAt:number};
   id: string;
   provider: ProviderId;
@@ -228,7 +233,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
   return typeof candidate === "string" ? normalizeThreadId(provider, candidate.trim()) : undefined;
 }
 
-/** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
+/** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
 export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
@@ -254,6 +259,7 @@ export function persistedTerminalSession(
     size: { ...metadata.size },
     ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
     ...(metadata.taskScope ? {taskScope:{...metadata.taskScope}} : {}),
+    ...(metadata.executionGoal ? { executionGoal: metadata.executionGoal, executionTask: metadata.executionTask, executionStrategy: metadata.executionStrategy } : {}),
     ...(normalizedThreadId !== undefined ? { threadId: normalizedThreadId } : {}),
     lastState,
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
@@ -337,6 +343,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       },
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       ...(isTaskScope(session.taskScope) ? {taskScope:{...session.taskScope}} : {}),
+      ...(isExecutionGoal(session.executionGoal) ? { executionGoal: session.executionGoal,
+        ...(typeof session.executionTask === "string" ? { executionTask: session.executionTask.slice(0,8000) } : {}),
+        ...(normalizeExecutionStrategy(session.executionStrategy)?.requested === session.executionGoal ? { executionStrategy: normalizeExecutionStrategy(session.executionStrategy) } : {}) } : {}),
       ...(threadId !== undefined ? { threadId } : {}),
       lastState,
       ...(lastState !== "running" ? { exitCode } : {}),

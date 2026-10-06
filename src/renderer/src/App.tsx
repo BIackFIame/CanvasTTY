@@ -1,3 +1,4 @@
+import type { ExecutionGoal } from "../../shared/executionStrategy";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   GitRiskReport,
@@ -595,7 +596,8 @@ export function App(): React.JSX.Element {
     requestedCenter?: Point,
     role: LaunchRole = "agent",
     launchOptions?: Record<string, PluginLaunchValues>,
-    environment?: SessionEnvironmentChoice
+    environment?: SessionEnvironmentChoice,
+    execution?: { goal: ExecutionGoal; task?: string }
   ): Promise<SessionSnapshot> => {
     const currentSettings = settingsRef.current;
     const pixelSkin = isPixelSkinThemeId(currentSettings.terminalBorderSkin)
@@ -624,6 +626,7 @@ export function App(): React.JSX.Element {
     try {
       const session = await window.canvasTTY.terminal.create({
         provider, profile, cwd, position, role, ...(launchOptions ? { launchOptions } : {}),
+        ...(execution && currentSettings.experimentalBacklogEnabled ? { executionGoal: execution.goal, executionTask: execution.task } : {}),
         ...(environment ? { environment } : {})
       });
       const sizedSession = pixelSkin ? { ...session, size: { ...cardSize } } : session;
@@ -680,9 +683,10 @@ export function App(): React.JSX.Element {
     role: LaunchRole,
     launchOptions?: Record<string, PluginLaunchValues>,
     environment?: SessionEnvironmentChoice,
-    initialPrompt?: string
+    initialPrompt?: string,
+    execution?: { goal: ExecutionGoal; task?: string }
   ): Promise<void> => {
-    const session=await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions, environment);
+    const session=await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions, environment, execution);
     if(initialPrompt)await window.canvasTTY.backlog.sendInstructions(session.id,initialPrompt);
     setLaunchPosition(null);
     showToast(provider === "terminal" ? t(settings.locale, "terminalStarted") : `${t(settings.locale, "sessionStarted")}: ${provider}`);

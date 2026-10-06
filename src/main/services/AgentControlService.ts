@@ -1,3 +1,4 @@
+import { executionStrategy, normalizeExecutionStrategy, type ExecutionStrategy } from "../../shared/executionStrategy.ts";
 import type {
   AgentProviderId,
   CreateSessionRequest,
@@ -108,6 +109,8 @@ export interface AgentWaitTiming {
 }
 
 export interface AgentControlOptions {
+  /** Dynamic application opt-in, also checked for restored sessions. */
+  executionEnabled?: () => boolean;
   /** waitFor timing; tests shorten it. */
   waitTiming?: AgentWaitTiming;
   /** The person's delegation limits (Settings → Agents), read at every spawn. */
@@ -187,6 +190,7 @@ export class PromptNotDeliveredError extends Error {
 }
 
 export class AgentControlService {
+  private readonly reviewRoots = new Set<string>();
   private readonly loopWarnings = new Map<string,{at:number;turnEpoch:number}>();
   private readonly terminals: TerminalManager;
   private readonly options: AgentControlOptions;
@@ -224,6 +228,10 @@ export class AgentControlService {
     const account = this.subagentAccount(parent.id, request.provider, request.launchOptions);
     if (account.launchOptions !== request.launchOptions) request = { ...request, launchOptions: account.launchOptions };
 
+    const execution = this.executionContext(parent.id);
+    const strategy = execution.goal ? this.rememberExecutionStrategy(parent.id, execution.strategy
+      ?? executionStrategy("auto", "balanced", "fallback", "No overall strategy was resolved before this direct launch; balanced host defaults apply.")) : undefined;
+    if (strategy?.review === "required") request = { ...request, review: true };
     const taskScope = this.taskRoot(parent.id);
     // What the request asks for first (its folder, its profile), then the person's limits.
     const cwd = subagentFolder(taskScope.cwd, parent.cwd, request.cwd);
@@ -387,6 +395,33 @@ export class AgentControlService {
     return taskScope ? { ...taskScope } : { id: root.id, cwd: root.cwd, startedAt: root.startedAt };
   }
 
+  /** Strategy belongs to the logical root, including its handoff replacements. */
+  executionContext(sessionId: string): { rootId: string; goal?: SessionMetadata["executionGoal"]; task?: string; strategy?: ExecutionStrategy } {
+    const root = this.lineage(sessionId).at(-1)!;
+    const rootId = this.taskRoot(sessionId).id;
+    if (this.options.executionEnabled && !this.options.executionEnabled()) return { rootId };
+    const related = this.terminals.listMetadata().filter(row => !row.parentSessionId && (row.id === rootId || row.taskScope?.id === rootId));
+    const owner = related.find(row => row.executionStrategy) ?? related.find(row => row.executionGoal) ?? root;
+    const goal = owner.executionGoal;
+    const stored = normalizeExecutionStrategy(owner.executionStrategy);
+    const strategy = (stored?.requested === goal ? stored : undefined)
+      ?? (goal && goal !== "auto" ? executionStrategy(goal, goal, "person", "The person selected this execution goal.") : undefined);
+    return { rootId, goal, task: owner.executionTask, strategy };
+  }
+
+  rememberExecutionStrategy(sessionId: string, strategy: ExecutionStrategy): ExecutionStrategy {
+    const context = this.executionContext(sessionId);
+    const normalized = normalizeExecutionStrategy(context.strategy ?? strategy);
+    if (!normalized || normalized.requested !== context.goal) throw new Error("Execution strategy does not match the person's goal.");
+    this.requireBudgetActive(sessionId);
+    for (const row of this.terminals.listMetadata()) {
+      if (!row.parentSessionId && (row.id === context.rootId || row.taskScope?.id === context.rootId)) {
+        this.terminals.setTaskMetadata(row.id, { executionStrategy: normalized });
+      }
+    }
+    return normalized;
+  }
+
   /** Resolve every card against one host snapshot, sharing parent traversal and preserving continuation scopes. */
   taskRoots(sessions: readonly SessionMetadata[]): Map<string, { id: string; cwd: string; startedAt: number }> {
     const byId = new Map(sessions.map((session) => [session.id, session]));
@@ -469,7 +504,7 @@ export class AgentControlService {
     return DEFAULT_DELEGATION_LIMITS;
   }
 
-  private assertSpawnCapacity(parentSessionId: string, replacingSessionId?: string): { live: number; childrenCount: number } {
+  private assertSpawnCapacity(parentSessionId: string, replacingSessionId?: string, reviewer = false): { live: number; childrenCount: number } {
     const childrenCount = this.children(parentSessionId).filter(session => session.id !== replacingSessionId).length;
     if (childrenCount >= MAX_CHILDREN_PER_PARENT) {
       throw new DelegationRefusal(`Session ${parentSessionId} already has ${MAX_CHILDREN_PER_PARENT} subagent cards; cancel_agent the finished ones first.`);
@@ -479,9 +514,16 @@ export class AgentControlService {
     if (lineage.length > limits.maxDepth) {
       throw new DelegationRefusal(`Subagents may nest at most ${limits.maxDepth} level${limits.maxDepth === 1 ? "" : "s"} deep below the agent the person started; this one would be level ${lineage.length}. The person sets this limit in Settings → Agents.`);
     }
-    const live = this.descendants(lineage.at(-1)!.id)
-      .filter(session => session.id !== replacingSessionId && session.exitCode === null).length;
-    if (live >= limits.maxSubagents) {
+    const sessions = this.terminals.listMetadata();
+    const roots = this.taskRoots(sessions);
+    const context = this.executionContext(parentSessionId);
+    const live = sessions.filter(session => session.parentSessionId && roots.get(session.id)?.id === context.rootId
+      && session.id !== replacingSessionId && session.exitCode === null).length;
+    const strategy = context.strategy;
+    const cap = Math.min(limits.maxSubagents, strategy?.maxConcurrent ?? limits.maxSubagents);
+    const workerCap = cap - (!reviewer && strategy?.review === "required" ? 1 : 0);
+    if (live >= workerCap) {
+      if (strategy) throw new DelegationRefusal(`Execution strategy ${strategy.resolved} allows ${cap} live subagents within the person's limit${strategy.review === "required" && !reviewer ? "; one slot is reserved for required review" : ""}. Cancel finished idle cards before spawning more.`);
       throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
     }
     return { live, childrenCount };
@@ -793,7 +835,7 @@ export class AgentControlService {
     if (active) return active;
     const controller = new AbortController();
     this.reviewControllers.set(sessionId, controller);
-    const pending = this.performReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
+    const pending = this.queuedReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
       status: "unavailable",
       reason: this.redactTail(error instanceof Error ? error.message : "The reviewer failed.", 500),
       costUsd: null
@@ -809,6 +851,23 @@ export class AgentControlService {
       if (this.reviewPending.get(sessionId) === pending) this.reviewPending.delete(sessionId);
       if (this.reviewControllers.get(sessionId) === controller) this.reviewControllers.delete(sessionId);
     }
+  }
+
+  private async queuedReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
+    const rootId = this.taskRoot(sessionId).id;
+    const deadline = Date.now() + (this.options.reviewTimeoutMs ?? REVIEW_TIMEOUT_MS);
+    while (this.reviewRoots.has(rootId)) {
+      signal.throwIfAborted();
+      this.requireSession(sessionId);
+      this.requireBudgetActive(sessionId);
+      if (Date.now() >= deadline) throw new Error("Required review could not obtain its reserved slot before the deadline.");
+      await pause(100, signal);
+    }
+    signal.throwIfAborted();
+    this.requireBudgetActive(sessionId);
+    this.reviewRoots.add(rootId);
+    try { return await this.performReview(sessionId, signal); }
+    finally { this.reviewRoots.delete(rootId); }
   }
 
   private async performReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
@@ -863,6 +922,14 @@ export class AgentControlService {
             launchOptions: { [MODEL_ACCOUNTS_PLUGIN_ID]: { account } } })
           : undefined;
         if (signal.aborted) { void reviewerAccount?.contribution.cleanup().catch(() => undefined); throw new Error("The worker session was removed before review."); }
+        try {
+          this.requireSession(root.id);
+          this.requireBudgetActive(sessionId);
+          this.assertSpawnCapacity(root.id, undefined, true);
+        } catch (error) {
+          void reviewerAccount?.contribution.cleanup().catch(() => undefined);
+          throw error;
+        }
         reviewer = this.terminals.createReadOnlyReviewer({
           taskRootSessionId: root.id,
           provider: worker.provider as AgentProviderId,
@@ -912,10 +979,15 @@ export class AgentControlService {
         return { status: "unavailable", reason: "The reviewer did not return a valid accept, revise, or reject verdict.", reviewerSessionId: reviewerSession.id, model, costUsd: null };
       }
       keepReviewer = true;
+      let releaseNote = "";
+      if (this.executionContext(sessionId).strategy?.review === "required") {
+        try { await this.terminals.finishReadOnlyReviewer(reviewerSession.id); }
+        catch { releaseNote = "The review completed, but its PTY could not be stopped; it still occupies a live slot until closed."; }
+      }
       return {
         status: parsed.verdict === "accept" ? "accepted" : parsed.verdict === "revise" ? "revise" : "rejected",
         verdict: parsed.verdict,
-        notes: [account ? "Reviewed on the worker's model account (the same model; name reviewModel for another)." : "", parsed.findings ? this.redactTail(parsed.findings, 8_000) : ""].filter(Boolean).join("\n") || undefined,
+        notes: [releaseNote, account ? "Reviewed on the worker's model account (the same model; name reviewModel for another)." : "", parsed.findings ? this.redactTail(parsed.findings, 8_000) : ""].filter(Boolean).join("\n") || undefined,
         reviewerSessionId: reviewerSession.id,
         model,
         costUsd: null

@@ -17,7 +17,7 @@ import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 const at = { x: 0, y: 0 };
 const ACCOUNTS = "canvastty-accounts";
 
-async function setup(t, { delegable = true, router = true, accountCandidates, route } = {}) {
+async function setup(t, { delegable = true, router = true, accountCandidates, route, executionGoal } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ctty-sub-account-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
@@ -47,7 +47,7 @@ async function setup(t, { delegable = true, router = true, accountCandidates, ro
       onRouting: (id, route) => terminals.setTaskMetadata(id, { modelRoute: route })
     });
   const orchestrator = (launchOptions) => terminals.create({ provider: "opencode", profile: "normal", cwd: root, position: at, role: "orchestrator",
-    ...(launchOptions ? { launchOptions } : {}) });
+    ...(launchOptions ? { launchOptions } : {}), ...(executionGoal ? {executionGoal} : {}) });
   const spawn = (parent, args) => handler.execute(parent.id, { id: `c-${Math.random()}`, tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, prompt: "Small task", ...args } });
   const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
   return { root, calls, prepared, terminals, control, handler, orchestrator, spawn, settle, routed: () => routed, requests };
@@ -188,4 +188,14 @@ test("account routing never overrides an explicit account or model, and needs tw
   const p2 = none.orchestrator({ [ACCOUNTS]: { account: "glm-flash" } });
   await none.settle();
   assert.equal((await none.spawn(p2, {})).servedBy.account, "glm-flash", "not delegable (no candidates): unchanged");
+});
+
+test("account routing receives the same manual root strategy and retains the account-owned model",async t=>{
+ const s=await setup(t,{executionGoal:"economical",accountCandidates:GLM_ACCOUNTS,route:pick("glm-5.3")});
+ const parent=s.orchestrator({[ACCOUNTS]:{account:"glm-flash"}});await s.settle();
+ const child=await s.spawn(parent,{});await s.settle();
+ assert.equal(s.requests[0].executionStrategy.resolved,"economical");assert.equal(child.executionStrategy.source,"person");
+ assert.equal(s.calls.at(-1).args.filter(arg=>arg==="--model").length,1);
+ await assert.rejects(s.spawn(parent,{}),/strategy/);
+ s.handler.forgetSession(child.sessionId);
 });

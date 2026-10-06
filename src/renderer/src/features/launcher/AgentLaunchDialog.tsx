@@ -1,3 +1,4 @@
+import type { ExecutionGoal } from "../../../../shared/executionStrategy";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentProviderId,
@@ -61,7 +62,8 @@ interface AgentLaunchDialogProps {
     role: LaunchRole,
     launchOptions?: Record<string, PluginLaunchValues>,
     environment?: SessionEnvironmentChoice,
-    initialPrompt?: string
+    initialPrompt?: string,
+    execution?: { goal: ExecutionGoal; task?: string }
   ): Promise<void>;
 }
 
@@ -76,6 +78,8 @@ export function AgentLaunchDialog({
   const platform = window.canvasTTY?.window?.platform ?? "";
   const [profile, setProfile] = useState<LaunchProfileId>(provider ? initialProfile(provider, settings, platform) : "normal");
   const [role, setRole] = useState<LaunchRole>("agent");
+  const [executionGoal, setExecutionGoal] = useState<ExecutionGoal>("auto");
+  const [executionTask, setExecutionTask] = useState("");
   const [cwd, setCwd] = useState(settings.lastDirectory);
   const [confirmDanger, setConfirmDanger] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -97,6 +101,8 @@ export function AgentLaunchDialog({
     if (!provider) return;
     setProfile(initialProfile(provider, settings, platform));
     setRole("agent");
+    setExecutionGoal("auto");
+    setExecutionTask("");
     setFlowId("");
     setFlows([]);
     setFlowErrors([]);
@@ -209,11 +215,14 @@ export function AgentLaunchDialog({
     setError(null);
     try {
       if (profile === "yolo" && !acknowledged && !isTerminal) await onAcknowledge(provider);
-      const initialPrompt = flowId
-        ? await backlog.redactText(await backlog.flowInstructions(cwd, flowId))
-        : undefined;
+      const strategyEnabled = settings.experimentalBacklogEnabled && (role === "orchestrator" || Boolean(flowId));
+      const initialPrompt = [
+        strategyEnabled ? `When an overall user task is available, call get_execution_strategy before delegating and follow its concurrency and review instructions. If no overall task has been supplied yet, wait for it; these setup instructions are not the task. The person's requested goal is ${executionGoal}.` : "",
+        strategyEnabled && executionTask.trim() ? await backlog.redactText(executionTask.trim()) : "",
+        flowId ? await backlog.redactText(await backlog.flowInstructions(cwd, flowId)) : ""
+      ].filter(Boolean).join("\n\n") || undefined;
       await onLaunch(provider, profile, cwd, flowId ? "orchestrator" : role, Object.keys(launchOptions).length > 0 ? launchOptions : undefined,
-        environment ?? undefined, initialPrompt);
+        environment ?? undefined, initialPrompt, strategyEnabled ? { goal: executionGoal, ...(executionTask.trim() ? { task: executionTask.trim() } : {}) } : undefined);
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "launchFailed"));
@@ -254,6 +263,19 @@ export function AgentLaunchDialog({
             aria-pressed={role === "agent" && !flowId} disabled={Boolean(flowId)} onClick={() => setRole("agent")}>{t(locale, "roleAgent")}</button>
           <button className={role === "orchestrator" ? "profile-button profile-button--active" : "profile-button"} type="button" aria-pressed={role === "orchestrator"} onClick={() => setRole("orchestrator")}>{t(locale, "roleOrchestrator")}</button>
         </div>}
+
+        {!isTerminal && settings.experimentalBacklogEnabled && (role === "orchestrator" || Boolean(flowId)) && <section className="launch-flow-picker" aria-label={locale === "ru" ? "Цель работы" : "Execution goal"}>
+          <label htmlFor="execution-goal">{locale === "ru" ? "Цель работы" : "Execution goal"}</label>
+          <select id="execution-goal" value={executionGoal} onChange={event => setExecutionGoal(event.currentTarget.value as ExecutionGoal)}>
+            {(["auto", "balanced", "fast", "economical", "deep"] as const).map(goal => <option key={goal} value={goal}>
+              {locale === "ru" ? ({auto:"Автономно · Jev выбирает",balanced:"Сбалансированно",fast:"Быстро",economical:"Экономно",deep:"Глубоко"})[goal]
+                : ({auto:"Autonomous · Jev chooses",balanced:"Balanced",fast:"Fast",economical:"Economical",deep:"Deep"})[goal]}
+            </option>)}
+          </select>
+          <label htmlFor="execution-task">{locale === "ru" ? "Общая задача (необязательно)" : "Overall task (optional)"}</label>
+          <textarea id="execution-task" maxLength={8000} value={executionTask} onChange={event => setExecutionTask(event.currentTarget.value)} rows={3} />
+          <small>{locale === "ru" ? "Ваш выбор имеет приоритет. Jev выбирает стратегию один раз для общей задачи. Лимиты и бюджет сохраняются; дополнительные агенты могут увеличить расход токенов." : "Your choice takes priority. Jev chooses once for the overall task. Limits and budget still apply; additional agents can increase token usage."}</small>
+        </section>}
 
         {!isTerminal && <section className="launch-flow-picker" aria-label={locale === "ru" ? "Шаблон рабочего процесса" : "Workflow template"}>
           <label htmlFor="launch-flow-select">{locale === "ru" ? "Рабочий процесс" : "Workflow"}</label>

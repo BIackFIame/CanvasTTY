@@ -1,3 +1,4 @@
+import { executionStrategy, executionGuidance, normalizeExecutionStrategy, isExecutionGoal, type ExecutionStrategy } from "../../../shared/executionStrategy.ts";
 import type { OrchestrationCommandHandler, OrchestrationRequest } from "./orchestration-protocol.ts";
 import { ACCOUNTS_PLUGIN_ID, selectedAccountId } from "../accountHomeIsolation.ts";
 import { orchestrationBridgeError } from "./orchestration-protocol.ts";
@@ -67,6 +68,7 @@ function accountModelLabel(label: string): string | undefined {
  * orchestrator cannot probe sessions it does not own.
  */
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
+  private readonly strategyPending = new Map<string, Promise<ExecutionStrategy>>();
   private readonly control: AgentControlService;
   private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
   private readonly providers: ProviderDirectorySources;
@@ -93,6 +95,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (this.control.isReadOnlyReviewer(sessionId)) return [];
     const session = this.control.status(sessionId);
     const core = ORCHESTRATION_TOOL_DEFINITIONS.filter((tool) => {
+      if (tool.name === "get_execution_strategy") return session.role === "orchestrator" && Boolean(this.control.executionContext?.(sessionId).goal);
       if (tool.name === "ask_user") return Boolean(this.integrations.humanQuestions) && session.provider !== "terminal";
       if (TASK_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.taskBoard);
       if (tool.name === "get_task_budget") return Boolean(this.integrations.budget);
@@ -141,6 +144,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", "Only orchestrator sessions can use CanvasTTY's agent tools.", false);
       }
       switch (request.tool) {
+        case "get_execution_strategy": {
+          const strategy = await this.resolveStrategy(sessionId, typeof request.arguments.task === "string" ? request.arguments.task : undefined);
+          return strategy ? { strategy, instructions: executionGuidance(strategy) } : { available: false, reason: "This session has no execution goal." };
+        }
         case "list_providers":
           return this.listProviders(session);
         case "wait_for_agent":
@@ -346,7 +353,46 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
+  private async resolveStrategy(sessionId: string, task?: string): Promise<ExecutionStrategy | undefined> {
+    const context = this.control.executionContext?.(sessionId);
+    if (!context?.goal) return undefined;
+    if (context.strategy) return this.control.rememberExecutionStrategy(sessionId, context.strategy);
+    const pending = this.strategyPending.get(context.rootId);
+    if (pending) return pending;
+    const resolve = async (): Promise<ExecutionStrategy> => {
+      const overall = this.control.maskText(context.task || task || "", 8000).trim();
+      let strategy = executionStrategy("auto", "balanced", "fallback", overall
+        ? "The strategy classifier is unavailable; balanced host defaults apply."
+        : "No overall task was supplied. Balanced defaults apply; worker prompts are not classified as the overall task.");
+      if (overall && this.integrations.router?.strategy) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const budget = this.control.taskBudget(sessionId);
+          if (budget?.paused) throw new Error("The shared task budget is paused.");
+          const answer = await Promise.race([
+            this.integrations.router.strategy({ sessionId: context.rootId, task: overall, cwd: this.control.taskRoot(sessionId).cwd,
+              ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {}) }),
+            new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Strategy classifier timed out.")), this.integrations.routeTimeoutMs ?? 2000); })
+          ]);
+          if (answer && isExecutionGoal(answer.goal) && String(answer.goal) !== "auto" && (answer.source === undefined || answer.source === "jev" || answer.source === "fallback") && typeof answer.reason === "string" && answer.reason.trim()) {
+            strategy = normalizeExecutionStrategy({ ...executionStrategy("auto", answer.goal, answer.source ?? "jev", this.control.maskText(answer.reason, 500)),
+              category: answer.category, difficulty: answer.difficulty, confident: answer.confident })!;
+          } else strategy.reason = "The classifier returned an invalid strategy; balanced host defaults apply.";
+        } catch { /* The fallback is explicit and cannot grant additional permissions or budget. */ }
+        finally { if (timer) clearTimeout(timer); }
+      }
+      return this.control.rememberExecutionStrategy(sessionId, strategy);
+    };
+    const work = resolve();
+    this.strategyPending.set(context.rootId, work);
+    try { return await work; }
+    finally { if (this.strategyPending.get(context.rootId) === work) this.strategyPending.delete(context.rootId); }
+  }
+
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    // Only the root's overall task feeds strategy selection. A worker prompt must never substitute for it.
+    const strategy = this.control.executionContext?.(orchestratorId).goal ? await this.resolveStrategy(orchestratorId) : undefined;
+    if (strategy?.review === "required") args = { ...args, review: true };
     if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
@@ -464,6 +510,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       routing = safeRouting;
     }
     return {
+      ...(strategy ? { executionStrategy: strategy, instructions: executionGuidance(strategy) } : {}),
       sessionId: created.id,
       provider: created.provider,
       status: created.status,
@@ -524,7 +571,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (accounts.length < 2 || !accounts.some((item) => item.id === currentAccount)) return keep("No other delegable model account to route to.");
     const candidates: ModelRouteCandidate[] = accounts.map((item, index) => {
       const model = accountModelLabel(item.label);
-      return { id: `account-${index}`, provider, ...(model ? { model } : {}), available: true, ...(item.id === currentAccount ? { default: true } : {}) };
+      return { id: `account-${index}`, provider, ...(model ? { model } : {}),
+        ...(args.effort ? { reasoningEffort: args.effort as SpawnAgentRequest["effort"] } : {}), available: true, ...(item.id === currentAccount ? { default: true } : {}) };
     });
     if (signal?.aborted) throw canceledError();
     const budget = this.control.taskBudget(sessionId);
@@ -534,9 +582,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       provider,
       profile: profile as ModelRouteRequest["profile"],
       cwd: String(args.cwd ?? ""),
-      requested: {},
+      requested: args.effort ? { reasoningEffort: args.effort as SpawnAgentRequest["effort"] } : {},
       candidates,
       humanChoice: null,
+      ...(this.control.executionContext?.(sessionId).strategy ? { executionStrategy: this.control.executionContext(sessionId).strategy } : {}),
       ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {})
     }, signal);
     const index = response ? candidates.findIndex((candidate) => candidate.id === response.candidateId) : -1;
@@ -605,6 +654,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       // An effort is a constraint on every candidate, not an explicit choice of model. Explicit models bypass
       // routeModel entirely; keeping this null lets installed rules/Jev choose among the listed candidates.
       humanChoice: null,
+      ...(this.control.executionContext?.(sessionId).strategy ? { executionStrategy: this.control.executionContext(sessionId).strategy } : {}),
       ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {})
     };
     let timer: ReturnType<typeof setTimeout> | undefined;

@@ -452,6 +452,8 @@ export interface SessionIsolation {
 }
 
 export interface CreateSessionRequest {
+  executionGoal?: import("./executionStrategy.ts").ExecutionGoal;
+  executionTask?: string;
   provider: ProviderId;
   cwd: string;
   profile: LaunchProfileId;
@@ -498,6 +500,9 @@ export type AgentChatHistoryResumeResult =
   | { error: { code: "invalid-id" | "cli-unavailable" | "conversation-missing" | "cwd-unknown" | "cwd-unavailable" | "resume-failed"; message: string } };
 
 export interface SessionMetadata {
+  executionGoal?: import("./executionStrategy.ts").ExecutionGoal;
+  executionTask?: string;
+  executionStrategy?: import("./executionStrategy.ts").ExecutionStrategy;
   /** Observed provider counters; missing fields are unknown, never inferred from limits. */
   usage?: import("./backlog.ts").UsageSummary;
   reviewUsage?: import("./backlog.ts").UsageSummary;

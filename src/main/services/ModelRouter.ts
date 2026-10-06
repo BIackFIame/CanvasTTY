@@ -14,6 +14,7 @@ export interface ModelRouteCandidate {
 }
 
 export interface ModelRouteRequest {
+  executionStrategy?: import("../../shared/executionStrategy.ts").ExecutionStrategy;
   sessionId: string;
   task: string;
   provider: AgentProviderId;
@@ -37,7 +38,19 @@ export interface ModelRouteResponse {
 }
 
 /** Installed plugin adapter. The host enforces the deadline and revalidates the chosen id and provider. */
+export interface ExecutionStrategyRequest {
+  sessionId: string; task: string; cwd: string; budget?: ModelRouteRequest["budget"];
+}
+export interface ExecutionStrategyResponse {
+  source?: "jev" | "fallback";
+  goal: import("../../shared/executionStrategy.ts").ResolvedExecutionGoal;
+  reason: string;
+  category?: import("../../shared/executionStrategy.ts").ExecutionStrategy["category"];
+  difficulty?: import("../../shared/executionStrategy.ts").ExecutionStrategy["difficulty"];
+  confident?: boolean;
+}
 export interface ModelRouter {
+  strategy?(request: ExecutionStrategyRequest): Promise<ExecutionStrategyResponse>;
   route(request: ModelRouteRequest): Promise<ModelRouteResponse>;
 }
 
@@ -53,7 +66,12 @@ export function experimentalModelRouter(router: ModelRouter, enabled: () => bool
   const requireEnabled = (): void => {
     if (enabled() !== true) throw new Error("Experimental model routing is disabled; not verified live.");
   };
-  return { route: async (request) => {
+  return { ...(router.strategy ? { strategy: async (request: ExecutionStrategyRequest) => {
+    requireEnabled();
+    const answer = await router.strategy!(request);
+    requireEnabled();
+    return answer;
+  } } : {}), route: async (request) => {
     requireEnabled();
     const answer = await router.route(request);
     requireEnabled();

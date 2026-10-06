@@ -846,6 +846,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   });
   ipcMain.handle(IPC.terminalCreate, (event, request: CreateSessionRequest) => {
     assertMainRenderer(event, getMainWindow);
+    if (request?.executionGoal !== undefined && !settings.get().experimentalBacklogEnabled) throw new Error("Experimental execution strategies are disabled.");
     return terminals.create(request);
   });
   ipcMain.handle(IPC.terminalRestart, (event, id: string, options?: { resume?: unknown }) => {
