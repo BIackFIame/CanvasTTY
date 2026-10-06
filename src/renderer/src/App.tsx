@@ -52,6 +52,7 @@ import { TitleBar } from "./components/TitleBar";
 import { Toast } from "./components/Toast";
 import { environmentOptions } from "./features/launcher/LaunchOptionsSection";
 import { UpdateNotice } from "./components/UpdateNotice";
+import { ModelDiscoveryNotice } from "./components/ModelDiscoveryNotice";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
@@ -1644,6 +1645,8 @@ export function App(): React.JSX.Element {
           ))}
         </div>
       )}
+      <ModelDiscoveryNotice plugins={plugins} enabled={settings.experimentalBacklogEnabled}
+        locale={settings.locale} onReview={openPluginCanvasContribution} onError={showToast} />
       <UpdateNotice
         status={settingsOpen ? null : updateNoticeForStatus(updateStatus, dismissedUpdateNotice)}
         locale={settings.locale}

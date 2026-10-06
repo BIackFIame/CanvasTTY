@@ -76,6 +76,7 @@ import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
+import { acceptDiscoverySignal, ModelDiscoveryObserver } from "./services/ModelDiscoveryObserver";
 import { OrchestrationBudgetService } from "./services/OrchestrationBudgetService";
 import { refreshOrchestrationUsageBatch, type OrchestrationUsageScope } from "./services/OrchestrationUsageSync";
 import { acceptLoopSignal } from "./services/AssistantLoopSignal";
@@ -201,6 +202,7 @@ let sessionTimeline: SessionTimelineService | null = null;
 let sessionReports:SessionReports|null=null;
 let terminalOutputHistory:TerminalOutputHistory|null=null;
 let disposeBudgetObservers:(()=>void)|null=null;
+let disposeModelDiscovery: (() => void) | null = null;
 let flushBudgets:(()=>Promise<void>)|null=null;
 let networkPolicies: NetworkPolicyManager | null = null;
 let secretGrants: SecretGrantService | null = null;
@@ -470,6 +472,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     sessions: terminalManager?.list().map(({ provider, status, exitCode }) => ({ provider, status, exitCode })) ?? [],
     plugins: pluginManager?.list().map(({ manifest, enabled }) => ({ id: manifest.id, version: manifest.version, enabled })) ?? []
   });
+  let refreshModelDiscovery = (): Promise<void> => Promise.resolve();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
@@ -485,6 +488,15 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       },
       emit: (pluginId, serviceId, event, data) => {
         let broadcastData = data;
+        if (event === "model.discovery") {
+          const accepted = acceptDiscoverySignal({
+            enabled: () => settings.get().experimentalBacklogEnabled === true,
+            providers: () => pluginManager?.modelRouterProviders() ?? [],
+            running: (id, service) => pluginServices?.running(id, service) === true
+          }, pluginId, serviceId, data);
+          if (!accepted) return;
+          broadcastData = accepted;
+        }
         if (event === "loop.detected") {
           // Verified by the install record (source repository, enabled, trusted services), not the manifest id.
           const accepted = acceptLoopSignal({
@@ -547,6 +559,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     await pluginServices!.sync(specs);
     // Trust changes add or remove card actions and badges.
     pluginCards?.refresh();
+    void refreshModelDiscovery().catch(() => undefined);
   });
   const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
   // Created before sessions are restored: launch services may resolve the plugin's own secrets.
@@ -923,6 +936,25 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     launchContributors: () => pluginManager?.launchContributors() ?? [],
     containment: () => terminalManager?.containment() === true
   };
+  const modelDiscovery = new ModelDiscoveryObserver({
+    enabled: experimentalEnabled,
+    providers: () => pluginManager?.modelRouterProviders() ?? [],
+    running: (id, service) => pluginServices?.running(id, service) === true,
+    directory: () => listProviderDirectory({
+      ...providerDirectorySources,
+      // Discovery observes existing metadata; it must not warm a cache or launch a CLI.
+      models: provider => {
+        const cached = providerModels.cached(provider);
+        return cached ? { models: cached.models, checkedAt: cached.checkedAt } : null;
+      },
+      launchContributors: () => []
+    }),
+    call: (id, service, method, params) => pluginServices!.hostCall(id, service, method, params, 2_000)
+  });
+  refreshModelDiscovery = () => modelDiscovery.refresh();
+  const discoveryTimer = setInterval(() => { void refreshModelDiscovery().catch(() => undefined); }, 60_000);
+  discoveryTimer.unref();
+  disposeModelDiscovery = () => { clearInterval(discoveryTimer); modelDiscovery.dispose(); };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.
@@ -1068,6 +1100,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // launch options or an environment ask their plugin's service, so start services first.
   pluginServices.hostReady();
   await pluginServicesStarted.catch(() => undefined);
+  void refreshModelDiscovery().catch(() => undefined);
   for(const budget of budgets.snapshots())if(budget.paused)applyBudgetEnforcement(budget);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
@@ -1635,6 +1668,7 @@ app.on("child-process-gone", (_event, details) => {
 void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
+  disposeModelDiscovery?.(); disposeModelDiscovery = null;
   disposeBudgetObservers?.();disposeBudgetObservers=null;
   diagnostics.record("info", "application", "shutdown.started");
   agentChatHistory?.dispose();

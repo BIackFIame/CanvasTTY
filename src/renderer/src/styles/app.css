@@ -1625,3 +1625,8 @@ button { border: 0; }
 .renderer-recovery strong { font-size: 16px; }
 .renderer-recovery p { margin: 0; max-width: 420px; color: rgba(255, 255, 255, 0.7); font-size: 13px; line-height: 1.5; }
 .renderer-recovery button { padding: 8px 16px; border: 0; border-radius: 10px; background: #b8cf99; color: #30313d; font: inherit; font-weight: 700; cursor: pointer; }
+
+/* Model decisions persist in the plugin queue; this notice only opens that queue. */
+.model-discovery-notice { position: fixed; left: 12px; bottom: 12px; z-index: 5900; width: min(390px, calc(100vw - 24px)); display: flex; align-items: center; gap: 9px; padding: 10px; border: 1px solid color-mix(in srgb, var(--primary) 45%, transparent); border-radius: 9px; color: var(--text); background: var(--surface); box-shadow: var(--shadow-md); font-size: 12px; }
+.model-discovery-notice__copy { flex: 1; min-width: 0; display: grid; gap: 4px; overflow-wrap: anywhere; }
+.model-discovery-notice__copy span { color: var(--text-muted-on-dark); }
