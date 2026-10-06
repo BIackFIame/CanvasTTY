@@ -328,6 +328,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     // Likewise a launch whose environment was chosen but not prepared yet.
     const environmentChoice = environment ? undefined : normalizeEnvironmentChoice(session.environmentChoice);
     if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
+    const strategy = normalizeExecutionStrategy(session.executionStrategy);
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -345,7 +346,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(isTaskScope(session.taskScope) ? {taskScope:{...session.taskScope}} : {}),
       ...(isExecutionGoal(session.executionGoal) ? { executionGoal: session.executionGoal,
         ...(typeof session.executionTask === "string" ? { executionTask: session.executionTask.slice(0,8000) } : {}),
-        ...(normalizeExecutionStrategy(session.executionStrategy)?.requested === session.executionGoal ? { executionStrategy: normalizeExecutionStrategy(session.executionStrategy) } : {}) } : {}),
+        ...(strategy?.requested === session.executionGoal ? { executionStrategy: strategy } : {}) } : {}),
       ...(threadId !== undefined ? { threadId } : {}),
       lastState,
       ...(lastState !== "running" ? { exitCode } : {}),

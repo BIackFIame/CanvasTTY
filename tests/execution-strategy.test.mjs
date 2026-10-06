@@ -12,7 +12,7 @@ import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 function fixture(t, goal, options={}) {
  const calls=[]; const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner(calls));
  t.after(()=>terminals.disposeAll());
- const root=terminals.create({provider:"codex",profile:"normal",cwd:"/private/tmp",position:{x:0,y:0},role:"orchestrator",...(goal?{executionGoal:goal}:{})});
+ const root=terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator",...(goal?{executionGoal:goal}:{})});
  const control=new AgentControlService(terminals,options);
  return {terminals,root,control,calls};
 }
@@ -22,8 +22,8 @@ test("manual economical strategy is local and enforces one live worker",async t=
  const h=new ScopedOrchestrationHandler(f.control,null,undefined,{router:{route:async()=>{throw Error("unused")},strategy:async()=>{queried++; return {goal:"deep",reason:"ignored"}}}});
  const result=await h.execute(f.root.id,request("get_execution_strategy",{task:"a task"}));
  assert.equal(result.strategy.resolved,"economical"); assert.equal(queried,0);
- await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"});
- await assert.rejects(async()=>f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"}),/limit|strategy/i);
+ await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()});
+ await assert.rejects(async()=>f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()}),/limit|strategy/i);
 });
 test("auto resolves once for concurrent root requests and persists the host cap",async t=>{
  const f=fixture(t,"auto");let queried=0;
@@ -34,19 +34,19 @@ test("auto resolves once for concurrent root requests and persists the host cap"
 });
 test("deep reserves a reviewer slot and cannot bypass the person's cap",async t=>{
  const f=fixture(t,"deep",{limits:()=>({maxDepth:2,maxSubagents:1})});
- await assert.rejects(async()=>f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"}),/review|limit/i);
+ await assert.rejects(async()=>f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()}),/review|limit/i);
 });
 test("sessions without a goal retain existing behavior",async t=>{
  const f=fixture(t); const h=new ScopedOrchestrationHandler(f.control);
  assert.equal(h.listTools(f.root.id).some(x=>x.name==="get_execution_strategy"),false);
- await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"});
- await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"});
+ await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()});
+ await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()});
 });
 
 test("the model route receives the root policy and explicit effort remains authoritative",async t=>{
  const f=fixture(t,"fast"); const routed=[];
  const h=new ScopedOrchestrationHandler(f.control,null,{cli:()=>"available",limits:()=>null,models:()=>({models:["fixture-model"],checkedAt:Date.now()})},{router:{route:async r=>{routed.push(r);return {candidateId:r.candidates.find(c=>c.model).id,reason:"fixture"}}}});
- const child=await h.execute(f.root.id,request("spawn_agent",{provider:"codex",cwd:"/private/tmp",effort:"high"}));
+ const child=await h.execute(f.root.id,request("spawn_agent",{provider:"codex",cwd:tmpdir(),effort:"high"}));
  assert.equal(routed[0].executionStrategy.resolved,"fast");assert.equal(child.executionStrategy.resolved,"fast");
  assert.ok(routed[0].candidates.every(c=>c.reasoningEffort==="high"));assert.equal(f.terminals.getMetadata(child.sessionId).effort,"high");
  h.forgetSession(child.sessionId);
@@ -55,7 +55,7 @@ test("worker prompts never become an absent overall task, and invalid or late an
  const f=fixture(t,"auto");let queries=0;
  const router={route:async()=>{throw Error("unused")},strategy:async()=>{queries++;return {goal:"deep",reason:"wrong"}}};
  const h=new ScopedOrchestrationHandler(f.control,null,undefined,{router});
- const child=await h.execute(f.root.id,request("spawn_agent",{provider:"opencode",cwd:"/private/tmp",prompt:"A worker subtask"}));
+ const child=await h.execute(f.root.id,request("spawn_agent",{provider:"opencode",cwd:tmpdir(),prompt:"A worker subtask"}));
  assert.equal(queries,0);assert.equal(child.executionStrategy.source,"fallback");assert.match(child.executionStrategy.reason,/No overall task/);
  h.forgetSession(child.sessionId);
  for(const answer of [{goal:"auto",reason:"invalid"},{goal:"deep",source:"person",reason:"invalid source"}]){
@@ -75,17 +75,17 @@ test("experimental opt-out blocks late Jev acceptance and restored goal behavior
  await assert.rejects(pending,/goal/);assert.equal(f.terminals.getMetadata(f.root.id).executionStrategy,undefined);
  assert.equal(h.listTools(f.root.id).some(x=>x.name==="get_execution_strategy"),false);
  const manual=fixture(t,"economical",{executionEnabled:()=>false});
- await manual.control.spawn({parentSessionId:manual.root.id,provider:"opencode",cwd:"/private/tmp"});
- await manual.control.spawn({parentSessionId:manual.root.id,provider:"opencode",cwd:"/private/tmp"});
+ await manual.control.spawn({parentSessionId:manual.root.id,provider:"opencode",cwd:tmpdir()});
+ await manual.control.spawn({parentSessionId:manual.root.id,provider:"opencode",cwd:tmpdir()});
 });
 test("logical root policy survives handoff and store reload; nested workers share its capacity",async t=>{
  const f=fixture(t,"economical"); const h=new ScopedOrchestrationHandler(f.control);
  await h.execute(f.root.id,request("get_execution_strategy"));
- const child=await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:"/private/tmp"});
- const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:"/private/tmp",position:{x:0,y:0},role:"orchestrator"});
+ const child=await f.control.spawn({parentSessionId:f.root.id,provider:"opencode",cwd:tmpdir()});
+ const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator"});
  f.terminals.inheritTaskScope(f.root.id,replacement.id);
- await assert.rejects(async()=>f.control.spawn({parentSessionId:replacement.id,provider:"opencode",cwd:"/private/tmp"}),/strategy/);
- await assert.rejects(async()=>f.control.spawn({parentSessionId:child.id,provider:"opencode",cwd:"/private/tmp"}),/strategy/);
+ await assert.rejects(async()=>f.control.spawn({parentSessionId:replacement.id,provider:"opencode",cwd:tmpdir()}),/strategy/);
+ await assert.rejects(async()=>f.control.spawn({parentSessionId:child.id,provider:"opencode",cwd:tmpdir()}),/strategy/);
  f.terminals.completeTaskContinuation(f.root.id,replacement.id);f.terminals.dispose(f.root.id,{keepEnvironmentData:true});
  assert.equal(f.control.executionContext(child.id).strategy.resolved,"economical");
  const dir=await mkdtemp(join(tmpdir(),"ctty-strategy-store-"));t.after(()=>rm(dir,{recursive:true,force:true}));

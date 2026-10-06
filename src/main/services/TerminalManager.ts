@@ -499,7 +499,11 @@ export class TerminalManager {
     if (patch.modelRoute) session.metadata.modelRoute={...patch.modelRoute,reason:this.redactSecrets(patch.modelRoute.reason).slice(0,500)};
     if (patch.executionStrategy) {
       const strategy = normalizeExecutionStrategy(patch.executionStrategy);
-      if (strategy) session.metadata.executionStrategy = { ...strategy, reason: this.redactSecrets(strategy.reason) };
+      if (strategy) {
+        const redacted = { ...strategy, reason: this.redactSecrets(strategy.reason) };
+        if (!patch.modelRoute && patch.reviewRequested === undefined && JSON.stringify(session.metadata.executionStrategy) === JSON.stringify(redacted)) return;
+        session.metadata.executionStrategy = redacted;
+      }
     }
     if (patch.reviewRequested !== undefined) session.metadata.reviewRequested=patch.reviewRequested;
     this.schedulePersistence();
