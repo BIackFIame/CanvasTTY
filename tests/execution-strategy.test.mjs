@@ -93,11 +93,11 @@ test("logical root policy survives handoff and store reload; nested workers shar
  const rows=await new TerminalSessionStore(dir).load();assert.equal(rows[0].executionStrategy.resolved,"economical");assert.equal(rows[0].executionGoal,"economical");
 });
 
-function reviewFixture(t,extra={}) {
+function reviewFixture(t,extra={}, onReviewStart=()=>{}) {
  const calls=[];let terminals;const writes=[];
  terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner(calls,{onWrite(data){
   if(!data.includes("Review only the supplied answer"))return;
-  writes.push(data);const reviewer=terminals.listMetadata().find(s=>s.title.startsWith("Review:") && s.exitCode===null);
+  onReviewStart();writes.push(data);const reviewer=terminals.listMetadata().find(s=>s.title.startsWith("Review:") && s.exitCode===null);
   const pty=calls.at(-1).process;pty.kill=()=>pty.emitExit(0);
   terminals.applyProviderSignal(reviewer.id,{state:"working"},"hook");
   terminals.recordAnswer(reviewer.id,{text:'{"verdict":"accept","findings":"fixture"}',truncated:false});
@@ -129,4 +129,96 @@ test("review admission rechecks global capacity and budget after asynchronous pr
   f.terminals.applyProviderSignal(worker.id,{state:"working"},"hook");f.terminals.applyProviderSignal(worker.id,{state:"idle",event:"Stop"},"hook");
   const result=await f.control.resultWithReview(worker.id);assert.equal(result.review.status,"unavailable");assert.match(result.review.reason,kind==="capacity"?/limit/:/Budget/);assert.equal(f.calls.length,2);
  }
+});
+
+test("strategy privacy follows the actual continuation root through deletion and restore, scoped to its router", async t=>{
+ const dir=await mkdtemp(join(tmpdir(),"ctty-strategy-privacy-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ const f=fixture(t,"auto");const originalId=f.root.id;
+ const store=new TerminalSessionStore(dir);
+ const original=persistedTerminalSession({...f.root,exitCode:0},undefined,{options:{assistant:{dataClass:"D3",task:"private task",other:"private option"},accounts:{account:"private-account"}}});
+ f.terminals.disposeAll();await store.replace([original]);
+ f.terminals.configureSessionPersistence(store,"continue");await f.terminals.restorePersistedSessions();
+ const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator"},{continueTaskFrom:originalId});
+ f.terminals.inheritTaskScope(originalId,replacement.id);f.terminals.completeTaskContinuation(originalId,replacement.id);f.terminals.dispose(originalId,{keepEnvironmentData:true});
+ assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
+ assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"unselected-router"),{dataClass:"default"});
+ assert.equal(f.terminals.strategyLaunchOptions(originalId,"assistant"),undefined);
+ let seen;
+ const h=new ScopedOrchestrationHandler(f.control,null,undefined,{router:{route:async()=>{throw Error("unused")},strategy:async r=>{seen=r;return {goal:"balanced",reason:"fixture"}}}});
+ await h.execute(replacement.id,request("get_execution_strategy",{task:"overall"}));
+ assert.equal(seen.sessionId,replacement.id,"logical identity remains only the singleflight key");
+ await f.terminals.shutdown();
+ const restored=fixture(t);restored.terminals.disposeAll();restored.terminals.configureSessionPersistence(new TerminalSessionStore(dir),"continue");await restored.terminals.restorePersistedSessions();
+ assert.deepEqual(restored.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
+ const rows=await store.load();assert.deepEqual(rows[0].executionPrivacy,{assistant:"D3",accounts:"default"});
+ assert.equal(rows[0].executionPrivacy.accounts,"default","account identifiers never enter strategy context");
+});
+
+for(const viaHandler of [false,true])test(`deep-only review opt-out before completion preserves explicit requests (handler=${viaHandler})`,async t=>{
+ for(const explicit of [false,true]){
+  const dir=await mkdtemp(join(tmpdir(),"ctty-review-optout-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let enabled=true;const f=reviewFixture(t,{executionEnabled:()=>enabled});
+  const root=f.terminals.create({provider:"codex",profile:"normal",cwd:dir,position:{x:0,y:0},role:"orchestrator",executionGoal:"deep"});
+  const h=new ScopedOrchestrationHandler(f.control);
+  const worker=viaHandler?await h.execute(root.id,request("spawn_agent",{provider:"codex",cwd:dir,review:explicit})):await f.control.spawn({parentSessionId:root.id,provider:"codex",cwd:dir,review:explicit});
+  const id=worker.id??worker.sessionId;enabled=false;
+  f.terminals.applyProviderSignal(id,{state:"working"},"hook");f.terminals.applyProviderSignal(id,{state:"idle",event:"Stop"},"hook");
+  const result=await f.control.resultWithReview(id);
+  assert.equal(result.review.status,explicit?"accepted":"unavailable");
+  if(!explicit)assert.match(result.review.reason,/disabled/i);
+  assert.equal(f.writes.length,explicit?1:0);
+  h.forgetSession(id);
+ }
+});
+
+test("deep-only review opt-out during asynchronous diff preparation prevents admission",async t=>{
+ const dir=await mkdtemp(join(tmpdir(),"ctty-review-optout-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let enabled=true;const f=reviewFixture(t,{executionEnabled:()=>enabled,reviewDiff:async()=>{enabled=false;return "+fixture"}});
+ const root=f.terminals.create({provider:"codex",profile:"normal",cwd:dir,position:{x:0,y:0},role:"orchestrator",executionGoal:"deep"});
+ const worker=await f.control.spawn({parentSessionId:root.id,provider:"codex",cwd:dir,review:false});
+ f.terminals.applyProviderSignal(worker.id,{state:"working"},"hook");f.terminals.applyProviderSignal(worker.id,{state:"idle",event:"Stop"},"hook");
+ const result=await f.control.resultWithReview(worker.id);assert.equal(result.review.status,"unavailable");assert.match(result.review.reason,/disabled/i);assert.equal(f.writes.length,0);
+});
+
+test("queued deep-only review stops on opt-out while the preceding preparation is still pending",async t=>{
+ const dir=await mkdtemp(join(tmpdir(),"ctty-review-queued-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let enabled=true,release,entered;const preparing=new Promise(r=>entered=r);
+ const f=reviewFixture(t,{executionEnabled:()=>enabled,reviewDiff:()=>{entered();return new Promise(r=>release=r)}});
+ const root=f.terminals.create({provider:"codex",profile:"normal",cwd:dir,position:{x:0,y:0},role:"orchestrator",executionGoal:"deep"});
+ const workers=await Promise.all([1,2].map(()=>f.control.spawn({parentSessionId:root.id,provider:"codex",cwd:dir,review:false})));
+ for(const worker of workers){f.terminals.applyProviderSignal(worker.id,{state:"working"},"hook");f.terminals.applyProviderSignal(worker.id,{state:"idle",event:"Stop"},"hook");}
+ const first=f.control.resultWithReview(workers[0].id);await preparing;
+ const second=f.control.resultWithReview(workers[1].id);enabled=false;
+ try { const result=await second;assert.equal(result.review.status,"unavailable");assert.match(result.review.reason,/disabled/i);assert.equal(f.writes.length,0); }
+ finally {release("+fixture");}
+ assert.equal((await first).review.status,"unavailable");
+});
+
+test("opt-out after account preparation releases its contribution and never creates a strategy-only reviewer",async t=>{
+ const {LaunchPipeline}=await import('../src/main/services/LaunchPipeline.ts');
+ const dir=await mkdtemp(join(tmpdir(),"ctty-review-account-optout-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let enabled=true,prepared=0,cleaned=0;
+ const f=reviewFixture(t,{executionEnabled:()=>enabled});
+ f.terminals.configureLaunchPipeline(new LaunchPipeline({
+  contributors:()=>[{pluginId:'canvastty-accounts',pluginName:'Accounts',serviceId:'accounts',secrets:false,launch:{fields:[{key:'account',label:'Model account',kind:'text'}],delegable:true}}],
+  call:async()=>({env:{},secretEnv:{},args:[],files:[]}),secret:async()=>null,runsRoot:join(dir,'runs'),timeoutMs:2000
+ }));
+ const prepare=f.terminals.prepareReviewerAccount.bind(f.terminals);
+ f.terminals.prepareReviewerAccount=async input=>{const result=await prepare(input);prepared++;enabled=false;const cleanup=result.contribution.cleanup;result.contribution.cleanup=async()=>{cleaned++;await cleanup()};return result};
+ const root=f.terminals.create({provider:"codex",profile:"normal",cwd:dir,position:{x:0,y:0},role:"orchestrator",executionGoal:"deep"});
+ const worker=await f.control.spawn({parentSessionId:root.id,provider:"codex",cwd:dir,review:false,initialPrompt:"fixture",launchOptions:{'canvastty-accounts':{account:'fixture-account'}}});
+ f.terminals.applyProviderSignal(worker.id,{state:"working"},"hook");f.terminals.applyProviderSignal(worker.id,{state:"idle",event:"Stop"},"hook");
+ const result=await f.control.resultWithReview(worker.id);assert.equal(result.review.status,"unavailable");assert.match(result.review.reason,/disabled/i);assert.equal(prepared,1);assert.equal(cleaned,1);assert.equal(f.writes.length,0);
+});
+
+test("an admitted deep reviewer still releases its PTY and retains usage metadata after opt-out",async t=>{
+ const dir=await mkdtemp(join(tmpdir(),"ctty-review-cleanup-"));t.after(()=>rm(dir,{recursive:true,force:true}));
+ let enabled=true;const f=reviewFixture(t,{executionEnabled:()=>enabled},()=>{enabled=false});
+ const root=f.terminals.create({provider:"codex",profile:"normal",cwd:dir,position:{x:0,y:0},role:"orchestrator",executionGoal:"deep"});
+ const worker=await f.control.spawn({parentSessionId:root.id,provider:"codex",cwd:dir,review:false});
+ f.terminals.applyProviderSignal(worker.id,{state:"working"},"hook");f.terminals.applyProviderSignal(worker.id,{state:"idle",event:"Stop"},"hook");
+ const result=await f.control.resultWithReview(worker.id);assert.equal(result.review.status,"accepted");
+ assert.equal(f.terminals.getMetadata(result.review.reviewerSessionId).exitCode,0);
+ f.terminals.setObservedUsage(result.review.reviewerSessionId,{tokens:42,costUsd:.01,reportedAt:Date.now()});
+ assert.equal(f.terminals.getMetadata(result.review.reviewerSessionId).usage.tokens,42);
 });

@@ -77,6 +77,7 @@ import { ACCOUNTS_PLUGIN_ID, selectedAccountId } from "./accountHomeIsolation.ts
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
+  executionPrivacyFromOptions,
   type PersistedEnvironmentRef,
   type PersistedSessionExtras,
   type PersistedTerminalSession,
@@ -494,6 +495,14 @@ export class TerminalManager {
     return account === "default" ? undefined : account;
   }
 
+  /** Host-only strategy context, scoped to the selected router; never returns other launch values. */
+  strategyLaunchOptions(id: string, pluginId: string): { dataClass: string } | undefined {
+    const session = this.sessions.get(id);
+    if (!session) return undefined;
+    const privacy = session.extras.executionPrivacy ?? executionPrivacyFromOptions(session.extras.options);
+    return { dataClass: Object.hasOwn(privacy, pluginId) ? privacy[pluginId]! : "default" };
+  }
+
   setTaskMetadata(id: string, patch: Pick<SessionMetadata,"modelRoute"|"reviewRequested"|"executionStrategy">): void {
     const session=this.sessions.get(id);if (!session) return;
     if (patch.modelRoute) session.metadata.modelRoute={...patch.modelRoute,reason:this.redactSecrets(patch.modelRoute.reason).slice(0,500)};
@@ -591,7 +600,9 @@ export class TerminalManager {
   /** Host-only: the replacement retains the old task's budget/board identity before it receives input. */
   inheritTaskScope(sourceId:string,replacementId:string):void {
     const replacement=this.sessions.get(replacementId);if(!replacement)throw new Error("Handoff card is unavailable.");
-    const source = this.sessions.get(sourceId)?.metadata;
+    const sourceSession = this.sessions.get(sourceId);
+    const source = sourceSession?.metadata;
+    if (sourceSession) replacement.extras.executionPrivacy = { ...(sourceSession.extras.executionPrivacy ?? executionPrivacyFromOptions(sourceSession.extras.options)) };
     if (source) {
       replacement.metadata.executionGoal = source.executionGoal;
       replacement.metadata.executionTask = source.executionTask;
@@ -1100,6 +1111,9 @@ export class TerminalManager {
       captureResult,
       ...(reviewerControl ? { reviewWorkspace: reviewerControl.workspace } : {}),
       extras: {
+        executionPrivacy: control.continueTaskFrom
+          ? { ...(this.sessions.get(control.continueTaskFrom)?.extras.executionPrivacy ?? executionPrivacyFromOptions(this.sessions.get(control.continueTaskFrom)?.extras.options)) }
+          : executionPrivacyFromOptions(launchOptions),
         ...(launchOptions ? { options: launchOptions } : {}),
         ...(environmentChoice ? { environmentChoice } : {}),
         ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
@@ -1678,6 +1692,7 @@ export class TerminalManager {
       ...(descriptor.reviewRequested !== undefined ? {reviewRequested:descriptor.reviewRequested} : {})
     };
     const extras: PersistedSessionExtras = {
+      executionPrivacy: { ...(descriptor.executionPrivacy ?? executionPrivacyFromOptions(descriptor.options)) },
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),

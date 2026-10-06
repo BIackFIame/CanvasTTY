@@ -200,6 +200,8 @@ export class AgentControlService {
   private readonly pendingRetries = new Map<string, number>();
   private readonly retryableQuiet = new Set<string>();
   private readonly reviewRequested = new Set<string>();
+  /** Deep-policy provenance survives opt-out, retries, and the lifetime of an admitted reviewer. */
+  private readonly strategyReviews = new Set<string>();
   private readonly readOnlyReviewers = new Set<string>();
   private readonly reviews = new Map<string, AgentReviewResult>();
   private readonly reviewPending = new Map<string, Promise<AgentReviewResult>>();
@@ -229,9 +231,9 @@ export class AgentControlService {
     if (account.launchOptions !== request.launchOptions) request = { ...request, launchOptions: account.launchOptions };
 
     const execution = this.executionContext(parent.id);
-    const strategy = execution.goal ? this.rememberExecutionStrategy(parent.id, execution.strategy
-      ?? executionStrategy("auto", "balanced", "fallback", "No overall strategy was resolved before this direct launch; balanced host defaults apply.")) : undefined;
-    if (strategy?.review === "required") request = { ...request, review: true };
+    if (execution.goal) this.rememberExecutionStrategy(parent.id, execution.strategy
+      ?? executionStrategy("auto", "balanced", "fallback", "No overall strategy was resolved before this direct launch; balanced host defaults apply."));
+
     const taskScope = this.taskRoot(parent.id);
     // What the request asks for first (its folder, its profile), then the person's limits.
     const cwd = subagentFolder(taskScope.cwd, parent.cwd, request.cwd);
@@ -303,7 +305,9 @@ export class AgentControlService {
     }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
-    if (request.review === true) this.reviewRequested.add(created.id);
+    const strategyReview = this.executionContext(parent.id).strategy?.review === "required";
+    if (strategyReview) this.strategyReviews.add(created.id);
+    if (request.review === true || strategyReview) this.reviewRequested.add(created.id);
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
@@ -451,6 +455,7 @@ export class AgentControlService {
     this.launchRequests.delete(sessionId);
     this.retryableQuiet.delete(sessionId);
     this.reviewRequested.delete(sessionId);
+    this.strategyReviews.delete(sessionId);
     this.readOnlyReviewers.delete(sessionId);
     this.reviews.delete(sessionId);
 
@@ -666,6 +671,7 @@ export class AgentControlService {
       output ? `Masked output tail (up to ${MAX_RETRY_OUTPUT_BYTES} UTF-8 bytes):\n${output}` : "No terminal output was available."
     ].join("\n");
     const retryPrompt = `${original.initialPrompt ?? ""}${context}`;
+    const strategyReviewWasRequested = this.strategyReviews.has(sessionId);
     const reviewWasRequested = this.reviewRequested.has(sessionId) || original.review === true;
     const readOnlyReviewWasRequested = this.readOnlyReviewers.has(sessionId) || original.readOnlyReview === true;
     // Reserve synchronously: concurrent tool calls must share the same finite allowance.
@@ -711,6 +717,7 @@ export class AgentControlService {
         const restarted = this.terminals.restart(sessionId, { resume: false });
         restartedWorktree = true;
         if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (strategyReviewWasRequested) this.strategyReviews.add(sessionId);
         await this.send(sessionId, retryPrompt, true, signal);
         return this.terminals.getMetadata(sessionId) ?? restarted;
       }
@@ -732,6 +739,7 @@ export class AgentControlService {
         this.launchRequests.set(sessionId, original);
         this.retryOrigins.set(sessionId, sourceId);
         if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (strategyReviewWasRequested) this.strategyReviews.add(sessionId);
         if (readOnlyReviewWasRequested) this.readOnlyReviewers.add(sessionId);
       }
       if (!restartedWorktree) {
@@ -853,10 +861,19 @@ export class AgentControlService {
     }
   }
 
+  private requireReviewEnabled(sessionId: string): void {
+    if (this.strategyReviews.has(sessionId) && this.launchRequests.get(sessionId)?.review !== true
+      && this.executionContext(sessionId).strategy?.review !== "required") {
+      throw new Error("Experimental strategy-only review is disabled.");
+    }
+  }
+
   private async queuedReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
+    this.requireReviewEnabled(sessionId);
     const rootId = this.taskRoot(sessionId).id;
     const deadline = Date.now() + (this.options.reviewTimeoutMs ?? REVIEW_TIMEOUT_MS);
     while (this.reviewRoots.has(rootId)) {
+      this.requireReviewEnabled(sessionId);
       signal.throwIfAborted();
       this.requireSession(sessionId);
       this.requireBudgetActive(sessionId);
@@ -865,12 +882,15 @@ export class AgentControlService {
     }
     signal.throwIfAborted();
     this.requireBudgetActive(sessionId);
+    this.requireReviewEnabled(sessionId);
     this.reviewRoots.add(rootId);
     try { return await this.performReview(sessionId, signal); }
     finally { this.reviewRoots.delete(rootId); }
   }
 
   private async performReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
+    this.requireReviewEnabled(sessionId);
+    const strategyReview = this.strategyReviews.has(sessionId);
     const worker = this.requireSession(sessionId);
     const request = this.launchRequests.get(sessionId);
     if (!request) return { status: "unavailable", reason: "CanvasTTY no longer has the worker launch details.", costUsd: null };
@@ -923,6 +943,7 @@ export class AgentControlService {
           : undefined;
         if (signal.aborted) { void reviewerAccount?.contribution.cleanup().catch(() => undefined); throw new Error("The worker session was removed before review."); }
         try {
+          this.requireReviewEnabled(sessionId);
           this.requireSession(root.id);
           this.requireBudgetActive(sessionId);
           this.assertSpawnCapacity(root.id, undefined, true);
@@ -980,7 +1001,7 @@ export class AgentControlService {
       }
       keepReviewer = true;
       let releaseNote = "";
-      if (this.executionContext(sessionId).strategy?.review === "required") {
+      if (strategyReview) {
         try { await this.terminals.finishReadOnlyReviewer(reviewerSession.id); }
         catch { releaseNote = "The review completed, but its PTY could not be stopped; it still occupies a live slot until closed."; }
       }

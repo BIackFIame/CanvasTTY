@@ -1017,7 +1017,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     router:experimentalModelRouter({strategy:async request=>{
       const provider=pluginManager!.modelRouterProviders().find(row=>pluginServices!.running(row.pluginId,row.serviceId));
       if(!provider)throw new Error("No trusted model router is running.");
-      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.strategy",request,2000) as import("./services/ModelRouter.ts").ExecutionStrategyResponse;
+      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.strategy",{...request,launchOptions:managedTerminals.strategyLaunchOptions(request.sessionId,provider.pluginId)},2000) as import("./services/ModelRouter.ts").ExecutionStrategyResponse;
     },route:async request=>{
       const provider=pluginManager!.modelRouterProviders().find(row=>pluginServices!.running(row.pluginId,row.serviceId));
       if(!provider)throw new Error("No trusted model router is running.");

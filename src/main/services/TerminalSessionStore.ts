@@ -51,6 +51,8 @@ export interface PersistedTerminalSession {
   restore: boolean;
   /** Plugin launch options keyed by plugin id, each opaque and at most 4 KB. */
   options?: Record<string, unknown>;
+  /** Host-only root privacy selections; no task, account identifiers, or plugin secrets. */
+  executionPrivacy?: Record<string, string>;
   /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
   environment?: PersistedEnvironmentRef;
   /**
@@ -234,7 +236,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "executionPrivacy" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -264,6 +266,7 @@ export function persistedTerminalSession(
     lastState,
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
     restore: metadata.skipRestore !== true,
+    ...(extras.executionPrivacy ? { executionPrivacy: { ...extras.executionPrivacy } } : {}),
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
@@ -322,6 +325,9 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       : "running";
     const exitCode = Number.isInteger(session.exitCode) ? session.exitCode as number : null;
     const options = normalizeOptions(session.options);
+    const executionPrivacy = session.executionPrivacy;
+    // An unreadable privacy selection must never restore as a weaker default.
+    if (executionPrivacy !== undefined && (!isRecord(executionPrivacy) || Object.entries(executionPrivacy).some(([id, value]) => !isPluginId(id) || typeof value !== "string" || !["default", "D0", "D1", "D2", "D3", "unresolved"].includes(value)))) continue;
     const environment = normalizeEnvironment(session.environment);
     // A placed session whose ref is unreadable must not come back as a local one.
     if (session.environment !== undefined && !environment) continue;
@@ -352,6 +358,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(lastState !== "running" ? { exitCode } : {}),
       restore: session.restore !== false,
       ...(options ? { options } : {}),
+      ...(executionPrivacy ? { executionPrivacy: { ...executionPrivacy } as Record<string, string> } : {}),
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
@@ -457,4 +464,12 @@ function isMissingFile(error: unknown): boolean {
 
 function isTaskScope(value:unknown):value is {id:string;cwd:string;startedAt:number} {
   return isRecord(value) && typeof value.id==="string" && /^[\w-]{1,160}$/.test(value.id) && typeof value.cwd==="string" && value.cwd.length>0 && value.cwd.length<=4096 && typeof value.startedAt==="number" && Number.isFinite(value.startedAt) && value.startedAt>0;
+}
+
+/** Snapshot only privacy selections from trusted launch options; unrecognized selections fail closed at the router. */
+export function executionPrivacyFromOptions(options?: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(options ?? {}).map(([id, value]) => {
+    const selected = isRecord(value) ? value.dataClass : undefined;
+    return [id, selected === undefined ? "default" : typeof selected === "string" && ["default", "D0", "D1", "D2", "D3"].includes(selected) ? selected : "unresolved"];
+  }));
 }

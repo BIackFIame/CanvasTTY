@@ -370,7 +370,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
           const budget = this.control.taskBudget(sessionId);
           if (budget?.paused) throw new Error("The shared task budget is paused.");
           const answer = await Promise.race([
-            this.integrations.router.strategy({ sessionId: context.rootId, task: overall, cwd: this.control.taskRoot(sessionId).cwd,
+            this.integrations.router.strategy({ sessionId: this.control.lineage(sessionId).at(-1)!.id, task: overall, cwd: this.control.taskRoot(sessionId).cwd,
               ...(budget ? { budget: { limits: budget.limits, usage: budget.usage, remaining: budget.remaining, paused: budget.paused } } : {}) }),
             new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Strategy classifier timed out.")), this.integrations.routeTimeoutMs ?? 2000); })
           ]);
@@ -392,7 +392,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     // Only the root's overall task feeds strategy selection. A worker prompt must never substitute for it.
     const strategy = this.control.executionContext?.(orchestratorId).goal ? await this.resolveStrategy(orchestratorId) : undefined;
-    if (strategy?.review === "required") args = { ...args, review: true };
+    const reviewRequested = args.review === true || strategy?.review === "required";
     if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
@@ -409,7 +409,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
     }
     if (args.reviewModel !== undefined) {
-      if (args.review !== true) throw orchestrationBridgeError("INVALID_REQUEST", "reviewModel can be set only when review:true.", false);
+      if (!reviewRequested) throw orchestrationBridgeError("INVALID_REQUEST", "reviewModel can be set only when review:true.", false);
       const reviewProblem = launchModelProblem(provider, args.reviewModel);
       if (reviewProblem) throw orchestrationBridgeError("INVALID_REQUEST", `${reviewProblem} Call list_providers for the valid reviewer models.`, false);
       const unknownReviewModel = await this.providers.checkModel?.(provider, args.reviewModel as string) ?? null;
@@ -504,7 +504,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (routing) {
       const safeRouting = { ...routing, reason: this.control.maskText(routing.reason, 500) };
       const task = this.control.maskText(String(args.prompt ?? ""), 8_000);
-      this.routedTasks.set(created.id, { parentSessionId: orchestratorId, task, review: args.review === true, attempt: 0 });
+      this.routedTasks.set(created.id, { parentSessionId: orchestratorId, task, review: reviewRequested, attempt: 0 });
       try { this.integrations.onRouting?.(created.id, safeRouting, task); } catch { /* timeline failures do not undo a launch */ }
       this.scheduleRouteWatch(created.id);
       routing = safeRouting;
@@ -521,7 +521,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(created.effort !== undefined ? { effort: created.effort } : {}),
       ...(routing ? { routing } : {}),
       servedBy,
-      ...(args.review === true ? { reviewRequested: true } : {}),
+      ...(reviewRequested ? { reviewRequested: true } : {}),
       ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {})
     };
   }
