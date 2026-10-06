@@ -813,7 +813,7 @@ test("deep nonexistent descendants cannot conceal a credential symlink alias", {
   }), /protected host credentials/u);
 });
 
- test("wrapper evidence reports applied layer, Plan writes and actual network independently of mutable policy", async (t) => {
+test("wrapper evidence reports applied layer, Plan writes and actual network independently of mutable policy", { skip: process.platform === "win32" ? "Seatbelt profile fixture requires POSIX filesystem paths" : false }, async (t) => {
   const w=await world(t);
   let mode="offline";
   const iso=isolation(w,{platform:"darwin",exists:()=>true,networkPolicy:{prepareLaunch:()=>({mode,cleanup(){}})}});
