@@ -44,6 +44,8 @@ export interface DecisionHooksDependencies {
   services(): DecisionService[];
   call(pluginId: string, serviceId: string, method: "canvastty.decide", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): DecisionSession | null;
+  /** Host-owned root task, scoped to the receiving plugin. */
+  launchOptions?(sessionId: string, pluginId: string): { task?: string; dataClass?: string } | undefined;
   /** Core-owned human approval path; never exposed as a plugin capability. */
   humanApprovalEnabled?(): boolean;
   resolveHumanAsk?(
@@ -77,6 +79,7 @@ export interface DecisionRequest {
   profile: LaunchProfileId | null;
   /** The agent can put an "ask" in front of the person; false: an ask is turned into a deny with its reason. */
   canAsk: boolean;
+  launchOptions?: { task?: string; dataClass?: string };
 }
 
 type Verdict = "deny" | "ask" | "allow";
@@ -165,7 +168,7 @@ export class DecisionHooks {
     // A service trusted after this card started gets no more time than the card's gate allows; the signal ends it.
     const answers = await Promise.all(services.map((service) => {
       const timeoutMs = this.timeoutFor(service);
-      return this.ask(service, { ...params, budgetMs: timeoutMs }, timeoutMs, signal);
+      return this.ask(service, { ...params, launchOptions: this.deps.launchOptions?.(sessionId, service.pluginId), budgetMs: timeoutMs }, timeoutMs, signal);
     }));
     const merged = mergeDecisions(answers, request.truncated);
     if (merged.behavior === "ask") {

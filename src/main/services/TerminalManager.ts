@@ -78,6 +78,7 @@ import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
   executionPrivacyFromOptions,
+  reviewTasksFromOptions,
   type PersistedEnvironmentRef,
   type PersistedSessionExtras,
   type PersistedTerminalSession,
@@ -602,6 +603,7 @@ export class TerminalManager {
     const replacement=this.sessions.get(replacementId);if(!replacement)throw new Error("Handoff card is unavailable.");
     const sourceSession = this.sessions.get(sourceId);
     const source = sourceSession?.metadata;
+    if (sourceSession) replacement.extras.reviewTasks = { ...(this.personReviewTasks(sourceSession)) };
     if (sourceSession) replacement.extras.executionPrivacy = { ...(sourceSession.extras.executionPrivacy ?? executionPrivacyFromOptions(sourceSession.extras.options)) };
     if (source) {
       replacement.metadata.executionGoal = source.executionGoal;
@@ -665,6 +667,34 @@ export class TerminalManager {
   /** `redactSecrets(text)` cut to its last `maxChars` characters, masking only a window around that tail. */
   redactSecretsTail(text: string, maxChars: number): string {
     return this.redaction.redactTail(text, maxChars);
+  }
+
+  private personReviewTasks(session: ManagedSession | undefined): Record<string, string> {
+    // A plugin may create a parentless card, but its task text is not a person's authorization.
+    if (!session) return {};
+    // A host-copied snapshot remains person-authored when a plugin performs a consented account handoff.
+    if (session.extras.reviewTasks !== undefined) return session.extras.reviewTasks;
+    return session.extras.ownerPluginId ? {} : reviewTasksFromOptions(session.extras.options);
+  }
+
+  /** Only the root person's review fields for this plugin; never subagent-authored launch values. */
+  decisionLaunchOptions(id: string, pluginId: string): { task?: string; dataClass?: string } | undefined {
+    let session = this.sessions.get(id);
+    if (!session) return undefined;
+    const seen = new Set<string>();
+    while (session.metadata.parentSessionId) {
+      if (seen.has(session.metadata.id)) return {};
+      seen.add(session.metadata.id);
+      const parent = this.sessions.get(session.metadata.parentSessionId);
+      if (!parent) return {};
+      session = parent;
+    }
+    const task = this.personReviewTasks(session)[pluginId];
+    const privacy = session.extras.executionPrivacy ?? executionPrivacyFromOptions(session.extras.options);
+    return {
+      ...(typeof task === "string" ? { task: this.redactSecrets(task).slice(0, 2000) } : {}),
+      ...(Object.hasOwn(privacy, pluginId) ? { dataClass: privacy[pluginId]! } : {})
+    };
   }
 
   /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
@@ -1111,6 +1141,9 @@ export class TerminalManager {
       captureResult,
       ...(reviewerControl ? { reviewWorkspace: reviewerControl.workspace } : {}),
       extras: {
+        reviewTasks: control.continueTaskFrom
+          ? { ...(this.personReviewTasks(this.sessions.get(control.continueTaskFrom))) }
+          : control.ownerPluginId ? {} : reviewTasksFromOptions(launchOptions),
         executionPrivacy: control.continueTaskFrom
           ? { ...(this.sessions.get(control.continueTaskFrom)?.extras.executionPrivacy ?? executionPrivacyFromOptions(this.sessions.get(control.continueTaskFrom)?.extras.options)) }
           : executionPrivacyFromOptions(launchOptions),
@@ -1692,6 +1725,7 @@ export class TerminalManager {
       ...(descriptor.reviewRequested !== undefined ? {reviewRequested:descriptor.reviewRequested} : {})
     };
     const extras: PersistedSessionExtras = {
+      reviewTasks: { ...(descriptor.reviewTasks ?? (descriptor.ownerPluginId ? {} : reviewTasksFromOptions(descriptor.options))) },
       executionPrivacy: { ...(descriptor.executionPrivacy ?? executionPrivacyFromOptions(descriptor.options)) },
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),

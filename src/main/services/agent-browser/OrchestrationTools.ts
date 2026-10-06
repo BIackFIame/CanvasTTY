@@ -51,7 +51,7 @@ export interface ScopedOrchestrationIntegrations {
    * it declared them delegable). With two or more, a subagent that would inherit its orchestrator's account lets the
    * router choose among them; the chosen ACCOUNT then sets the model, so no second --model is ever added.
    */
-  accountCandidates?(provider: AgentProviderId): Promise<Array<{ id: string; label: string }>>;
+  accountCandidates?(provider: AgentProviderId, sessionId: string): Promise<Array<{ id: string; label: string }>>;
 }
 
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/u;
@@ -564,7 +564,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   ): Promise<{ account?: string; info: ModelRoutingInfo }> {
     const keep = (reason: string) => ({ info: { source: "default" as const, reason: `${reason} Model account ${currentAccount.slice(0, 40)} (inherited from the orchestrator) decides the model.` } });
     let offered: Array<{ id: string; label: string }> = [];
-    try { offered = await this.integrations.accountCandidates!(provider); } catch { offered = []; }
+    try { offered = await this.integrations.accountCandidates!(provider, sessionId); } catch { offered = []; }
     const seen = new Set<string>();
     const accounts = (Array.isArray(offered) ? offered : []).filter((item) => item && typeof item.id === "string" && ACCOUNT_ID.test(item.id)
       && typeof item.label === "string" && !seen.has(item.id) && seen.add(item.id)).slice(0, 32);

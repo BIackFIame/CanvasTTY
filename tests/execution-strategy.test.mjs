@@ -138,11 +138,12 @@ test("strategy privacy follows the actual continuation root through deletion and
  const original=persistedTerminalSession({...f.root,exitCode:0},undefined,{options:{assistant:{dataClass:"D3",task:"private task",other:"private option"},accounts:{account:"private-account"}}});
  f.terminals.disposeAll();await store.replace([original]);
  f.terminals.configureSessionPersistence(store,"continue");await f.terminals.restorePersistedSessions();
- const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator"},{continueTaskFrom:originalId});
+ const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator"},{continueTaskFrom:originalId,origin:"plugin",ownerPluginId:"accounts"});
  f.terminals.inheritTaskScope(originalId,replacement.id);f.terminals.completeTaskContinuation(originalId,replacement.id);f.terminals.dispose(originalId,{keepEnvironmentData:true});
  assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
  assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"unselected-router"),{dataClass:"default"});
  assert.equal(f.terminals.strategyLaunchOptions(originalId,"assistant"),undefined);
+ assert.deepEqual(f.terminals.decisionLaunchOptions(replacement.id,"assistant"),{task:"private task",dataClass:"D3"});
  let seen;
  const h=new ScopedOrchestrationHandler(f.control,null,undefined,{router:{route:async()=>{throw Error("unused")},strategy:async r=>{seen=r;return {goal:"balanced",reason:"fixture"}}}});
  await h.execute(replacement.id,request("get_execution_strategy",{task:"overall"}));
@@ -150,6 +151,7 @@ test("strategy privacy follows the actual continuation root through deletion and
  await f.terminals.shutdown();
  const restored=fixture(t);restored.terminals.disposeAll();restored.terminals.configureSessionPersistence(new TerminalSessionStore(dir),"continue");await restored.terminals.restorePersistedSessions();
  assert.deepEqual(restored.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
+ assert.deepEqual(restored.terminals.decisionLaunchOptions(replacement.id,"assistant"),{task:"private task",dataClass:"D3"});
  const rows=await store.load();assert.deepEqual(rows[0].executionPrivacy,{assistant:"D3",accounts:"default"});
  assert.equal(rows[0].executionPrivacy.accounts,"default","account identifiers never enter strategy context");
 });

@@ -1,4 +1,5 @@
 import "./stdio";
+import { readyAccountCandidates } from "./services/readyAccountCandidates.ts";
 import appIcon from "../../build/icon.png?asset";
 import appManifest from "../../package.json";
 import { ipcMain } from "electron";
@@ -533,6 +534,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     services: () => pluginManager!.decisionServices(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null,
+    launchOptions: (sessionId, pluginId) => terminalManager?.decisionLaunchOptions(sessionId, pluginId),
     humanApprovalEnabled: () => evenG2?.enabled() ?? false,
     resolveHumanAsk: async (id, request, decision, signal) => {
       if (!humanQuestions || !evenG2?.canReply(id) || request.truncated ||
@@ -1056,8 +1058,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.route",request,2000) as {candidateId:string;reason:string;escalated?:boolean};
     }}, experimentalEnabled),
     // F-06: with the opt-in on, an inherited subagent may be routed to another delegable model account.
-    accountCandidates:async provider=>experimentalEnabled() && launchPipeline.delegable(ACCOUNTS_PLUGIN_ID)
-      ? ((await launchPipeline.fieldOptions(ACCOUNTS_PLUGIN_ID,provider)).account ?? []).map(option=>({id:option.value,label:option.label}))
+    accountCandidates:async (provider,sessionId)=>experimentalEnabled() && launchPipeline.delegable(ACCOUNTS_PLUGIN_ID)
+      ? await readyAccountCandidates(pluginTools,sessionId,provider)
       : [],
     onRouting:(id,route)=>{managedTerminals.setTaskMetadata(id,{modelRoute:route});void timeline.append(id,"model-route",route.source,route.reason,"core").catch(console.warn);},
     onRouteOutcome:(id,outcome)=>sessionsForPlugins.activity({type:"route.outcome",sessionId:id,at:Date.now(),...outcome})

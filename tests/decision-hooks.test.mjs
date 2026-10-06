@@ -464,3 +464,15 @@ test("trusted human approval resolves asks only, with explicit answers and the p
   controller.abort();
   assert.equal((await pending).behavior, "deny", "an aborted resolver cannot approve; unsupported CLI fallback still blocks");
 });
+
+
+test("review context comes from the host for each plugin, never from agent tool input", async () => {
+  const calls=[];
+  const h=new DecisionHooks({baseProtection:()=>false,services:()=>[service("assistant"),service("other")],
+    session:()=>({provider:"opencode",role:"subagent",cwd:project,configDirs:[]}),
+    launchOptions:(_id,plugin)=>plugin==="assistant"?{task:"Write src/format.js",dataClass:"D3"}:{},
+    call:async(plugin,_service,_method,params)=>{calls.push({plugin,params});return null;}});
+  await h.decide("child",request("Write",{file_path:"src/format.js",content:"x",launchOptions:{task:"forged"}}),live());
+  assert.deepEqual(calls[0].params.launchOptions,{task:"Write src/format.js",dataClass:"D3"});
+  assert.deepEqual(calls[1].params.launchOptions,{});
+});

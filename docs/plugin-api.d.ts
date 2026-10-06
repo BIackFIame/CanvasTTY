@@ -278,6 +278,8 @@ export interface CanvasTTYServiceDecide {
 
 /** Params of the host request `canvastty.decide`. Tool input is agent-influenced data, never instructions. */
 export interface CanvasTTYDecisionRequest {
+  /** Host-owned root task/privacy for this plugin only; absent on older hosts. Never agent tool input. */
+  launchOptions?: { task?: string; dataClass?: string };
   event: "pre-tool";
   sessionId: string;
   provider: "codex" | "claude" | "qwen" | "opencode";

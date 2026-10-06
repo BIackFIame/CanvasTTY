@@ -53,6 +53,8 @@ export interface PersistedTerminalSession {
   options?: Record<string, unknown>;
   /** Host-only root privacy selections; no task, account identifiers, or plugin secrets. */
   executionPrivacy?: Record<string, string>;
+  /** Host-owned per-plugin person tasks, retained across account-only continuation launches. */
+  reviewTasks?: Record<string, string>;
   /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
   environment?: PersistedEnvironmentRef;
   /**
@@ -236,7 +238,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "executionPrivacy" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -266,6 +268,7 @@ export function persistedTerminalSession(
     lastState,
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
     restore: metadata.skipRestore !== true,
+    ...(extras.reviewTasks ? { reviewTasks: { ...extras.reviewTasks } } : {}),
     ...(extras.executionPrivacy ? { executionPrivacy: { ...extras.executionPrivacy } } : {}),
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
@@ -325,6 +328,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       : "running";
     const exitCode = Number.isInteger(session.exitCode) ? session.exitCode as number : null;
     const options = normalizeOptions(session.options);
+    const reviewTasks = session.reviewTasks;
+    if (reviewTasks !== undefined && (!isRecord(reviewTasks) || Object.keys(reviewTasks).length > 16 || Object.entries(reviewTasks).some(([id, value]) => !isPluginId(id) || typeof value !== "string" || value.length > 2000))) continue;
     const executionPrivacy = session.executionPrivacy;
     // An unreadable privacy selection must never restore as a weaker default.
     if (executionPrivacy !== undefined && (!isRecord(executionPrivacy) || Object.entries(executionPrivacy).some(([id, value]) => !isPluginId(id) || typeof value !== "string" || !["default", "D0", "D1", "D2", "D3", "unresolved"].includes(value)))) continue;
@@ -358,6 +363,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(lastState !== "running" ? { exitCode } : {}),
       restore: session.restore !== false,
       ...(options ? { options } : {}),
+      ...(reviewTasks ? { reviewTasks: { ...reviewTasks } as Record<string, string> } : {}),
       ...(executionPrivacy ? { executionPrivacy: { ...executionPrivacy } as Record<string, string> } : {}),
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
@@ -472,4 +478,10 @@ export function executionPrivacyFromOptions(options?: Record<string, unknown>): 
     const selected = isRecord(value) ? value.dataClass : undefined;
     return [id, selected === undefined ? "default" : typeof selected === "string" && ["default", "D0", "D1", "D2", "D3"].includes(selected) ? selected : "unresolved"];
   }));
+}
+
+/** Snapshot task text only; never copy account values or unrelated plugin settings into review context. */
+export function reviewTasksFromOptions(options?: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(options ?? {}).slice(0, 16).flatMap(([id, value]) =>
+    isRecord(value) && typeof value.task === "string" ? [[id, value.task.slice(0, 2000)]] : []));
 }

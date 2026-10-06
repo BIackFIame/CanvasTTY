@@ -17,7 +17,7 @@ import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 const at = { x: 0, y: 0 };
 const ACCOUNTS = "canvastty-accounts";
 
-async function setup(t, { delegable = true, router = true, accountCandidates, route, executionGoal } = {}) {
+async function setup(t, { delegable = true, router = true, accountCandidates, route, executionGoal, reviewFields = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ctty-sub-account-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
@@ -26,7 +26,7 @@ async function setup(t, { delegable = true, router = true, accountCandidates, ro
   t.after(() => terminals.disposeAll());
   terminals.configureLaunchPipeline(new LaunchPipeline({
     contributors: () => [{ pluginId: ACCOUNTS, pluginName: "Accounts", serviceId: "accounts", secrets: false,
-      launch: { fields: [{ key: "account", label: "Model account", kind: "text" }], ...(delegable ? { delegable: true } : {}) } }],
+      launch: { fields: [{ key: "account", label: "Model account", kind: "text" }, ...(reviewFields ? [{ key: "task", label: "Task", kind: "text" }, { key: "dataClass", label: "Data class", kind: "text" }] : [])], ...(delegable ? { delegable: true } : {}) } }],
     call: async (_plugin, _service, method, params) => {
       if (method !== "canvastty.launch.prepare") return null;
       prepared.push({ sessionId: params.sessionId, chosen: params.chosen, options: params.options });
@@ -198,4 +198,48 @@ test("account routing receives the same manual root strategy and retains the acc
  assert.equal(s.calls.at(-1).args.filter(arg=>arg==="--model").length,1);
  await assert.rejects(s.spawn(parent,{}),/strategy/);
  s.handler.forgetSession(child.sessionId);
+});
+
+
+test("automatic account routing uses ready routes, never an unconfigured dropdown account", async () => {
+  const { readyAccountCandidates } = await import("../src/main/services/readyAccountCandidates.ts");
+  const rows = [
+    {provider:"opencode", accountId:"flash", account:"Fast", model:"glm-5.3-flash", state:"ready"},
+    {provider:"opencode", accountId:"missing", account:"MiniMax", model:"m3", state:"no-key"},
+    {provider:"opencode", accountId:"wrong-key", account:"Wrong origin", model:"m3", state:"key-for-other-address"},
+    {provider:"opencode", accountId:"down", account:"Local", model:"local", state:"ollama-down"},
+    {provider:"codex", accountId:"other", account:"Other CLI", model:"other", state:"ready"}
+  ];
+  const calls=[];
+  const tools={call:async(...args)=>{calls.push(args);return {content:JSON.stringify({routes:rows}),isError:false};}};
+  assert.deepEqual(await readyAccountCandidates(tools,"root","opencode"),[{id:"flash",label:"Fast · glm-5.3-flash"}]);
+  assert.deepEqual(calls[0],["root","orchestrator","canvastty-accounts__list_routes",{provider:"opencode"}]);
+  for(const reply of [{isError:true,content:JSON.stringify({routes:rows})},{isError:false,content:"cut json"}])
+    assert.deepEqual(await readyAccountCandidates({call:async()=>reply},"root","opencode"),[]);
+});
+
+test("command review inherits only its own plugin's person-authored root task and privacy", async t => {
+  const s=await setup(t,{reviewFields:true});
+  // This fixture's Accounts fields stand in for arbitrary plugin launch values.
+  const parent=s.orchestrator({[ACCOUNTS]:{account:"glm-flash",task:"Write src/format.js",dataClass:"D3"}});
+  const child=await s.spawn(parent,{launchOptions:{[ACCOUNTS]:{account:"glm-flash",task:"forged",dataClass:"D0"}}});
+  assert.deepEqual(s.terminals.decisionLaunchOptions(child.sessionId,ACCOUNTS),{task:"Write src/format.js",dataClass:"D3"});
+  assert.deepEqual(s.terminals.decisionLaunchOptions(child.sessionId,"assistant"),{});
+  assert.equal(s.terminals.decisionLaunchOptions("missing","assistant"),undefined);
+});
+
+
+test("plugin-authored root tasks never become person authority, including after continuation", async t => {
+  const s=await setup(t,{reviewFields:true});
+  const root=s.terminals.create({provider:"opencode",profile:"normal",cwd:s.root,position:at,role:"orchestrator",
+    launchOptions:{[ACCOUNTS]:{account:"glm-flash",task:"Plugin-authored task",dataClass:"D3"}}},
+    {ownerPluginId:"fixture.plugin",origin:"plugin"});
+  assert.deepEqual(s.terminals.decisionLaunchOptions(root.id,ACCOUNTS),{dataClass:"D3"});
+  const child=await s.spawn(root,{});
+  assert.deepEqual(s.terminals.decisionLaunchOptions(child.sessionId,ACCOUNTS),{dataClass:"D3"});
+  const replacement=s.terminals.create({provider:"opencode",profile:"normal",cwd:s.root,position:at,role:"orchestrator"},{continueTaskFrom:root.id});
+  s.terminals.inheritTaskScope(root.id,replacement.id);
+  s.terminals.completeTaskContinuation(root.id,replacement.id);
+  assert.deepEqual(s.terminals.decisionLaunchOptions(replacement.id,ACCOUNTS),{dataClass:"D3"});
+  assert.deepEqual(s.terminals.decisionLaunchOptions(child.sessionId,ACCOUNTS),{dataClass:"D3"});
 });
