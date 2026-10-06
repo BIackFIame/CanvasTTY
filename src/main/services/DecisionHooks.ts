@@ -1,3 +1,4 @@
+import { UNVERIFIED_EXECUTION_PROTECTION, type ExecutionProtection } from "../../shared/executionProtection.ts";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import type { AgentProviderId, LaunchProfileId, SessionRole } from "../../shared/contracts.ts";
@@ -40,6 +41,7 @@ export function hookCanAsk(provider: AgentProviderId): boolean {
 }
 
 export interface DecisionHooksDependencies {
+  executionProtection?(sessionId: string): ExecutionProtection;
   baseProtection(): boolean;
   services(): DecisionService[];
   call(pluginId: string, serviceId: string, method: "canvastty.decide", params: unknown, timeoutMs: number): Promise<unknown>;
@@ -62,6 +64,7 @@ export interface DecisionHooksDependencies {
 
 /** What a decision service receives (`canvastty.decide`). */
 export interface DecisionRequest {
+  executionProtection?: ExecutionProtection;
   event: "pre-tool";
   sessionId: string;
   provider: AgentProviderId;
@@ -168,7 +171,7 @@ export class DecisionHooks {
     // A service trusted after this card started gets no more time than the card's gate allows; the signal ends it.
     const answers = await Promise.all(services.map((service) => {
       const timeoutMs = this.timeoutFor(service);
-      return this.ask(service, { ...params, launchOptions: this.deps.launchOptions?.(sessionId, service.pluginId), budgetMs: timeoutMs }, timeoutMs, signal);
+      return this.ask(service, { ...params, executionProtection: this.deps.executionProtection?.(sessionId) ?? UNVERIFIED_EXECUTION_PROTECTION, launchOptions: this.deps.launchOptions?.(sessionId, service.pluginId), budgetMs: timeoutMs }, timeoutMs, signal);
     }));
     const merged = mergeDecisions(answers, request.truncated);
     if (merged.behavior === "ask") {

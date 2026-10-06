@@ -470,9 +470,11 @@ test("review context comes from the host for each plugin, never from agent tool 
   const calls=[];
   const h=new DecisionHooks({baseProtection:()=>false,services:()=>[service("assistant"),service("other")],
     session:()=>({provider:"opencode",role:"subagent",cwd:project,configDirs:[]}),
+    executionProtection:()=>({state:"unverified"}),
     launchOptions:(_id,plugin)=>plugin==="assistant"?{task:"Write src/format.js",dataClass:"D3"}:{},
     call:async(plugin,_service,_method,params)=>{calls.push({plugin,params});return null;}});
-  await h.decide("child",request("Write",{file_path:"src/format.js",content:"x",launchOptions:{task:"forged"}}),live());
+  await h.decide("child",request("Write",{file_path:"src/format.js",content:"x",launchOptions:{task:"forged"},executionProtection:{state:"applied",layer:"seatbelt"}}),live());
+  assert.deepEqual(calls[0].params.executionProtection,{state:"unverified"});
   assert.deepEqual(calls[0].params.launchOptions,{task:"Write src/format.js",dataClass:"D3"});
   assert.deepEqual(calls[1].params.launchOptions,{});
 });

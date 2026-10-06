@@ -534,6 +534,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     services: () => pluginManager!.decisionServices(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null,
+    executionProtection: sessionId => terminalManager?.decisionExecutionProtection(sessionId) ?? { state: "unverified" },
     launchOptions: (sessionId, pluginId) => terminalManager?.decisionLaunchOptions(sessionId, pluginId),
     humanApprovalEnabled: () => evenG2?.enabled() ?? false,
     resolveHumanAsk: async (id, request, decision, signal) => {

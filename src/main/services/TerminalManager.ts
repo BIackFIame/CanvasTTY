@@ -66,6 +66,7 @@ import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
+import { UNVERIFIED_EXECUTION_PROTECTION, type ExecutionProtection } from "../../shared/executionProtection.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
 import type { AgentNetworkMode } from "./isolation/networkPolicy.ts";
 import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
@@ -302,6 +303,7 @@ export class TerminalManager {
   private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> & Partial<Pick<AgentIsolation, "networkPolicyFor">> | null = null;
   // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
   private readonly isolationCleanups = new Map<string, () => void>();
+  private readonly executionProtections = new Map<string, ExecutionProtection>();
   /** Open git risk reports by id: the card it belongs to (none once closed) and what neutralize removes. */
   private readonly gitRisks = new Map<string, { sessionId: string | null; repositories: GitRiskRepository[] }>();
   /** When isolated launches started whose card did not exist yet (see wrapIsolated). */
@@ -675,6 +677,13 @@ export class TerminalManager {
     // A host-copied snapshot remains person-authored when a plugin performs a consented account handoff.
     if (session.extras.reviewTasks !== undefined) return session.extras.reviewTasks;
     return session.extras.ownerPluginId ? {} : reviewTasksFromOptions(session.extras.options);
+  }
+
+  /** Current process only: never restored from disk or inherited from a parent/remote card. */
+  decisionExecutionProtection(id: string): ExecutionProtection {
+    const session = this.sessions.get(id);
+    return session?.process && session.metadata.exitCode === null
+      ? this.executionProtections.get(id) ?? UNVERIFIED_EXECUTION_PROTECTION : UNVERIFIED_EXECUTION_PROTECTION;
   }
 
   /** Only the root person's review fields for this plugin; never subagent-authored launch values. */
@@ -2217,6 +2226,7 @@ export class TerminalManager {
     });
     this.releaseIsolation(id);
     this.isolationCleanups.set(id, wrapped.cleanup);
+    if (wrapped.executionProtection) this.executionProtections.set(id, Object.freeze({ ...wrapped.executionProtection }));
     if (wrapped.isolationReason) {
       const session = this.sessions.get(id);
       if (session) {
@@ -2242,6 +2252,7 @@ export class TerminalManager {
   }
 
   private releaseIsolation(id: string): void {
+    this.executionProtections.delete(id);
     const cleanup = this.isolationCleanups.get(id);
     if (!cleanup) return;
     this.isolationCleanups.delete(id);

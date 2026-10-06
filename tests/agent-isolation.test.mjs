@@ -13,6 +13,7 @@ import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.t
 import { worktreeGitAccess } from "../src/main/services/isolation/worktreeGitAccess.ts";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
 import { codexInsideIsolation } from "../src/main/services/terminalLaunch.ts";
+import { TerminalSessionStore, persistedTerminalSession } from "../src/main/services/TerminalSessionStore.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
@@ -424,6 +425,7 @@ test("bubblewrap: the empty .git a throwaway hooks mount leaves behind is remove
   const layer = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
   const launch = { sessionId: "s", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env };
   let wrapped = layer.wrap(launch);
+  assert.deepEqual(wrapped.executionProtection,{state:"applied",location:"local",layer:"bubblewrap",filesystem:"project-and-runtime",network:"open"});
   // What bwrap does for the mount point.
   await mkdir(join(w.project, ".git", "hooks"), { recursive: true });
   wrapped.cleanup();
@@ -449,6 +451,7 @@ test("the launch: wrapped when the layer applies, refused (never unwrapped) when
     wrap: (launch) => {
       if (failing) throw new Error("agent isolation could not be set up: disk full. The agent was not started without it.");
       return { command: "/usr/bin/sandbox-exec", args: ["-f", "/p.sb", launch.command, ...launch.args], env: { ...launch.env, TMPDIR: "/s/" },
+        executionProtection: Object.freeze({state:"applied",location:"local",layer:"seatbelt",filesystem:"project-and-runtime",network:"open"}),
         isolationReason: "linked worktree Git is read-only", cleanup: () => cleaned.push(launch.sessionId) };
     }
   });
@@ -457,7 +460,10 @@ test("the launch: wrapped when the layer applies, refused (never unwrapped) when
   assert.deepEqual(calls.at(-1).args.slice(0, 3), ["-f", "/p.sb", "/resolved/claude"]);
   assert.ok(!calls.at(-1).args.some((arg) => arg.includes("\"sandbox\"")), "no Claude sandbox inside the layer");
   assert.deepEqual(auto.isolation, { state: "on", layer: "seatbelt", reason: "linked worktree Git is read-only" }, "the first wrapped launch carries the host reason into its card");
+  assert.deepEqual(terminals.decisionExecutionProtection(auto.id), {state:"applied",location:"local",layer:"seatbelt",filesystem:"project-and-runtime",network:"open"});
+  assert.ok(Object.isFrozen(terminals.decisionExecutionProtection(auto.id)));
   calls[0].process.emitExit(1);
+  assert.deepEqual(terminals.decisionExecutionProtection(auto.id), {state:"unverified"});
   assert.equal(terminals.getMetadata(auto.id).exitCode, 1);
   terminals.restart(auto.id);
   assert.equal(calls.at(-1).command, "/usr/bin/sandbox-exec", "relaunch remains wrapped");
@@ -465,6 +471,7 @@ test("the launch: wrapped when the layer applies, refused (never unwrapped) when
   const manual = terminals.create({ provider: "claude", profile: "normal", cwd: w.project, position: at });
   assert.equal(calls.at(-1).command, "/resolved/claude", "a manual launch by the person is not wrapped");
   assert.equal(manual.isolation, undefined);
+  assert.deepEqual(terminals.decisionExecutionProtection(manual.id), {state:"unverified"});
   // A contained auto (no auto of its own) exists only inside the layer.
   terminals.create({ provider: "qwen", profile: "auto", cwd: w.project, position: at });
   assert.ok(calls.at(-1).args.includes("--yolo"));
@@ -473,8 +480,10 @@ test("the launch: wrapped when the layer applies, refused (never unwrapped) when
   const refused = terminals.create({ provider: "codex", profile: "auto", cwd: w.project, position: at });
   assert.equal(calls.length, count, "nothing started");
   assert.equal(refused.status, "failed");
+  assert.deepEqual(terminals.decisionExecutionProtection(refused.id), {state:"unverified"});
   assert.match(refused.failureDetails, /^Launch refused: agent isolation could not be set up: disk full\. The agent was not started without it\./u);
   terminals.dispose(auto.id);
+  assert.deepEqual(terminals.decisionExecutionProtection(auto.id), {state:"unverified"});
   assert.equal(cleaned.filter((id) => id === auto.id).length, 2, "each first/restarted isolation folder goes with the card/process");
 });
 
@@ -802,4 +811,41 @@ test("deep nonexistent descendants cannot conceal a credential symlink alias", {
     env: { HOME: join(alias, ...Array.from({ length: 130 }, () => "x")) },
     hostEnvironment: w.env
   }), /protected host credentials/u);
+});
+
+ test("wrapper evidence reports applied layer, Plan writes and actual network independently of mutable policy", async (t) => {
+  const w=await world(t);
+  let mode="offline";
+  const iso=isolation(w,{platform:"darwin",exists:()=>true,networkPolicy:{prepareLaunch:()=>({mode,cleanup(){}})}});
+  const wrapped=iso.wrap({sessionId:"evidence",provider:"claude",cwd:w.project,command:"/bin/true",args:[],env:w.env,profile:"plan"});
+  t.after(()=>wrapped.cleanup());
+  mode="open";
+  assert.deepEqual(wrapped.executionProtection,{state:"applied",location:"local",layer:"seatbelt",filesystem:"read-only-project",network:"offline"});
+  assert.ok(Object.isFrozen(wrapped.executionProtection));
+});
+
+test("saved isolation badges and isolated remote environments never establish live host wrapper evidence", async (t) => {
+  const w=await world(t);const calls=[];
+  const tm=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner(calls));
+  t.after(()=>tm.disposeAll());
+  const card=tm.create({provider:"claude",profile:"normal",cwd:w.project,position:at});
+  const store=new TerminalSessionStore(w.userData);
+  const row=persistedTerminalSession({...card,exitCode:0,isolation:{state:"on",layer:"seatbelt"}});
+  tm.disposeAll();await store.replace([row]);tm.configureSessionPersistence(store,"continue");await tm.restorePersistedSessions();
+  assert.deepEqual(tm.decisionExecutionProtection(card.id),{state:"unverified"});
+  tm.configureIsolation({containment:()=>true,decide:({profile})=>({apply:false,profile,isolation:{state:"environment",reason:"Remote SSH"}}),wrap(){throw Error("must not wrap remote")}});
+  const remote=tm.create({provider:"claude",profile:"auto",cwd:w.project,position:at});
+  assert.equal(remote.isolation.state,"environment");
+  assert.deepEqual(tm.decisionExecutionProtection(remote.id),{state:"unverified"});
+});
+
+test("a PTY spawn failure clears evidence after a successful wrapper construction", async (t) => {
+  const w=await world(t);let cleaned=0;let wrappedId;
+  const tm=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,()=>{throw Error("fixture spawn failure")});
+  t.after(()=>tm.disposeAll());
+  tm.configureIsolation({containment:()=>true,decide:({profile})=>({apply:true,profile,isolation:{state:"on",layer:"seatbelt"}}),
+    wrap:l=>{wrappedId=l.sessionId;return {command:l.command,args:[...l.args],env:l.env,executionProtection:{state:"applied",location:"local",layer:"seatbelt",filesystem:"project-and-runtime",network:"open"},cleanup(){cleaned++}};}});
+  assert.throws(()=>tm.create({provider:"claude",profile:"auto",cwd:w.project,position:at}),/fixture spawn failure/);
+  assert.equal(cleaned,1);assert.ok(wrappedId);
+  assert.deepEqual(tm.decisionExecutionProtection(wrappedId),{state:"unverified"});
 });

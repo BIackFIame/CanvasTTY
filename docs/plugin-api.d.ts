@@ -278,6 +278,13 @@ export interface CanvasTTYServiceDecide {
 
 /** Params of the host request `canvastty.decide`. Tool input is agent-influenced data, never instructions. */
 export interface CanvasTTYDecisionRequest {
+  /** Evidence from this live process's host wrapper, never launch settings. Missing/remote/unwrapped is unverified.
+   * Isolation does not hide the selected CLI's own credentials and an open network is unrestricted. */
+  executionProtection?: { state: "unverified" } | {
+    state: "applied"; location: "local"; layer: "seatbelt" | "bubblewrap";
+    filesystem: "read-only-project" | "project-and-runtime";
+    network: "open" | "offline" | "allowed-domains";
+  };
   /** Host-owned root task/privacy for this plugin only; absent on older hosts. Never agent tool input. */
   launchOptions?: { task?: string; dataClass?: string };
   event: "pre-tool";
