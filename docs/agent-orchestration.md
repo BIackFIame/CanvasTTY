@@ -103,6 +103,8 @@ Use `npm run control -- <arguments>` or `node scripts/canvastty-control.mjs <arg
 
 A session launched with the Orchestrator role gets its own control connection (`CANVASTTY_CONTROL_CONNECTION` names a descriptor in a folder of its own), never the app-wide one, which stays the person's. Through it `create` makes a subagent of that orchestrator under every delegation rule above (without `--profile` it gets the orchestrator's profile), the other commands see only what it created, and theme or settings commands are refused. Closing or restarting the orchestrator withdraws the connection.
 
+Run `execution-targets` on this scoped connection to list the person-approved destinations permitted for the task. When `enabled` is true, pass a returned ID to `create --execution-target <id>`; omission and IDs outside that task's allowed targets are refused. Discovery is read-only, accepts no session selector, and reflects current approvals. Agents cannot edit approvals or select an implicit default.
+
 ## Workflow
 
 ```sh

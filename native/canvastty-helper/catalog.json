@@ -963,6 +963,16 @@
         }
       },
       {
+        "name": "list_execution_targets",
+        "description": "List the person-approved execution destinations permitted for this task data class. Targets bind the CLI, account, model and configured environment; their approval does not promise remote isolation. Pass an id or auto as executionTargetId to spawn_agent. Agents cannot edit trust.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "get_execution_strategy",
         "description": "Resolve this logical task's execution strategy once, before spawning workers. Supply the overall user task, never a worker subtask. Returns the person's selected goal or Jev's bounded autonomous choice, concurrency, review policy and instructions. An existing root decision cannot be changed by children.",
         "inputSchema": {
@@ -1035,6 +1045,11 @@
                 "devin",
                 "antigravity"
               ]
+            },
+            "executionTargetId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 80
             },
             "cwd": {
               "type": "string",

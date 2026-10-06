@@ -1,4 +1,5 @@
 import "./stdio";
+import { AGENT_PROVIDERS } from "../shared/contracts";
 import { readyAccountCandidates } from "./services/readyAccountCandidates.ts";
 import appIcon from "../../build/icon.png?asset";
 import appManifest from "../../package.json";
@@ -1056,7 +1057,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     },route:async request=>{
       const provider=pluginManager!.modelRouterProviders().find(row=>pluginServices!.running(row.pluginId,row.serviceId));
       if(!provider)throw new Error("No trusted model router is running.");
-      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.route",request,2000) as {candidateId:string;reason:string;escalated?:boolean};
+      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.route",{...request,launchOptions:managedTerminals.strategyLaunchOptions(request.sessionId,provider.pluginId)},2000) as {candidateId:string;reason:string;escalated?:boolean};
     }}, experimentalEnabled),
     // F-06: with the opt-in on, an inherited subagent may be routed to another delegable model account.
     accountCandidates:async (provider,sessionId)=>experimentalEnabled() && launchPipeline.delegable(ACCOUNTS_PLUGIN_ID)
@@ -1086,6 +1087,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     runsRoot: join(userDataPath, "launch-runs")
   });
   await launchPipeline.clearRuns().catch(() => undefined);
+  terminalManager.configureExecutionPolicy(()=>settings.executionPolicy(),async (id,provider,accountId)=>{
+    const answer=await pluginTools.call(id,"orchestrator","canvastty-accounts__list_routes",{provider});
+    if(answer.isError)return null;
+    const parsed:unknown=JSON.parse(answer.content);
+    if(!parsed||typeof parsed!=="object"||!("routes" in parsed)||!Array.isArray(parsed.routes))return null;
+    const row=parsed.routes.find(r=>r?.provider===provider&&r.accountId===accountId);
+    return row && [row.model,row.endpoint,row.kind,row.state].every(v=>typeof v==="string") ? {model:row.model,endpoint:row.endpoint,kind:row.kind,state:row.state}:null;
+  });
   terminalManager.configureLaunchPipeline(launchPipeline);
   terminalManager.configureEnvironments(new EnvironmentRegistry({
     experimentalEnabled,
@@ -1131,7 +1140,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits,
         models: providerDirectorySources.models }),
       checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
+      executionTargets: (sessionId) => agentControlService.executionTargets(sessionId),
       spawnSubagent: (request) => agentControlService.spawn({ parentSessionId: request.parentSessionId, provider: request.provider,
+        ...(request.executionTargetId !== undefined ? { executionTargetId: request.executionTargetId } : {}),
         cwd: request.cwd, ...(request.title !== undefined ? { title: request.title } : {}),
         ...(request.profile !== undefined ? { profile: request.profile as LaunchProfileId } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}), ...(request.effort !== undefined ? { effort: request.effort } : {}) }),
@@ -1253,6 +1264,16 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     browser: browserService,
     githubAuth: githubAuth!,
     hermesHud: hermesHudService,
+    executionAccountRoutes: async provider=>{
+      if(!(AGENT_PROVIDERS as readonly string[]).includes(provider))throw new Error("Invalid provider.");
+      const service=pluginManager!.agentToolProviders().find(p=>p.pluginId===ACCOUNTS_PLUGIN_ID&&p.tools.some(t=>t.name==="list_routes"));
+      if(!service)throw new Error("Accounts route information is unavailable.");
+      const answer=await pluginServices!.hostCall(service.pluginId,service.serviceId,"canvastty.tools.call",{tool:"list_routes",input:{provider}},15000) as {content?:unknown;isError?:boolean};
+      if(answer.isError)throw new Error("Accounts route information is unavailable.");
+      const content=typeof answer.content==="string"?JSON.parse(answer.content):answer.content;
+      if(!content||typeof content!=="object"||!Array.isArray(content.routes))throw new Error("Invalid Accounts route information.");
+      return content.routes.slice(0,256).filter((v:Record<string,unknown>)=>v?.provider===provider&&[v.accountId,v.model,v.endpoint,v.kind,v.state].every(x=>typeof x==="string"&&x.length<=300)).map((v:Record<string,string>)=>({accountId:v.accountId!,model:v.model!,endpoint:v.endpoint!,kind:v.kind!,state:v.state!}));
+    },
     launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {

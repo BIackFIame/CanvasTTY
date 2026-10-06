@@ -1,3 +1,4 @@
+import { publicEndpoint } from "../../shared/executionPolicy.ts";
 import { randomUUID } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -64,9 +65,17 @@ export interface LaunchContext {
    * it trusted there for this run's agent; absent otherwise.
    */
   trustedFolder?: string;
+  /** Host capability: request public route evidence from the selected Accounts producer. */
+  accountRouteEvidence?: true;
 }
 
 export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen"> & { options: Record<string, PluginLaunchValues> };
+
+export interface AccountRouteEvidence {
+  model: string;
+  endpoint: string;
+  kind: "ollama" | "ollama-cloud" | "api-key";
+}
 
 export type PreparedLaunch =
   | {
@@ -82,6 +91,7 @@ export type PreparedLaunch =
     /** Host-derived selected Accounts CLI home, passed transiently to AgentIsolation for exact-path validation. */
     accountHome?: string;
     accountId?:string;
+    accountRoute?: AccountRouteEvidence;
     /** Model API hosts of the selected model account (allowed-domains mode keeps them reachable). */
     apiDomains?: string[];
     cleanup(): Promise<void>;
@@ -286,6 +296,7 @@ export class LaunchPipeline {
     let thirdPartyModel = false;
     let accountHome: string | undefined;
     let accountId:string|undefined;
+    let accountRoute: AccountRouteEvidence | undefined;
     const apiDomains = new Set<string>();
     for (const answer of answers) {
       if ("refuse" in answer) return refuse(answer.refuse);
@@ -293,6 +304,12 @@ export class LaunchPipeline {
     for (const answer of answers as Array<{ contributor: LaunchContributor; contribution: Contribution }>) {
       const { contributor, contribution } = answer;
       const name = contributor.pluginName;
+      if (contribution.accountRoute !== undefined) {
+        if (contributor.pluginId !== ACCOUNTS_PLUGIN_ID || !context.accountRouteEvidence || !contribution.accountId) {
+          return refuse(`${name} cannot supply account route evidence for this launch.`);
+        }
+        accountRoute = { ...contribution.accountRoute };
+      }
       if(contribution.accountId!==undefined) {
         if(contributor.pluginId!==ACCOUNTS_PLUGIN_ID)return refuse(`${name} cannot attribute the selected model account.`);
         if(contribution.accountId!==selectedAccountId(context.options))return refuse(`${name} returned an account attribution that differs from the selected account.`);
@@ -359,7 +376,7 @@ export class LaunchPipeline {
       thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
     return { ok: true, env, args, secrets, envSources, thirdPartyModel, ...(accountHome ? { accountHome } : {}), ...(accountId ? {accountId} : {}),
-      ...(apiDomains.size ? { apiDomains: [...apiDomains] } : {}), cleanup };
+      ...(accountRoute ? { accountRoute } : {}), ...(apiDomains.size ? { apiDomains: [...apiDomains] } : {}), cleanup };
   }
 
   private async ask(
@@ -369,6 +386,7 @@ export class LaunchPipeline {
   ): Promise<{ contributor: LaunchContributor; contribution: Contribution } | { refuse: string }> {
     const name = contributor.pluginName;
     const params: LaunchContext = { ...context, options: chosen ? context.options[contributor.pluginId]! : {}, chosen };
+    if (contributor.pluginId !== ACCOUNTS_PLUGIN_ID || !chosen) delete params.accountRouteEvidence;
     let timer: NodeJS.Timeout | undefined;
     try {
       const answer = await Promise.race([
@@ -403,6 +421,7 @@ interface Contribution {
   /** Only ever restricts (auto → accept-edits), so a launch policy may set it too. */
   thirdPartyModel?: boolean;
   accountId?:string;
+  accountRoute?: AccountRouteEvidence;
   refuse?: string;
 }
 
@@ -410,7 +429,7 @@ interface Contribution {
 function validContribution(value: unknown): Contribution | string {
   if (value === null) return { env: {}, secretEnv: {}, args: [], files: [] };
   if (!isRecord(value)) return "not an object";
-  const unknown = Object.keys(value).find((key) => !["env", "secretEnv", "args", "files", "thirdPartyModel", "refuse", "accountId"].includes(key));
+  const unknown = Object.keys(value).find((key) => !["env", "secretEnv", "args", "files", "thirdPartyModel", "refuse", "accountId", "accountRoute"].includes(key));
   if (unknown) return `unknown key ${unknown.slice(0, 40)}`;
   if (value.refuse !== undefined) {
     const reason = isRecord(value.refuse) ? value.refuse.reason : undefined;
@@ -419,6 +438,16 @@ function validContribution(value: unknown): Contribution | string {
   }
   if (value.thirdPartyModel !== undefined && typeof value.thirdPartyModel !== "boolean") return "thirdPartyModel must be true or false";
   if(value.accountId!==undefined && (typeof value.accountId!=="string" || !/^[\w-]{1,80}$/.test(value.accountId)))return "accountId must be a bounded account identifier";
+  let accountRoute: AccountRouteEvidence | undefined;
+  if (value.accountRoute !== undefined) {
+    const route = value.accountRoute;
+    if (!isRecord(route) || Object.keys(route).sort().join(",") !== "endpoint,kind,model"
+      || typeof route.model !== "string" || !route.model || route.model.length > 200 || /[\x00-\x1f\x7f]/u.test(route.model)
+      || !publicEndpoint(route.endpoint) || !["ollama", "ollama-cloud", "api-key"].includes(route.kind as string)) {
+      return "accountRoute needs a bounded model, public host:port and account kind";
+    }
+    accountRoute = { model: route.model, endpoint: publicEndpoint(route.endpoint)!, kind: route.kind as AccountRouteEvidence["kind"] };
+  }
   const env = stringMap(value.env, MAX_ENV, "env");
   if (typeof env === "string") return env;
   for (const [key, entry] of Object.entries(env)) {
@@ -453,7 +482,7 @@ function validContribution(value: unknown): Contribution | string {
     if (bytes > MAX_FILES_BYTES) return "files exceed 256 KB";
     files.push({ relPath: file.relPath, content: file.content });
   }
-  return { env, secretEnv, args: args as string[], files, ...(value.thirdPartyModel === true ? { thirdPartyModel: true } : {}),...(typeof value.accountId==="string" ? {accountId:value.accountId} : {}) };
+  return { env, secretEnv, args: args as string[], files, ...(accountRoute ? { accountRoute } : {}), ...(value.thirdPartyModel === true ? { thirdPartyModel: true } : {}),...(typeof value.accountId==="string" ? {accountId:value.accountId} : {}) };
 }
 
 /**

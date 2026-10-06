@@ -70,6 +70,7 @@ interface Dependencies {
   browser: BrowserService;
   githubAuth: GithubAuthService;
   hermesHud: HermesHudService;
+  executionAccountRoutes?(provider:ProviderId):Promise<Array<{accountId:string;model:string;endpoint:string;kind:string;state:string}>>;
   launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
   getMainWindow(): BrowserWindow | null;
   applyBrowserSettings(settings: AppSettings): Promise<void> | void;
@@ -208,6 +209,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   githubAuth,
   hermesHud,
   launchFieldOptions,
+  executionAccountRoutes,
   getMainWindow,
   applyBrowserSettings,
   setCanvasNavigationShortcutCapture,
@@ -446,6 +448,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     }
     return pluginCards.invoke(pluginId, actionId, sessionId, input);
   });
+  ipcMain.handle(IPC.executionAccountRoutes,(event,provider:unknown)=>{assertMainRenderer(event,getMainWindow);if(typeof provider!=="string")throw new Error("Invalid provider.");return executionAccountRoutes?.(provider as ProviderId)??[];});
   ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
     // Only the app's own launcher asks; plugin surfaces cannot reach this channel.
     assertMainRenderer(event, getMainWindow);

@@ -1,3 +1,4 @@
+import { normalizeExecutionPolicy, defaultExecutionPolicy } from "../../shared/executionPolicy.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -257,6 +258,11 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
 
+  /** A narrow copy for the per-input authorization check, excluding unrelated canvas/settings state. */
+  executionPolicy(): AppSettings["executionPolicy"] {
+    return structuredClone(this.value.executionPolicy);
+  }
+
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
     this.availableProviders = new Set(AGENT_PROVIDERS.filter((provider) => availability[provider]));
     // Filter in queue order: a snapshot taken while an update() is still
@@ -373,6 +379,7 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     radialLauncherEnabled: false,
     agentLifecycleHooksEnabled: true,
     experimentalBacklogEnabled: false,
+    executionPolicy: defaultExecutionPolicy(),
     baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
@@ -607,6 +614,7 @@ export function normalizeSettings(
       ? source.radialLauncherEnabled
       : fallback.radialLauncherEnabled ?? false,
     experimentalBacklogEnabled: source.experimentalBacklogEnabled === true,
+    executionPolicy: normalizeExecutionPolicy(source.executionPolicy),
     agentLifecycleHooksEnabled: typeof source.agentLifecycleHooksEnabled === "boolean"
       ? source.agentLifecycleHooksEnabled
       : fallback.agentLifecycleHooksEnabled,

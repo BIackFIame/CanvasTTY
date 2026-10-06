@@ -333,6 +333,7 @@ export interface CameraState extends Point {
 }
 
 export interface AppSettings {
+  executionPolicy?: import("./executionPolicy.ts").ExecutionPolicy;
   locale: LocaleId;
   sessionRestoreMode: SessionRestoreMode;
   persistCanvasRegions: boolean;
@@ -452,6 +453,7 @@ export interface SessionIsolation {
 }
 
 export interface CreateSessionRequest {
+  executionTargetId?: string;
   executionGoal?: import("./executionStrategy.ts").ExecutionGoal;
   executionTask?: string;
   provider: ProviderId;
@@ -1771,6 +1773,7 @@ export interface CanvasTTYApi {
     onCardDecorations(listener: (decorations: PluginCardDecorations) => void): () => void;
     invokeCardAction(pluginId: string, actionId: string, sessionId: string, input?: Record<string, unknown>): Promise<PluginCardActionResult>;
     /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
+    executionAccountRoutes(provider: ProviderId): Promise<Array<{accountId:string;model:string;endpoint:string;kind:string;state:string}>>;
     launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;
     openCanvas(pluginId: string, contributionId: string, sourceCanvasInstanceId?: string): Promise<void>;
@@ -1938,6 +1941,7 @@ export const IPC = {
   pluginsCardDecorations: "plugins:card-decorations",
   pluginsCardDecorationsChanged: "plugins:card-decorations-changed",
   pluginsInvokeCardAction: "plugins:invoke-card-action",
+  executionAccountRoutes: "execution:account-routes",
   pluginsLaunchFieldOptions: "plugins:launch-field-options",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",

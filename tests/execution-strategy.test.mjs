@@ -141,7 +141,7 @@ test("strategy privacy follows the actual continuation root through deletion and
  const replacement=f.terminals.create({provider:"codex",profile:"normal",cwd:tmpdir(),position:{x:0,y:0},role:"orchestrator"},{continueTaskFrom:originalId,origin:"plugin",ownerPluginId:"accounts"});
  f.terminals.inheritTaskScope(originalId,replacement.id);f.terminals.completeTaskContinuation(originalId,replacement.id);f.terminals.dispose(originalId,{keepEnvironmentData:true});
  assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
- assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"unselected-router"),{dataClass:"default"});
+ assert.deepEqual(f.terminals.strategyLaunchOptions(replacement.id,"unselected-router"),{dataClass:"unresolved"});
  assert.equal(f.terminals.strategyLaunchOptions(originalId,"assistant"),undefined);
  assert.deepEqual(f.terminals.decisionLaunchOptions(replacement.id,"assistant"),{task:"private task",dataClass:"D3"});
  let seen;
@@ -152,8 +152,8 @@ test("strategy privacy follows the actual continuation root through deletion and
  const restored=fixture(t);restored.terminals.disposeAll();restored.terminals.configureSessionPersistence(new TerminalSessionStore(dir),"continue");await restored.terminals.restorePersistedSessions();
  assert.deepEqual(restored.terminals.strategyLaunchOptions(replacement.id,"assistant"),{dataClass:"D3"});
  assert.deepEqual(restored.terminals.decisionLaunchOptions(replacement.id,"assistant"),{task:"private task",dataClass:"D3"});
- const rows=await store.load();assert.deepEqual(rows[0].executionPrivacy,{assistant:"D3",accounts:"default"});
- assert.equal(rows[0].executionPrivacy.accounts,"default","account identifiers never enter strategy context");
+ const rows=await store.load();assert.deepEqual(rows[0].executionPrivacy,{assistant:"D3"});
+ assert.equal(rows[0].executionPrivacy.accounts,undefined,"Accounts without a data class does not invent a privacy selection");
 });
 
 for(const viaHandler of [false,true])test(`deep-only review opt-out before completion preserves explicit requests (handler=${viaHandler})`,async t=>{

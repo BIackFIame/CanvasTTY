@@ -47,6 +47,7 @@ const REVIEW_TIMEOUT_MS = 180_000;
 const REVIEW_STARTUP_QUIET_MS = 90_000;
 
 export interface SpawnAgentRequest {
+  executionTargetId?: string;
   parentSessionId: string;
   provider: AgentProviderId;
   cwd: string;
@@ -219,6 +220,7 @@ export class AgentControlService {
    * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
    * start; the card stays, so the caller can inspect or cancel it.
    */
+  executionTargets(id:string) { this.requireSession(id); return this.terminals.allowedExecutionTargets(id); }
   spawn(request: SpawnAgentRequest, signal?: AbortSignal): Promise<SessionMetadata> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
@@ -227,6 +229,23 @@ export class AgentControlService {
     const capabilities = PROVIDER_CAPABILITIES[request.provider];
     if (!capabilities) throw new Error("Unknown agent provider.");
     if (!capabilities.send) throw new Error(`${request.provider} cannot receive prompts.`);
+    const targets=this.terminals.allowedExecutionTargets(parent.id);
+    if(targets!==null&&!request.executionTargetId)throw new DelegationRefusal("Choose an approved execution target id for this task before preparing a subagent.");
+    const target=request.executionTargetId ? targets?.find(t=>t.id===request.executionTargetId) : undefined;
+    if(request.executionTargetId && (!target||target.provider!==request.provider))throw new DelegationRefusal("The execution target is unavailable for this task/provider.");
+    if (target) {
+      const requestedAccount = request.launchOptions?.[ACCOUNTS_PLUGIN_ID]?.account;
+      if (request.model !== undefined && request.model !== target.model || requestedAccount !== undefined && selectedAccountId(request.launchOptions) !== target.accountId || request.isolate !== undefined) {
+        throw new DelegationRefusal("Execution target conflicts with the requested model, account or environment.");
+      }
+      request = { ...request, ...(target.model ? { model: target.model } : {}), launchOptions: { ...request.launchOptions, [ACCOUNTS_PLUGIN_ID]: { account: target.accountId === "default" ? "none" : target.accountId } } };
+      // With native sign-in and no account contributor do not add an artificial plugin requirement.
+      if (target.accountId === "default" && !this.terminals.modelAccountOf(parent.id) && requestedAccount === undefined) {
+        const options = { ...request.launchOptions };
+        delete options[ACCOUNTS_PLUGIN_ID];
+        request = { ...request, launchOptions: Object.keys(options).length ? options : undefined };
+      }
+    }
     const account = this.subagentAccount(parent.id, request.provider, request.launchOptions);
     if (account.launchOptions !== request.launchOptions) request = { ...request, launchOptions: account.launchOptions };
 
@@ -242,6 +261,9 @@ export class AgentControlService {
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
     const { live } = this.assertSpawnCapacity(parent.id);
+    if (target) {
+      return this.createSubagent(parent, request, cwd.cwd, profile.profile, target.environment ?? null, signal);
+    }
     const resolveEnvironment = this.options.resolveSubagentEnvironment;
     if (!resolveEnvironment) {
       if (request.isolate === "worktree") throw new DelegationRefusal("The environments plugin does not provide a worktree for this launch.");
@@ -289,6 +311,7 @@ export class AgentControlService {
     const cascade = childrenCount;
     const created = this.terminals.create({
       provider: request.provider,
+      ...(request.executionTargetId?{executionTargetId:request.executionTargetId}:{}),
       cwd,
       profile,
       position: {

@@ -14,6 +14,7 @@ import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
 import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
+import { normalizeExecutionAuthorization, isDataClass, type ExecutionAuthorization, type ExecutionDataClass } from "../../shared/executionPolicy.ts";
 import { isExecutionGoal, normalizeExecutionStrategy } from "../../shared/executionStrategy.ts";
 
 const TERMINAL_SESSION_STORE_VERSION = 2;
@@ -27,6 +28,8 @@ export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
 
 export interface PersistedTerminalSession {
+  executionClass?: ExecutionDataClass;
+  executionAuthorization?: ExecutionAuthorization;
   executionGoal?: SessionMetadata["executionGoal"];
   executionTask?: string;
   executionStrategy?: SessionMetadata["executionStrategy"];
@@ -238,7 +241,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "executionClass" | "executionAuthorization" | "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -268,6 +271,8 @@ export function persistedTerminalSession(
     lastState,
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
     restore: metadata.skipRestore !== true,
+    ...(extras.executionClass ? {executionClass:extras.executionClass} : {}),
+    ...(extras.executionAuthorization ? {executionAuthorization:structuredClone(extras.executionAuthorization)} : {}),
     ...(extras.reviewTasks ? { reviewTasks: { ...extras.reviewTasks } } : {}),
     ...(extras.executionPrivacy ? { executionPrivacy: { ...extras.executionPrivacy } } : {}),
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
@@ -340,6 +345,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     const environmentChoice = environment ? undefined : normalizeEnvironmentChoice(session.environmentChoice);
     if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
     const strategy = normalizeExecutionStrategy(session.executionStrategy);
+    const executionAuthorization = normalizeExecutionAuthorization(session.executionAuthorization);
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -363,6 +369,8 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(lastState !== "running" ? { exitCode } : {}),
       restore: session.restore !== false,
       ...(options ? { options } : {}),
+      ...(session.executionClass !== undefined ? {executionClass:isDataClass(session.executionClass)?session.executionClass:"D3" as const} : {}),
+      ...(executionAuthorization ? { executionAuthorization } : {}),
       ...(reviewTasks ? { reviewTasks: { ...reviewTasks } as Record<string, string> } : {}),
       ...(executionPrivacy ? { executionPrivacy: { ...executionPrivacy } as Record<string, string> } : {}),
       ...(environment ? { environment } : {}),
@@ -474,7 +482,7 @@ function isTaskScope(value:unknown):value is {id:string;cwd:string;startedAt:num
 
 /** Snapshot only privacy selections from trusted launch options; unrecognized selections fail closed at the router. */
 export function executionPrivacyFromOptions(options?: Record<string, unknown>): Record<string, string> {
-  return Object.fromEntries(Object.entries(options ?? {}).map(([id, value]) => {
+  return Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => isRecord(value) && Object.hasOwn(value, "dataClass")).map(([id, value]) => {
     const selected = isRecord(value) ? value.dataClass : undefined;
     return [id, selected === undefined ? "default" : typeof selected === "string" && ["default", "D0", "D1", "D2", "D3"].includes(selected) ? selected : "unresolved"];
   }));

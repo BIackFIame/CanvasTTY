@@ -286,7 +286,9 @@ export interface CanvasTTYDecisionRequest {
     network: "open" | "offline" | "allowed-domains";
   };
   /** Host-owned root task/privacy for this plugin only; absent on older hosts. Never agent tool input. */
-  launchOptions?: { task?: string; dataClass?: string };
+  /** Host root privacy. dataClass remains conservative for older plugins. With privacy present, resolve
+   * selected="default" from this plugin's settings, then take max(resolved, floor). Invalid context is D3. */
+  launchOptions?: { task?: string; dataClass?: string; privacy?: { version: 1; selected: string; floor: "D0" | "D1" | "D2" | "D3" } };
   event: "pre-tool";
   sessionId: string;
   provider: "codex" | "claude" | "qwen" | "opencode";
@@ -432,6 +434,9 @@ export interface CanvasTTYLaunchContext {
   environment: { pluginId: string; kind: string } | null;
   /** A subagent on this computer in (or below) the folder the person chose for its top-level agent: that real path. */
   trustedFolder?: string;
+  /** Host-owned capability sent only to selected Accounts when execution policy requires public route proof.
+   * Older cores reject unknown contribution fields: omit accountRoute unless this is exactly true. */
+  accountRouteEvidence?: true;
 }
 
 /**
@@ -440,6 +445,12 @@ export interface CanvasTTYLaunchContext {
  * conversation arguments refuse it as well.
  */
 export interface CanvasTTYLaunchContribution {
+  /** Only the selected canvastty-accounts service may attribute the configured account. */
+  accountId?: string;
+  /** Only when accountRouteEvidence is true; copied from the same immutable account snapshot used for args/env.
+   * No credentials. model <= 200 chars; endpoint is canonical host:port <= 300 chars (no URL/path).
+   * Binds configured model, host:port and kind, not URL protocol/path or native CLI inference attestation. */
+  accountRoute?: { model: string; endpoint: string; kind: "ollama" | "ollama-cloud" | "api-key" };
   /** At most 32; values up to 8 KB. `{launchFiles}` becomes this run's folder of `files`. */
   env?: Record<string, string>;
   /** Env name -> the plugin's own secret key (needs `secrets`); the host sets the value and masks it. */

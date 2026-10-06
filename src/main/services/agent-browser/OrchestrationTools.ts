@@ -148,6 +148,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
           const strategy = await this.resolveStrategy(sessionId, typeof request.arguments.task === "string" ? request.arguments.task : undefined);
           return strategy ? { strategy, instructions: executionGuidance(strategy) } : { available: false, reason: "This session has no execution goal." };
         }
+        case "list_execution_targets": {
+          const targets = this.control.executionTargets(sessionId);
+          return { enabled: targets !== null, targets: targets ?? [] };
+        }
         case "list_providers":
           return this.listProviders(session);
         case "wait_for_agent":
@@ -397,6 +401,36 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
     const provider = args.provider as AgentProviderId;
+    let targetId:string|undefined;
+    const targets=this.control.executionTargets(orchestratorId);
+    if(args.executionTargetId!==undefined && typeof args.executionTargetId!=="string")throw orchestrationBridgeError("INVALID_REQUEST","Invalid execution target id.",false);
+    if (targets !== null) {
+      const explicitTarget = typeof args.executionTargetId === "string" && args.executionTargetId !== "auto";
+      const readyAccounts = !explicitTarget && this.integrations.accountCandidates ? await this.integrations.accountCandidates(provider, orchestratorId).catch(() => []) : [];
+      const offered = targets.filter(t => t.provider === provider && (args.executionTargetId && args.executionTargetId !== "auto" || t.accountId === "default" || readyAccounts.some(a => a.id === t.accountId)) && (args.model === undefined || args.model === "auto" || t.model === args.model) && (args.launchOptions === undefined || selectedAccountId(args.launchOptions as SpawnAgentRequest["launchOptions"]) === t.accountId));
+      if (args.executionTargetId && args.executionTargetId !== "auto") {
+        targetId = offered.find(t => t.id === args.executionTargetId)?.id;
+      }
+      else if (offered.length === 1) {
+        targetId = offered[0]!.id;
+      }
+      else if (offered.length > 1 && this.integrations.router) {
+        const profile = this.control.profileFor(orchestratorId, provider, args.profile);
+        if ("error" in profile) {
+          throw orchestrationBridgeError("INVALID_REQUEST", profile.error, false);
+        }
+        const answer = await this.askRouter({ sessionId: orchestratorId, task: typeof args.prompt === "string" ? args.prompt : "", provider, profile: profile.profile, cwd: this.control.taskRoot(orchestratorId).cwd, requested: {}, humanChoice: null, candidates: offered.map(t => ({ id: t.id, provider: t.provider, model: t.inferenceModel ?? t.model, available: true, ...(typeof args.effort === "string" ? { reasoningEffort: args.effort as never } : {}) })), ...(strategy ? { executionStrategy: strategy } : {}), ...(this.control.taskBudget(orchestratorId) ? { budget: this.control.taskBudget(orchestratorId)! } : {}) }, signal);
+        targetId = offered.find(t => t.id === answer?.candidateId)?.id;
+      }
+      if (!targetId) {
+        throw orchestrationBridgeError("INVALID_REQUEST", "No permitted execution target was selected; choose an available target id. No default launch was attempted.", false);
+      }
+      const selected = offered.find(t => t.id === targetId)!;
+      args = { ...args, model: selected.model, executionTargetId: targetId };
+    }
+    else if (args.executionTargetId !== undefined) {
+      throw orchestrationBridgeError("INVALID_REQUEST", "Execution target policy is not enabled.", false);
+    }
     const hasExplicitModel = args.model !== undefined && args.model !== "auto";
     const problem = (hasExplicitModel ? launchModelProblem(provider, args.model) : null)
       ?? (args.effort !== undefined ? launchEffortProblem(provider, args.effort) : null);
@@ -428,7 +462,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     // A spawn without an account runs on the orchestrator's account (never silently on the CLI's default model).
     let launchOptions = args.launchOptions as SpawnAgentRequest["launchOptions"];
     let accountSource: "inherited" | "explicit" | "routed" | "none" = "none";
-    if (typeof this.control.subagentAccount === "function") {
+    if (!targetId && typeof this.control.subagentAccount === "function") {
       try {
         const account = this.control.subagentAccount(orchestratorId, provider, launchOptions);
         launchOptions = account.launchOptions;
@@ -437,10 +471,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : String(error), false);
       }
     }
-    let accountId = selectedAccountId(launchOptions as Record<string, unknown> | undefined);
+    if(targetId) accountSource="explicit";
+    let accountId = targetId ? targets!.find(t=>t.id===targetId)!.accountId : selectedAccountId(launchOptions as Record<string, unknown> | undefined);
     // A model account passes its own --model: the router must not add a second one (OpenCode crashed on two).
     const accountChosen = accountId !== "default";
-    if (!hasExplicitModel && accountChosen && accountSource === "inherited" && this.integrations.router && this.integrations.accountCandidates) {
+    if(targetId) {routing={source:"explicit",candidateId:targetId,reason:"Selected a person-approved execution target."};}
+    else if (!hasExplicitModel && accountChosen && accountSource === "inherited" && this.integrations.router && this.integrations.accountCandidates) {
       // The router may move an inherited subagent to another delegable account; it never adds a model.
       const route = await this.routeAccount(orchestratorId, provider, args, profile.profile, accountId, signal);
       if (route.account && route.account !== accountId) {
@@ -466,11 +502,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (signal?.aborted) throw canceledError();
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
+      ...(targetId?{executionTargetId:targetId}:{}),
       provider: args.provider as never,
       cwd: args.cwd as string,
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
-      ...(launchOptions !== undefined ? { launchOptions } : {}),
+      ...(!targetId && launchOptions !== undefined ? { launchOptions } : targetId && args.launchOptions!==undefined ? {launchOptions:args.launchOptions as SpawnAgentRequest["launchOptions"]} : {}),
       ...(model !== undefined ? { model } : {}),
       ...(effort !== undefined ? { effort } : {}),
       ...(args.review === true ? { review: true } : {}),
