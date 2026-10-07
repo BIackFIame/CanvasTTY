@@ -184,6 +184,7 @@ export class AgentControlService {
   private readonly readOnlyReviewers = new Set<string>();
   private readonly reviews = new Map<string, AgentReviewResult>();
   private readonly reviewGenerations = new Map<string, object>();
+  private readonly reviewInputObservers = new Map<string, () => void>();
   private readonly reviewPending = new Map<string, Promise<AgentReviewResult>>();
   private readonly reviewControllers = new Map<string, AbortController>();
   private readonly reviewAgents = new Map<string, string>();
@@ -252,7 +253,21 @@ export class AgentControlService {
     }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
-    if (request.review === true) this.reviewRequested.add(created.id);
+    if (request.review === true) {
+      this.reviewRequested.add(created.id);
+      this.reviewInputObservers.set(created.id, this.terminals.observeInputWrites(created.id, (_data, submitted) => {
+        this.invalidateReview(created.id);
+        const generation = this.reviewGeneration(created.id);
+        this.retryableQuiet.delete(created.id);
+        if (!submitted) {
+          this.reviews.set(created.id, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
+          return;
+        }
+        return () => queueMicrotask(() => {
+          if (this.reviewRequested.has(created.id) && this.reviewGenerations.get(created.id) === generation) this.scheduleReview(created.id);
+        });
+      }));
+    }
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
@@ -307,15 +322,7 @@ export class AgentControlService {
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
     this.assertInputAllowed(sessionId);
-    let generation: object | undefined;
-    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal, () => {
-      this.invalidateReview(sessionId);
-      generation = this.reviewGenerations.get(sessionId);
-      if (!submit) this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
-      this.retryableQuiet.delete(sessionId);
-    }).then(() => {
-      if (submit && generation && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
-    });
+    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal);
   }
 
   status(sessionId: string): SessionMetadata {
@@ -372,6 +379,8 @@ export class AgentControlService {
 
   /** Called when TerminalManager removes a card; retries belonging to a live replacement retain their shared count. */
   forgetSession(sessionId: string): void {
+    this.reviewInputObservers.get(sessionId)?.();
+    this.reviewInputObservers.delete(sessionId);
     this.invalidateReview(sessionId);
     this.reviewGenerations.delete(sessionId);
     this.launchRequests.delete(sessionId);
@@ -625,7 +634,7 @@ export class AgentControlService {
           void this.ensureReview(sessionId);
           review = this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
         } else {
-          const result = await this.ensureReview(sessionId);
+          const result = await this.ensureReview(sessionId, reason === "quiet");
           review = this.reviewWithCost(this.reviewGenerations.get(sessionId) === generation ? result : supersededReview());
         }
       }
@@ -688,7 +697,14 @@ export class AgentControlService {
     try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
   }
 
-  private async ensureReview(sessionId: string): Promise<AgentReviewResult> {
+  private async ensureReview(sessionId: string, quiet = false): Promise<AgentReviewResult> {
+    // An old idle/answer can remain visible until the provider acknowledges the submitted input.
+    const progress = this.turnProgress(sessionId);
+    if (progress?.promptSent && !progress.turnStartedSincePrompt && !this.answer(sessionId)) {
+      return quiet || this.terminals.getMetadata(sessionId)?.exitCode !== null
+        ? { status: "unavailable", reason: "The provider did not report a new completed turn or final answer after the submitted input.", costUsd: null }
+        : { status: "pending", costUsd: null };
+    }
     const generation = this.reviewGeneration(sessionId);
     const cached = this.reviews.get(sessionId);
     if (cached) return cached;
@@ -878,8 +894,9 @@ export class AgentControlService {
       const result = await this.waitFor(sessionId, { timeoutMs: MAX_AGENT_WAIT_MS, signal });
       if (signal.aborted) return;
       if (result.reason === "idle" || result.reason === "done" || result.reason === "failed" || result.reason === "quiet") {
-        await this.ensureReview(sessionId);
-        return;
+        const review = result.review ?? await this.ensureReview(sessionId, result.reason === "quiet");
+        if (signal.aborted) return;
+        if (review.status !== "pending") return;
       }
       if (result.reason === "closed") return;
       // Approval and quiet states need a later human input or another output sample; avoid spinning on either.
@@ -888,8 +905,8 @@ export class AgentControlService {
   }
 
   /** Through the terminal manager's one delivery rule: exactly once, into the launch that is starting now. */
-  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal, beforeWrite?: () => void): Promise<void> {
-    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal, beforeWrite);
+  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal): Promise<void> {
+    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal);
     if (!delivery.delivered) {
       throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
     }

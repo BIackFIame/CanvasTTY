@@ -158,7 +158,7 @@ for(const state of ['active','cached'])for(const failure of ['queued cancellatio
   const session=f.terminals.sessions.get(f.worker.id),write=session.process.write;
   let writes=0;session.process.write=data=>{writes++;write(data);};
   const deliver=f.terminals.deliverInput.bind(f.terminals);
-  f.terminals.deliverInput=(id,data,_wait,signal,beforeWrite)=>deliver(id,data,25,signal,beforeWrite);
+  f.terminals.deliverInput=(id,data,_wait,signal)=>deliver(id,data,25,signal);
   if(failure==='queued cancellation'){
    const gate=deferred();session.inputQueue=gate.promise;
    const controller=new AbortController();const sending=f.control.send(f.worker.id,'must not be delivered',true,controller.signal);
@@ -188,7 +188,7 @@ test('ambiguous acknowledgement after a write invalidates the old review without
  const session=f.terminals.sessions.get(f.worker.id);session.agentRuntime={cleanup(){}};
  const writes=[];session.process.write=data=>writes.push(data);
  const deliver=f.terminals.deliverInput.bind(f.terminals);
- f.terminals.deliverInput=(id,data,_wait,signal,beforeWrite)=>deliver(id,data,25,signal,beforeWrite);
+ f.terminals.deliverInput=(id,data,_wait,signal)=>deliver(id,data,25,signal);
  await assert.rejects(f.control.send(f.worker.id,'ambiguous second task'),/did not confirm accepting/u);
  assert.deepEqual(writes,['ambiguous second task\r']);
  assert.equal(f.terminals.getMetadata(reviewer),null);assert.equal(f.control.reviews.has(f.worker.id),false);
@@ -212,4 +212,128 @@ test('concurrent queued sends schedule only the latest written generation',async
  f.finish(f.prompts[1].id,'{"verdict":"accept","findings":"latest review"}');await until(()=>f.reviews.length===2);
  await tick();assert.equal(f.prompts.length,2);
  assert.equal((await f.control.resultWithReview(f.worker.id)).review.notes,'latest review');
+});
+
+
+for(const route of ['input','inputChecked'])for(const state of ['active','cached']){
+ test(`manual ${route} invalidates ${state} review and automatically reviews the new completed turn`,async t=>{
+  const f=await fixture(t);
+  f.finish(f.worker.id,'first answer');await until(()=>f.prompts.length===1);
+  const old=f.prompts[0].id;
+  if(state==='cached'){f.finish(old,'{"verdict":"accept","findings":"old verdict"}');await until(()=>f.reviews.length===1);}
+  const concurrent=state==='active'?f.control.resultWithReview(f.worker.id):null;
+  const previousCount=f.reviews.length;
+  f.terminals[route](f.worker.id,'manual next task\r');
+  assert.equal(f.terminals.getMetadata(old),null);
+  // A delayed provider message for the disposed reviewer cannot publish a verdict for the new task.
+  f.finish(old,'{"verdict":"accept","findings":"late old verdict"}');
+  if(concurrent){const result=await concurrent;assert.equal(result.review.status,'unavailable');assert.equal(result.review.verdict,undefined);}
+  f.finish(f.worker.id,'manual second answer');await until(()=>f.prompts.length===2);
+  assert.match(f.prompts[1].text,/manual second answer/u);assert.ok(!f.prompts[1].text.includes('first answer'));
+  f.finish(f.prompts[1].id,'{"verdict":"reject","findings":"manual new verdict"}');await until(()=>f.reviews.length===previousCount+1);
+  const result=await f.control.resultWithReview(f.worker.id);assert.equal(result.review.status,'rejected');
+  assert.equal(result.review.notes,'manual new verdict');
+ });
+}
+
+test('manual split typing and Enter do not review an old idle answer before the new turn begins',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ const session=f.terminals.sessions.get(f.worker.id);session.process.write=()=>{};
+ f.terminals.input(f.worker.id,'typed task');
+ assert.equal((await f.control.resultWithReview(f.worker.id)).review.status,'unavailable');
+ assert.equal(f.terminals.inputChecked(f.worker.id,'\r'),true);
+ const early=await f.control.resultWithReview(f.worker.id);
+ assert.equal(early.review.status,'pending');assert.equal(early.answer,undefined);
+ await tick();assert.equal(f.prompts.length,1,'manual Enter must not review retained idle/answer state');
+ f.terminals.applyProviderSignal(f.worker.id,{state:'working'},'hook');f.finish(f.worker.id,'new answer');
+ await until(()=>f.prompts.length===2);
+ assert.match(f.prompts[1].text,/new answer/u);assert.ok(!f.prompts[1].text.includes('old answer'));
+});
+
+test('a fresh final answer without a working hook remains reviewable after manual submission',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ const session=f.terminals.sessions.get(f.worker.id);session.process.write=()=>{};
+ f.terminals.input(f.worker.id,'quiet provider task\r');
+ assert.equal((await f.control.resultWithReview(f.worker.id)).review.status,'pending');
+ f.terminals.recordAnswer(f.worker.id,{text:'fresh answer without a working hook',truncated:false});
+ const waiting=f.control.resultWithReview(f.worker.id);await until(()=>f.prompts.length===2);
+ assert.match(f.prompts[1].text,/fresh answer without a working hook/u);
+ f.finish(f.prompts[1].id,'{"verdict":"accept","findings":"fresh result"}');
+ assert.equal((await waiting).review.status,'accepted');
+});
+
+test('quiet input with neither a new turn nor a fresh answer ends with unavailable instead of reviewing stale work',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ const session=f.terminals.sessions.get(f.worker.id);session.process.write=()=>{};
+ f.control.options.waitTiming.quietMs=10;
+ f.terminals.input(f.worker.id,'silent task\r');
+ const result=await f.control.waitFor(f.worker.id,{timeoutMs:100});
+ assert.equal(result.reason,'quiet');assert.equal(result.review.status,'unavailable');assert.equal(result.answer,undefined);
+ assert.equal(f.prompts.length,1);
+});
+
+test('manual input blocked by the common gate preserves the current reviewer and answer',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ const reviewer=f.prompts[0].id;
+ f.finish(reviewer,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ f.terminals.configureInputGate(()=>{throw new Error('fixture denied');});
+ assert.equal(f.terminals.inputChecked(f.worker.id,'not allowed\r'),false);
+ f.terminals.input(f.worker.id,'also denied\r');
+ assert.ok(f.terminals.getMetadata(reviewer));
+ const result=await f.control.resultWithReview(f.worker.id);assert.equal(result.review.status,'accepted');assert.equal(result.answer.text,'old answer');
+});
+
+test('an automatic Enter acknowledgement retry preserves the submitted generation and starts only one new review',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ const session=f.terminals.sessions.get(f.worker.id);session.agentRuntime={cleanup(){}};
+ const writes=[];let submittedGeneration;
+ session.process.write=data=>{
+  writes.push(data);
+  if(data!=='\r'){
+   submittedGeneration=f.control.reviewGenerations.get(f.worker.id);
+   setImmediate(()=>session.process.emitData(data.replace(/\r$/u,'')));
+  }else{
+   assert.equal(f.control.reviewGenerations.get(f.worker.id),submittedGeneration,'retry does not invalidate the written task');
+   f.terminals.applyProviderSignal(f.worker.id,{state:'working'},'hook');f.finish(f.worker.id,'answer after Enter retry');
+  }
+ };
+ const deliver=f.terminals.deliverInput.bind(f.terminals);
+ f.terminals.deliverInput=(id,data,_wait,signal)=>deliver(id,data,2000,signal);
+ await f.control.send(f.worker.id,'echoed task');await until(()=>f.prompts.length===2);
+ assert.deepEqual(writes,['echoed task\r','\r']);
+ f.finish(f.prompts[1].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===2);
+ await tick();assert.equal(f.prompts.length,2);session.agentRuntime=null;
+});
+
+test('forgetting a reviewed worker unregisters the common input observer',async t=>{
+ const f=await fixture(t);assert.equal(f.terminals.inputWriteObservers.get(f.worker.id).size,1);
+ f.control.forgetSession(f.worker.id);assert.equal(f.terminals.inputWriteObservers.has(f.worker.id),false);
+ f.terminals.input(f.worker.id,'input after forgetting\r');await tick();assert.equal(f.prompts.length,0);
+});
+
+
+test('manual LF submits a fresh turn, while bracketed paste newlines remain unsubmitted',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ const session=f.terminals.sessions.get(f.worker.id);session.process.write=()=>{};
+ f.terminals.input(f.worker.id,'\x1b[200~pasted first line\n');
+ f.terminals.input(f.worker.id,'pasted second line\n');
+ f.terminals.input(f.worker.id,'\x1b[201~');
+ assert.equal((await f.control.resultWithReview(f.worker.id)).review.status,'unavailable');
+ await tick();assert.equal(f.prompts.length,1);
+ f.terminals.inputChecked(f.worker.id,'\n');
+ const early=await f.control.resultWithReview(f.worker.id);
+ assert.equal(early.review.status,'pending');assert.equal(early.answer,undefined);
+ f.terminals.applyProviderSignal(f.worker.id,{state:'working'},'hook');f.finish(f.worker.id,'LF submitted answer');
+ await until(()=>f.prompts.length===2);assert.match(f.prompts[1].text,/LF submitted answer/u);
 });

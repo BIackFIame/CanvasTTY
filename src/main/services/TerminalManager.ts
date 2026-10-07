@@ -130,6 +130,7 @@ interface ManagedSession {
   threadId?: string;
   captureResult: boolean;
   captureReviewDiff?: boolean;
+  inputBracketedPaste?: boolean;
   /** Turns the agent started (its status became working) since launch. */
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
@@ -248,6 +249,7 @@ export class TerminalManager {
   private readonly providerClis: ProviderCliRegistry;
   private readonly agentBrowser?: AgentBrowserLaunchCoordinator;
   private readonly agentRuntime?: AgentRuntimeLaunchCoordinator;
+  private readonly inputWriteObservers = new Map<string, Set<(data: string, submitted: boolean) => (() => void) | void>>();
   private readonly reviewDiffTracker = new ReviewDiffTracker();
   private readonly spawnPty: typeof pty.spawn;
   private readonly processTreePause: ProcessTreePause;
@@ -383,6 +385,18 @@ export class TerminalManager {
     this.redaction = registry;
   }
   configureInputGate(gate: ((id:string)=>void) | null): void {this.inputGate=gate;}
+
+  /** Host-only observer at the guarded PTY boundary; the returned callback runs only after a successful write. */
+  observeInputWrites(id: string, observer: (data: string, submitted: boolean) => (() => void) | void): () => void {
+    if (!this.sessions.has(id)) throw new Error("Terminal session does not exist.");
+    let observers = this.inputWriteObservers.get(id);
+    if (!observers) { observers = new Set(); this.inputWriteObservers.set(id, observers); }
+    observers.add(observer);
+    return () => {
+      observers.delete(observer);
+      if (observers.size === 0 && this.inputWriteObservers.get(id) === observers) this.inputWriteObservers.delete(id);
+    };
+  }
 
   /**
    * Host-only entry point for an automatic reviewer. Its launch authority is tied to an unforgeable temporary
@@ -1186,7 +1200,7 @@ export class TerminalManager {
    * and asks the caller to inspect the card. Cancellation, restart and deadlines never replay queued text
    * into a later launch. Unhooked terminals retain ordinary PTY delivery.
    */
-  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal, beforeWrite?: () => void): Promise<InputDelivery> {
+  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
     const session = this.sessions.get(id);
     if (!session) return Promise.resolve({ delivered: false, reason: "The session does not exist." });
     const epoch = session.launchEpoch;
@@ -1196,7 +1210,7 @@ export class TerminalManager {
       if (this.sessions.get(id) !== session || session.launchEpoch !== epoch) {
         return { delivered: false, reason: "The session was closed or restarted before delivery." };
       }
-      return this.deliverQueuedInput(id, data, Math.max(0, deadline - Date.now()), signal, beforeWrite);
+      return this.deliverQueuedInput(id, data, Math.max(0, deadline - Date.now()), signal);
     };
     const pending = previous ? previous.then(run, run) : run();
     session.inputQueue = pending;
@@ -1204,7 +1218,7 @@ export class TerminalManager {
     return pending;
   }
 
-  private async deliverQueuedInput(id: string, data: string, waitMs: number, signal?: AbortSignal, beforeWrite?: () => void): Promise<InputDelivery> {
+  private async deliverQueuedInput(id: string, data: string, waitMs: number, signal?: AbortSignal): Promise<InputDelivery> {
     const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
     if (signal?.aborted) return canceled;
     const session = this.sessions.get(id);
@@ -1261,12 +1275,11 @@ export class TerminalManager {
     // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
     const offset = session.outputOffset;
     const mark = session.turnStarts ?? 0;
-    if (!this.inputChecked(id, data, beforeWrite)) return { delivered: false, reason: "The terminal no longer accepts input." };
-    if (data.endsWith("\r")) session.promptTurnMark = mark;
+    if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
     if (!confirm) return { delivered: true };
     // Never replay the text on an ambiguous acknowledgement: that can run a task twice. Retry only Enter,
     // and only after observing the complete text echoed by an idle CLI (the text itself was accepted).
-    const text = data.replace(/\r$/u, "").replace(/\s+/gu, "");
+    const text = data.replace(/[\r\n]$/u, "").replace(/\s+/gu, "");
     let submits = 1;
     let retryAt = Date.now() + 1000;
     let observedOffset = offset;
@@ -1278,9 +1291,9 @@ export class TerminalManager {
         const fresh = scrollbackTail(session, observedOffset - offset);
         echoed = text.length > 0 && stripVTControlCharacters(fresh).replace(/\s+/gu, "").includes(text);
       }
-      if (echoed && !data.endsWith("\r")) return { delivered: true };
+      if (echoed && !/[\r\n]$/u.test(data)) return { delivered: true };
       if (echoed && session.metadata.status === "idle" && Date.now() >= retryAt && submits < 3) {
-        if (!this.inputChecked(id, "\r")) break;
+        if (!this.inputChecked(id, "\r", { acknowledgementRetry: true })) break;
         submits++;
         retryAt = Date.now() + 1000;
       }
@@ -1294,16 +1307,28 @@ export class TerminalManager {
     for (const wake of [...session.launchWaiters]) wake();
   }
 
-  inputChecked(id: string, data: string, beforeWrite?: () => void): boolean {
+  inputChecked(id: string, data: string, internal: { acknowledgementRetry?: boolean } = {}): boolean {
     if (data !== "\x03") { try { this.inputGate?.(id); } catch { return false; } }
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process) return false;
     if(data!=="\x03" && this.isSessionBudgetPaused(session))return false;
     const process = session.process;
-    // Host-only notification: all no-write checks passed; a failed write or acknowledgement is now ambiguous.
-    beforeWrite?.();
+    const mark = session.turnStarts ?? 0;
+    const pasteStart = data.lastIndexOf("\x1b[200~"), pasteEnd = data.lastIndexOf("\x1b[201~");
+    if (!internal.acknowledgementRetry && (pasteStart >= 0 || pasteEnd >= 0)) session.inputBracketedPaste = pasteStart > pasteEnd;
+    const submitted = /[\r\n]$/u.test(data) && !session.inputBracketedPaste;
+    // All routes, including renderer and companion input, notify only after every no-write guard passed.
+    const afterWrite = internal.acknowledgementRetry ? []
+      : [...(this.inputWriteObservers.get(id) ?? [])].map(observer => observer(data, submitted));
+    if (!internal.acknowledgementRetry && submitted) {
+      session.promptTurnMark = mark;
+      delete session.answer;
+    }
     const written = tryPtyOperation(() => process.write(data));
+    if (written && !internal.acknowledgementRetry) {
+      for (const callback of afterWrite) callback?.();
+    }
     if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
     return written;
   }
@@ -1501,6 +1526,7 @@ export class TerminalManager {
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.inputWriteObservers.delete(id);
     this.reviewDiffTracker.forget(id);
     this.resumedThreads.delete(id);
     session.reviewWorkspace?.cleanup();
@@ -2751,6 +2777,7 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.answer;
   delete session.turnStarts;
   delete session.promptTurnMark;
+  delete session.inputBracketedPaste;
   delete session.hookSignals;
   delete session.cliInputReady;
   delete session.readinessOutput;
