@@ -5,7 +5,6 @@ import type {
   SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
-import { GitCheckpoints } from "./GitCheckpoints.ts";
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
@@ -118,7 +117,7 @@ export interface AgentControlOptions {
   /** Actual CLI model metadata/configuration, used when the worker kept its CLI default. */
   workerModel?: (session:SessionMetadata) => string | null | Promise<string|null>;
   reviewCost?: (reviewerSessionId:string) => number|null;
-  /** Optional environment-aware diff reader for worktree plugins. */
+  /** Trusted host override: the returned diff must already be scoped to this worker and its launch. */
   reviewDiff?: (session: SessionMetadata) => Promise<string>;
   reviewTimeoutMs?: number;
   /** How long an OpenCode reviewer may take to report its first status before the prompt is typed anyway. */
@@ -249,7 +248,7 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
+    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
     if (request.review === true) this.reviewRequested.add(created.id);
@@ -707,7 +706,7 @@ export class AgentControlService {
     if ("error" in profile) return { status: "unavailable", reason: `A read-only Plan reviewer is unavailable: ${profile.error}`, costUsd: null };
     let diff: string;
     try {
-      diff = this.options.reviewDiff ? await this.options.reviewDiff(worker) : await this.readReviewDiff(worker.cwd);
+      diff = this.options.reviewDiff ? await this.options.reviewDiff(worker) : await this.terminals.readReviewDiff(sessionId);
     } catch (error) {
       return { status: "unavailable", reason: `The worker diff could not be read: ${error instanceof Error ? error.message : "unknown error"}`, costUsd: null };
     }
@@ -725,6 +724,7 @@ export class AgentControlService {
     ].join("\n\n");
     let reviewer: SessionMetadata | undefined;
     let keepReviewer = false;
+    let reviewerAccount: Awaited<ReturnType<TerminalManager["prepareReviewerAccount"]>> | undefined;
     let workspace: DiffOnlyReviewWorkspace;
     try {
       workspace = createDiffOnlyReviewWorkspace(maskedDiff);
@@ -733,11 +733,11 @@ export class AgentControlService {
     }
     try {
       try {
-        const reviewerAccount = account
+        reviewerAccount = account
           ? await this.terminals.prepareReviewerAccount({ taskRootSessionId: root.id, provider: worker.provider as AgentProviderId, workspace,
             launchOptions: { [MODEL_ACCOUNTS_PLUGIN_ID]: { account } } })
           : undefined;
-        if (signal.aborted) { void reviewerAccount?.contribution.cleanup().catch(() => undefined); throw new Error("The worker session was removed before review."); }
+        if (signal.aborted) throw new Error("The worker session was removed before review.");
         reviewer = this.terminals.createReadOnlyReviewer({
           taskRootSessionId: root.id,
           provider: worker.provider as AgentProviderId,
@@ -745,6 +745,8 @@ export class AgentControlService {
           title: `Review: ${worker.title}`.slice(0, 80),
           ...(reviewerAccount ? { account: reviewerAccount } : { model })
         });
+        // Once creation succeeds, TerminalManager owns the contribution and cleans it up with the session.
+        reviewerAccount = undefined;
         this.readOnlyReviewers.add(reviewer.id);
         // OpenCode drops what is typed before its TUI is up: wait for its first lifecycle status (bounded).
         if (worker.provider === "opencode") {
@@ -796,6 +798,7 @@ export class AgentControlService {
         costUsd: null
       };
     } finally {
+      if (reviewerAccount) await reviewerAccount.contribution.cleanup().catch(() => undefined);
       if (reviewer && this.reviewAgents.get(sessionId) === reviewer.id) this.reviewAgents.delete(sessionId);
       if (!keepReviewer) {
         if (reviewer) try { this.terminals.dispose(reviewer.id); } catch { /* the task may already have removed it */ }
@@ -805,9 +808,6 @@ export class AgentControlService {
     }
   }
 
-  private async readReviewDiff(cwd: string): Promise<string> {
-    return new GitCheckpoints(text => this.redactTail(text,MAX_REVIEW_DIFF_BYTES + 8192)).workingDiff(cwd);
-  }
 
   private requireBudgetActive(sessionId: string): void {
     if (!this.options.budget) return;

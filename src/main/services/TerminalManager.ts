@@ -1,3 +1,5 @@
+import { ReviewDiffTracker } from "./ReviewDiffTracker.ts";
+import { GitCheckpoints } from "./GitCheckpoints.ts";
 import { constants as osConstants } from "node:os";
 import { randomUUID } from "node:crypto";
 import { stripVTControlCharacters } from "node:util";
@@ -127,6 +129,7 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
+  captureReviewDiff?: boolean;
   /** Turns the agent started (its status became working) since launch. */
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
@@ -245,6 +248,7 @@ export class TerminalManager {
   private readonly providerClis: ProviderCliRegistry;
   private readonly agentBrowser?: AgentBrowserLaunchCoordinator;
   private readonly agentRuntime?: AgentRuntimeLaunchCoordinator;
+  private readonly reviewDiffTracker = new ReviewDiffTracker();
   private readonly spawnPty: typeof pty.spawn;
   private readonly processTreePause: ProcessTreePause;
   private readonly budgetPausedTaskRoots = new Set<string>();
@@ -868,7 +872,7 @@ export class TerminalManager {
 
   create(
     request: CreateSessionRequest,
-    control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string } = {}
+    control: { captureReviewDiff?: boolean; captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string } = {}
   ): SessionSnapshot {
     const reviewerControl = this.readOnlyReviewerRequests.get(request);
     if (reviewerControl) this.readOnlyReviewerRequests.delete(request);
@@ -972,7 +976,7 @@ export class TerminalManager {
         ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
         : this.spawnProcess(id, request.provider, request.profile, request.cwd,
           INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, captureResult, role,
-          control.answerCaptureGrantExpiresAt, reviewerControl?.account?.contribution ?? null, request.parentSessionId, taskProjectRoot, reviewerControl);
+          control.answerCaptureGrantExpiresAt, reviewerControl?.account?.contribution ?? null, request.parentSessionId, taskProjectRoot, reviewerControl, control.captureReviewDiff === true);
     } finally {
       this.startingModels.delete(id);
       this.startingOwners.delete(id);
@@ -1003,6 +1007,7 @@ export class TerminalManager {
       resumeOnLaunch: resume,
       ...(threadId ? { threadId } : {}),
       captureResult,
+      captureReviewDiff: control.captureReviewDiff === true,
       ...(reviewerControl ? { reviewWorkspace: reviewerControl.workspace } : {}),
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
@@ -1062,6 +1067,7 @@ export class TerminalManager {
     if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
     delete session.extras.heldState;
     delete session.metadata.restoreNote;
+    this.reviewDiffTracker.forget(id);
     // Input queued for the launch that ended never reaches this one.
     session.launchEpoch += 1;
     this.wakeLaunchWaiters(session);
@@ -1493,6 +1499,7 @@ export class TerminalManager {
 
     this.flushOutput(id, session);
     this.sessions.delete(id);
+    this.reviewDiffTracker.forget(id);
     this.resumedThreads.delete(id);
     session.reviewWorkspace?.cleanup();
     delete session.reviewWorkspace;
@@ -1919,7 +1926,8 @@ export class TerminalManager {
     contribution: LaunchContribution | null = null,
     parentSessionId?: string,
     taskProjectRoot?: string,
-    reviewerControl?: ReadOnlyReviewerLaunch
+    reviewerControl?: ReadOnlyReviewerLaunch,
+    captureReviewDiff = this.sessions.get(id)?.captureReviewDiff === true
   ): {
     process: IPty | null;
     agentBrowser: PreparedAgentBrowserPtyLaunch | null;
@@ -1951,6 +1959,7 @@ export class TerminalManager {
       }
     }
     try {
+      this.reviewDiffTracker.beforeSpawn(id, planned.cwd, captureReviewDiff, this.reviewParentDirectory(parentSessionId));
       const process = this.spawnPty(spawn.command, spawn.args, {
         name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
@@ -1963,10 +1972,24 @@ export class TerminalManager {
         failure: null
       };
     } catch (error) {
+      this.reviewDiffTracker.forget(id);
       planned.cleanup();
       this.releaseIsolation(id);
       throw error;
     }
+  }
+
+  private reviewParentDirectory(parentSessionId?: string): string | undefined {
+    if (!parentSessionId) return undefined;
+    return this.launchContexts.get(parentSessionId)?.cwd ?? this.sessions.get(parentSessionId)?.metadata.cwd;
+  }
+
+  /** Only the launch-owned baseline can attribute a diff to this worker. */
+  async readReviewDiff(id: string): Promise<string> {
+    const baseline = this.reviewDiffTracker.baseline(id);
+    const diff = await new GitCheckpoints(text => this.redactSecrets(text)).workingDiff(baseline.root, baseline.head);
+    this.reviewDiffTracker.assertCurrent(id, baseline);
+    return diff;
   }
 
   /** In the manual profile the CLI's own configuration decides: the card says when it skips approvals. */
@@ -2506,10 +2529,12 @@ export class TerminalManager {
     }
     let process: IPty;
     try {
+      this.reviewDiffTracker.beforeSpawn(id, spawn.cwd, session.captureReviewDiff === true, this.reviewParentDirectory(metadata.parentSessionId));
       process = this.spawnPty(spawn.command, spawn.args, {
         name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
       });
     } catch (error) {
+      this.reviewDiffTracker.forget(id);
       abandon();
       this.releaseIsolation(id);
       metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
@@ -2597,6 +2622,7 @@ export class TerminalManager {
   }
 
   private recordExit(id: string, current: ManagedSession, reportedExitCode: number, signal?: number): void {
+    this.reviewDiffTracker.stopped(id);
     current.process = null;
     this.flushOutput(id, current);
     this.releaseIsolation(id);

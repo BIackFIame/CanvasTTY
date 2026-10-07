@@ -753,7 +753,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     },
     reviewCost:id=>timeline.usage([id],usagePrices.get()).cost,
     reviewModel:(provider,model)=>model ? providerDirectorySources.models?.(provider)?.models.find(candidate=>candidate!==model) ?? null : null,
-    reviewDiff:worker=>checkpoints.workingDiff(managedTerminals.pluginContext(worker.id)?.workingDirectory ?? worker.cwd),
     onReview:id=>managedTerminals.setTaskMetadata(id,{reviewRequested:true})
   });
   budgetInputGate=id=>agentControlService.assertInputAllowed(id);
