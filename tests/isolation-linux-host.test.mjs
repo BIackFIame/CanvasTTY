@@ -187,3 +187,14 @@ test("OpenCode custom permission sources are read-only without creating an empty
   assert.equal(existsSync(join(custom, "agent")), false, "empty temporary directory is released");
   assert.equal(await readFile(explicit, "utf8"), '{"permission":{"edit":"deny"}}', "person config is preserved");
 });
+
+
+test("read-restricted reviewers receive a private minimal /dev while ordinary isolation retains host devices", () => {
+  const paths = { writable: [], writableFiles: [], unreadable: [], readableAgain: ["/usr"], gitHooks: [], protectedWrites: [], socketFolders: [] };
+  const launch = { command: "/usr/bin/node", args: [], cwd: "/review" };
+  const restricted = bubblewrapArguments({ ...paths, restrictReads: true }, launch, () => "directory");
+  assert.deepEqual(restricted.slice(restricted.indexOf("--dev"), restricted.indexOf("--dev") + 2), ["--dev", "/dev"]);
+  assert.equal(restricted.includes("--dev-bind"), false, "the review sandbox must not expose host disks, terminals or device aliases");
+  const ordinary = bubblewrapArguments(paths, launch, () => "directory");
+  assert.deepEqual(ordinary.slice(ordinary.indexOf("--dev-bind"), ordinary.indexOf("--dev-bind") + 3), ["--dev-bind", "/dev", "/dev"]);
+});

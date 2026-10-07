@@ -1186,7 +1186,7 @@ export class TerminalManager {
    * and asks the caller to inspect the card. Cancellation, restart and deadlines never replay queued text
    * into a later launch. Unhooked terminals retain ordinary PTY delivery.
    */
-  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal): Promise<InputDelivery> {
+  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal, beforeWrite?: () => void): Promise<InputDelivery> {
     const session = this.sessions.get(id);
     if (!session) return Promise.resolve({ delivered: false, reason: "The session does not exist." });
     const epoch = session.launchEpoch;
@@ -1196,7 +1196,7 @@ export class TerminalManager {
       if (this.sessions.get(id) !== session || session.launchEpoch !== epoch) {
         return { delivered: false, reason: "The session was closed or restarted before delivery." };
       }
-      return this.deliverQueuedInput(id, data, Math.max(0, deadline - Date.now()), signal);
+      return this.deliverQueuedInput(id, data, Math.max(0, deadline - Date.now()), signal, beforeWrite);
     };
     const pending = previous ? previous.then(run, run) : run();
     session.inputQueue = pending;
@@ -1204,7 +1204,7 @@ export class TerminalManager {
     return pending;
   }
 
-  private async deliverQueuedInput(id: string, data: string, waitMs: number, signal?: AbortSignal): Promise<InputDelivery> {
+  private async deliverQueuedInput(id: string, data: string, waitMs: number, signal?: AbortSignal, beforeWrite?: () => void): Promise<InputDelivery> {
     const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
     if (signal?.aborted) return canceled;
     const session = this.sessions.get(id);
@@ -1261,7 +1261,7 @@ export class TerminalManager {
     // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
     const offset = session.outputOffset;
     const mark = session.turnStarts ?? 0;
-    if (!this.inputChecked(id, data)) return { delivered: false, reason: "The terminal no longer accepts input." };
+    if (!this.inputChecked(id, data, beforeWrite)) return { delivered: false, reason: "The terminal no longer accepts input." };
     if (data.endsWith("\r")) session.promptTurnMark = mark;
     if (!confirm) return { delivered: true };
     // Never replay the text on an ambiguous acknowledgement: that can run a task twice. Retry only Enter,
@@ -1294,13 +1294,15 @@ export class TerminalManager {
     for (const wake of [...session.launchWaiters]) wake();
   }
 
-  inputChecked(id: string, data: string): boolean {
+  inputChecked(id: string, data: string, beforeWrite?: () => void): boolean {
     if (data !== "\x03") { try { this.inputGate?.(id); } catch { return false; } }
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process) return false;
     if(data!=="\x03" && this.isSessionBudgetPaused(session))return false;
     const process = session.process;
+    // Host-only notification: all no-write checks passed; a failed write or acknowledgement is now ambiguous.
+    beforeWrite?.();
     const written = tryPtyOperation(() => process.write(data));
     if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
     return written;

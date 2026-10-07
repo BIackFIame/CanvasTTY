@@ -30,7 +30,7 @@ export function bubblewrapArguments(
     "--unshare-pid",
     "--unshare-ipc",
     ...(paths.restrictReads ? ["--tmpfs","/",...paths.readableAgain.flatMap(path=>exists(path) ? ["--ro-bind",path,path] : [])] : ["--ro-bind", "/", "/"]),
-    "--dev-bind", "/dev", "/dev",
+    ...(paths.restrictReads ? ["--dev", "/dev"] : ["--dev-bind", "/dev", "/dev"]),
     "--proc", "/proc"
   ];
   const seen = new Set<string>();

@@ -307,13 +307,14 @@ export class AgentControlService {
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
     this.assertInputAllowed(sessionId);
-    if (signal?.aborted) return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal);
-    this.invalidateReview(sessionId);
-    const generation = this.reviewGenerations.get(sessionId);
-    if (!submit) this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
-    this.retryableQuiet.delete(sessionId);
-    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal).then(() => {
-      if (submit && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
+    let generation: object | undefined;
+    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal, () => {
+      this.invalidateReview(sessionId);
+      generation = this.reviewGenerations.get(sessionId);
+      if (!submit) this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
+      this.retryableQuiet.delete(sessionId);
+    }).then(() => {
+      if (submit && generation && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
     });
   }
 
@@ -669,6 +670,7 @@ export class AgentControlService {
   }
 
   private invalidateReview(sessionId: string): void {
+    const reviewerIds = new Set([this.reviews.get(sessionId)?.reviewerSessionId, this.reviewAgents.get(sessionId)]);
     this.reviewGenerations.set(sessionId, {});
     this.reviews.delete(sessionId);
     this.reviewWatchers.get(sessionId)?.controller.abort();
@@ -676,12 +678,14 @@ export class AgentControlService {
     this.reviewControllers.get(sessionId)?.abort();
     this.reviewControllers.delete(sessionId);
     this.reviewPending.delete(sessionId);
-    const reviewerId = this.reviewAgents.get(sessionId);
     this.reviewAgents.delete(sessionId);
-    if (reviewerId) {
-      this.readOnlyReviewers.delete(reviewerId);
-      try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
-    }
+    for (const reviewerId of reviewerIds) this.disposeReviewer(reviewerId);
+  }
+
+  private disposeReviewer(reviewerId: string | undefined): void {
+    if (!reviewerId) return;
+    this.readOnlyReviewers.delete(reviewerId);
+    try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
   }
 
   private async ensureReview(sessionId: string): Promise<AgentReviewResult> {
@@ -701,7 +705,10 @@ export class AgentControlService {
       reason: this.redactTail(error instanceof Error ? error.message : "The reviewer failed.", 500),
       costUsd: null
     })).then(result => {
-      if (controller.signal.aborted || this.reviewGenerations.get(sessionId) !== generation) return supersededReview();
+      if (controller.signal.aborted || this.reviewGenerations.get(sessionId) !== generation) {
+        this.disposeReviewer(result.reviewerSessionId);
+        return supersededReview();
+      }
       this.reviews.set(sessionId, result);
       try { this.options.onReview?.(sessionId, result); } catch { /* review observers cannot affect the result */ }
       return result;
@@ -881,8 +888,8 @@ export class AgentControlService {
   }
 
   /** Through the terminal manager's one delivery rule: exactly once, into the launch that is starting now. */
-  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal): Promise<void> {
-    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal);
+  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal, beforeWrite?: () => void): Promise<void> {
+    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal, beforeWrite);
     if (!delivery.delivered) {
       throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
     }
