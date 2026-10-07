@@ -262,6 +262,7 @@ const api: CanvasTTYApi = {
       ipcRenderer.sendSync(IPC.canvasNavigationOwnerWheel, { clientX, clientY });
     },
     setShortcutCaptureActive: (active: boolean) => ipcRenderer.send(IPC.canvasNavigationShortcutCapture, active),
+    setTerminalEditFocus: (active: boolean) => ipcRenderer.send(IPC.canvasNavigationTerminalEditFocus, active),
     setPointerBindingState: (input: CanvasNavigationPointerBindingInput) => (
       ipcRenderer.send(IPC.canvasNavigationPointerBinding, input)
     ),
