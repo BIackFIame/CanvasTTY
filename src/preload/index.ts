@@ -133,9 +133,13 @@ const api: CanvasTTYApi = {
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.materialsSetBounds, id, bounds),
     setBoundsBatch: (entries: { id: string; bounds: SessionBounds }[]) => ipcRenderer.send(IPC.materialsSetBoundsBatch, entries),
     remove: (id: string) => ipcRenderer.invoke(IPC.materialsRemove, id),
+    pinVersion: (id: string) => ipcRenderer.invoke(IPC.materialsPinVersion, id),
     reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
     relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
     acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
+    addRemark: (draft: unknown) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
+    updateRemark: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
+    deleteRemark: (id: string) => ipcRenderer.invoke(IPC.materialsDeleteRemark, id),
     onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
   },
   limits: {
@@ -269,6 +273,7 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    openFile: (id: string, reference: string) => ipcRenderer.invoke(IPC.terminalOpenFile, id, reference),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),
       process.platform
