@@ -99,13 +99,16 @@ test('a worker on a model account is reviewed on that account (its key and model
  const {LaunchPipeline}=await import('../src/main/services/LaunchPipeline.ts');
  const root=await mkdtemp(join(tmpdir(),'ctty-review-account-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const prepared=[];let terminals;const isolatedLaunches=[];
- terminals=new TerminalManager(()=>undefined,availableRegistry(),undefined,undefined,true,fakeSpawner([],{onWrite(data){
+ const spawn=fakeSpawner([],{onWrite(data){
   if(!data.includes('Review only the supplied answer'))return;
   const reviewer=terminals.listMetadata().find(s=>s.title.startsWith('Review:'));
   terminals.applyProviderSignal(reviewer.id,{state:'working'},'hook');
   terminals.recordAnswer(reviewer.id,{text:'{"verdict":"revise","findings":"name the constant"}',truncated:false});
   terminals.applyProviderSignal(reviewer.id,{state:'idle',event:'Stop'},'hook');
- }}));installReviewerIsolation(terminals,isolatedLaunches);t.after(()=>terminals.disposeAll());
+ }});
+ terminals=new TerminalManager(()=>undefined,availableRegistry(),undefined,undefined,true,(...args)=>{
+  const pty=spawn(...args);queueMicrotask(()=>pty.emitData('Ask anything…\nctrl+p commands\n'));return pty;
+ });installReviewerIsolation(terminals,isolatedLaunches);t.after(()=>terminals.disposeAll());
  terminals.configureLaunchPipeline(new LaunchPipeline({
   contributors:()=>[{pluginId:'canvastty-accounts',pluginName:'Accounts',serviceId:'accounts',secrets:false,
    launch:{fields:[{key:'account',label:'Model account',kind:'text'}],delegable:true}}],

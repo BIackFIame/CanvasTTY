@@ -1199,6 +1199,13 @@ export class TerminalManager {
     return Boolean(session && session.metadata.exitCode === null && !session.process);
   }
 
+  /** Host input readiness includes OpenCode's first prompt, before it creates a conversation. */
+  inputReady(id: string): boolean {
+    const session = this.sessions.get(id);
+    return Boolean(session?.process && session.metadata.exitCode === null
+      && (session.hookSignals || session.titleState || session.cliInputReady));
+  }
+
   /**
    * Serialize controller prompts within one launch, waiting for the PTY and supported CLI readiness.
    * Confirm hooked CLI input through a new turn or an echoed unsubmitted prompt. Submitted text is
@@ -1260,7 +1267,7 @@ export class TerminalManager {
     }
     // Only these providers have a startup hook and a turn acknowledgement. Without an installed runtime
     // (e.g. hooks disabled or a remote environment) keep the ordinary PTY delivery contract.
-    const confirm = this.lifecycleHooksEnabled && session.agentRuntime !== null
+    const confirm = (this.lifecycleHooksEnabled || session.captureResult) && session.agentRuntime !== null
       && ["opencode", "claude", "codex"].includes(session.metadata.provider);
     const valid = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
       && session.metadata.exitCode === null && !signal?.aborted;
@@ -1272,10 +1279,10 @@ export class TerminalManager {
       });
     };
     if (confirm) {
-      while (valid() && !(session.hookSignals || session.titleState || session.cliInputReady) && Date.now() < deadline) await poll();
+      while (valid() && !this.inputReady(id) && Date.now() < deadline) await poll();
       if (signal?.aborted) return canceled;
       if (!valid()) return { delivered: false, reason: "The session closed, exited or restarted before CLI readiness." };
-      if (!(session.hookSignals || session.titleState || session.cliInputReady)) return { delivered: false, reason: "The CLI did not become ready before the delivery deadline; no text was sent." };
+      if (!this.inputReady(id)) return { delivered: false, reason: "The CLI did not become ready before the delivery deadline; no text was sent." };
     }
     if (Date.now() >= deadline) return { delivered: false, reason: "The input delivery deadline expired; no text was sent." };
     // A submitted prompt: the agent's next turn is the one that answers it (turnProgress).
@@ -1298,7 +1305,7 @@ export class TerminalManager {
         echoed = text.length > 0 && stripVTControlCharacters(fresh).replace(/\s+/gu, "").includes(text);
       }
       if (echoed && !/[\r\n]$/u.test(data)) return { delivered: true };
-      if (echoed && session.metadata.status === "idle" && Date.now() >= retryAt && submits < 3) {
+      if (echoed && (session.acceptedLifecycleState ?? session.metadata.status) === "idle" && Date.now() >= retryAt && submits < 3) {
         if (!this.inputChecked(id, "\r", { acknowledgementRetry: true })) break;
         submits++;
         retryAt = Date.now() + 1000;
@@ -1450,6 +1457,12 @@ export class TerminalManager {
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
     return true;
+  }
+
+  /** Result transport completion is independent of the person's lifecycle UI preference. */
+  resultLifecycleState(id: string): ProviderLifecycleSignal["state"] | null {
+    const session = this.sessions.get(id);
+    return session?.captureResult ? session.acceptedLifecycleState ?? null : null;
   }
 
   /** Capture before starting an asynchronous answer read when the source has no provider turn id. */

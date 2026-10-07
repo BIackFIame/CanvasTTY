@@ -120,7 +120,7 @@ export interface AgentControlOptions {
   /** Trusted host override: the returned diff must already be scoped to this worker and its launch. */
   reviewDiff?: (session: SessionMetadata) => Promise<string>;
   reviewTimeoutMs?: number;
-  /** How long an OpenCode reviewer may take to report its first status before the prompt is typed anyway. */
+  /** How long an OpenCode reviewer may take to expose its input prompt before startup is refused. */
   reviewStartupMs?: number;
   onReview?: (sessionId: string, review: AgentReviewResult) => void;
 }
@@ -513,7 +513,8 @@ export class AgentControlService {
   async resultWithReview(sessionId: string, options: { deferReview?: boolean } = {}): Promise<AgentResult> {
     const current = this.result(sessionId);
     if (!this.reviewRequested.has(sessionId)) return current;
-    if (current.status !== "idle" && current.status !== "done" && current.status !== "failed" && current.exitCode === null) {
+    const status = this.resultLifecycleStatus(sessionId) ?? current.status;
+    if (status !== "idle" && status !== "done" && status !== "failed" && current.exitCode === null) {
       return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
     }
     if (options.deferReview) {
@@ -652,16 +653,17 @@ export class AgentControlService {
       if (current !== offset) { offset = current; changedAt = now; }
       const quietFor = now - changedAt;
       if (session.exitCode !== null) return answer(session, session.exitCode === 0 ? "done" : "failed");
-      if (session.status === "needs_approval") return answer(session, "needs_approval");
+      const status = this.resultLifecycleStatus(sessionId) ?? session.status;
+      if (status === "needs_approval") return answer(session, "needs_approval");
       // After a prompt, an idle that no turn followed (the CLI's startup idle, or one reported before the turn began)
       // is not the answer: only an idle after a turn that started since that prompt is. A CLI that never reports its
       // turns still ends as "quiet" once its screen stops changing.
       const progress = this.turnProgress(sessionId);
       const awaitingTurn = progress !== null && progress.promptSent && !progress.turnStartedSincePrompt;
-      if (!awaitingTurn && (session.status === "idle" || session.status === "done" || session.status === "failed") && quietFor >= timing.settleMs) {
-        return answer(session, session.status);
+      if (!awaitingTurn && (status === "idle" || status === "done" || status === "failed") && quietFor >= timing.settleMs) {
+        return answer(session, status);
       }
-      if ((session.status === "unavailable" || awaitingTurn) && quietFor >= timing.quietMs) return answer(session, "quiet");
+      if ((status === "unavailable" || awaitingTurn) && quietFor >= timing.quietMs) return answer(session, "quiet");
       const waited = now - started;
       if (waited >= timeoutMs) return answer(session, "timeout");
       await pause(Math.min(timing.checkMs, timeoutMs - waited), signal);
@@ -807,10 +809,14 @@ export class AgentControlService {
         // Once creation succeeds, TerminalManager owns the contribution and cleans it up with the session.
         reviewerAccount = undefined;
         this.readOnlyReviewers.add(reviewer.id);
-        // OpenCode drops what is typed before its TUI is up: wait for its first lifecycle status (bounded).
+        // OpenCode's fresh home has no conversation until submission; wait for its rendered input prompt or hook.
         if (worker.provider === "opencode") {
           const readyBy = Date.now() + (this.options.reviewStartupMs ?? REVIEW_STARTUP_QUIET_MS);
-          while (Date.now() < readyBy && this.terminals.getMetadata(reviewer.id)?.status === "unavailable") await pause(250, signal);
+          const ready = (): boolean => typeof this.terminals.inputReady === "function"
+            ? this.terminals.inputReady(reviewer!.id)
+            : (this.resultLifecycleStatus(reviewer!.id) ?? this.terminals.getMetadata(reviewer!.id)?.status) !== "unavailable";
+          while (Date.now() < readyBy && !ready()) await pause(250, signal);
+          if (!ready()) throw new Error("The reviewer CLI did not expose its input prompt before the startup deadline.");
         }
         await this.deliver(reviewer.id, `${prompt}\r`, "prompt", signal);
       } catch (error) {
@@ -930,6 +936,10 @@ export class AgentControlService {
   private redactTail(text: string, maxChars: number): string {
     if (typeof this.terminals.redactSecretsTail === "function") return this.terminals.redactSecretsTail(text, maxChars);
     return tail(typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text, maxChars);
+  }
+
+  private resultLifecycleStatus(sessionId: string): "idle" | "working" | "needs_approval" | null {
+    return typeof this.terminals.resultLifecycleState === "function" ? this.terminals.resultLifecycleState(sessionId) : null;
   }
 
   private turnProgress(sessionId: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {

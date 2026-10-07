@@ -68,18 +68,34 @@ function runFakeOpenCode(capability, answer, captureResult, script = FAKE_OPENCO
   if (captureResult) env[CAPTURE_RESULT_ENV] = "1";
   else delete env[CAPTURE_RESULT_ENV];
   const child = spawn(process.execPath, ["--input-type=module", "-e", script], { env, stdio: ["pipe", "pipe", "pipe"] });
-  if (onCapture) child.stdout.once("data", () => { onCapture(); child.stdin.end("continue"); });
+  const timeout = setTimeout(() => child.kill(), 5_000);
   let stderr = "";
   child.stderr.on("data", (chunk) => { stderr += chunk; });
-  return new Promise((resolve) => child.on("close", (code) => resolve({ code, stderr })));
+  return new Promise((resolve, reject) => {
+    if (onCapture) child.stdout.once("data", () => {
+      Promise.resolve().then(onCapture).then(() => child.stdin.end("continue"), error => { child.kill(); reject(error); });
+    });
+    child.on("error", error => { clearTimeout(timeout); reject(error); });
+    child.on("close", code => { clearTimeout(timeout); resolve({ code, stderr }); });
+  });
 }
 
-async function setup(t) {
+async function setupTerminals(t) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ctty-ocr-")));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls = [];
   const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
   t.after(() => terminals.disposeAll());
+  const orchestrator = terminals.create({ provider: "codex", cwd: root, profile: "normal", position: { x: 0, y: 0 }, role: "orchestrator" });
+  const control = new AgentControlService(terminals, { waitTiming: { checkMs: 5, settleMs: 300, quietMs: 2_000 } });
+  const handler = new ScopedOrchestrationHandler(control);
+  const child = await handler.execute(orchestrator.id, { id: "1", tool: "spawn_agent", arguments: { provider: "opencode", cwd: root } });
+  return { root, calls, terminals, control, handler, orchestrator, childId: child.sessionId };
+}
+
+async function setup(t) {
+  const fixture = await setupTerminals(t);
+  const { terminals } = fixture;
   const runtimeDirectory = await mkdtemp(join(tmpdir(), "ctty-rt-"));
   t.after(() => rm(runtimeDirectory, { recursive: true, force: true }));
   // What main/index.ts does with each runtime signal.
@@ -92,11 +108,7 @@ async function setup(t) {
   });
   await gateway.start();
   t.after(() => gateway.close());
-  const orchestrator = terminals.create({ provider: "codex", cwd: root, profile: "normal", position: { x: 0, y: 0 }, role: "orchestrator" });
-  const control = new AgentControlService(terminals, { waitTiming: { checkMs: 5, settleMs: 300, quietMs: 2_000 } });
-  const handler = new ScopedOrchestrationHandler(control);
-  const child = await handler.execute(orchestrator.id, { id: "1", tool: "spawn_agent", arguments: { provider: "opencode", cwd: root } });
-  return { root, calls, terminals, gateway, handler, orchestrator, childId: child.sessionId };
+  return {...fixture, gateway};
 }
 
 test("an OpenCode subagent's final reply reaches wait_for_agent and get_agent_result, masked", POSIX, async (t) => {
@@ -171,7 +183,7 @@ test("wait_for_agent ignores an idle before the prompt's turn and returns that t
 
 
 test("OpenCode turn correlation rejects preceding answers and continuations across host submissions", async t => {
-  const { terminals, childId } = await setup(t);
+  const { terminals, childId } = await setupTerminals(t);
   const apply = (state, event, turnId, answer) => {
     const accepted = terminals.applyProviderSignal(childId, {state, event, requestId: turnId});
     if(accepted && answer) terminals.recordAnswer(childId, {text:answer,truncated:false}, {turnId});
@@ -282,7 +294,7 @@ test("a delayed plugin capture before the next busy event cannot restore the pre
 
 
 test("disabled lifecycle UI keeps permission continuations and duplicate working events in the same turn", async t => {
-  const {terminals,childId}=await setup(t);
+  const {terminals,childId}=await setupTerminals(t);
   terminals.setLifecycleHooksEnabled(false);
   const apply=(state,event,turnId)=>terminals.applyProviderSignal(childId,{state,event,requestId:turnId});
   assert.equal(apply('working','session.status:busy','turn1'),true);
@@ -307,4 +319,54 @@ test("disabled lifecycle UI keeps permission continuations and duplicate working
   terminals.input(childId,'next task\r');
   assert.equal(terminals.answerCaptureGeneration(childId),generation+1);
   assert.equal(apply('working','permission.replied','turn1'),false);
+});
+
+
+test("captured status idle waits for the SDK answer before actual result polling can start review", POSIX, async t=>{
+  const {terminals,gateway,control,childId}=await setup(t);
+  control.reviewRequested.add(childId);
+  let reviews=0;
+  control.performReview=async()=>{reviews++;assert.equal(terminals.answer(childId)?.text,'captured after delay');return {status:'accepted',costUsd:null};};
+  const capability=gateway.registerSession(childId,'opencode',true);
+  const script=`
+    const {CanvasTTYLifecycle}=await import(process.env.PLUGIN_URL);
+    const client={session:{messages:async()=>{
+      process.stdout.write('capturing');await new Promise(done=>process.stdin.once('data',done));
+      return {data:[{info:{role:'assistant'},parts:[{type:'text',text:'captured after delay'}]}]};
+    }}};
+    const hooks=await CanvasTTYLifecycle({client});
+    const event=(type,rest={})=>hooks.event({event:{type,properties:{sessionID:'root',...rest}}});
+    await event('session.created',{info:{id:'root'}});
+    await event('session.status',{status:{type:'busy'}});
+    await event('session.status',{status:{type:'idle'}});
+    await event('session.idle');
+  `;
+  const run=await runFakeOpenCode(capability,'unused',true,script,{},async()=>{
+    const result=await control.resultWithReview(childId,{deferReview:true});
+    assert.equal(result.status,'working');assert.equal(result.review.status,'pending');assert.equal(reviews,0);
+  });
+  assert.equal(run.code,0,run.stderr);
+  const result=await control.resultWithReview(childId);
+  assert.equal(result.review.status,'accepted');assert.equal(reviews,1);assert.equal(result.answer.text,'captured after delay');
+});
+
+for(const failure of ['error','timeout'])test(`captured OpenCode idle completes without an answer after SDK ${failure}`,POSIX,async t=>{
+  const {terminals,gateway,childId}=await setup(t);
+  terminals.setLifecycleHooksEnabled(false);
+  const accepted=[];const apply=terminals.applyProviderSignal.bind(terminals);
+  terminals.applyProviderSignal=(id,signal,...args)=>{accepted.push(signal);return apply(id,signal,...args);};
+  const capability=gateway.registerSession(childId,'opencode',true);
+  const script=`
+    const {CanvasTTYLifecycle}=await import(process.env.PLUGIN_URL);
+    const client={session:{messages:async()=>{${failure==='error'?'throw new Error("fixture failed");':'return new Promise(()=>{});'}}}};
+    const hooks=await CanvasTTYLifecycle({client});
+    const event=(type,rest={})=>hooks.event({event:{type,properties:{sessionID:'root',...rest}}});
+    await event('session.created',{info:{id:'root'}});await event('session.status',{status:{type:'busy'}});
+    await event('session.status',{status:{type:'idle'}});await event('session.idle');
+  `;
+  const run=await runFakeOpenCode(capability,'unused',true,script,{CANVASTTY_LIFECYCLE_HOOKS_ENABLED:'0'});
+  assert.equal(run.code,0,run.stderr);
+  assert.equal(accepted.filter(s=>s.event==='session.status:idle').length,0);
+  assert.equal(accepted.filter(s=>s.event==='session.idle').length,1,'bounded empty completion remains observable with UI disabled');
+  assert.equal(terminals.answer(childId),null);
 });

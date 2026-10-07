@@ -77,7 +77,9 @@ async function lifecycleEvent(event, decisions, client) {
       }
     } else if (status === "idle") {
       rootWorking = false;
-      if (lifecycleEnabled || captureResult) await reportLifecycle({ state: "idle", event: "session.status:idle", turnId: rootTurnId });
+      // A result-capturing turn is not complete until its bounded session.idle SDK read settles. Publishing idle
+      // here lets an orchestrator review before the final answer has reached the host.
+      if (lifecycleEnabled && !captureResult) await reportLifecycle({ state: "idle", event: "session.status:idle", turnId: rootTurnId });
     }
     return;
   }
@@ -87,7 +89,7 @@ async function lifecycleEvent(event, decisions, client) {
     const result = captureResult && endingTurnId ? await finalAnswer(client, endingSessionId) : undefined;
     // SDK reads are asynchronous: the next turn may already have started while the old answer was being read.
     if (endingSessionId !== rootSessionId || endingTurnId !== rootTurnId || rootWorking) return;
-    if (lifecycleEnabled || result) {
+    if (lifecycleEnabled || captureResult) {
       await reportLifecycle({ state: "idle", event: event.type, turnId: rootTurnId, ...(result ? { result } : {}) });
     }
     runPluginHooks("stop", event.type, event);
