@@ -152,6 +152,8 @@ interface ManagedSession {
   launchToken: number;
   /** Removes the current run's plugin files; called when the process exits. */
   launchCleanup: (() => Promise<void>) | null;
+  /** Cleanup already started by an earlier exit; closing the card must drain it before deleting its parent. */
+  launchCleanupPending?: Promise<void>;
   /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
@@ -1560,6 +1562,23 @@ export class TerminalManager {
     }
   }
 
+  /** Serializes this card's run cleanup across exit/restart; callbacks retain their specific launch ownership. */
+  private cleanupLaunchFiles(session: ManagedSession): Promise<void> {
+    const cleanup = session.launchCleanup;
+    session.launchCleanup = null;
+    const previous = session.launchCleanupPending;
+    if (!cleanup) return previous ?? Promise.resolve();
+    const pending = (async (): Promise<void> => {
+      if (previous) await previous.catch(() => undefined);
+      await cleanup();
+    })();
+    session.launchCleanupPending = pending;
+    void pending.finally(() => {
+      if (session.launchCleanupPending === pending) delete session.launchCleanupPending;
+    }).catch(() => undefined);
+    return pending;
+  }
+
   /**
    * Closes a card. A card in a plugin environment releases it: `keepEnvironmentData` is the person's
    * answer to "Keep environment data?" (kept unless they said no). Quitting releases nothing.
@@ -1598,9 +1617,10 @@ export class TerminalManager {
     this.redaction.clear(`session:${id}`);
     this.releaseIsolation(id);
     session.launchToken += 1;
-    void session.launchCleanup?.().catch(() => undefined);
-    session.launchCleanup = null;
-    if (session.extras.options) void this.launchPipeline?.forgetSession(id).catch(() => undefined);
+    const pipeline = session.extras.options ? this.launchPipeline : null;
+    // Windows cannot reliably remove a parent while a child's recursive removal is still in progress.
+    // Capture this pipeline and run cleanup now; a restart or reconfiguration must not change their ownership.
+    void this.cleanupLaunchFiles(session).finally(() => pipeline?.forgetSession(id)).catch(() => undefined);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -2725,8 +2745,7 @@ export class TerminalManager {
     current.agentRuntime = null;
     current.agentOrchestration?.cleanup();
     current.agentOrchestration = null;
-    void current.launchCleanup?.().catch(() => undefined);
-    current.launchCleanup = null;
+    void this.cleanupLaunchFiles(current).catch(() => undefined);
     this.emitSession(current.metadata);
     // Recorded at the moment of exit, so a finished agent is never relaunched.
     this.schedulePersistence();

@@ -31,7 +31,8 @@ async function fixture(t, {account=false} = {}) {
  terminals.configureIsolation({containment:()=>true,
   decide:({profile})=>profile==='plan'?{apply:true,profile,isolation:{state:'on',layer:'seatbelt'}}:{apply:false,profile},
   wrap:launch=>({command:launch.command,args:[...launch.args],env:launch.env,cleanup(){}})});
- const accounts=[],accountCleanups=[];
+ const accounts=[],accountCleanups=[],forgotten=new Map();
+ const forgetCompletion=id=>{let done=forgotten.get(id);if(!done){done=deferred();forgotten.set(id,done);}return done;};
  if(account){
   const {LaunchPipeline}=await import('../src/main/services/LaunchPipeline.ts');
   const pipeline=new LaunchPipeline({
@@ -46,6 +47,8 @@ async function fixture(t, {account=false} = {}) {
    if(prepared.ok){const cleanup=prepared.cleanup;prepared.cleanup=()=>{const pending=cleanup();accountCleanups.push(pending);return pending;};}
    return prepared;
   };
+  const forget=pipeline.forgetSession.bind(pipeline);
+  pipeline.forgetSession=id=>{const pending=forget(id);forgetCompletion(id).resolve(pending);return pending;};
   terminals.configureLaunchPipeline(pipeline);
   const prepare=terminals.prepareReviewerAccount.bind(terminals);
   terminals.prepareReviewerAccount=async input=>{
@@ -56,7 +59,16 @@ async function fixture(t, {account=false} = {}) {
  }
  const control=new AgentControlService(terminals,{reviewModel:()=> 'fixture-reviewer',reviewDiff:async()=>'+worker scoped fixture',
   waitTiming:{checkMs:1,settleMs:0,quietMs:10_000},onReview:(_id,review)=>reviews.push(review)});
- t.after(async()=>{for(const row of terminals.listMetadata())control.forgetSession(row.id);terminals.disposeAll();await Promise.all(accountCleanups);await rm(root,{recursive:true,force:true});});
+ t.after(async()=>{
+  const parentCleanups=[];
+  for(const row of terminals.listMetadata()){
+   if(account && terminals.sessions.get(row.id)?.extras.options)parentCleanups.push(forgetCompletion(row.id).promise);
+   control.forgetSession(row.id);
+  }
+  terminals.disposeAll();
+  await Promise.all([...accountCleanups,...parentCleanups]);
+  await rm(root,{recursive:true,force:true});
+ });
  const parent=terminals.create({provider:'codex',profile:'normal',cwd:root,role:'orchestrator',position:{x:0,y:0}});
  const worker=await control.spawn({parentSessionId:parent.id,provider:'codex',cwd:root,review:true,initialPrompt:'first task',...(account?{launchOptions:{'canvastty-accounts':{account:'fixture-model'}}}:{})});
  const finish=(id,text)=>{terminals.recordAnswer(id,{text,truncated:false});terminals.applyProviderSignal(id,{state:'idle',event:'Stop'},'hook');};
