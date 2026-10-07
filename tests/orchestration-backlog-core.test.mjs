@@ -398,7 +398,7 @@ test("forgetting a review worker aborts its active watcher", async (t) => {
     return waitFor(sessionId, request);
   };
 
-  await control.send(worker.id, "Continue the task.", false);
+  await control.send(worker.id, "Continue the task.");
   assert.equal(signals.length, 1);
   assert.equal(signals[0].aborted, false);
   control.forgetSession(worker.id);

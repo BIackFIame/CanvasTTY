@@ -183,6 +183,7 @@ export class AgentControlService {
   private readonly reviewRequested = new Set<string>();
   private readonly readOnlyReviewers = new Set<string>();
   private readonly reviews = new Map<string, AgentReviewResult>();
+  private readonly reviewGenerations = new Map<string, object>();
   private readonly reviewPending = new Map<string, Promise<AgentReviewResult>>();
   private readonly reviewControllers = new Map<string, AbortController>();
   private readonly reviewAgents = new Map<string, string>();
@@ -306,10 +307,13 @@ export class AgentControlService {
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
     this.assertInputAllowed(sessionId);
-    this.reviews.delete(sessionId);
+    if (signal?.aborted) return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal);
+    this.invalidateReview(sessionId);
+    const generation = this.reviewGenerations.get(sessionId);
+    if (!submit) this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
     this.retryableQuiet.delete(sessionId);
     return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal).then(() => {
-      this.scheduleReview(sessionId);
+      if (submit && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
     });
   }
 
@@ -367,7 +371,8 @@ export class AgentControlService {
 
   /** Called when TerminalManager removes a card; retries belonging to a live replacement retain their shared count. */
   forgetSession(sessionId: string): void {
-    const activeReviewerId = this.reviewAgents.get(sessionId);
+    this.invalidateReview(sessionId);
+    this.reviewGenerations.delete(sessionId);
     this.launchRequests.delete(sessionId);
     this.retryableQuiet.delete(sessionId);
     this.reviewRequested.delete(sessionId);
@@ -378,18 +383,9 @@ export class AgentControlService {
     this.retryOrigins.delete(sessionId);
     if (!this.pendingRetries.has(sourceId) && ![...this.retryOrigins.values()].includes(sourceId)) this.retryCounts.delete(sourceId);
 
-    this.reviewWatchers.get(sessionId)?.controller.abort();
-    this.reviewWatchers.delete(sessionId);
-    this.reviewControllers.get(sessionId)?.abort();
-    this.reviewControllers.delete(sessionId);
-    this.reviewPending.delete(sessionId);
-    this.reviewAgents.delete(sessionId);
     for (const [workerId, workerReviewerId] of this.reviewAgents) {
       if (workerReviewerId !== sessionId) continue;
       this.reviewAgents.delete(workerId);
-    }
-    if (activeReviewerId) {
-      try { this.terminals.dispose(activeReviewerId); } catch { /* it has already ended */ }
     }
   }
 
@@ -514,8 +510,10 @@ export class AgentControlService {
       void this.ensureReview(sessionId);
       return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
     }
+    const generation = this.reviewGeneration(sessionId);
     const review = await this.ensureReview(sessionId);
-    return { ...this.result(sessionId), review:this.reviewWithCost(review) };
+    return { ...this.result(sessionId), review: this.reviewWithCost(
+      this.reviewGenerations.get(sessionId) === generation ? review : supersededReview()) };
   }
 
   private reviewWithCost(review:AgentReviewResult):AgentReviewResult{
@@ -620,11 +618,15 @@ export class AgentControlService {
       try { observation = this.observe(sessionId); } catch { observation = null; }
       const finalAnswer: AgentAnswer | null = reason === "timeout" || reason === "needs_approval" ? null : this.answer(sessionId);
       let review: AgentReviewResult | undefined;
+      const generation = this.reviewGeneration(sessionId);
       if (this.reviewRequested.has(sessionId) && (reason === "idle" || reason === "done" || reason === "failed" || reason === "quiet")) {
         if (request.deferReview) {
           void this.ensureReview(sessionId);
           review = this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
-        } else review = this.reviewWithCost(await this.ensureReview(sessionId));
+        } else {
+          const result = await this.ensureReview(sessionId);
+          review = this.reviewWithCost(this.reviewGenerations.get(sessionId) === generation ? result : supersededReview());
+        }
       }
       return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
         ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(finalAnswer ? { answer: finalAnswer } : {}), ...(review ? { review } : {}) };
@@ -660,29 +662,56 @@ export class AgentControlService {
     this.terminals.dispose(sessionId);
   }
 
+  private reviewGeneration(sessionId: string): object {
+    let generation = this.reviewGenerations.get(sessionId);
+    if (!generation) { generation = {}; this.reviewGenerations.set(sessionId, generation); }
+    return generation;
+  }
+
+  private invalidateReview(sessionId: string): void {
+    this.reviewGenerations.set(sessionId, {});
+    this.reviews.delete(sessionId);
+    this.reviewWatchers.get(sessionId)?.controller.abort();
+    this.reviewWatchers.delete(sessionId);
+    this.reviewControllers.get(sessionId)?.abort();
+    this.reviewControllers.delete(sessionId);
+    this.reviewPending.delete(sessionId);
+    const reviewerId = this.reviewAgents.get(sessionId);
+    this.reviewAgents.delete(sessionId);
+    if (reviewerId) {
+      this.readOnlyReviewers.delete(reviewerId);
+      try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
+    }
+  }
+
   private async ensureReview(sessionId: string): Promise<AgentReviewResult> {
+    const generation = this.reviewGeneration(sessionId);
     const cached = this.reviews.get(sessionId);
     if (cached) return cached;
     const active = this.reviewPending.get(sessionId);
-    if (active) return active;
+    if (active) {
+      const result = await active;
+      return this.reviewGenerations.get(sessionId) === generation ? result : supersededReview();
+    }
     const controller = new AbortController();
     this.reviewControllers.set(sessionId, controller);
+    // Store the guarded promise, so every concurrent caller observes invalidation, not the raw verdict.
     const pending = this.performReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
       status: "unavailable",
       reason: this.redactTail(error instanceof Error ? error.message : "The reviewer failed.", 500),
       costUsd: null
-    }));
-    this.reviewPending.set(sessionId, pending);
-    try {
-      const result = await pending;
-      if (controller.signal.aborted) return result;
+    })).then(result => {
+      if (controller.signal.aborted || this.reviewGenerations.get(sessionId) !== generation) return supersededReview();
       this.reviews.set(sessionId, result);
       try { this.options.onReview?.(sessionId, result); } catch { /* review observers cannot affect the result */ }
       return result;
-    } finally {
+    }).finally(() => {
       if (this.reviewPending.get(sessionId) === pending) this.reviewPending.delete(sessionId);
       if (this.reviewControllers.get(sessionId) === controller) this.reviewControllers.delete(sessionId);
-    }
+    });
+    this.reviewPending.set(sessionId, pending);
+    const result = await pending;
+    return this.reviewGenerations.get(sessionId) === generation ? result : supersededReview();
   }
 
   private async performReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
@@ -840,13 +869,14 @@ export class AgentControlService {
         return;
       }
       const result = await this.waitFor(sessionId, { timeoutMs: MAX_AGENT_WAIT_MS, signal });
+      if (signal.aborted) return;
       if (result.reason === "idle" || result.reason === "done" || result.reason === "failed" || result.reason === "quiet") {
         await this.ensureReview(sessionId);
         return;
       }
       if (result.reason === "closed") return;
       // Approval and quiet states need a later human input or another output sample; avoid spinning on either.
-      await pause(1_000);
+      await pause(1_000, signal);
     }
   }
 
@@ -1018,4 +1048,8 @@ const MODEL_ACCOUNTS_PLUGIN_ID = "canvastty-accounts";
 function selectedModelAccount(launchOptions: SpawnAgentRequest["launchOptions"]): string | null {
   const account = launchOptions?.[MODEL_ACCOUNTS_PLUGIN_ID]?.account;
   return typeof account === "string" && account && account !== "none" ? account : null;
+}
+
+function supersededReview(): AgentReviewResult {
+  return { status: "unavailable", reason: "The worker prompt changed or the session was removed before this review completed.", costUsd: null };
 }
