@@ -51,6 +51,11 @@ test("workflow launcher requires a task and redacts the literal task substitutio
   const task = "Check $& and $` and $' with private-value\nthen preserve {{TASK}} literally.";
   change(field("launch-flow-task"), task); tree = render();
   assert.equal(submit().props.disabled, false);
+  props.settings.agentControlEnabled = false; tree = render();
+  assert.equal(submit().props.disabled, true, "a valid task still requires the orchestration endpoint");
+  submit().props.onClick(); await tick(); tree = render();
+  assert.equal(launches.length, 0); assert.equal(instructions.length, 0);
+  props.settings.agentControlEnabled = true; tree = render();
   submit().props.onClick(); await tick(); tree = render();
   assert.deepEqual(instructions, [["/fixture/project", "review"]]);
   assert.deepEqual(redactions, ["Review the project.\nUser task:\n" + task]);
