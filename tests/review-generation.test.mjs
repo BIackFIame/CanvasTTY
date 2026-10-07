@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {AgentControlService} from '../src/main/services/AgentControlService.ts';
 import {TerminalManager} from '../src/main/services/TerminalManager.ts';
+import {ScopedOrchestrationHandler} from '../src/main/services/agent-browser/OrchestrationTools.ts';
 import {availableRegistry, fakeSpawner} from './helpers/terminal.mjs';
 
 const deferred = () => { let resolve; const promise=new Promise(done=>{resolve=done;}); return {promise,resolve}; };
@@ -30,25 +31,32 @@ async function fixture(t, {account=false} = {}) {
  terminals.configureIsolation({containment:()=>true,
   decide:({profile})=>profile==='plan'?{apply:true,profile,isolation:{state:'on',layer:'seatbelt'}}:{apply:false,profile},
   wrap:launch=>({command:launch.command,args:[...launch.args],env:launch.env,cleanup(){}})});
- const accounts=[];
+ const accounts=[],accountCleanups=[];
  if(account){
   const {LaunchPipeline}=await import('../src/main/services/LaunchPipeline.ts');
-  terminals.configureLaunchPipeline(new LaunchPipeline({
+  const pipeline=new LaunchPipeline({
    contributors:()=>[{pluginId:'canvastty-accounts',pluginName:'Accounts',serviceId:'accounts',secrets:false,
     launch:{fields:[{key:'account',label:'Model account',kind:'text'}],delegable:true}}],
    call:async()=>({env:{FIXTURE_RUN_FILE:'{launchFiles}/fixture.txt'},files:[{relPath:'fixture.txt',content:'fixture account data'}]}),
    secret:async()=>null,runsRoot:join(root,'runs'),timeoutMs:2000
-  }));
+  });
+  const prepareLaunch=pipeline.prepare.bind(pipeline);
+  pipeline.prepare=async input=>{
+   const prepared=await prepareLaunch(input);
+   if(prepared.ok){const cleanup=prepared.cleanup;prepared.cleanup=()=>{const pending=cleanup();accountCleanups.push(pending);return pending;};}
+   return prepared;
+  };
+  terminals.configureLaunchPipeline(pipeline);
   const prepare=terminals.prepareReviewerAccount.bind(terminals);
   terminals.prepareReviewerAccount=async input=>{
    const prepared=await prepare(input),row={id:prepared.id,file:prepared.contribution.env.FIXTURE_RUN_FILE,cleanupCalls:0};
    accounts.push(row);const cleanup=prepared.contribution.cleanup;
-   prepared.contribution.cleanup=async()=>{row.cleanupCalls++;await cleanup();};return prepared;
+   prepared.contribution.cleanup=()=>{row.cleanupCalls++;const pending=cleanup();row.cleanupPromise=pending;return pending;};return prepared;
   };
  }
  const control=new AgentControlService(terminals,{reviewModel:()=> 'fixture-reviewer',reviewDiff:async()=>'+worker scoped fixture',
   waitTiming:{checkMs:1,settleMs:0,quietMs:10_000},onReview:(_id,review)=>reviews.push(review)});
- t.after(async()=>{for(const row of terminals.listMetadata())control.forgetSession(row.id);terminals.disposeAll();await rm(root,{recursive:true,force:true});});
+ t.after(async()=>{for(const row of terminals.listMetadata())control.forgetSession(row.id);terminals.disposeAll();await Promise.all(accountCleanups);await rm(root,{recursive:true,force:true});});
  const parent=terminals.create({provider:'codex',profile:'normal',cwd:root,role:'orchestrator',position:{x:0,y:0}});
  const worker=await control.spawn({parentSessionId:parent.id,provider:'codex',cwd:root,review:true,initialPrompt:'first task',...(account?{launchOptions:{'canvastty-accounts':{account:'fixture-model'}}}:{})});
  const finish=(id,text)=>{terminals.recordAnswer(id,{text,truncated:false});terminals.applyProviderSignal(id,{state:'idle',event:'Stop'},'hook');};
@@ -135,7 +143,8 @@ test('successive successful account reviews release the previous reviewer, priva
  f.finish(first,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
  assert.equal(f.accounts[0].cleanupCalls,0);assert.ok(existsSync(f.accounts[0].file));
  await f.control.send(f.worker.id,'second task');
- await until(()=>!existsSync(f.accounts[0].file));
+ await f.accounts[0].cleanupPromise;
+ assert.equal(existsSync(f.accounts[0].file),false);
  assert.equal(f.terminals.getMetadata(first),null);assert.equal(existsSync(firstWorkspace),false);
  assert.equal(f.control.isReadOnlyReviewer(first),false);assert.equal(f.accounts[0].cleanupCalls,1);
  f.finish(f.worker.id,'second answer');await until(()=>f.prompts.length===2);
@@ -143,7 +152,8 @@ test('successive successful account reviews release the previous reviewer, priva
  f.finish(second,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===2);
  assert.equal(f.terminals.listMetadata().filter(row=>row.title.startsWith('Review:')).length,1);
  f.control.forgetSession(f.worker.id);
- await until(()=>!existsSync(f.accounts[1].file));
+ await f.accounts[1].cleanupPromise;
+ assert.equal(existsSync(f.accounts[1].file),false);
  assert.equal(f.terminals.getMetadata(second),null);assert.equal(existsSync(secondWorkspace),false);
  assert.equal(f.control.isReadOnlyReviewer(second),false);
  assert.deepEqual(f.accounts.map(row=>row.cleanupCalls),[1,1]);
@@ -259,7 +269,7 @@ test('a fresh final answer without a working hook remains reviewable after manua
  const session=f.terminals.sessions.get(f.worker.id);session.process.write=()=>{};
  f.terminals.input(f.worker.id,'quiet provider task\r');
  assert.equal((await f.control.resultWithReview(f.worker.id)).review.status,'pending');
- f.terminals.recordAnswer(f.worker.id,{text:'fresh answer without a working hook',truncated:false});
+ f.terminals.recordAnswer(f.worker.id,{text:'fresh answer without a working hook',truncated:false},{generation:f.terminals.answerCaptureGeneration(f.worker.id)});
  const waiting=f.control.resultWithReview(f.worker.id);await until(()=>f.prompts.length===2);
  assert.match(f.prompts[1].text,/fresh answer without a working hook/u);
  f.finish(f.prompts[1].id,'{"verdict":"accept","findings":"fresh result"}');
@@ -336,4 +346,20 @@ test('manual LF submits a fresh turn, while bracketed paste newlines remain unsu
  assert.equal(early.review.status,'pending');assert.equal(early.answer,undefined);
  f.terminals.applyProviderSignal(f.worker.id,{state:'working'},'hook');f.finish(f.worker.id,'LF submitted answer');
  await until(()=>f.prompts.length===2);assert.match(f.prompts[1].text,/LF submitted answer/u);
+});
+
+
+test('deferred orchestration waits return terminal unavailable for a quiet uncorrelated turn without starting a reviewer',async t=>{
+ const f=await fixture(t);
+ f.finish(f.worker.id,'old answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ f.terminals.sessions.get(f.worker.id).process.write=()=>{};
+ f.control.options.waitTiming.quietMs=10;
+ f.terminals.input(f.worker.id,'silent next task\r');
+ const handler=new ScopedOrchestrationHandler(f.control);
+ for(let i=0;i<2;i++){
+  const result=await handler.execute(f.worker.parentSessionId,{id:String(i),tool:'wait_for_agent',arguments:{sessionId:f.worker.id,timeoutSeconds:1}});
+  assert.equal(result.reason,'quiet');assert.equal(result.review.status,'unavailable');assert.equal(result.answer,undefined);
+ }
+ assert.equal(f.prompts.length,1,'a terminal quiet outcome must not launch a billed review');
 });

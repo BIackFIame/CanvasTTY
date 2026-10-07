@@ -631,8 +631,9 @@ export class AgentControlService {
       const generation = this.reviewGeneration(sessionId);
       if (this.reviewRequested.has(sessionId) && (reason === "idle" || reason === "done" || reason === "failed" || reason === "quiet")) {
         if (request.deferReview) {
-          void this.ensureReview(sessionId);
-          review = this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
+          const readiness = this.reviewReadiness(sessionId, reason === "quiet");
+          if (!readiness) void this.ensureReview(sessionId, reason === "quiet");
+          review = this.reviewWithCost(readiness ?? this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
         } else {
           const result = await this.ensureReview(sessionId, reason === "quiet");
           review = this.reviewWithCost(this.reviewGenerations.get(sessionId) === generation ? result : supersededReview());
@@ -697,7 +698,7 @@ export class AgentControlService {
     try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
   }
 
-  private async ensureReview(sessionId: string, quiet = false): Promise<AgentReviewResult> {
+  private reviewReadiness(sessionId: string, quiet = false): AgentReviewResult | null {
     // An old idle/answer can remain visible until the provider acknowledges the submitted input.
     const progress = this.turnProgress(sessionId);
     if (progress?.promptSent && !progress.turnStartedSincePrompt && !this.answer(sessionId)) {
@@ -705,6 +706,12 @@ export class AgentControlService {
         ? { status: "unavailable", reason: "The provider did not report a new completed turn or final answer after the submitted input.", costUsd: null }
         : { status: "pending", costUsd: null };
     }
+    return null;
+  }
+
+  private async ensureReview(sessionId: string, quiet = false): Promise<AgentReviewResult> {
+    const readiness = this.reviewReadiness(sessionId, quiet);
+    if (readiness) return readiness;
     const generation = this.reviewGeneration(sessionId);
     const cached = this.reviews.get(sessionId);
     if (cached) return cached;

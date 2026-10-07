@@ -135,6 +135,12 @@ interface ManagedSession {
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
   promptTurnMark?: number;
+  /** Last accepted lifecycle state, also maintained when lifecycle UI updates are disabled. */
+  acceptedLifecycleState?: ProviderLifecycleSignal["state"];
+  inputGeneration?: number;
+  answerTurnGeneration?: number;
+  providerTurnId?: string;
+  providerTurnGenerations?: Map<string, number>;
   /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
   answer?: { text: string; truncated: boolean; at: number };
   /**
@@ -1322,6 +1328,7 @@ export class TerminalManager {
     const afterWrite = internal.acknowledgementRetry ? []
       : [...(this.inputWriteObservers.get(id) ?? [])].map(observer => observer(data, submitted));
     if (!internal.acknowledgementRetry && submitted) {
+      if ((session.acceptedLifecycleState ?? session.metadata.status) !== "needs_approval") session.inputGeneration = (session.inputGeneration ?? 0) + 1;
       session.promptTurnMark = mark;
       delete session.answer;
     }
@@ -1400,9 +1407,24 @@ export class TerminalManager {
   }
 
   /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
-  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): void {
+  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): boolean {
     const session = this.sessions.get(id);
-    if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
+    if (!session || session.metadata.status === "done" || session.metadata.status === "failed") return false;
+    let startsProviderTurn = false;
+    if (source === "hook" && session.metadata.provider === "opencode" && signal.requestId) {
+      const turns = session.providerTurnGenerations ??= new Map();
+      const generation = session.inputGeneration ?? 0;
+      const known = turns.get(signal.requestId);
+      const starts = signal.event === "session.status:busy" || signal.event === "session.status:retry";
+      if (known !== undefined && (known !== generation || session.providerTurnId !== signal.requestId)) return false;
+      if (known === undefined) {
+        if (!starts) return false;
+        startsProviderTurn = true;
+        turns.set(signal.requestId, generation);
+        session.providerTurnId = signal.requestId;
+        while (turns.size > 64) turns.delete(turns.keys().next().value!);
+      }
+    }
     if (source === "hook") session.hookSignals = (session.hookSignals ?? 0) + 1;
 
     const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
@@ -1415,24 +1437,40 @@ export class TerminalManager {
 
     const nextStatus = signal.state;
     // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
-    if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
+    if (nextStatus === "working" && (startsProviderTurn || (session.acceptedLifecycleState ?? session.metadata.status) !== "working")) session.turnStarts = (session.turnStarts ?? 0) + 1;
+    session.acceptedLifecycleState = nextStatus;
     // A new turn: the previous answer is no longer this turn's.
-    if (nextStatus === "working") session.answer = undefined;
+    if (nextStatus === "working") { session.answer = undefined; session.answerTurnGeneration = session.inputGeneration ?? 0; }
+    // Result correlation remains active when the user disables lifecycle UI updates.
+    if (!this.lifecycleHooksEnabled) return true;
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
-    if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
+    if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return true;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
+    return true;
+  }
+
+  /** Capture before starting an asynchronous answer read when the source has no provider turn id. */
+  answerCaptureGeneration(id: string): number | null {
+    const session = this.sessions.get(id);
+    return session ? session.inputGeneration ?? 0 : null;
   }
 
   /**
-   * Keeps the final answer a result-capturing session reported with its turn's end (the Codex Stop hook, the OpenCode
-   * plugin's session.idle); read back masked by answer(). In memory only, never saved.
+   * Keeps a final answer only for its current turn/input generation. A no-hook source must pass the token captured
+   * before its asynchronous read; an uncorrelated answer cannot acknowledge a newly submitted prompt.
+   * In memory only, read back masked by answer(), never saved.
    */
-  recordAnswer(id: string, result: { text: string; truncated: boolean }): void {
+  recordAnswer(id: string, result: { text: string; truncated: boolean }, correlation?: { turnId?: string | null; generation?: number }): void {
     const session = this.sessions.get(id);
     if (!session?.captureResult || typeof result?.text !== "string") return;
+    const generation = session.inputGeneration ?? 0;
+    if (correlation?.generation !== undefined && correlation.generation !== generation) return;
+    if (session.metadata.provider === "opencode" && correlation && "turnId" in correlation) {
+      if (!correlation.turnId || correlation.turnId !== session.providerTurnId || session.providerTurnGenerations?.get(correlation.turnId) !== generation) return;
+    } else if (session.promptTurnMark !== undefined && correlation?.generation === undefined && session.answerTurnGeneration !== generation) return;
     session.answer = { text: result.text, truncated: result.truncated === true, at: Date.now() };
   }
 
@@ -2777,6 +2815,11 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.answer;
   delete session.turnStarts;
   delete session.promptTurnMark;
+  session.inputGeneration = (session.inputGeneration ?? 0) + 1;
+  delete session.acceptedLifecycleState;
+  delete session.answerTurnGeneration;
+  delete session.providerTurnId;
+  delete session.providerTurnGenerations;
   delete session.inputBracketedPaste;
   delete session.hookSignals;
   delete session.cliInputReady;
