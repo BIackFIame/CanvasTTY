@@ -213,10 +213,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     this.requireOwned(orchestratorId, target);
     if (signal?.aborted) throw canceledError();
     const created = await this.control.retry(target, args.reason as string | undefined, signal);
-    if (signal?.aborted) {
-      try { this.control.cancel(created.id); } catch { /* already ended */ }
-      throw canceledError();
-    }
+    // Retry owns cancellation cleanup and retains this same card's diagnostic history.
     return { sessionId: created.id, provider: created.provider, title: created.title, profile: created.profile,
       ...(created.model !== undefined ? { model: created.model } : {}), ...(created.effort !== undefined ? { effort: created.effort } : {}) };
   }

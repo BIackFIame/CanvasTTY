@@ -545,6 +545,7 @@ export class AgentControlService {
       throw new DelegationRefusal("retry_agent works only for a failed or quiet subagent; a running agent must finish or be canceled first.");
     }
     const sourceId = this.retryOrigins.get(sessionId) ?? sessionId;
+    if (this.pendingRetries.has(sourceId)) throw new DelegationRefusal("A retry of this agent is already in progress.");
     const count = this.retryCounts.get(sourceId) ?? 0;
     if (count >= MAX_RETRY_COUNT) throw new DelegationRefusal(`This agent has already used its limit of ${MAX_RETRY_COUNT} retries.`);
     const original = this.launchRequests.get(sessionId) ?? this.launchRequests.get(sourceId);
@@ -565,12 +566,23 @@ export class AgentControlService {
     this.pendingRetries.set(sourceId, (this.pendingRetries.get(sourceId) ?? 0) + 1);
     try {
       if (signal?.aborted) throw spawnCanceled();
-      const retried = await this.spawn({
-        ...original,
-        parentSessionId: session.parentSessionId ?? original.parentSessionId,
-        initialPrompt: retryPrompt,
-        title: `${session.title} (retry ${count + 1})`.slice(0, 80)
-      }, signal);
+      const parentId = session.parentSessionId ?? original.parentSessionId;
+      const validate = (): void => {
+        const parent = this.requireSession(parentId);
+        const taskScope = this.taskRoot(parentId);
+        const cwd = subagentFolder(taskScope.cwd, parent.cwd, session.cwd);
+        if ("error" in cwd) throw new DelegationRefusal(cwd.error);
+        const profile = subagentProfile(parent.profile, session.provider as AgentProviderId, session.profile, this.containment());
+        if ("error" in profile) throw new DelegationRefusal(profile.error);
+        if (profile.profile !== session.profile) throw new DelegationRefusal("The original launch profile is no longer allowed; choose a new agent with an allowed profile.");
+        this.requireBudgetActive(parentId);
+        // This replaces the same card, and the manager waits for its old PTY to exit before starting a successor.
+        this.assertSpawnCapacity(parentId, sessionId);
+      };
+      validate();
+      const retried = await this.terminals.retryAgentLaunch(sessionId, retryPrompt, validate, signal, () => this.invalidateReview(sessionId));
+      this.retryableQuiet.delete(sessionId);
+      this.scheduleReview(sessionId);
       this.retryOrigins.set(retried.id, sourceId);
       // Each attempt starts from the original request, with only this attempt's masked failure context appended.
       this.launchRequests.set(retried.id, original);

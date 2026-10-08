@@ -66,7 +66,7 @@ test("task board tools are visible to subagents without granting spawn tools", a
   await assert.rejects(handler.execute(reviewer.id, { id: "review-call", tool: "list_tasks", arguments: {} }), /Read-only reviewers cannot call/u);
 });
 
-test("session cleanup preserves the retry allowance while a replacement remains live; parallel retry requests reserve it before launching", async (t) => {
+test("same-card retries retain their finite allowance and concurrent requests create only one successor", async (t) => {
   const root = await temp(t, "ctty-retry-cleanup-");
   const { terminals, calls } = manager(t);
   const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator" });
@@ -76,11 +76,8 @@ test("session cleanup preserves the retry allowance while a replacement remains 
   await assert.rejects(control.retry(original.id), /running agent must finish or be canceled/u);
   originalProcess.emitExit(1);
   const firstRetry = await control.retry(original.id);
-  originalProcess.emitExit(1);
+  assert.equal(firstRetry.id, original.id);
   calls.at(-1).process.emitExit(1);
-
-  terminals.dispose(original.id);
-  control.forgetSession(original.id);
   const secondRetry = await control.retry(firstRetry.id);
   calls.at(-1).process.emitExit(1);
   await assert.rejects(control.retry(secondRetry.id), /limit of 2 retries/u);
@@ -88,8 +85,8 @@ test("session cleanup preserves the retry allowance while a replacement remains 
   const parallelOriginal = await control.spawn({ parentSessionId: orchestrator.id, provider: "opencode", cwd: root });
   calls.at(-1).process.emitExit(1);
   const attempts = await Promise.allSettled(Array.from({ length: 4 }, () => control.retry(parallelOriginal.id)));
-  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 2);
-  for (const attempt of attempts.filter((attempt) => attempt.status === "rejected")) assert.match(attempt.reason.message, /limit of 2 retries/u);
+  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
+  for (const attempt of attempts.filter((attempt) => attempt.status === "rejected")) assert.match(attempt.reason.message, /retry of this agent is already in progress/u);
 });
 
 test("duration budget trips once and blocks input to the root without killing its PTY", async (t) => {
