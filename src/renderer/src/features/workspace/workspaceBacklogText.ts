@@ -12,7 +12,7 @@ export type BacklogTextKey =
   | "noPresets"
   | "contextPreview" | "contextPreviewDescription" | "contextFiles" | "contextOutsideWarning" | "contextAllowOutside"
   | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
-  | "broadcastPlaceholder" | "broadcastSend" | "contextFailed"
+  | "broadcastPlaceholder" | "broadcastSend" | "broadcastFailed" | "contextFailed"
   | "historicalOutput" | "historicalOutputContext" | "historicalOutputLoading" | "outputHistoryPruned"
   | "tabTasks" | "tabBudget" | "taskBoard" | "taskTitle" | "taskDescription" | "taskDependencies" | "taskOwner"
   | "unassigned" | "addTask" | "noTasks" | "closeTask" | "taskOpen" | "taskClaimed" | "taskDone" | "taskClosed"
@@ -56,6 +56,7 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   contextEditablePreview: ["Текст, который получит агент", "Text the agent will receive"], contextConfirmSend: ["Подтвердить и вставить", "Confirm and paste"],
   searchOutput: ["Вывод терминалов", "Terminal output"], outputLine: ["строка", "line"],
   broadcastPlaceholder: ["Команда для выбранных карточек…", "Prompt for selected cards…"],
+  broadcastFailed: ["Не удалось отправить сообщение всем выбранным карточкам.", "Could not deliver the message to every selected card."],
   broadcastSend: ["Отправить всем", "Send to all"], contextFailed: ["Не удалось подготовить предпросмотр. Ничего не отправлено.", "Could not prepare the preview. Nothing was sent."],
   historicalOutput: ["Исторический вывод терминала", "Historical terminal output"],
   historicalOutputContext: ["Показан маскированный контекст найденной строки.", "This masked excerpt shows the matched historical line."],

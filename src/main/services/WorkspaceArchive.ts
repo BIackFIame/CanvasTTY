@@ -2,6 +2,8 @@ import { mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { CreateSessionRequest, SessionSnapshot } from "../../shared/contracts.ts";
 import type { WorkspacePreset } from "../../shared/backlog.ts";
+import { normalizeImportedTasks } from "./OrchestrationTaskBoard.ts";
+import { normalizeCanvasRegions, normalizeStickyNotes, normalizeBrowserCanvas } from "./SettingsStore.ts";
 import { normalizePersistedTerminalSessions, type PersistedTerminalSession } from "./TerminalSessionStore.ts";
 
 function validPresetName(value: unknown): value is string {
@@ -65,6 +67,7 @@ export class WorkspaceArchive {
     for (const record of records) {
       if (!this.deps.available(record.provider)) warnings.push(`${record.title}: ${record.provider} CLI is unavailable.`);
       if (!await stat(record.cwd).then((entry) => entry.isDirectory()).catch(() => false)) warnings.push(`${record.title}: folder is missing (${record.cwd}).`);
+      if (record.environmentChoice || record.options) warnings.push(`${record.title}: imported plugin launcher and account choices are not applied; reselect them in the launcher.`);
       if (record.environment) warnings.push(`${record.title}: saved ${record.environment.pluginId} environment needs to be reconnected; this card will be skipped.`);
       if (record.profile === "yolo") warnings.push(`${record.title}: Bypass requires confirmation.`);
     }
@@ -88,9 +91,7 @@ export class WorkspaceArchive {
           position: record.position, title: record.title, role: record.role,
           ...(record.parentSessionId ? {parentSessionId:idMap.get(record.parentSessionId)!} : {}),
           ...(record.threadId ? {resumeThreadId:record.threadId} : {}),
-          ...(record.model ? {model:record.model} : {}), ...(record.effort ? {effort:record.effort} : {}),
-          ...(record.environmentChoice ? {environment:record.environmentChoice} : {}),
-          ...(record.options ? {launchOptions:record.options as CreateSessionRequest["launchOptions"]} : {})});
+          ...(record.model ? {model:record.model} : {}), ...(record.effort ? {effort:record.effort} : {})});
         this.deps.setBounds(created.id, {position:record.position,size:record.size});
         idMap.set(record.id,created.id); sessions.push({...created,size:record.size});
       } catch (error) { warnings.push(`${record.title}: ${error instanceof Error ? error.message : "could not be opened"}`); }
@@ -146,7 +147,26 @@ export class WorkspaceArchive {
     await writeFile(`${this.file}.tmp`,JSON.stringify(rows),{mode:0o600}); await rename(`${this.file}.tmp`,this.file);
   }
   private freshSnapshot(text:string):string {
-    const sessions=this.parse(text).map(({threadId:_threadId,...record})=>record);
-    return JSON.stringify({format:"canvastty-workspace",version:1,sessions});
+    const sessions=this.parse(text).map(({threadId:_threadId,environmentChoice:_choice,options:_options,...record})=>record);
+    const source=JSON.parse(text) as Record<string,unknown>;
+    const sessionIds=Object.fromEntries(sessions.map(row=>[row.id,row.id]));
+    let tasks;
+    if(source.tasks!==undefined) {
+      if(!Array.isArray(source.tasks) || source.tasks.length>100)throw new Error("Invalid workspace task groups.");
+      tasks=source.tasks.map(group=>{
+        if(!group || typeof group.rootSessionId!=="string" || !Object.hasOwn(sessionIds,group.rootSessionId))throw new Error("Invalid workspace task group root.");
+        return {rootSessionId:group.rootSessionId,tasks:normalizeImportedTasks(group.tasks,group.rootSessionId,sessionIds,id=>id)};
+      });
+    }
+    let canvas;
+    if(source.canvas!==undefined) {
+      if(!source.canvas || typeof source.canvas!=="object" || Array.isArray(source.canvas))throw new Error("Invalid workspace canvas.");
+      const value=source.canvas as Record<string,unknown>;
+      if(value.version!==1)throw new Error("Unsupported workspace canvas version.");
+      canvas={version:1,canvasRegions:normalizeCanvasRegions(value.canvasRegions),stickyNotes:normalizeStickyNotes(value.stickyNotes),
+        browserCanvas:normalizeBrowserCanvas(value.browserCanvas,null)};
+    }
+    return JSON.stringify(this.sanitize({format:"canvastty-workspace",version:1,sessions,
+      ...(tasks!==undefined?{tasks}:{}),...(canvas!==undefined?{canvas}:{})}));
   }
 }

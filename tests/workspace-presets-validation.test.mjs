@@ -60,3 +60,69 @@ test("one invalid saved workspace preset is isolated from valid presets", async 
   await archive.deletePreset("daily");
   assert.deepEqual((await archive.presets()).map(({ id }) => id), ["review", "new"]);
 });
+
+
+test("portable imports never authorize plugin launcher or account choices, including saved presets", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "ctty-portable-choices-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const created = [];
+  const archive = new WorkspaceArchive(directory, {
+    descriptors: () => [], create: request => { created.push(request); return { ...request, id: `new-${created.length}` }; },
+    setBounds() {}, available: () => true, redact: text => text,
+  });
+  const value = snapshot(directory, "source", {
+    environmentChoice: { pluginId: "example.native", kind: "remote", config: { host: "example.test" } },
+    options: { "example.native": { account: "private-account" } },
+    model: "model-name", effort: "high", threadId: "11111111-1111-4111-8111-111111111111",
+  });
+  const preview = await archive.preview(value);
+  await archive.import(value, false);
+  assert.equal(created[0].environment, undefined);
+  assert.equal(created[0].launchOptions, undefined);
+  assert.match(preview.warnings.join(" "), /reselect.*launcher/);
+  assert.equal(created[0].resumeThreadId, "11111111-1111-4111-8111-111111111111");
+  assert.equal(created[0].model, "model-name");
+  assert.equal(created[0].effort, "high");
+  await archive.savePreset({ id: "portable", name: "Portable", snapshot: value });
+  await archive.import((await archive.presets())[0].snapshot, false);
+  assert.equal(created[1].environment, undefined);
+  assert.equal(created[1].launchOptions, undefined);
+  assert.equal(created[1].resumeThreadId, undefined);
+});
+
+
+test("preset metadata is canonically normalized, whitelisted and redacted across reload", async t => {
+  const directory = await mkdtemp(join(tmpdir(), "ctty-preset-metadata-"));
+  t.after(() => rm(directory, {recursive: true, force: true}));
+  const deps = {descriptors: () => [], create() {}, setBounds() {}, available: () => true,
+    redact: text => text.replaceAll("fixture-private", "<redacted>")};
+  const archive = new WorkspaceArchive(directory, deps);
+  const value = JSON.parse(snapshot(directory, "root"));
+  value.tasks = [{rootSessionId: "root", tasks: [{id: "task", rootSessionId: "root", title: "fixture-private task",
+    description: "fixture-private", progress: "", ownerSessionId: "root", ownerName: "Root", status: "claimed",
+    dependencies: [], result: null, createdBySessionId: "root", createdAt: 1, updatedAt: 2,
+    arbitraryExecutable: "must not persist"}]}];
+  value.canvas = {version: 1,
+    canvasRegions: [{id: "region", title: "fixture-private lane", color: "#abcdef", position: {x: 1, y: 2}, size: {width: 1, height: 1}, dangerous: true}],
+    stickyNotes: [{id: "note", text: "fixture-private note", position: {x: 3, y: 4}, size: {width: 320, height: 220}}, {id: "bad"}],
+    browserCanvas: {position: {x: 5, y: 6}, size: {width: 900, height: 620}, url: "must not persist"},
+    plugins: {trust: true}};
+  value.nativeTrust = true;
+  await archive.savePreset({id: "metadata", name: "Metadata", snapshot: JSON.stringify(value)});
+  const saved = (await new WorkspaceArchive(directory, deps).presets())[0].snapshot;
+  assert.doesNotMatch(saved, /fixture-private|must not persist|dangerous|nativeTrust|plugins/);
+  const result = JSON.parse(saved);
+  assert.ok(Array.isArray(result.tasks), "saved preset retains its task board");
+  assert.ok(result.canvas, "saved preset retains its canvas");
+  assert.equal(result.tasks[0].tasks[0].title, "<redacted> task");
+  assert.equal(result.canvas.canvasRegions[0].color, "#ABCDEF");
+  assert.deepEqual(result.canvas.canvasRegions[0].size, {width: 360, height: 240});
+  assert.equal(result.canvas.stickyNotes.length, 1);
+  assert.equal(result.canvas.stickyNotes[0].text, "<redacted> note");
+  for (const malformed of [
+    {...value, tasks: [{rootSessionId: "missing", tasks: []}]},
+    {...value, tasks: [{rootSessionId: "root", tasks: [{...value.tasks[0].tasks[0], dependencies: ["missing"]}]}]},
+    {...value, canvas: {...value.canvas, version: 99}},
+  ]) assert.throws(() => archive.savePreset({id: "bad", name: "Bad", snapshot: JSON.stringify(malformed)}));
+  assert.equal((await archive.presets()).length, 1);
+});

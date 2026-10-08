@@ -850,19 +850,26 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     setContextPreview(null);
   };
   const sendBroadcast = useCallback(async (text: string): Promise<void> => {
-    if(!broadcastEnabled)return;
     const message = text.trim();
-    if (!message || broadcastTargets.length === 0) return;
+    if (!broadcastEnabled || !message || broadcastTargets.length === 0) {
+      throw new Error(backlogText(settings.locale,"broadcastFailed"));
+    }
     setBroadcastSending(true);
     try {
       const result=await window.canvasTTY.backlog.broadcast(broadcastTargets.map(session=>session.id),message);
-      if(!result.delivered.length)setContextDropError(backlogText(settings.locale,"contextFailed"));
-    } catch {
-      setContextDropError(backlogText(settings.locale,"contextFailed"));
+      const delivered=new Set(result.delivered);
+      const skipped=broadcastTargets.filter(session=>!delivered.has(session.id) || result.skipped.includes(session.id));
+      if(skipped.length || result.skipped.length) {
+        const labels=skipped.map(session=>session.title || session.id);
+        for(const id of result.skipped)if(!skipped.some(session=>session.id===id))labels.push(id);
+        throw new Error(`${backlogText(settings.locale,"broadcastFailed")}: ${labels.join(", ")}`);
+      }
     } finally {
+      // The dialog owns the visible error and retains its draft on rejection.
       setBroadcastSending(false);
     }
   }, [broadcastEnabled,broadcastTargets,settings.locale]);
+
   const animateLayout = useCallback((): void => {
     setLayoutAnimating(true);
     if (layoutAnimationTimer.current !== null) window.clearTimeout(layoutAnimationTimer.current);

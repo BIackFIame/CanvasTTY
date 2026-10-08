@@ -400,8 +400,8 @@ function TerminalCardView({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatches, setSearchMatches] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
-  const externalSearchRequestRef = useRef(externalSearchRequest);
-  externalSearchRequestRef.current = externalSearchRequest;
+  const historicalRequestEpoch = useRef(0);
+  const historicalSearchActive = useRef(false);
   const searchQueryRef = useRef(searchQuery);
   searchQueryRef.current = searchQuery;
   const [historicalOutput, setHistoricalOutput] = useState<{
@@ -751,24 +751,11 @@ function TerminalCardView({
     markBootOnce("restoredTerminalInteractive");
     const titleChange = terminal.onTitleChange((title) => setOscTitle(title.trim() ? title : null));
     const searchResults = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+      if (historicalSearchActive.current) return;
       setSearchMatches({
         current: resultCount > 0 && resultIndex >= 0 ? resultIndex + 1 : 0,
         total: resultCount
       });
-      const requested = externalSearchRequestRef.current;
-      if (resultCount > 0) {
-        setHistoricalOutput(null);
-      } else if (requested && searchQueryRef.current === requested.query) {
-        setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: true });
-        void backlogTerminalApi().readOutputContext(session.id, requested.offset).then((context) => {
-          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
-          setHistoricalOutput({ ...context, loading: false });
-        }).catch((reason: unknown) => {
-          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
-          setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: false,
-            error: reason instanceof Error ? reason.message : String(reason) });
-        });
-      }
     });
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
@@ -1114,6 +1101,8 @@ function TerminalCardView({
   };
 
   const runSearch = (query: string, direction: "next" | "previous", incremental: boolean): void => {
+    historicalRequestEpoch.current += 1;
+    historicalSearchActive.current = false;
     const addon = searchAddonRef.current;
     searchQueryRef.current = query;
     setSearchQuery(query);
@@ -1130,16 +1119,33 @@ function TerminalCardView({
   };
 
   useEffect(() => {
-    if (!externalSearchRequest || summaryMode) return;
-    searchQueryRef.current = externalSearchRequest.query;
+    const epoch = ++historicalRequestEpoch.current;
+    historicalSearchActive.current = false;
     setHistoricalOutput(null);
+    if (!externalSearchRequest || summaryMode) return;
+    const requested = externalSearchRequest;
+    historicalSearchActive.current = true;
+    searchQueryRef.current = requested.query;
     setSearchOpen(true);
-    setSearchQuery(externalSearchRequest.query);
-    searchAddonRef.current?.findNext(externalSearchRequest.query, { decorations: SEARCH_DECORATIONS });
+    setSearchQuery(requested.query);
+    setSearchMatches({ current: 0, total: 0 });
+    searchAddonRef.current?.clearDecorations();
+    setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: true });
+    // A text match in xterm is not the selected occurrence in retained history.
+    void backlogTerminalApi().readOutputContext(session.id, requested.offset).then(context => {
+      if (historicalRequestEpoch.current === epoch) setHistoricalOutput({ ...context, loading: false });
+    }).catch((reason: unknown) => {
+      if (historicalRequestEpoch.current !== epoch) return;
+      setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: false,
+        error: reason instanceof Error ? reason.message : String(reason) });
+    });
     terminalRef.current?.focus();
-  }, [externalSearchRequest, summaryMode]);
+    return () => { historicalRequestEpoch.current += 1; historicalSearchActive.current = false; };
+  }, [externalSearchRequest, summaryMode, session.id]);
 
   const closeSearch = (): void => {
+    historicalRequestEpoch.current += 1;
+    historicalSearchActive.current = false;
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMatches({ current: 0, total: 0 });
