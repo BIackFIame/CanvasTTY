@@ -676,6 +676,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }
         if(signal.state !== "working" && signal.state !== "needs_approval")checkpointTurns.delete(terminalSessionId);
         if (signal.state === "idle") secretGrants?.turnEnded(terminalSessionId);
+        else secretGrants?.revalidateTurn(terminalSessionId);
         // The answer belongs to the accepted provider turn and its host-submitted input generation.
         if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
         void timeline.append(terminalSessionId,"lifecycle",signal.event ?? signal.state,undefined,"provider-hook").catch(console.warn);
@@ -742,6 +743,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     const claudeHttpHookPolicy = new ClaudeHttpHookPolicy();
     agentRuntimeBridge = new AgentRuntimeBridge(runtimeGateway, {
       helper: agentRuntimeHelper,
+      onTurnAuthorityChanged: id => secretGrants?.revalidateTurn(id),
       runtimeDirectory: lifecycleRuntimeDirectory,
       openCodePluginPath,
       hermesHomeDirectory,
@@ -936,6 +938,15 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   secretGrants = new SecretGrantService({
     getSecret: id => providerSecretsService!.get(id),
     getApiProfiles: () => settings.get().apiProfiles,
+    getTurnIdentity: id => {
+      const turn = agentRuntimeBridge?.currentTurnIdentity(id);
+      const generation = managedTerminals.observedTurnGeneration(id);
+      return turn && generation !== null ? `${turn}:${generation}` : null;
+    },
+    watchTurn: (id, changed) => managedTerminals.observeInputWrites(id, () => {
+      const generation = managedTerminals.answerCaptureGeneration(id);
+      return () => { if (generation !== managedTerminals.answerCaptureGeneration(id)) changed(); };
+    }),
     getSession: id => {
       const context = managedTerminals.pluginContext(id);
       if (!context || context.environment && context.environment.kind !== "worktree") return null;

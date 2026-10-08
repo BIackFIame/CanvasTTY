@@ -96,6 +96,8 @@ export interface ProviderRuntimeLaunchOptions {
 }
 
 export interface PreparedProviderRuntimeLaunch {
+  /** This prepared configuration installs a per-turn completion event (not merely session end). */
+  turnCompletion?: boolean;
   args: string[];
   environment: Record<string, string>;
   releaseConfiguration(): void;
@@ -209,10 +211,10 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], environment);
     }
     if (provider === "claude") {
-      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, claudeHttpHookBase), environment);
+      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, claudeHttpHookBase), environment, undefined, coreHooksEnabled);
     }
     if (provider === "codex") {
-      return prepared(codexHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, resultHooks), environment);
+      return prepared(codexHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, resultHooks), environment, undefined, coreHooksEnabled);
     }
     if (provider === "qwen") {
       const path = createQwenHookSettings({
@@ -224,7 +226,7 @@ export class ProviderRuntimeLaunchAdapters {
         coreHooksEnabled,
         pluginCommands
       });
-      return prepared([], { ...environment, [QWEN_SYSTEM_SETTINGS]: path }, () => unlinkIfExists(path));
+      return prepared([], { ...environment, [QWEN_SYSTEM_SETTINGS]: path }, () => unlinkIfExists(path), coreHooksEnabled);
     }
     if (provider === "opencode") {
       const pluginEnvironment = this.openCodePluginEnvironment(
@@ -239,20 +241,20 @@ export class ProviderRuntimeLaunchAdapters {
           this.environment[OPENCODE_CONFIG_CONTENT],
           this.options.openCodePluginPath
         )
-      });
+      }, undefined, coreHooksEnabled);
     }
     if (provider === "omp" || provider === "pi") {
       return prepared(coreHooksEnabled
         ? ["--extension", join(dirname(this.options.openCodePluginPath), "omp-extension.mjs")]
-        : [], environment);
+        : [], environment, undefined, coreHooksEnabled);
     }
     if (provider === "kimi") {
-      return prepared([], environment, this.acquireKimi(coreHooksEnabled, pluginCommands));
+      return prepared([], environment, this.acquireKimi(coreHooksEnabled, pluginCommands), coreHooksEnabled);
     }
     if (provider === "hermes") {
       return prepared([], environment, this.acquireHermes(coreHooksEnabled, pluginCommands));
     }
-    if (provider === "grok") return prepared([], environment, this.acquireGrok(coreHooksEnabled, pluginCommands));
+    if (provider === "grok") return prepared([], environment, this.acquireGrok(coreHooksEnabled, pluginCommands), coreHooksEnabled);
     return prepared([], environment);
   }
 
@@ -1181,9 +1183,10 @@ function tomlString(value: string): string {
 function prepared(
   args: string[],
   environment: Record<string, string>,
-  cleanup: () => void = () => undefined
+  cleanup: () => void = () => undefined,
+  turnCompletion = false
 ): PreparedProviderRuntimeLaunch {
-  return { args, environment, releaseConfiguration: once(cleanup) };
+  return { args, environment, ...(turnCompletion ? { turnCompletion: true } : {}), releaseConfiguration: once(cleanup) };
 }
 
 function once(action: () => void): () => void {

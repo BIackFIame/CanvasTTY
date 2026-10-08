@@ -23,13 +23,13 @@ export function SecretGrantsPanel({ sessionId, sessions, locale, onError }: Secr
   const text = locale === "ru" ? {
     title: "Доступ к ключам провайдеров", note: "Ключи используются только для изолированных запросов к API выбранного профиля. Они не показываются и не вставляются в сообщения.",
     pending: "Ожидают решения", grants: "Разрешения", noRequests: "Запросов на доступ нет.", noGrants: "Активных разрешений нет.",
-    reason: "Причина", session: "Карточка", approve10m: "10 минут", approveTurn: "До конца хода", approveSession: "До закрытия карточки",
+    reason: "Причина", session: "Карточка", approve10m: "10 минут", approveTurn: "До конца хода", turnUnavailable: "Этот запуск не отслеживает завершение текущего хода или ход уже сменился.", approveSession: "До закрытия карточки",
     deny: "Отклонить", revoke: "Отозвать", approved: "Доступ разрешён", expires: "Истекает", turn: "до конца хода", sessionGrant: "до закрытия карточки",
     expired: "истёк", loading: "Загрузка…", refresh: "Обновить"
   } : {
     title: "Provider secret access", note: "Keys are used only for isolated API requests to a selected profile. Values are never shown or pasted into messages.",
     pending: "Pending requests", grants: "Active grants", noRequests: "No access requests.", noGrants: "No active grants.",
-    reason: "Reason", session: "Card", approve10m: "10 minutes", approveTurn: "Until this turn ends", approveSession: "Until card closes",
+    reason: "Reason", session: "Card", approve10m: "10 minutes", approveTurn: "Until this turn ends", turnUnavailable: "This launch cannot track the current turn ending, or the turn has changed.", approveSession: "Until card closes",
     deny: "Deny", revoke: "Revoke", approved: "Access approved", expires: "Expires", turn: "until turn ends", sessionGrant: "until card closes",
     expired: "expired", loading: "Loading…", refresh: "Refresh"
   };
@@ -103,7 +103,7 @@ export function SecretGrantsPanel({ sessionId, sessions, locale, onError }: Secr
             <p>{text.reason}: {request.reason}</p><time>{new Date(request.createdAt).toLocaleString(locale)}</time></div>
           <div className="backlog-secret-grants__actions">
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "10m")}>{text.approve10m}</button>
-            <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "turn")}>{text.approveTurn}</button>
+            <button type="button" disabled={busyId === request.id || !request.turnAvailable} title={request.turnAvailable ? undefined : text.turnUnavailable} onClick={() => void decide(request, "turn")}>{text.approveTurn}</button>
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "session")}>{text.approveSession}</button>
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, null)}>{text.deny}</button>
           </div>

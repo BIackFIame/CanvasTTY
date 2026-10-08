@@ -192,6 +192,62 @@ test("allowlist proxy authenticates each launch, enforces domains, and pins DNS 
   }
 });
 
+test("allowlist proxy grants domain descendants, preserves wildcard roots, and rejects deceptive suffixes", { timeout: 15_000 }, async (t) => {
+  const sockets = new Set();
+  const trackSocket = (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); };
+  const targetServer = createNetServer(trackSocket);
+  const target = await listen(targetServer, 0, "127.0.0.1");
+  let dnsCalls = 0;
+  let dialCalls = 0;
+  const { manager, base } = policyManager(t, {
+    // Exercise the actual TCP proxy on every OS; no native sandbox or public connection is involved.
+    platform: "darwin",
+    resolveAddress: async () => { dnsCalls += 1; return "93.184.216.34"; },
+    openConnection: (address, port) => {
+      assert.equal(address, "93.184.216.34");
+      assert.equal(port, 443);
+      dialCalls += 1;
+      return createConnection({ host: "127.0.0.1", port: target.port });
+    }
+  });
+  const project = join(base, "descendant-project");
+  mkdirSync(project);
+  manager.setProjectPolicy(project, {
+    mode: "allowed-domains", providerApis: false, packageRegistries: false,
+    domains: ["ALLOWED.example.", "*.wild.example", "bücher.example"]
+  });
+  await manager.start();
+  const launch = manager.prepareLaunch(project, "codex");
+  const check = async (grant, host, status) => {
+    const before = dnsCalls;
+    const result = await connectThroughProxy(grant, host, 443, grant.token, trackSocket);
+    assert.equal(result.status, status, host);
+    result.socket?.destroy();
+    assert.equal(dnsCalls - before, status === 200 ? 1 : 0, `${host}: denied domains never reach DNS`);
+  };
+  try {
+    for (const host of ["allowed.example", "api.allowed.example", "deep.api.allowed.example", "API.ALLOWED.EXAMPLE.",
+      "child.wild.example", "deep.child.wild.example", "api.xn--bcher-kva.example"]) await check(launch, host, 200);
+    for (const host of ["notallowed.example", "allowed.example.attacker.test", "wild.example", "notwild.example", "child.wild.example.attacker.test"])
+      await check(launch, host, 403);
+    const beforeHttp = dnsCalls;
+    assert.equal(await httpThroughProxy(launch, "http://allowed.example.attacker.test/"), 403);
+    assert.equal(dnsCalls, beforeHttp, "forwarded HTTP applies the same domain boundary");
+    manager.setProjectPolicy(project, { mode: "allowed-domains", providerApis: true, packageRegistries: false, domains: [] });
+    const providerLaunch = manager.prepareLaunch(project, "antigravity");
+    try {
+      for (const host of ["googleapis.com", "generativelanguage.googleapis.com"]) await check(providerLaunch, host, 200);
+      await check(providerLaunch, "googleapis.com.attacker.test", 403);
+      await check(providerLaunch, "notgoogleapis.com", 403);
+    } finally { providerLaunch.cleanup(); }
+    assert.equal(dialCalls, 9, "only the nine allowed DNS-pinned destinations reached the fake upstream");
+  } finally {
+    launch.cleanup();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => targetServer.close(resolve));
+  }
+});
+
 test("Linux network arguments create a private network namespace and expose only the Unix proxy socket", () => {
   const paths = emptyIsolationPaths();
   const socket = "/tmp/ctty-proxy-test.sock";

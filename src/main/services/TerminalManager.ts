@@ -1657,6 +1657,16 @@ export class TerminalManager {
     return session?.captureResult ? session.acceptedLifecycleState ?? null : null;
   }
 
+  /** Host-only turn authority: accepted working/approval state for this input generation, on a live PTY. */
+  observedTurnGeneration(id: string): number | null {
+    const session = this.sessions.get(id);
+    if (!session?.process || session.metadata.exitCode !== null || session.metadata.status === "failed"
+      || session.metadata.status === "done" || this.isCheckpointRestoreActive(id)
+      || !["working", "needs_approval"].includes(session.acceptedLifecycleState ?? "")) return null;
+    const generation = session.inputGeneration ?? 0;
+    return session.answerTurnGeneration === generation ? generation : null;
+  }
+
   /** Capture before starting an asynchronous answer read when the source has no provider turn id. */
   answerCaptureGeneration(id: string): number | null {
     const session = this.sessions.get(id);

@@ -31,6 +31,7 @@ export interface SecretRequestSnapshot {
   reason: string;
   createdAt: number;
   expiresAt: number;
+  turnAvailable: boolean;
 }
 
 export interface SecretGrantSnapshot {
@@ -68,6 +69,10 @@ export interface SecretGrantServiceOptions {
   getSecret(secretId: ProviderSecretId): Promise<string | null>;
   /** Resolve trusted session metadata from the host, never from tool arguments. */
   getSession(sessionId: string): SecretCommandSession | null;
+  /** Current trusted launch/turn/input identity, or null when this launch cannot observe turn completion. */
+  getTurnIdentity?(sessionId: string): string | null;
+  /** Notify after host input changes the captured turn; callbacks never carry secret material. */
+  watchTurn?(sessionId: string, changed: () => void): () => void;
   /** Human-owned profiles only. API origins are never accepted from agent tool arguments. */
   getApiProfiles?(): readonly ApiProfile[];
   /** Must execute the fixed host-owned API helper inside the host's approved isolation boundary. */
@@ -82,8 +87,8 @@ export interface SecretGrantServiceOptions {
   now?: () => number;
 }
 
-interface PendingRequest extends SecretRequestSnapshot {}
-interface Grant extends SecretGrantSnapshot { expiresAt: number | null; }
+interface PendingRequest extends Omit<SecretRequestSnapshot, "turnAvailable"> { turnIdentity: string | null; }
+interface Grant extends SecretGrantSnapshot { expiresAt: number | null; turnIdentity: string | null; }
 
 /**
  * Host-owned, memory-only grants for using a provider secret in one isolated provider API request.
@@ -94,6 +99,7 @@ export class SecretGrantService {
   private readonly options: SecretGrantServiceOptions;
   private readonly pendingRequests = new Map<string, PendingRequest>();
   private readonly grants = new Map<string, Grant>();
+  private readonly turnWatches = new Map<string, () => void>();
   private readonly activeRuns = new Set<{ sessionId: string; secretIds: Set<ProviderSecretId>; controller: AbortController }>();
 
   constructor(options: SecretGrantServiceOptions) {
@@ -109,7 +115,7 @@ export class SecretGrantService {
     }
     this.pruneExpired();
     const duplicate = [...this.pendingRequests.values()].find((item) => item.sessionId === sessionId && item.secretId === secretId);
-    if (duplicate) return { ...duplicate };
+    if (duplicate) return this.requestSnapshot(duplicate);
     const now = this.now();
     const request: PendingRequest = {
       id: randomUUID(),
@@ -117,11 +123,15 @@ export class SecretGrantService {
       secretId,
       reason: this.mask(reason.trim()).slice(0, MAX_REASON_CHARS),
       createdAt: now,
-      expiresAt: now + REQUEST_TTL_MS
+      expiresAt: now + REQUEST_TTL_MS,
+      turnIdentity: this.currentTurn(sessionId)
     };
     this.pendingRequests.set(request.id, request);
-    this.emit(() => this.options.onRequest?.({ ...request }));
-    return { ...request };
+    if (!this.turnWatches.has(sessionId) && this.options.watchTurn) {
+      this.turnWatches.set(sessionId, this.options.watchTurn(sessionId, () => this.revalidateTurn(sessionId)));
+    }
+    this.emit(() => this.options.onRequest?.(this.requestSnapshot(request)));
+    return this.requestSnapshot(request);
   }
 
   /** Safe for a human-facing UI; secret values are never included. */
@@ -131,7 +141,7 @@ export class SecretGrantService {
     return [...this.pendingRequests.values()]
       .filter((item) => !allowed || allowed.has(item.sessionId))
       .sort((a, b) => a.createdAt - b.createdAt)
-      .map((item) => ({ ...item }));
+      .map((item) => this.requestSnapshot(item));
   }
 
   /** Safe for a human-facing UI; grants contain metadata only, never key material. */
@@ -141,7 +151,7 @@ export class SecretGrantService {
     return [...this.grants.values()]
       .filter((item) => !allowed || allowed.has(item.sessionId))
       .sort((a, b) => a.approvedAt - b.approvedAt)
-      .map((item) => ({ ...item }));
+      .map((item) => this.grantSnapshot(item));
   }
 
   /** UI-only. Call only after the person explicitly approves the pending request. */
@@ -152,18 +162,22 @@ export class SecretGrantService {
     if (!request) throw new Error("Secret request expired or is no longer pending.");
     const session = this.activeSession(request.sessionId);
     if (session.provider === "terminal") throw new Error("Provider secrets are available to agent sessions only.");
+    if (duration === "turn" && (!request.turnIdentity || request.turnIdentity !== this.currentTurn(request.sessionId))) {
+      throw new Error("Turn-scoped approval is unavailable for this launch or the requested turn has ended.");
+    }
     const now = this.now();
     const grant: Grant = {
       sessionId: request.sessionId,
       secretId: request.secretId,
       duration,
       approvedAt: now,
-      expiresAt: duration === "10m" ? now + TEN_MINUTES_MS : null
+      expiresAt: duration === "10m" ? now + TEN_MINUTES_MS : null,
+      turnIdentity: duration === "turn" ? request.turnIdentity : null
     };
     this.pendingRequests.delete(request.id);
     this.grants.set(grantKey(request.sessionId, request.secretId), grant);
-    this.emit(() => this.options.onDecision?.({ request: { ...request }, decision: "approved", duration }));
-    return { ...grant };
+    this.emit(() => this.options.onDecision?.({ request: this.requestSnapshot(request), decision: "approved", duration }));
+    return this.grantSnapshot(grant);
   }
 
   /** UI-only. */
@@ -172,7 +186,7 @@ export class SecretGrantService {
     const request = this.pendingRequests.get(requestId);
     if (!request) throw new Error("Secret request expired or is no longer pending.");
     this.pendingRequests.delete(requestId);
-    this.emit(() => this.options.onDecision?.({ request: { ...request }, decision: "denied" }));
+    this.emit(() => this.options.onDecision?.({ request: this.requestSnapshot(request), decision: "denied" }));
   }
 
   /** UI-only. Revokes all grants for a session, or one selected secret. */
@@ -198,7 +212,19 @@ export class SecretGrantService {
     this.clearPending(sessionId);
   }
 
+  /** Revoke promptly on launch/input/hook changes; longer grants retain their established lifetime. */
+  revalidateTurn(sessionId: string): void {
+    const current = this.currentTurn(sessionId);
+    for (const grant of [...this.grants.values()]) {
+      if (grant.sessionId === sessionId && grant.duration === "turn" && (!current || grant.turnIdentity !== current)) {
+        this.removeGrant(grant, "turn-ended");
+      }
+    }
+  }
+
   sessionEnded(sessionId: string): void {
+    this.turnWatches.get(sessionId)?.();
+    this.turnWatches.delete(sessionId);
     for (const grant of [...this.grants.values()]) {
       if (grant.sessionId === sessionId) this.removeGrant(grant, "session-ended");
     }
@@ -235,6 +261,7 @@ export class SecretGrantService {
       throw new Error("API request timeout must be between 1 and 300 seconds.");
     }
 
+    this.revalidateTurn(sessionId);
     const grant = this.grants.get(grantKey(sessionId, request.secretId));
     if (!grant || (grant.expiresAt !== null && grant.expiresAt <= this.now())) {
       if (grant) this.removeGrant(grant, "expired");
@@ -254,6 +281,7 @@ export class SecretGrantService {
     // A revoke/session close may race while ProviderSecretsService reads from disk.
     try {
       this.activeSession(sessionId);
+      this.revalidateTurn(sessionId);
       if (this.grants.get(grantKey(sessionId, request.secretId)) !== grant || (grant.expiresAt !== null && grant.expiresAt <= this.now())) {
         throw new Error("Provider secret approval was revoked or expired.");
       }
@@ -295,6 +323,8 @@ export class SecretGrantService {
         if (controller.signal.aborted) abortListener();
       });
       const result = await Promise.race([apiRequestPromise, timeoutPromise, abortPromise]);
+      this.revalidateTurn(sessionId);
+      controller.signal.throwIfAborted();
       if (!result || !Number.isInteger(result.status) || result.status < 100 || result.status > 599
         || typeof result.body !== "string" || typeof result.truncated !== "boolean") {
         throw new Error("invalid result");
@@ -315,6 +345,20 @@ export class SecretGrantService {
     }
   }
 
+  private currentTurn(sessionId: string): string | null {
+    try { return this.options.getTurnIdentity?.(sessionId) ?? null; } catch { return null; }
+  }
+
+  private requestSnapshot(request: PendingRequest): SecretRequestSnapshot {
+    const { turnIdentity, ...snapshot } = request;
+    return { ...snapshot, turnAvailable: Boolean(turnIdentity && turnIdentity === this.currentTurn(request.sessionId)) };
+  }
+
+  private grantSnapshot(grant: Grant): SecretGrantSnapshot {
+    const { turnIdentity: _identity, ...snapshot } = grant;
+    return snapshot;
+  }
+
   private activeSession(sessionId: string): SecretCommandSession {
     const session = this.options.getSession(sessionId);
     if (!session || session.active !== true || !session.cwd || !session.profile || session.provider === "terminal") {
@@ -328,9 +372,10 @@ export class SecretGrantService {
     for (const request of [...this.pendingRequests.values()]) {
       if (request.expiresAt <= now) {
         this.pendingRequests.delete(request.id);
-        this.emit(() => this.options.onDecision?.({ request: { ...request }, decision: "expired" }));
+        this.emit(() => this.options.onDecision?.({ request: this.requestSnapshot(request), decision: "expired" }));
       }
     }
+    for (const sessionId of new Set([...this.grants.values()].filter(grant => grant.duration === "turn").map(grant => grant.sessionId))) this.revalidateTurn(sessionId);
     for (const grant of [...this.grants.values()]) {
       if (grant.expiresAt !== null && grant.expiresAt <= now) this.removeGrant(grant, "expired");
     }
@@ -354,7 +399,7 @@ export class SecretGrantService {
     for (const request of [...this.pendingRequests.values()]) {
       if (request.sessionId !== sessionId) continue;
       this.pendingRequests.delete(request.id);
-      this.emit(() => this.options.onDecision?.({ request: { ...request }, decision: "revoked" }));
+      this.emit(() => this.options.onDecision?.({ request: this.requestSnapshot(request), decision: "revoked" }));
     }
   }
 

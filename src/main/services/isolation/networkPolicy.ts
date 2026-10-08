@@ -399,7 +399,7 @@ export function validatePolicy(input: unknown): AgentNetworkPolicy {
   };
 }
 
-/** Exact hostnames and `*.example.com` patterns are supported; URLs, ports and IP literals are refused. */
+/** Domains include their subdomains; `*.example.com` patterns exclude the root; URLs, ports and IP literals are refused. */
 export function canonicalDomain(input: string): string {
   const value = input.trim().toLowerCase().replace(/\.$/u, "");
   const wildcard = value.startsWith("*.");
@@ -417,7 +417,7 @@ function domainAllowed(hostname: string, rules: readonly string[]): boolean {
   const host = hostname.toLowerCase().replace(/\.$/u, "");
   return rules.some((rule) => rule.startsWith("*.")
     ? host !== rule.slice(2) && host.endsWith(`.${rule.slice(2)}`)
-    : host === rule);
+    : host === rule || host.endsWith(`.${rule}`));
 }
 
 function parseAuthority(authority: string, defaultPort: number): { hostname: string; port: number } | null {

@@ -15,7 +15,7 @@ export type NotificationChannel = "desktop"|"phone"|"glasses";
 export interface NotificationPreferences {version:1;channels:Record<NotificationChannel,boolean>;quietUntil:number|null;importantOnly:boolean;sessionIds:string[]|null}
 export interface AttentionEvent {id:string;sessionId:string;title:string;kind:"response"|"approval"|"done"|"failed"|"budget"|"loop";at:number}
 export type SecretGrantDuration = "10m" | "turn" | "session";
-export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number}
+export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number;turnAvailable:boolean}
 export interface SecretGrant {sessionId:string;secretId:ProviderSecretId;duration:SecretGrantDuration;approvedAt:number;expiresAt:number|null}
 export interface AgentNetworkPolicy {mode:"open"|"allowed-domains"|"offline";providerApis:boolean;packageRegistries:boolean;domains:string[]}
 export interface BacklogApi {

@@ -22,6 +22,7 @@ function setup(overrides = {}) {
     getSession: (sessionId) => sessionId === "session-a" && active
       ? { provider: "codex", cwd: "/project", profile: "normal", active: true }
       : null,
+    getTurnIdentity: () => "fixture-launch:turn-1",
     rememberSecret: (value) => events.push(["remember", value]),
     redact: (value) => value.replaceAll(secret, "[masked]"),
     execute: async (request) => {
@@ -260,6 +261,7 @@ test("secret approval IPC is main-window-only and cannot cross task roots", asyn
   const otherChild = await control.spawn({ parentSessionId: secondRoot.id, provider: "opencode", cwd });
   const service = new SecretGrantService({
     getSecret: async () => "never-return-this",
+    getTurnIdentity: () => "trusted-fixture-launch:turn-1",
     getSession: (sessionId) => {
       const metadata = terminals.getMetadata(sessionId);
       return metadata ? { provider: metadata.provider, cwd: metadata.cwd, profile: metadata.profile, active: metadata.exitCode === null } : null;
