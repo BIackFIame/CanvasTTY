@@ -1,9 +1,13 @@
+import {renameSync,mkdirSync} from 'node:fs';
+import {stripTypeScriptTypes} from 'node:module';
+import {runInNewContext} from 'node:vm';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,readFile,rm} from 'node:fs/promises';
+import {mkdtemp,readFile,rm,rename} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {AttentionService} from '../src/main/services/AttentionService.ts';
+import {OrchestrationTaskBoard} from '../src/main/services/OrchestrationTaskBoard.ts';
 import {PluginSessions} from '../src/main/services/PluginSessions.ts';
 
 test('attention masks names, coalesces events and persists independent channel/quiet/agent policies',async()=>{
@@ -40,7 +44,7 @@ function world(failDelivery=false, ...options){
     async deliverInput(id,text){calls.push({type:'input',id,text});return {delivered:!failDelivery};},
     dispose(id,options){calls.push({type:'dispose',id,options});contexts.delete(id);},redactSecrets:text=>text.replaceAll('SECRET','[masked]'),
     redactSecretsTail:text=>text,readBuffer:()=>({buffer:'PRIVATE OUTPUT'}),setPluginOwner(){}};
-  const sessions=new PluginSessions({experimentalEnabled,terminals,installRecord,notify:(...args)=>{notices.push(args);return true;}});
+  const sessions=new PluginSessions({experimentalEnabled,terminals,installRecord,handoffTaskOwner:options[2],notify:(...args)=>{notices.push(args);return true;}});
   return {sessions,calls,contexts,notices};
 }
 
@@ -137,4 +141,41 @@ test('tool activity requires the exact live trusted assistant and exposes only s
  const count=f.notices.length;
  for(const record of [null,{...trusted,sourceUrl:'https://github.com/attacker/canvastty-plugin-assistant.git'},{...trusted,enabled:false},{...trusted,nativeCodeTrusted:false}]){installed=record;f.sessions.activity(outcome);assert.equal(f.notices.length,count);}
  installed=trusted;f.sessions.activity(outcome);assert.equal(f.notices.length,count+1,'live trust restored without changing metadata subscription');
+});
+test('handoff board failure leaves every original owner intact and disposes only the replacement',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'ctty-handoff-atomic-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const board=new OrchestrationTaskBoard(directory);for(const title of ['First','Second'])await board.addTask(directory,'root','root',{title,ownerSessionId:'source'});
+ const location=board.boardLocation(directory).path,original=await readFile(location,'utf8'),backup=location+'.backup';let blocked=false;const mutate=board.mutate.bind(board);
+ // Fail the commit that would finish transferring both tasks. A per-task implementation has already persisted one.
+ t.mock.method(board,'mutate',(project,root,mutation)=>mutate(project,root,state=>{const result=mutation(state);if(!blocked&&state.tasks.filter(task=>task.ownerSessionId==='replacement').length===2){blocked=true;renameSync(location,backup);mkdirSync(location);}return result;}));
+ const source=await readFile(new URL('../src/main/index.ts',import.meta.url),'utf8');const start=source.indexOf('handoffTaskOwner:')+'handoffTaskOwner:'.length;
+ const callback=source.slice(start,source.indexOf('    installRecord:',start)).trim().replace(/,$/,'');
+ const handoff=runInNewContext(stripTypeScriptTypes(`(${callback})`),{agentControlService:{taskRoot:()=>({cwd:directory,id:'root'})},taskBoard:board,managedTerminals:{getMetadata:()=>({title:'Replacement'})}});
+ const f=world(false,()=>true,()=>null,handoff);
+ await assert.rejects(f.sessions.withCardConsent('canvastty-accounts','handoff','source',()=>f.sessions.handle('canvastty-accounts','service','sessions.handoff',{sessionId:'source',summary:'Continue'},['sessions:launch'])));
+ assert.equal(await readFile(backup,'utf8'),original,'failed atomic rename cannot persist a subset');
+ await rm(location,{recursive:true});await rename(backup,location);assert.ok((await board.listTasks(directory,'root')).tasks.every(task=>task.ownerSessionId==='source'));
+ assert.equal(f.contexts.has('source'),true);assert.equal(f.contexts.has('replacement'),false);assert.deepEqual(f.calls.filter(c=>c.type==='dispose').map(c=>c.id),['replacement']);
+});
+test('atomic handoff revalidates queued completion and ownership changes under the board lock',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'ctty-handoff-lock-'));t.after(()=>rm(directory,{recursive:true,force:true}));const board=new OrchestrationTaskBoard(directory);
+ const add=title=>board.addTask(directory,'root','root',{title,ownerSessionId:'source'});const done=await add('Completing'),other=await add('Reassigned'),keep=await add('Transfer');
+ const foreign=await board.addTask(directory,'foreign','foreign',{title:'Other root',ownerSessionId:'source'});
+ const completing=board.completeTask(directory,'root','source',done.id,'Finished');const reassigned=board.assignTask(directory,'root',other.id,'another');
+ const transfer=board.transferOwner(directory,'root','source','replacement','Replacement');await Promise.all([completing,reassigned]);assert.equal(await transfer,1);
+ const rows=(await board.listTasks(directory,'root')).tasks;assert.equal(rows.find(x=>x.id===done.id).status,'done');assert.equal(rows.find(x=>x.id===done.id).ownerSessionId,'source');assert.equal(rows.find(x=>x.id===other.id).ownerSessionId,'another');assert.equal(rows.find(x=>x.id===keep.id).ownerSessionId,'replacement');
+ assert.equal((await board.listTasks(directory,'foreign')).tasks.find(x=>x.id===foreign.id).ownerSessionId,'source');assert.equal((await board.listTasks(directory,'root')).revision,7,'one revision for the whole handoff');
+});
+test('quota-only Accounts delivery uses its own live provenance, service, opt-in and ownership gates',()=>{
+ const trusted={sourceUrl:'https://github.com/BIackFIame/canvastty-plugin-accounts.git',enabled:true,nativeCodeTrusted:true};let record=trusted,enabled=true;
+ const f=world(false,()=>enabled,id=>id==='canvastty-accounts'?record:null);
+ for(const [plugin,service] of [['canvastty-accounts','accounts'],['canvastty-accounts','other'],['foreign','accounts'],['canvastty-assistant','assistant']])f.sessions.handle(plugin,service,'sessions.subscribe',{},['sessions:events']);
+ for(const type of ['limit.exhausted','route.outcome'])f.sessions.activity({type,sessionId:'source',at:1,provider:'codex',accountId:'default',toolName:'must not leak',normalizedActionHash:'a'.repeat(64)});
+ assert.equal(f.notices.length,2);assert.ok(f.notices.every(row=>row[0]==='canvastty-accounts'&&row[1]==='accounts'));assert.doesNotMatch(JSON.stringify(f.notices),/toolName|normalizedActionHash|must not leak/);
+ for(const type of ['pretool','activity','tool-outcome'])f.sessions.activity({type,sessionId:'source',at:2,toolName:'Bash',normalizedAction:'a'.repeat(64),normalizedActionHash:'a'.repeat(64)});
+ assert.equal(f.notices.length,2,'Accounts never receives tool metadata, even without an Assistant');
+ for(const changed of [null,{...trusted,sourceUrl:'https://github.com/spoof/canvastty-plugin-accounts.git'},{...trusted,enabled:false},{...trusted,nativeCodeTrusted:false}]){record=changed;f.sessions.activity({type:'limit.exhausted',sessionId:'source',at:3});assert.equal(f.notices.length,2);}
+ record=trusted;enabled=false;f.sessions.activity({type:'limit.exhausted',sessionId:'source',at:4});assert.equal(f.notices.length,2);
+ enabled=true;f.sessions.handle('canvastty-accounts','accounts','sessions.subscribe',{ownedOnly:true},['sessions:events']);f.sessions.activity({type:'limit.exhausted',sessionId:'source',at:5});assert.equal(f.notices.length,2);
+ f.contexts.get('source').owner='canvastty-accounts';f.sessions.activity({type:'limit.exhausted',sessionId:'source',at:6});assert.equal(f.notices.length,3);assert.doesNotMatch(JSON.stringify(f.notices),/PRIVATE OUTPUT/);
 });

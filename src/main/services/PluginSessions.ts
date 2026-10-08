@@ -213,9 +213,18 @@ export class PluginSessions {
     } catch (error) { this.deps.terminals.dispose(created.id,{keepEnvironmentData:true}); throw error; }
   }
   activity(event: PluginActivity): void {
-    if ((event.type === "limit.exhausted" || event.type === "route.outcome") && this.deps.experimentalEnabled?.() !== true) return;
-    try { if(!isInstalledAssistant(this.deps.installRecord?.(ASSISTANT_PLUGIN_ID) ?? null))return; }
-    catch { return; }
+    const quotaEvent = event.type === "limit.exhausted" || event.type === "route.outcome";
+    if (quotaEvent && this.deps.experimentalEnabled?.() !== true) return;
+    let assistantTrusted = false, accountsTrusted = false;
+    try { assistantTrusted = isInstalledAssistant(this.deps.installRecord?.(ASSISTANT_PLUGIN_ID) ?? null); } catch { /* fail closed */ }
+    if (quotaEvent) {
+      try {
+        const record = this.deps.installRecord?.(ACCOUNTS_PLUGIN_ID);
+        accountsTrusted = Boolean(record?.enabled && record.nativeCodeTrusted
+          && record.sourceUrl.toLowerCase() === "https://github.com/biackfiame/canvastty-plugin-accounts.git");
+      } catch { /* fail closed independently of the Assistant installation */ }
+    }
+    if (!assistantTrusted && !accountsTrusted) return;
     let safeEvent = event.type === "tool-outcome" ? this.safeToolOutcome(event)
       : event.type === "activity" || event.type === "pretool" ? this.safePretool(event) : event;
     if (!safeEvent) return;
@@ -228,9 +237,20 @@ export class PluginSessions {
       safeEvent = { ...safeEvent, evidenceId };
     }
     for (const subscriber of this.subscribers.values()) {
-      if(subscriber.pluginId!==ASSISTANT_PLUGIN_ID || subscriber.serviceId!==ASSISTANT_SERVICE_ID)continue;
+      const assistant = assistantTrusted && subscriber.pluginId === ASSISTANT_PLUGIN_ID && subscriber.serviceId === ASSISTANT_SERVICE_ID;
+      const accounts = quotaEvent && accountsTrusted && subscriber.pluginId === ACCOUNTS_PLUGIN_ID && subscriber.serviceId === "accounts";
+      if (!assistant && !accounts) continue;
       if (subscriber.ownedOnly && context.owner !== subscriber.pluginId) continue;
-      this.deps.notify(subscriber.pluginId,subscriber.serviceId,"canvastty.activity",safeEvent);
+      const payload: PluginActivity = accounts ? {
+        type: safeEvent.type, sessionId: safeEvent.sessionId, at: safeEvent.at,
+        ...(safeEvent.provider !== undefined ? { provider: safeEvent.provider } : {}),
+        ...(safeEvent.accountId !== undefined ? { accountId: safeEvent.accountId } : {}),
+        ...(safeEvent.resetAt !== undefined ? { resetAt: safeEvent.resetAt } : {}),
+        ...(safeEvent.task !== undefined ? { task: safeEvent.task } : {}),
+        ...(safeEvent.parentSessionId !== undefined ? { parentSessionId: safeEvent.parentSessionId } : {}),
+        ...(safeEvent.status !== undefined ? { status: safeEvent.status } : {})
+      } : safeEvent;
+      this.deps.notify(subscriber.pluginId,subscriber.serviceId,"canvastty.activity",payload);
     }
   }
 

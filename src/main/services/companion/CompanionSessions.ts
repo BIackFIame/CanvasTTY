@@ -148,6 +148,7 @@ export class CompanionSessions {
             startedAt: session.startedAt,
             exitCode: session.exitCode,
             revision: session.revision,
+            ...(session.attention !== undefined ? { attention: publicAttention(session.attention) } : {}),
           })),
         providers: Object.fromEntries(CANVAS_LAUNCHER_ITEMS.map(
           (provider) => [provider, providers[provider] === true],
@@ -245,4 +246,15 @@ export class CompanionSessions {
     if (action.type === "session.input") this.host.inputSubmitted?.(action.sessionId);
     return { delivered: true, sessionId: action.sessionId };
   }
+}
+
+/** Overview notices contain only bounded metadata, never notification bodies or terminal output. */
+function publicAttention(value: unknown): { id: string; kind: string; at: number }[] {
+  if (!Array.isArray(value)) return [];
+  const kinds = new Set(["response", "approval", "done", "failed", "budget", "loop"]);
+  return value.slice(-3).flatMap(entry => {
+    if (!entry || typeof entry !== "object" || typeof entry.id !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(entry.id)
+      || typeof entry.kind !== "string" || !kinds.has(entry.kind) || !Number.isSafeInteger(entry.at) || entry.at < 0) return [];
+    return [{ id: entry.id, kind: entry.kind, at: entry.at }];
+  });
 }

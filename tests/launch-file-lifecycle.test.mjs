@@ -74,7 +74,7 @@ for(const outcome of ['success','refusal','throw'])test(`close while environment
  const wrapping=deferred(),release=f.gate();let plannedCleanups=0;
  const plan=f.terminals.planSpawn.bind(f.terminals);
  f.terminals.planSpawn=(...args)=>{const result=plan(...args);assert.ok(!('failure' in result));const cleanup=result.cleanup;result.cleanup=()=>{plannedCleanups++;cleanup();};return result;};
- const registry=new EnvironmentRegistry({providers:()=>[{pluginId:'fixture.env',pluginName:'Environment',serviceId:'env',secrets:false,kinds:[{kind:'test',label:'Test',fields:[]}]}],
+ const registry=new EnvironmentRegistry({providers:()=>[{pluginId:'fixture.env',pluginName:'Environment',serviceId:'env',secrets:false,kinds:[{kind:'test',label:'Test',executionLocation:'local',fields:[]}]}],
   call:async(_p,_s,method)=>method.endsWith('.prepare')?{ref:{id:'one'},label:'Test'}:{},secret:async()=>null});
  registry.wrap=async(_environment,input)=>{
   wrapping.resolve();await release.promise;

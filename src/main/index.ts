@@ -923,8 +923,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     experimentalEnabled,
     terminals: terminalManager,
     handoffTaskOwner:async(sourceId,replacementId)=>{
-      const root=agentControlService.taskRoot(sourceId),listing=await taskBoard.listTasks(root.cwd,root.id);
-      for(const task of listing.tasks)if(task.ownerSessionId===sourceId && task.status!=="done" && task.status!=="closed")await taskBoard.assignTask(root.cwd,root.id,task.id,replacementId,managedTerminals.getMetadata(replacementId)?.title);
+      const root=agentControlService.taskRoot(sourceId);
+      await taskBoard.transferOwner(root.cwd,root.id,sourceId,replacementId,managedTerminals.getMetadata(replacementId)?.title);
     },
     installRecord:id=>pluginManager?.installRecord(id) ?? null,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)

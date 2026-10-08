@@ -244,7 +244,7 @@ An environment is where a card runs: a git worktree, a container, a remote host.
 "services": [{
   "id": "worktree", "title": "Git worktree", "entry": "services/worktree.mjs",
   "environments": [{
-    "kind": "worktree", "label": "Git worktree",
+    "kind": "worktree", "label": "Git worktree", "executionLocation": "local",
     "description": "A branch in its own folder",
     "appliesTo": ["terminal", "claude"],
     "fields": [{ "key": "branch", "label": "Branch", "kind": "text", "default": "", "maxLength": 80 }],
@@ -252,6 +252,8 @@ An environment is where a card runs: a git worktree, a container, a remote host.
   }]
 }]
 ```
+
+`executionLocation` declares `local` or `remote` in the trusted service manifest. Remote and undeclared locations require the experimental opt-in; launcher choices cannot override this declaration. `keeps.isolated` does not determine location (a container may be local). For older manifests, only `canvastty-environments` installed from `https://github.com/BIackFIame/canvastty-plugin-environments.git`, with service/kind `worktree`/`worktree` or `container`/`container`, is recognized as local. An explicit declaration takes precedence. Cleanup remains available after opt-out.
 
 `keeps` declares what of CanvasTTY's protection reaches the agent there: `launch` (the launch's arguments and environment reach the agent unchanged, so CanvasTTY's hooks and the profile's per-run settings work), `isolated` (the agent does not run on this computer's files: a container or a remote host) and `confines` (the environment itself confines the agent to the project). Undeclared means no: any profile but normal is refused without `launch`, and the card says that base protection does not reach the agent there. An `isolated` environment is not wrapped in CanvasTTY's agent isolation again (the card names the environment's own boundary); any other runs inside it, with the environment's folder as the project.
 
@@ -342,7 +344,7 @@ A service may offer up to 16 `tools` to agents. They appear in the `canvastty_ag
 
 ### Session events and plugin-owned cards (`sessions:*`)
 
-`canvastty.activity` is a separate host-only integration for the enabled, native-code-trusted Assistant service installed from a canonical Assistant repository. `sessions:events` does not grant activity access. Tool equality fingerprints sent to that service are host-secret HMAC values scoped to the card and fingerprint kind; they are not plain hashes of tool input or output. Install provenance is checked on each delivery.
+`canvastty.activity` is a separate host-only integration for the enabled, native-code-trusted Assistant service installed from a canonical Assistant repository. `sessions:events` does not grant activity access. Tool equality fingerprints sent to that service are host-secret HMAC values scoped to the card and fingerprint kind; they are not plain hashes of tool input or output. Install provenance is checked on each delivery. With the experimental opt-in, only `limit.exhausted` and `route.outcome` may also reach the enabled, native-code-trusted `canvastty-accounts` / `accounts` service installed from `https://github.com/BIackFIame/canvastty-plugin-accounts.git`; it receives no tool activity or fingerprints and needs no Assistant installation.
 OpenCode tool outcomes use its direct `tool.execute.after` hook and terminal `message.part.updated` tool states, correlated with a root-turn `tool.execute.before` call. Duplicate, child-session and obsolete completions are ignored. Shell nonzero exit codes are errors; missing exit status remains unknown. Separately trusted native `after-tool` hooks keep their provider-payload permission: the direct callback supplies `{ input, output }`, and a tool-part completion supplies its provider event. This does not grant `sessions:events` subscribers access to those payloads.
 Kimi core hooks report `PostToolUse` and `PostToolUseFailure`; Hermes reports `post_tool_call`, independently of native plugin hooks. Kimi's `tool_output` is an opaque `str(ret)` that can also represent a tool error: its class stays `unknown`, while an explicit failure event reports `error`. It supplies no verified changed-path evidence. Hermes shell-hook `extra` carries the result, explicit outcome status and stable turn ID; result text is never interpreted as a status.
 

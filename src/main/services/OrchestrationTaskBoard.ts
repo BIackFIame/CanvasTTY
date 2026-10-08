@@ -204,6 +204,20 @@ export class OrchestrationTaskBoard {
     });
   }
 
+  /** Handoff updates the source's current unfinished tasks in one persisted board transaction. */
+  async transferOwner(projectRoot: string, rootSessionId: string, sourceId: string, replacementId: string, replacementName?: string): Promise<number> {
+    for (const [value, field] of [[rootSessionId, "rootSessionId"], [sourceId, "sourceId"], [replacementId, "replacementId"]]) requireId(value, field);
+    const name = optionalName(replacementName) ?? replacementId;
+    return this.mutate(projectRoot, rootSessionId, state => {
+      let transferred = 0;
+      for (const task of state.tasks) {
+        if (task.rootSessionId !== rootSessionId || task.ownerSessionId !== sourceId || task.status === "done" || task.status === "closed") continue;
+        task.ownerSessionId = replacementId; task.ownerName = name; task.status = "claimed"; task.updatedAt = Date.now(); transferred++;
+      }
+      return transferred;
+    });
+  }
+
   /** Person/UI operations use explicit methods that bypass agent ownership while retaining the same atomic store. */
   async assignTask(projectRoot: string, rootSessionId: string, taskId: string, ownerSessionId: string | null, ownerName?: string | null): Promise<OrchestrationTask> {
     return this.editTask(projectRoot, rootSessionId, rootSessionId, taskId, { ownerSessionId, ...(ownerName !== undefined ? { ownerName } : {}) }, true);

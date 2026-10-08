@@ -44,7 +44,7 @@ function environments(experimentalEnabled, answer) {
   const kinds = ["worktree", "container", "remote", "ssh", "ssh-host", "remote-container"];
   const registry = new EnvironmentRegistry({
     experimentalEnabled,
-    providers: () => [{ pluginId: "fixture", pluginName: "Fixture", serviceId: "env", secrets: false, kinds: kinds.map(kind => ({ kind, label: kind })) }],
+    providers: () => [{ pluginId: "fixture", pluginName: "Fixture", serviceId: "env", secrets: false, kinds: kinds.map(kind => ({ kind, label: kind, executionLocation: ["worktree", "container"].includes(kind) ? "local" : "remote" })) }],
     call: async (_plugin, _service, method, params) => {
       calls.push({ method, params });
       if (answer) return answer(method, params);
@@ -99,6 +99,6 @@ test("disabling during remote prepare/resume/wrap rejects the asynchronous resul
     const result = step === "prepare" ? await prepare(registry, "remote")
       : step === "resume" ? await registry.resume(ref("remote"), "s") : await wrap(registry, "remote");
     assert.equal(result.ok, false, step);
-    if (step !== "wrap") assert.equal(calls.at(-1).method, "canvastty.environment.release");
+    assert.equal(calls.at(-1).method, "canvastty.environment.release");
   }
 });

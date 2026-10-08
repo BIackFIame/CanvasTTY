@@ -1,3 +1,4 @@
+import { verifiedEnvironmentPluginSource } from "./helpers/environment-provenance.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -94,7 +95,7 @@ test("the real worktree environment wraps once before one active core seatbelt w
   const status = () => supervisor.report(pluginId);
   await waitFor(() => status().services.every(service => service.state === "running"));
 
-  const provider = { pluginId, pluginName: manifest.name, serviceId: worktreeService.id,
+  const provider = { pluginId, sourceUrl: verifiedEnvironmentPluginSource(pluginRoot), pluginName: manifest.name, serviceId: worktreeService.id,
     kinds: worktreeService.environments, secrets: false };
   const registry = new EnvironmentRegistry({
     providers: () => [provider],

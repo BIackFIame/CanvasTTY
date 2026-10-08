@@ -82,7 +82,7 @@ test('a delayed environment captures its final effective cwd immediately before 
  const f=await fixture(t); let release, wrapping=false;
  const gate=new Promise(resolve=>{release=resolve;});
  const registry=new EnvironmentRegistry({providers:()=>[{pluginId:'fixture.env',pluginName:'Fixture',serviceId:'env',secrets:false,
-  kinds:[{kind:'worktree',label:'Worktree',fields:[]}]}],
+  kinds:[{kind:'worktree',label:'Worktree',executionLocation:'local',fields:[]}]}],
   call:async(_plugin,_service,method,params)=>{
    if(method.endsWith('.prepare'))return {ref:{id:'one'},label:'worktree'};
    if(method.endsWith('.wrap')){wrapping=true;await gate;return {command:process.execPath,args:params.args,cwd:f.worktree};}

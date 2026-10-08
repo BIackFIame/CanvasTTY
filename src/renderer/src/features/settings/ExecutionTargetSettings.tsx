@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AGENT_PROVIDERS, type AppSettings, type AgentProviderId, type LocaleId, type PluginLaunchValues, type SessionEnvironmentChoice } from "../../../../shared/contracts";
 import { DATA_CLASSES, normalizeExecutionPolicy, type ExecutionDataClass, type ExecutionPolicy, type ExecutionTarget } from "../../../../shared/executionPolicy";
 import { LaunchOptionsSection } from "../launcher/LaunchOptionsSection";
@@ -23,11 +23,15 @@ export function ExecutionTargetSettings({ settings, locale, onChange }: {
   const accountId = typeof selected === "string" && selected && selected !== "none" ? selected : "default";
   const [routeLoading, setRouteLoading] = useState(false);
   const [routeReady, setRouteReady] = useState(false);
+  const previousAccount = useRef(accountId);
   useEffect(() => {
+    const changedToDefault = accountId === "default" && previousAccount.current !== "default";
+    previousAccount.current = accountId;
     let active = true;
     setRouteReady(false);
     setError("");
     if (accountId === "default") {
+      if (changedToDefault) { setModel(""); setEndpoint(""); setKind("api-key"); }
       setRouteLoading(false);
       return;
     }

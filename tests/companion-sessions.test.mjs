@@ -227,3 +227,11 @@ test("submission acknowledgments follow structured successful actions exactly on
  f.host.input=()=>false;await assert.rejects(f.service.dispatch('phone',f.request({type:'session.input',sessionId:'one',text:'not sent'})),{code:'unavailable'});
  assert.deepEqual(acknowledged,['one']);
 });
+test('phone overviews preserve only three safe attention records for granted sessions, including summary-only mode',async()=>{
+ const f=fixture();f.host.overview=()=>f.host.list().map(row=>({...row,startedAt:1,exitCode:null,revision:1,attention:row.id==='private'?[{id:'foreign',kind:'done',at:2}]:[
+  {id:'old',kind:'response',at:1},{id:'one',kind:'approval',at:2,body:'PRIVATE BODY',screen:'PRIVATE SCREEN'},
+  {id:'two',kind:'done',at:3,title:'PRIVATE TITLE'},{id:'three',kind:'budget',at:4,token:'PRIVATE TOKEN'}]}));
+ for(const summaryOnly of [false,true]){const result=await f.service.dispatch('phone',f.request({type:'sessions.overview'}),{summaryOnly});assert.deepEqual(result.sessions[0].attention,[{id:'one',kind:'approval',at:2},{id:'two',kind:'done',at:3},{id:'three',kind:'budget',at:4}]);assert.equal(result.sessions.length,1);assert.doesNotMatch(JSON.stringify(result),/PRIVATE|foreign|private\/path/);}
+ f.host.overview=()=>[{...f.host.list()[0],startedAt:1,exitCode:null,revision:1,attention:[{id:'bad\n',kind:'done',at:1},{id:'good',kind:'unknown',at:2},{id:'valid',kind:'done',at:NaN}]}];
+ assert.deepEqual((await f.service.dispatch('phone',f.request({type:'sessions.overview'}))).sessions[0].attention,[]);
+});

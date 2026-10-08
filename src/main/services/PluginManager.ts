@@ -600,7 +600,8 @@ export class PluginManager {
   /** Services that may place sessions now: enabled, native code trusted, `environment:provide` granted. */
   environmentProviders(): EnvironmentProvider[] {
     return this.trustedServicesWith("environment:provide", (service) => service.environments).map(({ plugin, service, name, secrets }) => ({
-      pluginId: plugin, pluginName: name, serviceId: service.id, kinds: structuredClone(service.environments!), secrets
+      pluginId: plugin, pluginName: name, serviceId: service.id, kinds: structuredClone(service.environments!), secrets,
+      sourceUrl: this.installRecord(plugin)?.sourceUrl
     }));
   }
 
@@ -1849,7 +1850,10 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   const kinds = new Set<string>();
   return value.map((candidate): PluginEnvironmentKind => {
     if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
-    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps"], "Plugin environment");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps", "executionLocation"], "Plugin environment");
+    if (candidate.executionLocation !== undefined && candidate.executionLocation !== "local" && candidate.executionLocation !== "remote") {
+      throw new Error("Plugin environment executionLocation must be local or remote.");
+    }
     const kind = requiredString(candidate.kind, "environment kind", 32);
     // Same shape the session store accepts for a saved environment's kind.
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
@@ -1880,7 +1884,8 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
       }
     }
     return {
-      kind, label, ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
+      kind, label, ...(candidate.executionLocation ? { executionLocation: candidate.executionLocation } : {}),
+      ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
       ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {})
     };
   });

@@ -1,3 +1,4 @@
+import { verifiedEnvironmentPluginSource, verifiedAccountsPluginSource } from "./helpers/environment-provenance.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -186,8 +187,10 @@ test("consented account handoff continues in the same real worktree after an alt
       setBadge: (pluginId, params) => cards.setBadge(pluginId, params)
     }
   });
+  const accountsSourceUrl = verifiedAccountsPluginSource(accountsRoot);
   pluginSessions = new PluginSessions({
     experimentalEnabled: () => true,
+    installRecord: id => id === accountsId ? {sourceUrl:accountsSourceUrl,enabled:true,nativeCodeTrusted:true} : null,
     terminals,
     notify: (pluginId, serviceId, method, params) => supervisor?.notify(pluginId, serviceId, method, params) ?? false
   });
@@ -245,7 +248,7 @@ test("consented account handoff continues in the same real worktree after an alt
     runsRoot: join(userData, "launch-runs")
   });
   terminals.configureLaunchPipeline(pipeline);
-  const environmentProvider = {
+  const environmentProvider = { sourceUrl: verifiedEnvironmentPluginSource(environmentsRoot),
     pluginId: environmentsId,
     pluginName: environmentsManifest.name,
     serviceId: worktreeService.id,

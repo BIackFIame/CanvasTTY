@@ -1,3 +1,4 @@
+import { verifiedEnvironmentPluginSource } from "./helpers/environment-provenance.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -136,7 +137,7 @@ try {
   await supervisor.sync([await serviceSpec(worktreeService), await serviceSpec(resultsService)]);
   await waitFor(() => supervisor.report(pluginId).services.every(service => service.state === "running"));
 
-  const envProvider = { pluginId, pluginName: manifest.name, serviceId: worktreeService.id, kinds: worktreeService.environments, secrets: false };
+  const envProvider = { pluginId, sourceUrl: verifiedEnvironmentPluginSource(pluginRoot), pluginName: manifest.name, serviceId: worktreeService.id, kinds: worktreeService.environments, secrets: false };
   const registry = new EnvironmentRegistry({
     providers: () => [envProvider],
     call: (id, service, method, params, timeoutMs) => supervisor.hostCall(id, service, method, params, timeoutMs),

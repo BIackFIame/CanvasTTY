@@ -918,6 +918,8 @@ export interface PluginServiceDecide {
 
 /** One place a session can run (a worktree, a container, a remote host), provided by a plugin service. */
 export interface PluginEnvironmentKind {
+  /** Trusted manifest declaration; omitted means unknown, not local. */
+  executionLocation?: "local" | "remote";
   kind: string;
   label: string;
   description?: string;

@@ -61,7 +61,7 @@ const provider = (extra = {}) => ({
   pluginId: PLUGIN,
   pluginName: "Env",
   serviceId: "env",
-  kinds: [{ kind: "box", label: "Box", fields: [{ key: "name", label: "Name", kind: "text", default: "one" }] }],
+  kinds: [{ kind: "box", label: "Box", executionLocation: "local", fields: [{ key: "name", label: "Name", kind: "text", default: "one" }] }],
   secrets: false,
   ...extra
 });
@@ -145,12 +145,12 @@ test("manifests declare environments (kinds unique across the plugin's services)
   // Kinds may be split over services (one per module); each kind is answered by the service that lists it.
   const split = validatePluginManifest({
     ...exampleManifest,
-    services: [exampleManifest.services[0], { ...exampleManifest.services[0], id: "second", environments: [{ kind: "remote", label: "Remote" }] }]
+    services: [exampleManifest.services[0], { ...exampleManifest.services[0], id: "second", environments: [{ kind: "remote", label: "Remote", executionLocation: "remote" }] }]
   });
   assert.deepEqual(split.services.map((service) => service.environments[0].kind), ["worktree", "remote"]);
   const { registry, requests } = registryFixture({
     experimentalEnabled: () => true,
-    providers: () => [provider(), provider({ serviceId: "remote-svc", kinds: [{ kind: "remote", label: "Remote" }] })],
+    providers: () => [provider(), provider({ serviceId: "remote-svc", kinds: [{ kind: "remote", label: "Remote", executionLocation: "remote" }] })],
     answers: { prepare: { ref: {}, label: "x" } }
   });
   await registry.prepare({ sessionId: "s1", provider: "terminal", cwd, choice: { pluginId: PLUGIN, kind: "remote" } });
@@ -160,8 +160,8 @@ test("manifests declare environments (kinds unique across the plugin's services)
 
 test("launcher choices are checked against the kinds and fields, with defaults", () => {
   const { registry } = registryFixture({ providers: () => [provider({ kinds: [
-    { kind: "box", label: "Box", fields: [{ key: "name", label: "Name", kind: "text", default: "one", maxLength: 8 }] },
-    { kind: "agents-only", label: "Agents only", appliesTo: ["claude"] }
+    { kind: "box", label: "Box", executionLocation: "local", fields: [{ key: "name", label: "Name", kind: "text", default: "one", maxLength: 8 }] },
+    { kind: "agents-only", label: "Agents only", executionLocation: "local", appliesTo: ["claude"] }
   ] })] });
   assert.equal(registry.normalizeChoice("terminal", undefined), undefined);
   assert.deepEqual(registry.normalizeChoice("terminal", choice), { ...choice, options: { name: "one" } });
