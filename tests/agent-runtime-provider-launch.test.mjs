@@ -47,6 +47,8 @@ test("Claude and Codex receive automatic lifecycle hooks without prompt or respo
   assert.equal(settings.showStatusInTerminalTab, true);
   assert.match(settings.hooks.UserPromptSubmit[0].hooks[0].command, /working.*UserPromptSubmit/u);
   assert.match(settings.hooks.PermissionRequest[0].hooks[0].command, /needs_approval.*PermissionRequest/u);
+  assert.match(settings.hooks.PostToolUse[0].hooks[0].command, /PostToolUse/u);
+  assert.match(settings.hooks.PostToolUseFailure[0].hooks[0].command, /PostToolUseFailure/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /idle.*Stop/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /^ELECTRON_RUN_AS_NODE='1' /u);
   assert.equal(JSON.stringify(settings).includes('"prompt":'), false);
@@ -485,4 +487,37 @@ test("result capture independently provisions a minimal transport and survives d
   const old=bridge.prepareLaunch({terminalSessionId:'reused',provider:'codex',cwd:root,captureResult:true,decisions:false});
   const replacement=bridge.prepareLaunch({terminalSessionId:'reused',provider:'codex',cwd:root,captureResult:true,decisions:false});
   old.cleanup();assert.equal(gateway.currentStatus('reused'),'idle');replacement.cleanup();assert.equal(gateway.currentStatus('reused'),null);
+});
+
+
+test("Kimi and Hermes core overlays register completion helpers without native plugin hooks and restore user hooks", async t => {
+  const root=await fixture(t), adapters=adaptersFor(root);
+  const originals={
+    kimi:'model = "user-model"\n\n[[hooks]]\nevent = "PostToolUse"\ncommand = "user-kimi-hook"\ntimeout = 10\n',
+    hermes:'model:\n  default: user-model\nhooks:\n  post_tool_call:\n    - command: user-hermes-hook\n      timeout: 10\n'
+  };
+  for(const provider of ["kimi","hermes"]){
+    const home=join(root,provider), path=join(home,provider==="kimi"?"config.toml":"config.yaml");
+    await mkdir(home,{recursive:true});await writeFile(path,originals[provider]);
+    const disabled=adapters.prepare(provider,provider+"-disabled",false);
+    assert.deepEqual(disabled.args,[]);assert.deepEqual(disabled.environment,{});
+    assert.equal(await readFile(path,"utf8"),originals[provider],"disabled lifecycle leaves user config untouched");
+    disabled.releaseConfiguration();
+    const enabled=adapters.prepare(provider,provider+"-enabled",true);
+    const configured=await readFile(path,"utf8");
+    if(provider==="kimi"){
+      const blocks=configured.split("[[hooks]]").filter(block=>/event = "PostToolUse"/u.test(block));
+      assert.equal(blocks.length,2);
+      assert.match(blocks[1],/hook-helper\.mjs.*'working' 'PostToolUse'/u);
+      assert.ok(blocks[0].includes("user-kimi-hook"));
+      assert.match(configured,/event = "PostToolUseFailure"\ncommand = .*hook-helper\.mjs.*'working' 'PostToolUseFailure'/u);
+    }else{
+      const entries=parseYaml(configured).hooks.post_tool_call;
+      assert.equal(entries.length,2);assert.equal(entries[0].command,"user-hermes-hook");
+      assert.match(entries[1].command,/hook-helper\.mjs.*'working' 'post_tool_call'/u);
+    }
+    assert.doesNotMatch(configured,/plugin-hook-runner/u,"core outcome transport does not depend on a native plugin");
+    enabled.releaseConfiguration();enabled.releaseConfiguration();
+    assert.equal(await readFile(path,"utf8"),originals[provider],"only temporary core hooks removed, cleanup idempotent");
+  }
 });

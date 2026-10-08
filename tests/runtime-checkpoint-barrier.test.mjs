@@ -66,7 +66,7 @@ test('production barrier skips ineligible sessions, deduplicates success and rej
  const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});
  terminals.resize(worker.id,80,24);assert.ok(terminals.sessions.get(worker.id).process,'Grok starts after its measured grid');
  const entered=deferred(),release=deferred(),signals=[];t.after(()=>release.resolve());let captures=0,hold=false;
- const sandbox={terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{captures++;if(hold){entered.resolve(signal);await release.promise;signal.throwIfAborted();}}},redaction:{redact:text=>text},console,AbortController,result:null};
+ const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{captures++;if(hold){entered.resolve(signal);await release.promise;signal.throwIfAborted();}}},redaction:{redact:text=>text},console,AbortController,result:null};
  runInNewContext(callbackCode,sandbox);
  const f=await fixture(t,{...sandbox.result,lifecycleBarrierMs:35,onSignal:(id,signal)=>{signals.push(signal.turnId);terminals.applyProviderSignal(id,{state:signal.state,event:signal.event});}});
  const norm=f.gateway.registerSession(normal.id,'grok');await send(norm).done;assert.equal(captures,0);
@@ -119,7 +119,7 @@ for(const [label,input,approval,changesTurn] of [
  const worker=terminals.create({provider:'codex',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});
  if(approval)terminals.applyProviderSignal(worker.id,{state:'needs_approval',event:'PermissionRequest'});
  const entered=deferred(),release=deferred();t.after(()=>release.resolve());let saved=false;
- const sandbox={terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{entered.resolve(signal);await release.promise;signal.throwIfAborted();saved=true;}},redaction:{redact:text=>text},console,AbortController,result:null};
+ const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{entered.resolve(signal);await release.promise;signal.throwIfAborted();saved=true;}},redaction:{redact:text=>text},console,AbortController,result:null};
  runInNewContext(callbackCode,sandbox);
  const pending=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call',turnId:null},new AbortController().signal);
  const signal=await entered.promise;assert.equal(terminals.inputChecked(worker.id,input),true);
@@ -131,7 +131,7 @@ for(const mode of ['aborted','failed'])test(`production checkpoint ${mode} attem
  const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]));t.after(()=>terminals.disposeAll());
  const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);
  const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0;
- const sandbox={terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{captures++;if(captures===1){entered.resolve();await release.promise;if(mode==='aborted')signal.throwIfAborted();throw new Error('capture failed');}}},redaction:{redact:x=>x},console:{warn(){}},AbortController,result:null};runInNewContext(callbackCode,sandbox);
+ const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{captures++;if(captures===1){entered.resolve();await release.promise;if(mode==='aborted')signal.throwIfAborted();throw new Error('capture failed');}}},redaction:{redact:x=>x},console:{warn(){}},AbortController,result:null};runInNewContext(callbackCode,sandbox);
  const cancel=new AbortController();const first=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},cancel.signal);await entered.promise;
  if(mode==='aborted')cancel.abort();
  const post=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'PostToolUse'},new AbortController().signal);
@@ -148,7 +148,7 @@ test('restoration invalidates held pre-turn delivery and prevents late hooks sna
  const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),pause);t.after(()=>terminals.disposeAll());
  const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);terminals.applyProviderSignal(worker.id,{state:'idle'});
  const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0;
- const sandbox={terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(captures===1){entered.resolve();await release.promise;}}},redaction:{redact:x=>x},console,AbortController,result:null};runInNewContext(callbackCode,sandbox);
+ const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(captures===1){entered.resolve();await release.promise;}}},redaction:{redact:x=>x},console,AbortController,result:null};runInNewContext(callbackCode,sandbox);
  const first=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},new AbortController().signal);await entered.promise;
  await terminals.withCheckpointRestore(worker.id,async()=>{});release.resolve();assert.equal(await first,false);
  await sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'PostToolUse'},new AbortController().signal);
@@ -164,7 +164,7 @@ test('accepted turn end clears a failed attempt; permission callbacks deny durin
  const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),pause);t.after(()=>terminals.disposeAll());
  const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);terminals.applyProviderSignal(worker.id,{state:'idle'});
  const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0,decisions=0,hold=false;
- const sandbox={terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(hold){entered.resolve();await release.promise;}else throw new Error('unavailable');}},redaction:{redact:x=>x},console:{warn(){}},AbortController,agentControl:undefined,evenG2:undefined,budgetInputGate:()=>{},decisionHooks:{decide:()=>{decisions++;return{behavior:'allow'};}},result:null};runInNewContext(code,sandbox);
+ const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(hold){entered.resolve();await release.promise;}else throw new Error('unavailable');}},redaction:{redact:x=>x},console:{warn(){}},AbortController,agentControl:undefined,evenG2:undefined,budgetInputGate:()=>{},decisionHooks:{decide:()=>{decisions++;return{behavior:'allow'};}},result:null};runInNewContext(code,sandbox);
  await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,1);
  sandbox.result.onSignal(worker.id,{state:'idle'});
  await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,2,'an accepted end allows the next provider turn');

@@ -1,3 +1,11 @@
+import { runShutdownSteps } from "./services/shutdownSteps";
+import { BACKLOG_TERMINAL_IPC } from "../shared/backlog";
+import { AttentionService } from "./services/AttentionService";
+import { SessionReports } from "./services/SessionReports";
+import { collectTerminalHistoryRecoverySnapshots, TerminalOutputHistory } from "./services/TerminalOutputHistory";
+import { actionFromHook } from "./services/safety/baseProtection";
+import { normalizedActionHashFromHook } from "../agent-runtime/runtime-protocol.mjs";
+import { acceptLoopSignal } from "./services/AssistantLoopSignal";
 import { UsagePrices } from "./services/UsagePrices";
 import { ProviderUsageSource } from "./services/ProviderUsageSource";
 import { SessionTimelineService } from "./services/SessionTimelineService";
@@ -14,7 +22,7 @@ import "./stdio";
 import appIcon from "../../build/icon.png?asset";
 import appManifest from "../../package.json";
 import { ipcMain } from "electron";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
@@ -180,6 +188,8 @@ async function showCompanionBrowser():Promise<{title:string;url:string}> {
 let disposeBudgetObservers:(()=>void)|null=null;
 let flushBudgets:(()=>Promise<void>)|null=null;
 let sessionTimeline:SessionTimelineService|null=null;
+let sessionReports:SessionReports|null=null;
+let terminalOutputHistory:TerminalOutputHistory|null=null;
 let terminalManager: TerminalManager | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
@@ -373,9 +383,22 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   markMainBoot("criticalServicesReady");
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
+  const outputHistory=new TerminalOutputHistory(()=>redaction.snapshotForWorker(), () =>
+    collectTerminalHistoryRecoverySnapshots((terminalManager?.listMetadata() ?? []).map(row => row.id),
+      (id, maxChars) => terminalManager!.readBuffer(id, maxChars)),
+    // Encrypted crash-recovery copy of the worker's history; its key lives only in this process.
+    {spillDirectory:join(userDataPath,"terminal-history")});
+  terminalOutputHistory=outputHistory;
+  const outputHistorySeeded=new Set<string>();
+  const outputHistoryError = (error: unknown): void => {
+    if (!shutdownRunning) console.warn(error);
+  };
   const timeline = new SessionTimelineService(userDataPath,text => redaction.redact(text));
   await timeline.load();
   sessionTimeline=timeline;
+  const reports=new SessionReports(userDataPath,id=>timeline.report(id),(id,at)=>terminalManager?.setSessionReport(id,at));
+  sessionReports=reports;
+  const reviewUsageSessions=new Map<string,string>();
   const usagePrices=new UsagePrices(join(userDataPath,"usage-prices.json"));
   await usagePrices.load();
   const usageSources=new Map<string,ProviderUsageSource>();
@@ -384,9 +407,20 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     if(!source){source=new ProviderUsageSource(home);usageSources.set(home,source);}
     return source;
   };
+  const attention=new AttentionService(join(userDataPath,"attention-preferences.json"),text=>redaction.redact(text));
+  await attention.load();
+  const notifyAttention=(id:string,kind:string)=>{
+    const row=terminalManager?.getMetadata(id) ?? terminalManager?.listMetadata().find(row=>!row.parentSessionId && row.taskScope?.id===id);if(!row)return;
+    const event=attention.publish(row.id,row.title || row.provider,kind);
+    if(!event || !attention.allows("desktop",event) || !settings.get().attentionNotifications || !Notification.isSupported())return;
+    const labels:Record<string,string>=settings.get().locale==="ru" ? {response:"Ждёт ответа",approval:"Нужно разрешение",done:"Закончил",failed:"Ошибка",budget:"Бюджет требует внимания",loop:"Повторяет одно действие"} : {response:"Waiting for your answer",approval:"Approval required",done:"Finished",failed:"Failed",budget:"Task budget needs attention",loop:"Repeating the same action"};
+    const notice=new Notification({title:event.title,body:labels[kind]});
+    notice.on("click",()=>{mainWindow?.show();mainWindow?.focus();mainWindow?.webContents.send(BACKLOG_TERMINAL_IPC.focusRequested,row.id);});notice.show();
+  };
   const taskBoard=new OrchestrationTaskBoard(join(userDataPath,"task-boards"));
   const templates=new OrchestrationTemplateService(join(userDataPath,"flow-approvals.json"));
   let budgetInputGate:(id:string)=>void=()=>undefined;
+  let markLoopDetected:(id:string)=>boolean=()=>false;
   const applyBudgetEnforcement=(row:ReturnType<OrchestrationBudgetService["snapshot"]>):void=>{
     if(!terminalManager)return;
     const result=terminalManager.setBudgetPaused(row.rootSessionId,row.paused);
@@ -395,7 +429,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     if(failure){row.paused=true;row.reason=`${row.reason ?? "Task budget is paused."} ${failure}`;}
   };
   const budgets=new OrchestrationBudgetService(join(userDataPath,"task-budgets.json"),{
-    onPause:applyBudgetEnforcement,
+    onWarning:row=>{notifyAttention(row.rootSessionId,"budget");void timeline.append(row.rootSessionId,"budget","Task reached 80% of its budget").catch(console.warn);},
+    onPause:row=>{applyBudgetEnforcement(row);notifyAttention(row.rootSessionId,"budget");void timeline.append(row.rootSessionId,"budget","Task paused at its budget limit",row.reason).catch(console.warn);},
     onChange:applyBudgetEnforcement
   });
   await budgets.load();
@@ -412,7 +447,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       created.pending=checkpoints.capture(id,row.cwd,signal).catch(error => {
         // Keep the failed attempt until the turn ends or its input generation changes.
         // Retrying at PostToolUse could snapshot edits as if they preceded the turn.
-        console.warn("Rollback point unavailable",redaction.redact(String(error)));
+        const reason=redaction.redact(String(error));
+        console.warn("Rollback point unavailable",reason);
+        void timeline.append(id,"checkpoint","Rollback point unavailable",reason).catch(console.warn);
       });
       checkpointTurns.set(id,created);entry=created;
     }
@@ -439,7 +476,24 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         await pluginManager!.storageSet(pluginId, key, value);
         broadcastPluginStorageChange(pluginId, key, value);
       },
-      emit: (pluginId, serviceId, event, data) => broadcastPluginServiceEvent({ pluginId, serviceId, event, data }),
+      emit: (pluginId, serviceId, event, data) => {
+        let broadcastData = data;
+        if (event === "loop.detected") {
+          // Verified by the install record (source repository, enabled, trusted services), not the manifest id.
+          const accepted = acceptLoopSignal({
+            installRecord: id => pluginManager?.installRecord(id) ?? null,
+            session: id => terminalManager?.getMetadata(id) ?? undefined,
+            turnEpoch: id => runtimeGateway?.currentTurnEpoch(id) ?? null,
+            consumeEvidence: (id, evidence, epoch) => pluginSessions?.consumeLoopEvidence(id, evidence, epoch) ?? false,
+            markLoopDetected: id => markLoopDetected(id)
+          }, pluginId, serviceId, data, text => redaction.redact(text));
+          if (!accepted) return;
+          notifyAttention(accepted.sessionId,"loop");
+          void timeline.append(accepted.sessionId,"loop",accepted.label,accepted.reason,"canvastty-assistant").catch(console.warn);
+          broadcastData = accepted.data;
+        }
+        broadcastPluginServiceEvent({ pluginId, serviceId, event, data: broadcastData });
+      },
       registerSecrets: (pluginId, values) => redaction.add(`plugin:${pluginId}`, values),
       secretGet: (pluginId, key) => {
         if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
@@ -598,13 +652,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         finally {unobserve();cancellation.removeEventListener("abort",abort);}
       },
       onSignal: (terminalSessionId, signal) => {
-        const usageRow=terminalManager?.getMetadata(terminalSessionId);
-        if(usageRow?.provider==="codex" && signal.threadId && (!terminalManager?.pluginContext(terminalSessionId)?.environment || terminalManager.pluginContext(terminalSessionId)?.environment?.kind==="worktree")) {
-          const account=terminalManager!.usageAccount(terminalSessionId);
-          const source=usageSourceFor(account.home ?? resolveAgentHistoryPaths().codex);
-          void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
-        }
-
         const accepted = terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
@@ -613,9 +660,31 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
         if (!accepted) return;
+        const usageRow=terminalManager?.getMetadata(terminalSessionId);
+        if(usageRow?.provider==="codex" && signal.threadId && (!terminalManager?.pluginContext(terminalSessionId)?.environment || terminalManager.pluginContext(terminalSessionId)?.environment?.kind==="worktree")) {
+          const account=terminalManager!.usageAccount(terminalSessionId);
+          const source=usageSourceFor(account.home ?? resolveAgentHistoryPaths().codex);
+          void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
+        }
         if(signal.state !== "working" && signal.state !== "needs_approval")checkpointTurns.delete(terminalSessionId);
         // The answer belongs to the accepted provider turn and its host-submitted input generation.
         if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
+        void timeline.append(terminalSessionId,"lifecycle",signal.event ?? signal.state,undefined,"provider-hook").catch(console.warn);
+        if (signal.toolOutcome) {
+          pluginSessions?.activity({
+            type: "tool-outcome",
+            sessionId: terminalSessionId,
+            at: Date.now(),
+            turnEpoch: signal.turnEpoch,
+            ...(signal.turnId ? {turnId:signal.turnId} : {}),
+            toolName: redaction.redact(signal.toolOutcome.toolName),
+            resultClass: signal.toolOutcome.resultClass,
+            ...(signal.toolOutcome.normalizedActionHash ? { normalizedActionHash: signal.toolOutcome.normalizedActionHash } : {}),
+            ...(signal.toolOutcome.errorHash ? { errorHash: signal.toolOutcome.errorHash } : {}),
+            ...(signal.toolOutcome.outputHash ? { outputHash: signal.toolOutcome.outputHash } : {}),
+            changedPathHashes: signal.toolOutcome.changedPathHashes
+          });
+        }
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
           evenG2?.answer(
@@ -629,12 +698,26 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
       onPermissionRequest: async (terminalSessionId, request, signal) => {
         if (terminalManager?.isCheckpointRestoreActive(terminalSessionId)) return {behavior:"deny",message:"Workspace checkpoint restoration is in progress."};
-        try { budgetInputGate(terminalSessionId); }
-        catch(error) { return {behavior:"deny",message:redaction.redact(error instanceof Error ? error.message : "Task budget is paused.")}; }
+        try {budgetInputGate(terminalSessionId);}catch(error) {
+          const message=redaction.redact(error instanceof Error ? error.message : "Task budget is paused.");
+          void timeline.append(terminalSessionId,"budget","Tool blocked by task budget",message).catch(console.warn);
+          return {behavior:"deny",message};
+        }
         const current=terminalManager?.providerSignalGuard(terminalSessionId,{kind:"lifecycle",state:"working"});
         await checkpointBeforeTurn(terminalSessionId, signal);
         if(!current?.() || terminalManager?.isCheckpointRestoreActive(terminalSessionId))return {behavior:"deny",message:"The agent turn changed while preparing its rollback point."};
-        return decisionHooks.decide(terminalSessionId, request, signal);
+        const action=actionFromHook(request.toolName,request.toolInput,request.toolInputPreview);
+        const detail=redaction.redact(JSON.stringify({kind:action.kind,command:action.command,paths:action.paths}));
+        void timeline.append(terminalSessionId,action.kind === "shell" ? "command" : action.kind === "edit" ? "file" : "tool",request.toolName,detail,"provider-hook").catch(console.warn);
+        const decision=await decisionHooks.decide(terminalSessionId,request,signal);
+        if (decision.behavior !== "none") void timeline.append(terminalSessionId,"decision",decision.behavior,decision.message,"core").catch(console.warn);
+        const normalizedActionHash=normalizedActionHashFromHook(request.toolName,request.toolInput);
+        pluginSessions?.activity({type:"pretool",sessionId:terminalSessionId,at:Date.now(),turnEpoch:request.turnEpoch,toolName:redaction.redact(request.toolName),
+          ...(request.turnId ? {turnId:request.turnId} : {}),
+          normalizedAction:createHash("sha256").update(`${request.toolName}:${detail}`).digest("hex"),
+          ...(normalizedActionHash ? {normalizedActionHash} : {}),
+          ...(decision.behavior!=="none" ? {resultClass:decision.behavior} : {})});
+        return decision;
       },
       // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
       httpHooks: true
@@ -675,6 +758,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   }
 
   // Output batches of every session flushed in one task leave as one IPC message.
+  const reportedSafety = new Map<string,{isolation?:string;gitRisk?:string}>();
   let forgetOrchestrationSession=(_id:string):void=>undefined;
   let scheduleUsageRefresh=():void=>undefined;
   const usageMembership=new Map<string,string>();
@@ -686,6 +770,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     // only, and the replay when it is shown again to the renderer only; the
     // event says which (TerminalDataEvent.audience).
     if (reachesObservers(payload)) {
+      if(!shutdownRunning && channel===IPC.terminalData && "data" in payload)void outputHistory.append(payload.id,payload.data,payload.outputOffset).catch(outputHistoryError);
       agentControl?.observe(channel, payload);
       evenG2?.observe(channel, payload);
       pluginSessions?.observe(channel, payload);
@@ -700,33 +785,55 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     // re-derived state (a restored session, already on screen) or the outcome
     // of a launch the user just asked for, which is news either way.
     if (channel === IPC.terminalSession && "session" in payload) {
-      const { id, status, title, provider } = payload.session;
+      const { id, status, provider } = payload.session;
+      const membership=JSON.stringify([payload.session.parentSessionId,payload.session.taskScope]);
+      if(usageMembership.get(id)!==membership){usageMembership.set(id,membership);scheduleUsageRefresh();}
+      if(!outputHistorySeeded.has(id)){
+        outputHistorySeeded.add(id);
+        const snapshot=terminalManager?.readBuffer(id);
+        if(!shutdownRunning && snapshot?.buffer)void outputHistory.append(id,snapshot.buffer,snapshot.outputOffset).catch(outputHistoryError);
+      }
+      const oldSafety=reportedSafety.get(id) ?? {};
+      const nextSafety={isolation:payload.session.isolation ? JSON.stringify(payload.session.isolation) : undefined,gitRisk:payload.session.gitRisk ? JSON.stringify(payload.session.gitRisk) : undefined};
+      if(nextSafety.isolation && nextSafety.isolation!==oldSafety.isolation)void timeline.append(id,"isolation","Effective session protection",nextSafety.isolation,"core").catch(console.warn);
+      if(nextSafety.gitRisk && nextSafety.gitRisk!==oldSafety.gitRisk)void timeline.append(id,"git-risk","Git settings require attention",nextSafety.gitRisk,"core").catch(console.warn);
+      reportedSafety.set(id,nextSafety);
       const previousStatus = notifiedAttentionStatus.get(id);
+      if (previousStatus !== status) void timeline.append(id,"status",status,undefined,"session-manager").catch(console.warn);
       if (previousStatus !== status) diagnostics.record(status === "failed" ? "error" : "info", "terminal", "session.state", {
         id, provider, status, exitCode: payload.session.exitCode
       });
       notifiedAttentionStatus.set(id, status);
+      if(previousStatus!==status){
+        if(status==="working")reports.invalidate(id);
+        else if(status==="done" || status==="failed" || status==="idle" && previousStatus==="working" && payload.session.turnCompleted)void reports.complete(id).catch(console.warn);
+      }
       const failureOrigin = status === "failed" ? terminalManager?.consumeFailureOrigin() ?? null : null;
-      if ((status === "needs_approval" || status === "failed")
-        && failureOrigin !== "restore"
-        && (failureOrigin === "user" || previousStatus !== status)
-        && settings.get().attentionNotifications
-        && Notification.isSupported()) {
-        new Notification({
-          title: title || provider,
-          body: attentionStatusLabel(status, settings.get().locale)
-        }).show();
+      if(failureOrigin!=="restore" && (failureOrigin==="user" || previousStatus!==status)) {
+        if(status==="needs_approval")notifyAttention(id,"approval");
+        else if(status==="idle" && previousStatus==="working")notifyAttention(id,payload.session.turnCompleted ? "done" : "response");
+        else if(status==="failed")notifyAttention(id,"failed");
+        else if(status==="done" && previousStatus!==undefined)notifyAttention(id,"done");
       }
     } else if (channel === IPC.terminalRemoved && "id" in payload) {
-      checkpointTurns.delete(payload.id);
       usageMembership.delete(payload.id);scheduleUsageRefresh();
-      forgetOrchestrationSession(payload.id);
+      outputHistorySeeded.delete(payload.id);
+      if(!shutdownRunning)void outputHistory.remove(payload.id).catch(outputHistoryError);
+      reports.forget(payload.id);
+      reviewUsageSessions.delete(payload.id);
+      for(const [worker,reviewer] of reviewUsageSessions)if(reviewer===payload.id)reviewUsageSessions.delete(worker);
       diagnostics.record("info", "terminal", "session.closed", { id: payload.id });
       notifiedAttentionStatus.delete(payload.id);
+      reportedSafety.delete(payload.id);
+      checkpointTurns.delete(payload.id);
+      forgetOrchestrationSession(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
   terminalManager.configureRedaction(redaction);
-  timeline.configureSessionContext(id=>{const row=terminalManager?.getMetadata(id);return row ? {taskId:terminalManager!.taskScopeFor(id).id,title:row.title || row.provider} : undefined;});
+  timeline.configureSessionContext(id=>{
+    const row=terminalManager?.getMetadata(id);
+    return row ? {taskId:terminalManager!.taskScopeFor(id).id,title:row.title || row.provider} : undefined;
+  });
   terminalManager.setKeyboardShortcuts(settings.get().shortcuts);
   // The operating-system isolation layer (Settings → Agents → Agent isolation) and YOLO only where the person
   // acknowledged it: both decided here, in the main process, for every launch whoever asks for it.
@@ -741,6 +848,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // Plugin services see card events and control only the cards they start (EP-4).
   const sessionsForPlugins = new PluginSessions({
     terminals: terminalManager,
+    installRecord:id=>pluginManager?.installRecord(id) ?? null,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
   });
   pluginSessions = sessionsForPlugins;
@@ -789,21 +897,23 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const agentControlService = new AgentControlService(managedTerminals, {
     limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
     containment: () => managedTerminals.containment(),
+    currentTurnEpoch: id => runtimeGateway?.currentTurnEpoch(id) ?? null,
     budget:budgets,
+    resolveSubagentEnvironment: subagentWorktreeResolver({
+      isGitProject: projectRoot => checkpoints.available(projectRoot),
+      providers: () => pluginManager!.environmentProviders()
+    }),
     workerModel:async worker=>{
       const account=managedTerminals.usageAccount(worker.id);
       const actual=worker.provider==="codex" && worker.threadId ? await usageSourceFor(account.home ?? resolveAgentHistoryPaths().codex).codexUsage(worker.threadId) : null;
       return actual?.model ?? configuredModel(worker.provider as AgentProviderId,{codex:resolveAgentHistoryPaths().codex,claude:join(app.getPath("home"),".claude"),opencode:join(process.env.XDG_CONFIG_HOME ?? join(app.getPath("home"),".config"),"opencode")});
     },
     reviewCost:id=>timeline.usage([id],usagePrices.get()).cost,
-    resolveSubagentEnvironment: subagentWorktreeResolver({
-      isGitProject: projectRoot => checkpoints.available(projectRoot),
-      providers: () => pluginManager!.environmentProviders()
-    }),
     reviewModel:(provider,model)=>model ? providerDirectorySources.models?.(provider)?.models.find(candidate=>candidate!==model) ?? null : null,
-    onReview:id=>managedTerminals.setTaskMetadata(id,{reviewRequested:true})
+    onReview:(id,result)=>{if(result.reviewerSessionId)reviewUsageSessions.set(id,result.reviewerSessionId);managedTerminals.setTaskMetadata(id,{reviewRequested:true});void timeline.append(id,"review",result.status,result.notes ?? result.reason,"reviewer").catch(console.warn);}
   });
   budgetInputGate=id=>agentControlService.assertInputAllowed(id);
+  markLoopDetected=id=>agentControlService.markLoopDetected(id);
   managedTerminals.configureInputGate(budgetInputGate);
   let usageRefreshPending=false;
   const refreshUsage=()=>{
@@ -813,6 +923,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     const members=new Map<string,string[]>(),parents=new Map<string,string>();
     for(const row of rows){
       if(row.provider==="terminal")continue;
+      const reviewer=reviewUsageSessions.get(row.id);
+      managedTerminals.setObservedUsage(row.id,timeline.usage([row.id],prices),reviewer ? timeline.usage([reviewer],prices) : undefined);
       const root=scopes.get(row.id);if(!root)continue;
       const ids=members.get(root.id) ?? [];ids.push(row.id);members.set(root.id,ids);
       if(!row.parentSessionId)parents.set(root.id,row.id);
@@ -945,7 +1057,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await materialService.load();
   registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
-  registerBacklogIpc(ipc,{checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
+  registerBacklogIpc(ipc,{reports,usagePrices,attention,timeline,checkpoints,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),terminals:managedTerminals,getMainWindow:()=>mainWindow});
   registerIpc(ipc, {
     settings,
     recheckProviderClis: async () => {
@@ -1012,6 +1124,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   markMainBoot("coreServicesReady");
   // The Even G2 companion is the last group: nothing on the first frame needs it.
   evenG2 = new EvenG2Controller({
+    notifications:(channel,id)=>attention.list(channel,id),
+    loopWarningActive:id=>agentControlService.hasCurrentLoopWarning(id),
     userDataPath, terminals: terminalManager,
     localDiscovery: process.platform === "darwin",
     defaultWorkspace: join(app.getPath("documents"), "CanvasTTY Projects"),
@@ -1307,12 +1421,6 @@ async function showStartupFailure(window: BrowserWindow, error: unknown): Promis
   }
 }
 
-/** Notification body for the two statuses that deserve the user's attention. */
-function attentionStatusLabel(status: "needs_approval" | "failed", locale: LocaleId): string {
-  if (status === "needs_approval") return locale === "ru" ? "Требуется подтверждение" : "Needs approval";
-  return locale === "ru" ? "Сессия завершилась с ошибкой" : "Session failed";
-}
-
 if (hasSingleInstanceLock) {
   void app.whenReady()
     .then(() => {
@@ -1379,8 +1487,6 @@ void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
   disposeBudgetObservers?.();disposeBudgetObservers=null;
-  await Promise.allSettled([flushBudgets?.(), sessionTimeline?.flush()]);
-
   diagnostics.record("info", "application", "shutdown.started");
   agentChatHistory?.dispose();
   if (agentControl) await Promise.allSettled([agentControl.close()]);
@@ -1388,8 +1494,10 @@ async function shutdownServices(): Promise<void> {
   if (updateInterval) clearInterval(updateInterval);
   for (const request of browserRequests.values()) { clearTimeout(request.timer); request.reject(new Error("App closing")); }
   browserRequests.clear();
-  await evenG2?.close();
-  if (terminalManager) await terminalManager.shutdown();
+  await runShutdownSteps([
+    {name:"Even G2",run:()=>evenG2?.close()},
+    {name:"terminal processes",run:()=>terminalManager?.shutdown()},
+  ]);
   // The hung-up PTYs exit while the other services close; quitting waits for them (see waitForProcessExits).
   const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
     if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
@@ -1397,10 +1505,17 @@ async function shutdownServices(): Promise<void> {
   limitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
-  if (browserService) await Promise.allSettled([browserService.dispose()]);
-  if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
-  if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
-  if (materialService) await Promise.allSettled([materialService.dispose()]);
+  if(terminalOutputHistory)await terminalOutputHistory.close().catch(console.warn);
+  terminalOutputHistory=null;
+  await runShutdownSteps([
+    {name:"session reports",run:()=>sessionReports?.flush()},
+    {name:"session timeline",run:()=>sessionTimeline?.flush()},
+    {name:"budgets",run:async()=>{try{await flushBudgets?.();}finally{flushBudgets=null;}}},
+    {name:"browser",run:()=>browserService?.dispose()},
+    {name:"plugin services",run:()=>pluginServices?.dispose()},
+    {name:"plugins",run:()=>pluginManager?.dispose()},
+    {name:"materials",run:()=>materialService?.dispose()}
+  ]);
   await ptyExits;
   diagnostics.record("info", "application", "shutdown.completed");
   await diagnostics.flush();

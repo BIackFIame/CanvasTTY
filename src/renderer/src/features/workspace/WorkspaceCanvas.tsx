@@ -144,7 +144,7 @@ interface TerminalCardHandlers {
   restart(id: string, resume?: boolean): Promise<void>;
   dispose(id: string, keepEnvironmentData?: boolean): void;
   openUrl(url: string): void;
-  openInspector(id: string): void;
+  openInspector(id: string, initialTab?: "timeline" | "report"): void;
   gatherTask(id: string): void;
   boundsPreview(id: string, bounds: SessionBounds | null): void;
 }
@@ -663,6 +663,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const taskEdges = useMemo(() => directTaskEdges(renderedSessions), [renderedSessions]);
   const taskSessionsById = useMemo(() => new Map(renderedSessions.map((session) => [session.id, session])), [renderedSessions]);
   const [inspectedSessionId, setInspectedSessionId] = useState<string | null>(null);
+  const [inspectorTab, setInspectorTab] = useState<"timeline" | "report">("timeline");
   const inspectedSession = sessions.find((session) => session.id === inspectedSessionId);
   const taskChildrenByParent = useMemo(() => {
     const result = new Map<string, SessionSnapshot[]>();
@@ -700,7 +701,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     restart: onRestartSession,
     dispose: onDisposeSession,
     openUrl: onOpenTerminalUrl,
-    openInspector: setInspectedSessionId,
+    openInspector: (id, initialTab = "timeline") => {setInspectorTab(initialTab);setInspectedSessionId(id);},
     gatherTask: handleGatherTask,
     boundsPreview: liveTaskBounds.set
   };
@@ -712,7 +713,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       onRestart: (id: string, resume?: boolean) => latest.current!.restart(id, resume),
       onDispose: (id: string, keepEnvironmentData?: boolean) => latest.current!.dispose(id, keepEnvironmentData),
       onOpenUrl: (url: string) => latest.current!.openUrl(url),
-      onOpenInspector: (id: string) => latest.current!.openInspector(id),
+      onOpenInspector: (id: string, initialTab?: "timeline" | "report") => latest.current!.openInspector(id, initialTab),
       onGatherTask: (id: string) => latest.current!.gatherTask(id),
       onBoundsPreview: (id: string, bounds: SessionBounds | null) => latest.current!.boundsPreview(id, bounds)
     };
@@ -1489,7 +1490,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       )}
 
       {inspectedSession && <BacklogSessionInspector key={inspectedSession.id} session={inspectedSession}
-        sessions={sessions} locale={settings.locale} onClose={() => setInspectedSessionId(null)} />}
+        sessions={sessions} locale={settings.locale} initialTab={inspectorTab} onClose={() => setInspectedSessionId(null)} />}
 
       {commandPaletteOpen && (
         <CanvasCommandPalette

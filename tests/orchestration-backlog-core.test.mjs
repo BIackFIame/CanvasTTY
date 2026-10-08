@@ -70,13 +70,23 @@ test("same-card retries retain their finite allowance and concurrent requests cr
   const root = await temp(t, "ctty-retry-cleanup-");
   const { terminals, calls } = manager(t);
   const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator" });
-  const control = new AgentControlService(terminals);
+  const turnEpochs = new Map();
+  const control = new AgentControlService(terminals, { currentTurnEpoch: id => turnEpochs.get(id) ?? null });
   const original = await control.spawn({ parentSessionId: orchestrator.id, provider: "opencode", cwd: root });
   const originalProcess = calls.at(-1).process;
-  await assert.rejects(control.retry(original.id), /running agent must finish or be canceled/u);
-  originalProcess.emitExit(1);
+  originalProcess.kill = () => originalProcess.emitExit(143);
+  turnEpochs.set(original.id, 1);
+  assert.equal(control.markLoopDetected(original.id), true);
+  assert.equal(control.observe(original.id).loopDetected, true, "a current-turn warning remains observable");
+  turnEpochs.set(original.id, 2);
+  assert.equal(control.observe(original.id).loopDetected, undefined, "a completed turn's warning is no longer observable");
+  await assert.rejects(control.retry(original.id), /running agent must finish or be canceled/u, "a prior-turn loop does not permit retry");
+  assert.equal(control.markLoopDetected(original.id), true);
+  assert.equal(control.observe(original.id).loopDetected, true);
   const firstRetry = await control.retry(original.id);
   assert.equal(firstRetry.id, original.id);
+  assert.equal(control.observe(firstRetry.id).loopDetected, undefined, "the old launch warning must not mark the fresh process");
+  await assert.rejects(control.retry(firstRetry.id), /running agent must finish or be canceled/u, "a stale loop warning cannot authorize another retry");
   calls.at(-1).process.emitExit(1);
   const secondRetry = await control.retry(firstRetry.id);
   calls.at(-1).process.emitExit(1);
@@ -368,6 +378,37 @@ test("many task budgets share timeline passes and retain legacy, resumed, and re
       "reloading and repricing preserves exact single-root snapshots");
   }
   await budget.flush();await repricedBudget.flush();
+});
+
+test("daily usage baselines respect provider and account context and count counter resets",async(t)=>{
+  const dir=await temp(t,"ctty-usage-context-");
+  let now=Date.now()-2*86400_000;
+  const timeline=new SessionTimelineService(dir,text=>text,200*1024*1024,()=>now);await timeline.load();
+  await timeline.recordCumulativeUsage("old-card",{input:800,output:200,total:1_000,costUsd:0.1},"cli","same-counter",
+    {provider:"codex",accountId:"account-a",taskId:"root"});
+  now=Date.now();
+  await timeline.recordCumulativeUsage("other-account",{input:16,output:4,total:20,costUsd:0.002},"cli","same-counter",
+    {provider:"codex",accountId:"account-b",taskId:"root"});
+  await timeline.recordCumulativeUsage("other-provider",{input:4,output:1,total:5,costUsd:0.001},"cli","same-counter",
+    {provider:"opencode",accountId:"account-a",taskId:"root"});
+  await timeline.recordCumulativeUsage("reset-card",{input:20,output:5,total:25,costUsd:0.005},"cli","same-counter",
+    {provider:"codex",accountId:"account-a",taskId:"root"});
+  await timeline.recordCumulativeUsage("reset-followup",{input:28,output:7,total:35,costUsd:0.007},"cli","same-counter",
+    {provider:"codex",accountId:"account-a",taskId:"root"});
+  const today=await timeline.breakdown("day","root");
+  const bySession=new Map(today.map(row=>[row.sessionId,row]));
+  assert.equal(bySession.get("other-account")?.tokens.total,20,"a different account starts its own baseline");
+  assert.equal(bySession.get("other-provider")?.tokens.total,5,"a different provider starts its own baseline");
+  assert.equal(bySession.get("reset-card")?.tokens.total,25,"a lower cumulative value starts a new counter epoch");
+  assert.equal(bySession.get("reset-followup")?.tokens.total,10,"later samples delta from the reset counter");
+  assert.ok(Math.abs((bySession.get("reset-card")?.costUsd ?? -1)-0.005)<1e-12);
+  assert.ok(Math.abs((bySession.get("reset-followup")?.costUsd ?? -1)-0.002)<1e-12);
+  const budget=new OrchestrationBudgetService(join(dir,"budget.json"));await budget.load();t.after(()=>budget.dispose());
+  await budget.setLimits("root",{tokens:2_000,costUsd:1,durationMs:null});
+  const task=refreshOrchestrationUsage(budget,timeline,"root",Date.now(),["old-card","other-account","other-provider","reset-card","reset-followup"],[]);
+  assert.equal(task.usage.tokens,1_060,"budget totals keep provider/account identities separate and add reset epochs only once");
+  assert.ok(Math.abs((task.usage.costUsd ?? -1)-0.11)<1e-12,"reported cost deltas across resumed cards are deduplicated");
+  await budget.flush();
 });
 
 test("duration enforcement fires its deadline without session polling", async(t)=>{

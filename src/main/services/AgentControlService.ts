@@ -68,6 +68,7 @@ export interface SpawnAgentRequest {
 export interface AgentObservation {
   sessionId: string;
   status: SessionSnapshot["status"];
+  loopDetected?: boolean;
   /** Raw terminal tail, capped; capabilities with result \"none\" see nothing. */
   output: string;
   /** Once the process exited: its exit code and the last lines of its screen as plain text, masked. */
@@ -112,6 +113,8 @@ export interface AgentControlOptions {
   limits?: () => DelegationLimits;
   /** CanvasTTY's isolation layer can contain an agent on this computer now (a "contained" auto needs it). */
   containment?: () => boolean;
+  /** Current host-owned provider turn epoch; loop warnings expire as soon as the turn changes. */
+  currentTurnEpoch?: (sessionId: string) => number | null;
   /** Persistent task budgets. Only usage from a real provider/timeline source is counted. */
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
   /** Resolves an explicit or automatic subagent environment using the already trusted environments plugin. */
@@ -184,6 +187,7 @@ export class PromptNotDeliveredError extends Error {
 }
 
 export class AgentControlService {
+  private readonly loopWarnings = new Map<string,{at:number;turnEpoch:number}>();
   private readonly terminals: TerminalManager;
   private readonly options: AgentControlOptions;
   private readonly launchRequests = new Map<string, SpawnAgentRequest>();
@@ -406,6 +410,7 @@ export class AgentControlService {
 
   /** Called when TerminalManager removes a card; retries belonging to a live replacement retain their shared count. */
   forgetSession(sessionId: string): void {
+    this.loopWarnings.delete(sessionId);
     this.reviewInputObservers.get(sessionId)?.();
     this.reviewInputObservers.delete(sessionId);
     this.invalidateReview(sessionId);
@@ -504,6 +509,7 @@ export class AgentControlService {
     return {
       sessionId: session.id,
       status: session.status,
+      ...(this.hasCurrentLoopWarning(sessionId) ? {loopDetected:true} : {}),
       // Masked before the cut (a cut inside a secret would leave a tail no pattern recognizes), over a window
       // wider than any match rather than the whole scrollback.
       output: this.redactTail(buffer, maxChars),
@@ -561,7 +567,26 @@ export class AgentControlService {
     }catch{return review;}
   }
 
-  /** Retry is restricted to a failed or observed quiet agent. */
+  /** Host-only signal from the trusted loop detector; it never stops a process itself. */
+  markLoopDetected(sessionId:string):boolean {
+    const session=this.requireSession(sessionId);
+    if(session.role!=="subagent" || session.exitCode!==null)return false;
+    const turnEpoch=this.options.currentTurnEpoch?.(sessionId);
+    if(typeof turnEpoch!=="number" || !Number.isSafeInteger(turnEpoch) || turnEpoch<=0)return false;
+    this.loopWarnings.set(sessionId,{at:Date.now(),turnEpoch});
+    return true;
+  }
+
+  /** Current host loop warning, shared by retry eligibility and companion attention. */
+  hasCurrentLoopWarning(sessionId:string):boolean {
+    const warning=this.loopWarnings.get(sessionId);
+    if(!warning)return false;
+    const age=Date.now()-warning.at;
+    if(!Number.isFinite(age) || age<0 || age>60_000)return false;
+    return this.options.currentTurnEpoch?.(sessionId)===warning.turnEpoch;
+  }
+
+  /** Retry is restricted to a failed, observed quiet or recently looping agent. */
   async retry(sessionId: string, reason?: string, signal?: AbortSignal): Promise<SessionMetadata> {
     const session = this.requireSession(sessionId);
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
@@ -573,7 +598,7 @@ export class AgentControlService {
       throw new DelegationRefusal("The agent's worktree environment is unavailable; its retry was not started locally.");
     }
     const failed = (session.exitCode !== null && session.exitCode !== 0) || session.status === "failed";
-    if (!failed && !this.retryableQuiet.has(sessionId)) {
+    if (!failed && !this.retryableQuiet.has(sessionId) && !this.hasCurrentLoopWarning(sessionId)) {
       throw new DelegationRefusal("retry_agent works only for a failed or quiet subagent; a running agent must finish or be canceled first.");
     }
     const sourceId = this.retryOrigins.get(sessionId) ?? sessionId;
@@ -613,6 +638,7 @@ export class AgentControlService {
       };
       validate();
       const retried = await this.terminals.retryAgentLaunch(sessionId, retryPrompt, validate, signal, () => this.invalidateReview(sessionId));
+      this.loopWarnings.delete(sessionId);
       this.retryableQuiet.delete(sessionId);
       this.scheduleReview(sessionId);
       this.retryOrigins.set(retried.id, sourceId);

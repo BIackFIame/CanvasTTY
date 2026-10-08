@@ -1117,6 +1117,10 @@ export function App(): React.JSX.Element {
     setCamera(focusCamera(session.position, session.size));
   }, []);
 
+  useEffect(()=>window.canvasTTY.terminal.onFocusRequested(id=>{
+    const session=sessionsRef.current.find(row=>row.id===id);if(session)focusSession(session);
+  }),[focusSession]);
+
   const resumeHistory = useCallback(async (item: AgentChatHistoryItem, center: Point): Promise<SessionSnapshot> => {
     const current = settingsRef.current;
     const pixelSkin = isPixelSkinThemeId(current.terminalBorderSkin) || isPixelSkinPackId(current.terminalBorderSkin);
