@@ -3,6 +3,9 @@ import type { MaterialKind, Point, SessionBounds, Size } from "./contracts.ts";
 export const MATERIAL_SCHEME = "canvastty-material";
 export const MATERIAL_LIMIT = 256;
 export const MATERIAL_VERSION_LIMIT = 20;
+export const MATERIAL_STORAGE_LIMIT = 1024 * 1024 * 1024;
+export const MATERIAL_VERSION_MAX_BYTES = 100 * 1024 * 1024;
+export const REMARK_TEXT_LIMIT = 2_000;
 export const MATERIAL_MIN_SIZE: Size = { width: 220, height: 150 };
 export const MATERIAL_MAX_SIZE: Size = { width: 2_400, height: 1_800 };
 export const MATERIAL_HEADER_HEIGHT = 54;
@@ -173,4 +176,8 @@ export function clampSize(size: Size): Size {
     width: Math.min(MATERIAL_MAX_SIZE.width, Math.max(MATERIAL_MIN_SIZE.width, size.width)),
     height: Math.min(MATERIAL_MAX_SIZE.height, Math.max(MATERIAL_MIN_SIZE.height, size.height))
   };
+}
+
+export function isAreaAnchor(anchor: import("./contracts.ts").RemarkAnchor): anchor is Extract<import("./contracts.ts").RemarkAnchor, { kind: "region" | "point" }> {
+  return anchor.kind === "region" || anchor.kind === "point";
 }

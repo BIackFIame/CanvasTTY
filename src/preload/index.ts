@@ -1,3 +1,4 @@
+import { BACKLOG_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type {
   AppSettings,
@@ -132,9 +133,13 @@ const api: CanvasTTYApi = {
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.materialsSetBounds, id, bounds),
     setBoundsBatch: (entries: { id: string; bounds: SessionBounds }[]) => ipcRenderer.send(IPC.materialsSetBoundsBatch, entries),
     remove: (id: string) => ipcRenderer.invoke(IPC.materialsRemove, id),
+    pinVersion: (id: string) => ipcRenderer.invoke(IPC.materialsPinVersion, id),
     reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
     relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
     acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
+    addRemark: (draft: unknown) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
+    updateRemark: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
+    deleteRemark: (id: string) => ipcRenderer.invoke(IPC.materialsDeleteRemark, id),
     onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
   },
   limits: {
@@ -268,6 +273,7 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    openFile: (id: string, reference: string) => ipcRenderer.invoke(IPC.terminalOpenFile, id, reference),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),
       process.platform
@@ -289,6 +295,10 @@ const api: CanvasTTYApi = {
     resolveGitRisk: (reportId: string, action: "neutralize" | "keep") => ipcRenderer.invoke(IPC.terminalResolveGitRisk, reportId, action),
     onGitRisk: (listener: (report: GitRiskReport) => void) => subscribe(IPC.terminalGitRisk, listener)
   },
+  backlog: {
+    ...Object.fromEntries(Object.entries(BACKLOG_IPC).map(([name, channel]) => [name, (...args: unknown[]) => ipcRenderer.invoke(channel, ...args)])),
+    onTaskBoardChanged:(listener)=>subscribe(BACKLOG_EVENTS.taskBoardChanged,listener)
+  } as BacklogApi,
   window: {
     isMacOS: process.platform === "darwin",
     platform: process.platform,
