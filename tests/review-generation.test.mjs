@@ -52,7 +52,7 @@ async function fixture(t, {account=false} = {}) {
   terminals.configureLaunchPipeline(pipeline);
   const prepare=terminals.prepareReviewerAccount.bind(terminals);
   terminals.prepareReviewerAccount=async input=>{
-   const prepared=await prepare(input),row={id:prepared.id,file:prepared.contribution.env.FIXTURE_RUN_FILE,cleanupCalls:0};
+   const prepared=await prepare(input),row={id:prepared.id,directory:join(root,'runs',prepared.id),file:prepared.contribution.env.FIXTURE_RUN_FILE,cleanupCalls:0};
    accounts.push(row);const cleanup=prepared.contribution.cleanup;
    prepared.contribution.cleanup=()=>{row.cleanupCalls++;const pending=cleanup();row.cleanupPromise=pending;return pending;};return prepared;
   };
@@ -66,7 +66,7 @@ async function fixture(t, {account=false} = {}) {
    control.forgetSession(row.id);
   }
   terminals.disposeAll();
-  await Promise.all([...accountCleanups,...parentCleanups]);
+  await Promise.all([...accountCleanups,...parentCleanups,...accounts.map(row=>row.cleanupPromise)]);
   await rm(root,{recursive:true,force:true});
  });
  const parent=terminals.create({provider:'codex',profile:'normal',cwd:root,role:'orchestrator',position:{x:0,y:0}});
@@ -157,6 +157,7 @@ test('successive successful account reviews release the previous reviewer, priva
  await f.control.send(f.worker.id,'second task');
  await f.accounts[0].cleanupPromise;
  assert.equal(existsSync(f.accounts[0].file),false);
+ assert.equal(existsSync(f.accounts[0].directory),false,'reviewer account parent directory is removed');
  assert.equal(f.terminals.getMetadata(first),null);assert.equal(existsSync(firstWorkspace),false);
  assert.equal(f.control.isReadOnlyReviewer(first),false);assert.equal(f.accounts[0].cleanupCalls,1);
  f.finish(f.worker.id,'second answer');await until(()=>f.prompts.length===2);
@@ -166,6 +167,7 @@ test('successive successful account reviews release the previous reviewer, priva
  f.control.forgetSession(f.worker.id);
  await f.accounts[1].cleanupPromise;
  assert.equal(existsSync(f.accounts[1].file),false);
+ assert.equal(existsSync(f.accounts[1].directory),false,'reviewer account parent directory is removed');
  assert.equal(f.terminals.getMetadata(second),null);assert.equal(existsSync(secondWorkspace),false);
  assert.equal(f.control.isReadOnlyReviewer(second),false);
  assert.deepEqual(f.accounts.map(row=>row.cleanupCalls),[1,1]);

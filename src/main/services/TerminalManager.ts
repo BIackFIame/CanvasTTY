@@ -154,6 +154,10 @@ interface ManagedSession {
   launchCleanup: (() => Promise<void>) | null;
   /** Cleanup already started by an earlier exit; closing the card must drain it before deleting its parent. */
   launchCleanupPending?: Promise<void>;
+  /** Whole contributed launches, including asynchronous preparation/wrapping and abandoned-run cleanup. */
+  launchTasks?: Set<Promise<unknown>>;
+  /** The pipelines that created this card's run folders, retained across host reconfiguration/restart. */
+  launchFilePipelines?: Set<Pick<LaunchPipeline, "forgetSession">>;
   /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
@@ -427,21 +431,34 @@ export class TerminalManager {
     const options = pipeline.normalizeOptions(input.provider, accountOnly, { delegated: true });
     if (!options) throw new LaunchRefusal("The worker has no model account for its reviewer.");
     const id = randomUUID();
-    const prepared = await pipeline.prepare({
-      sessionId: id,
-      provider: input.provider,
-      profile: "plan",
-      role: "subagent",
-      cwd: realpathSync(input.workspace.directory),
-      projectRoot: this.taskScopeFor(input.taskRootSessionId).cwd,
-      parentSessionId: input.taskRootSessionId,
-      restoring: false,
-      resume: false,
-      options: structuredClone(options) as Record<string, Record<string, boolean | string>>,
-      environment: null
-    });
-    if (!prepared.ok) throw new LaunchRefusal(prepared.reason);
-    return { id, contribution: prepared };
+    try {
+      const prepared = await pipeline.prepare({
+        sessionId: id,
+        provider: input.provider,
+        profile: "plan",
+        role: "subagent",
+        cwd: realpathSync(input.workspace.directory),
+        projectRoot: this.taskScopeFor(input.taskRootSessionId).cwd,
+        parentSessionId: input.taskRootSessionId,
+        restoring: false,
+        resume: false,
+        options: structuredClone(options) as Record<string, Record<string, boolean | string>>,
+        environment: null
+      });
+      if (!prepared.ok) throw new LaunchRefusal(prepared.reason);
+      // A reviewer id has one run and cannot be restarted. Its account contribution therefore owns both the run
+      // and its parent even before a card adopts it; cancellation/failed creation use this same cleanup handle.
+      const cleanup = prepared.cleanup;
+      let released: Promise<void> | undefined;
+      prepared.cleanup = () => released ??= (async () => {
+        try { await cleanup(); }
+        finally { await pipeline.forgetSession(id); }
+      })();
+      return { id, contribution: prepared };
+    } catch (error) {
+      await pipeline.forgetSession(id).catch(() => undefined);
+      throw error;
+    }
   }
 
   createReadOnlyReviewer(input: {
@@ -1579,6 +1596,20 @@ export class TerminalManager {
     return pending;
   }
 
+  /** Closing a card waits for producers of run files, not just the current process's adopted cleanup. */
+  private async forgetLaunchFiles(session: ManagedSession): Promise<void> {
+    while (session.launchTasks?.size) await Promise.allSettled([...session.launchTasks]);
+    try { await this.cleanupLaunchFiles(session); }
+    finally {
+      const errors: unknown[] = [];
+      // Different pipeline instances may share runsRoot; even their parent deletions must not overlap.
+      for (const pipeline of session.launchFilePipelines ?? []) {
+        try { await pipeline.forgetSession(session.metadata.id); } catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new AggregateError(errors, "Launch file folders could not be removed.");
+    }
+  }
+
   /**
    * Closes a card. A card in a plugin environment releases it: `keepEnvironmentData` is the person's
    * answer to "Keep environment data?" (kept unless they said no). Quitting releases nothing.
@@ -1617,10 +1648,9 @@ export class TerminalManager {
     this.redaction.clear(`session:${id}`);
     this.releaseIsolation(id);
     session.launchToken += 1;
-    const pipeline = session.extras.options ? this.launchPipeline : null;
-    // Windows cannot reliably remove a parent while a child's recursive removal is still in progress.
-    // Capture this pipeline and run cleanup now; a restart or reconfiguration must not change their ownership.
-    void this.cleanupLaunchFiles(session).finally(() => pipeline?.forgetSession(id)).catch(() => undefined);
+    // launchToken and launch waiters were invalidated above: pending preparation/wrapping can now unwind before
+    // parent removal. Its original pipeline remains the owner even if the host configuration has since changed.
+    void this.forgetLaunchFiles(session).catch(() => undefined);
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -2400,7 +2430,9 @@ export class TerminalManager {
   ): void {
     const token = ++session.launchToken;
     const { metadata } = session;
-    void this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt)
+    const tasks = session.launchTasks ??= new Set();
+    // Register before invoking plugin code, which may synchronously close or restart its card.
+    const task = Promise.resolve().then(() => this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt))
       .catch((error: unknown): LaunchOutcome => {
         metadata.failureDetails = this.redactSecrets(`Launch refused: ${error instanceof Error ? error.message : String(error)}`);
         return "failed";
@@ -2414,7 +2446,9 @@ export class TerminalManager {
         this.emitSession(metadata, outcome === "failed" ? failureOrigin : null);
         this.schedulePersistence();
       })
-      .finally(() => this.wakeLaunchWaiters(session));
+      .finally(() => { tasks.delete(task); this.wakeLaunchWaiters(session); });
+    tasks.add(task);
+    void task.catch(() => undefined);
   }
 
   private async runContributedLaunch(
@@ -2493,171 +2527,155 @@ export class TerminalManager {
 
     // 3. Chosen launch contributors, and the launch policies that apply.
     let contribution: LaunchContribution | null = null;
-    const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
-    if (session.extras.options || this.policyApplies(metadata.provider)) {
-      const pipeline = this.launchPipeline;
-      if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
-      const placedIn = session.extras.environment;
-      const prepared = await pipeline.prepare({
-        sessionId: id,
-        provider: metadata.provider,
-        profile: metadata.profile,
-        role: metadata.role,
-        cwd: metadata.cwd,
-        ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
-        restoring,
-        resume: resume !== null,
-        options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
-        environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
-        ...(trustedFolder ? { trustedFolder } : {})
-      });
-      if (!live()) {
-        if (prepared.ok) void prepared.cleanup().catch(() => undefined);
-        return "superseded";
-      }
-      if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) {
-        if(prepared.ok)void prepared.cleanup().catch(()=>undefined);
-        return "superseded";
-      }
-      if(!live()) {
-        if(prepared.ok)void prepared.cleanup().catch(()=>undefined);
-        return "superseded";
-      }
-      if (!prepared.ok) return refuse(prepared.reason);
-      contribution = prepared;
-      session.accountId=prepared.accountId ?? selectedAccountId(session.extras.options);
-      session.accountHome=prepared.accountHome;
-      this.addLaunchSecrets(session, prepared.secrets);
-    }
-    const dropContribution = (): void => {
-      void contribution?.cleanup().catch(() => undefined);
-    };
-
-    // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
-    const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
-    if (environment && keeps.launch !== true && metadata.profile !== "normal") {
-      dropContribution();
-      return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
-    }
-    const taskProjectRoot = metadata.taskScope?.cwd ?? this.taskProjectRoot(metadata.cwd, metadata.parentSessionId);
-    const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
-      environment ? { isolated: keeps.isolated === true, label: environment.label } : null, taskProjectRoot);
-    if (decision.refuse) {
-      dropContribution();
-      return refuse(decision.refuse);
-    }
-    if (environment && keeps.launch !== true) {
-      metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
-        reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
-    }
-
-    // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
-    let planned: PlannedSpawn | { failure: LaunchFailure };
+    let adopted = false;
+    let plannedCleanup: (() => void) | undefined;
     try {
-      planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
-    } catch (error) {
-      dropContribution();
-      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
-      return "failed";
-    }
-    if ("failure" in planned) {
-      dropContribution();
-      applyLaunchFailure(metadata, planned.failure);
-      return "failed";
-    }
-    const abandon = (): void => {
-      planned.cleanup();
-      dropContribution();
-    };
-    this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
-    let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
-    if (environment && environments) {
-      if (typeof planned.args === "string") {
-        abandon();
-        return refuse("this provider's Windows batch launcher cannot run in a plugin environment.");
+      const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
+      if (session.extras.options || this.policyApplies(metadata.provider)) {
+        const pipeline = this.launchPipeline;
+        if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
+        (session.launchFilePipelines ??= new Set()).add(pipeline);
+        const placedIn = session.extras.environment;
+        const prepared = await pipeline.prepare({
+          sessionId: id,
+          provider: metadata.provider,
+          profile: metadata.profile,
+          role: metadata.role,
+          cwd: metadata.cwd,
+          ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
+          restoring,
+          resume: resume !== null,
+          options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
+          environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
+          ...(trustedFolder ? { trustedFolder } : {})
+        });
+        if (prepared.ok) contribution = prepared;
+        if (!live()) return "superseded";
+        if (this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) return "superseded";
+        if (!live()) return "superseded";
+        if (!prepared.ok) return refuse(prepared.reason);
+        session.accountId=prepared.accountId ?? selectedAccountId(session.extras.options);
+        session.accountHome=prepared.accountHome;
+        this.addLaunchSecrets(session, prepared.secrets);
       }
-      const secretValues = new Set(contribution?.secrets ?? []);
-      const secretEnvNames = Object.keys(contribution?.env ?? {}).filter((key) => secretValues.has(contribution!.env[key]!));
-      // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
-      const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
-        .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
-      const wrapped = await environments.wrap(environment, {
-        sessionId: id,
-        provider: metadata.provider,
-        launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
-        secretEnvNames,
-        takenEnv: new Set(Object.keys(planned.launchEnvironment)),
-        path: launchSearchPath(planned.env)
-      });
-      if (!live()) {
-        abandon();
-        return "superseded";
+
+      // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
+      const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+      if (environment && keeps.launch !== true && metadata.profile !== "normal") {
+        return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
       }
-      if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) {
-        abandon();
-        return "superseded";
+      const taskProjectRoot = metadata.taskScope?.cwd ?? this.taskProjectRoot(metadata.cwd, metadata.parentSessionId);
+      const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
+        environment ? { isolated: keeps.isolated === true, label: environment.label } : null, taskProjectRoot);
+      if (decision.refuse) {
+        return refuse(decision.refuse);
       }
-      if(!live()) {
-        abandon();
-        return "superseded";
+      if (environment && keeps.launch !== true) {
+        metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
+          reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
       }
-      if (!wrapped.ok) {
-        abandon();
-        return refuse(wrapped.reason);
-      }
-      this.addLaunchSecrets(session, wrapped.secrets);
-      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
-        env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
-    }
-    if (decision.apply) {
+
+      // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
+      let planned: PlannedSpawn | { failure: LaunchFailure };
       try {
-        spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, taskProjectRoot, contribution?.accountHome, undefined), cwd: spawn.cwd };
+        planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
+          session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
       } catch (error) {
-        abandon();
-        return refuse(error instanceof Error ? error.message : String(error));
+        metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+        return "failed";
+      }
+      if ("failure" in planned) {
+        applyLaunchFailure(metadata, planned.failure);
+        return "failed";
+      }
+      plannedCleanup = planned.cleanup;
+      this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
+      let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
+      if (environment && environments) {
+        if (typeof planned.args === "string") {
+          return refuse("this provider's Windows batch launcher cannot run in a plugin environment.");
+        }
+        const secretValues = new Set(contribution?.secrets ?? []);
+        const secretEnvNames = Object.keys(contribution?.env ?? {}).filter((key) => secretValues.has(contribution!.env[key]!));
+        // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
+        const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
+          .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
+        const wrapped = await environments.wrap(environment, {
+          sessionId: id,
+          provider: metadata.provider,
+          launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
+          secretEnvNames,
+          takenEnv: new Set(Object.keys(planned.launchEnvironment)),
+          path: launchSearchPath(planned.env)
+        });
+        if (!live()) {
+          return "superseded";
+        }
+        if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) {
+          return "superseded";
+        }
+        if(!live()) {
+          return "superseded";
+        }
+        if (!wrapped.ok) {
+          return refuse(wrapped.reason);
+        }
+        this.addLaunchSecrets(session, wrapped.secrets);
+        spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
+          env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
+      }
+      if (decision.apply) {
+        try {
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, taskProjectRoot, contribution?.accountHome, undefined), cwd: spawn.cwd };
+        } catch (error) {
+          return refuse(error instanceof Error ? error.message : String(error));
+        }
+      }
+      if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) {
+        return "superseded";
+      }
+      if(!live()) {
+        return "superseded";
+      }
+      let process: IPty;
+      try {
+        this.reviewDiffTracker.beforeSpawn(id, spawn.cwd, session.captureReviewDiff === true, this.reviewParentDirectory(metadata.parentSessionId));
+        process = this.spawnPty(spawn.command, spawn.args, {
+          name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
+        });
+      } catch (error) {
+        this.reviewDiffTracker.forget(id);
+        this.releaseIsolation(id);
+        metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+        return "failed";
+      }
+      session.process = process;
+      if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
+        metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
+      } else {
+        delete metadata.nativeEditor;
+      }
+      this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
+      session.agentBrowser = planned.agentBrowser;
+      session.agentRuntime = planned.agentRuntime;
+      session.agentOrchestration = planned.agentOrchestration;
+      session.launchCleanup = contribution?.cleanup ?? null;
+      adopted = true;
+      metadata.status = initialSessionStatus(metadata.provider);
+      metadata.exitCode = null;
+      metadata.failureDetails = null;
+      this.bindProcess(id, session, process);
+      const runtimeStatus = this.agentRuntime?.currentStatus(id);
+      if (runtimeStatus) metadata.status = runtimeStatus;
+      if (environment) this.describeEnvironment(id, session, environment);
+      return "launched";
+    } finally {
+      // Unadopted resources remain owned by this tracked launch, including throws during plugin wrapping.
+      if (!adopted) {
+        try { plannedCleanup?.(); }
+        finally { await contribution?.cleanup().catch(() => undefined); }
       }
     }
-    if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused()) {
-      abandon();
-      return "superseded";
-    }
-    if(!live()) {
-      abandon();
-      return "superseded";
-    }
-    let process: IPty;
-    try {
-      this.reviewDiffTracker.beforeSpawn(id, spawn.cwd, session.captureReviewDiff === true, this.reviewParentDirectory(metadata.parentSessionId));
-      process = this.spawnPty(spawn.command, spawn.args, {
-        name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
-      });
-    } catch (error) {
-      this.reviewDiffTracker.forget(id);
-      abandon();
-      this.releaseIsolation(id);
-      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
-      return "failed";
-    }
-    session.process = process;
-    if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
-      metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
-    } else {
-      delete metadata.nativeEditor;
-    }
-    this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
-    session.agentBrowser = planned.agentBrowser;
-    session.agentRuntime = planned.agentRuntime;
-    session.agentOrchestration = planned.agentOrchestration;
-    session.launchCleanup = contribution?.cleanup ?? null;
-    metadata.status = initialSessionStatus(metadata.provider);
-    metadata.exitCode = null;
-    metadata.failureDetails = null;
-    this.bindProcess(id, session, process);
-    const runtimeStatus = this.agentRuntime?.currentStatus(id);
-    if (runtimeStatus) metadata.status = runtimeStatus;
-    if (environment) this.describeEnvironment(id, session, environment);
-    return "launched";
   }
 
   private addLaunchSecrets(session: ManagedSession, secrets: readonly string[]): void {

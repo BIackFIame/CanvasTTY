@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,stat} from 'node:fs/promises';
 import {realpathSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
@@ -194,11 +194,10 @@ test('an OpenCode reviewer gets its prompt only after its TUI reported a first s
 
 
 for (const scenario of ["creation throws", "cancelled during preparation", "success"]) {
- test(`reviewer account contribution is cleaned exactly once: ${scenario}`, async t => {
+ test(`reviewer account contribution is cleaned exactly once: ${scenario}`, {timeout:5000}, async t => {
   const {LaunchPipeline} = await import('../src/main/services/LaunchPipeline.ts');
   const root = await mkdtemp(join(tmpdir(), 'ctty-review-cleanup-'));
-  t.after(() => rm(root, {recursive:true,force:true}));
-  let terminals;
+  let terminals, releaseCleanup;
   terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner([], {onWrite(data) {
    if (!data.includes('Review only the supplied answer')) return;
    const reviewer = terminals.listMetadata().find(row => row.title.startsWith('Review:'));
@@ -207,18 +206,22 @@ for (const scenario of ["creation throws", "cancelled during preparation", "succ
    terminals.applyProviderSignal(reviewer.id, {state:'idle',event:'Stop'}, 'hook');
   }}));
   installReviewerIsolation(terminals);
-  t.after(() => terminals.disposeAll());
+  const disposals=[],forgetFiles=terminals.forgetLaunchFiles.bind(terminals);
+  terminals.forgetLaunchFiles=session=>{const pending=forgetFiles(session);disposals.push(pending);return pending;};
+  t.after(async()=>{releaseCleanup?.();terminals.disposeAll();await Promise.allSettled(disposals);await rm(root,{recursive:true,force:true});});
   terminals.configureLaunchPipeline(new LaunchPipeline({
    contributors: () => [{pluginId:'canvastty-accounts',pluginName:'Accounts',serviceId:'accounts',secrets:false,
     launch:{fields:[{key:'account',label:'Model account',kind:'text'}],delegable:true}}],
-   call: async () => ({env:{},secretEnv:{},args:[],files:[]}),
+   call: async () => ({env:{FIXTURE_FILE:'{launchFiles}/account.txt'},secretEnv:{},args:[],files:[{relPath:'account.txt',content:'temporary account config'}]}),
    secret: async () => null, runsRoot:join(root,'runs'), timeoutMs:2000
   }));
   const control = new AgentControlService(terminals, {reviewDiff:async () => '+fixture',waitTiming:{checkMs:1,settleMs:0,quietMs:10}});
   const parent = terminals.create({provider:'codex',profile:'normal',cwd:root,role:'orchestrator',position:{x:0,y:0}});
   const worker = await control.spawn({parentSessionId:parent.id,provider:'codex',cwd:root,review:true,
    launchOptions:{'canvastty-accounts':{account:'fixture-model'}}});
-  let cleanupCalls = 0, cleanupDone = false, releaseCleanup;
+  let cleanupCalls = 0, cleanupDone = false;
+  let cleanupStarted;const started=new Promise(resolve=>{cleanupStarted=resolve;});
+  let cleanupFinished;const finished=new Promise(resolve=>{cleanupFinished=resolve;});
   const cleanupGate = new Promise(resolve => { releaseCleanup = resolve; });
   let preparedAccount;
   const prepare = terminals.prepareReviewerAccount.bind(terminals);
@@ -226,7 +229,7 @@ for (const scenario of ["creation throws", "cancelled during preparation", "succ
    const prepared = await prepare(input); preparedAccount = prepared;
    const cleanup = prepared.contribution.cleanup;
    prepared.contribution.cleanup = async () => {
-    cleanupCalls++; await cleanupGate; await cleanup(); cleanupDone = true;
+    cleanupCalls++; cleanupStarted(); await cleanupGate; await cleanup(); cleanupDone = true; cleanupFinished();
    };
    if (scenario === 'cancelled during preparation') control.forgetSession(worker.id);
    return prepared;
@@ -243,11 +246,11 @@ for (const scenario of ["creation throws", "cancelled during preparation", "succ
    terminals.dispose(result.review.reviewerSessionId);
    assert.equal(cleanupCalls, 1);
    releaseCleanup();
-   for (let attempt=0; !cleanupDone && attempt<100; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+   await finished;
    assert.equal(cleanupDone, true);
    terminals.dispose(result.review.reviewerSessionId);
   } else {
-   for (let attempt=0; cleanupCalls===0 && attempt<100; attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+   await started;
    assert.ok(preparedAccount, 'preparation completed');
    assert.equal(cleanupCalls, 1);
    assert.equal(settled, false, 'failure/cancellation must wait for account cleanup');
@@ -257,6 +260,7 @@ for (const scenario of ["creation throws", "cancelled during preparation", "succ
    assert.equal(cleanupDone, true);
    assert.equal(terminals.listMetadata().filter(row => row.title.startsWith('Review:')).length, 0);
   }
+  await assert.rejects(stat(join(root,'runs',preparedAccount.id)),{code:'ENOENT'},'account parent removed for every ownership outcome');
   terminals.disposeAll();
   assert.equal(cleanupCalls, 1, 'cleanup is not duplicated by service and terminal manager');
  });
