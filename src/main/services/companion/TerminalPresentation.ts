@@ -45,6 +45,8 @@ interface Screen {
   sequence: number;
   turnPending: boolean;
   inputPending: boolean;
+  observedStatus: SessionMetadata["status"] | null;
+  responseAvailable: boolean;
   busySeen: boolean;
   menuFingerprint: string | null;
   menuId: string | null;
@@ -73,6 +75,8 @@ export class TerminalPresentation {
       sequence: 0,
       turnPending: false,
       inputPending: false,
+      observedStatus: null,
+      responseAvailable: false,
       busySeen: false,
       menuFingerprint: null,
       menuId: null,
@@ -127,13 +131,7 @@ export class TerminalPresentation {
     }
     if (channel === IPC.terminalSession) {
       const session = (payload as { session: SessionMetadata }).session;
-      const screen = this.screen(session.id);
-      if (session.status === "working") {
-        screen.turnPending = true;
-        screen.busySeen = true;
-      } else if (session.status === "idle" && screen.busySeen) {
-        screen.inputPending = false;
-      }
+      this.observeStatus(this.screen(session.id),session);
       return;
     }
     if (channel !== IPC.terminalData) return;
@@ -164,6 +162,21 @@ export class TerminalPresentation {
           new Promise<void>((resolve) => terminal.write(data, resolve)),
       );
   }
+  private observeStatus(screen:Screen,session:SessionMetadata):void {
+    const previous=screen.observedStatus;
+    screen.observedStatus=session.status;
+    if(session.status==="working") {
+      screen.turnPending=true;screen.busySeen=true;screen.responseAvailable=false;
+    } else if(session.status==="idle" && !session.turnCompleted) {
+      if(previous===null || previous==="working")screen.responseAvailable=true;
+      if(previous==="working")screen.inputPending=false;
+    } else screen.responseAvailable=false;
+  }
+  /** An old response is eligible again only after fresh progress/answer, not a failed-to-idle transition. */
+  canShowResponseAttention(id:string):boolean {
+    const screen=this.screens.get(id);
+    return screen?.responseAvailable===true && !screen.inputPending;
+  }
   answer(id: string, text: string, turnId: string | null, expiresAt: number): void {
     if (!this.port.listMetadata().some((s) => s.id === id) || !text.trim())
       return;
@@ -177,6 +190,7 @@ export class TerminalPresentation {
     screen.sequence++;
     screen.turnPending = false;
     screen.inputPending = false;
+    screen.responseAvailable = true;
   }
   clearAnswer(id: string): void {
     const screen = this.screens.get(id);
@@ -190,8 +204,12 @@ export class TerminalPresentation {
   pending(id: string): void {
     const screen = this.screen(id);
     screen.turnPending = true;
-    screen.inputPending = true;
     screen.busySeen = false;
+  }
+  /** A confirmed text/voice submission acknowledges a response; raw terminal keys do not. */
+  submitted(id:string):void {
+    this.pending(id);
+    this.screen(id).inputPending = true;
   }
   /** Successful device input resolves the prior response notice until fresh progress or an answer. */
   hasPendingInput(id:string):boolean { return this.screens.get(id)?.inputPending ?? false; }
@@ -228,8 +246,9 @@ export class TerminalPresentation {
   async read(id: string) {
     const session = this.port.listMetadata().find((s) => s.id === id);
     if (!session) throw new Error("Session unavailable");
-    const screen = this.screen(id),
-      viewport = await this.text(id),
+    const screen = this.screen(id);
+    this.observeStatus(screen,session);
+    const viewport = await this.text(id),
       menu = session.provider === "codex" ? codexMenu(viewport) : null;
     if (screen.answerExpiresAt !== null && screen.answerExpiresAt <= Date.now()) {
       screen.lastAnswer = "";
@@ -276,7 +295,10 @@ export class TerminalPresentation {
           !screen.lastAnswer ||
           (screen.turnPending && screen.busySeen))
       ) {
-        if (reply !== screen.lastAnswer) screen.inputPending = false;
+        if (reply !== screen.lastAnswer) {
+          screen.inputPending = false;
+          if(session.status==="idle" && !session.turnCompleted)screen.responseAvailable=true;
+        }
         screen.lastAnswer = reply;
       }
     }

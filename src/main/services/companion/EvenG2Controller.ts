@@ -229,6 +229,7 @@ export class EvenG2Controller {
           if (written) this.presentation.pending(id);
           return written;
         },
+        inputSubmitted: (id) => this.presentation.submitted(id),
         close: (id) => this.terminals.dispose(id),
         rename: (id, title) => safeSession(this.terminals.rename(id, title)),
         create: (provider) => {
@@ -319,18 +320,17 @@ export class EvenG2Controller {
   }
   /** History remains available; the glasses notice describes only a still-current condition. */
   private currentAttention(session:SessionMetadata,selectionSent:boolean):AttentionEvent|null {
-    const event=this.notifications("glasses",session.id).at(-1);
-    if(!event || event.sessionId!==session.id)return null;
-    let current=false;
-    switch(event.kind) {
-      case "approval": current=session.status==="needs_approval" && !selectionSent;break;
-      case "response": current=session.status==="idle" && !session.turnCompleted && !this.presentation.hasPendingInput(session.id);break;
-      case "done": current=session.status==="done" || session.status==="idle" && session.turnCompleted===true;break;
-      case "failed": current=session.status==="failed";break;
-      case "budget": current=session.taskBudget?.warning===true || session.taskBudget?.paused===true;break;
-      case "loop": current=session.exitCode===null && this.loopWarningActive(session.id);break;
-    }
-    return current ? event : null;
+    return [...this.notifications("glasses",session.id)].reverse().find(event=>{
+      if(event.sessionId!==session.id)return false;
+      switch(event.kind) {
+        case "approval": return session.status==="needs_approval" && !selectionSent;
+        case "response": return session.status==="idle" && !session.turnCompleted && this.presentation.canShowResponseAttention(session.id);
+        case "done": return session.status==="done" || session.status==="idle" && session.turnCompleted===true;
+        case "failed": return session.status==="failed";
+        case "budget": return session.taskBudget?.warning===true || session.taskBudget?.paused===true;
+        case "loop": return session.exitCode===null && this.loopWarningActive(session.id);
+      }
+    }) ?? null;
   }
   observe(channel: string, payload: unknown): void {
     if (this.config.enabled) this.presentation.observe(channel, payload);
@@ -1219,7 +1219,7 @@ export class EvenG2Controller {
               )
             )
               throw new Error("terminal-closed");
-            this.presentation.pending(id);
+            this.presentation.submitted(id);
             return true;
           },
         ),

@@ -989,3 +989,64 @@ test('fallback response attention returns after real working-to-idle progress wi
  f.controller.observe(IPC.terminalData,{id:'one',data:output,outputOffset:7+output.length});
  assert.deepEqual(await poll(),event,'a changed parsed reply also resolves pending input without lifecycle hooks');
 });
+
+
+test('terminal navigation and interrupt keys do not acknowledge response attention; replayed text cannot acknowledge a fresh response',async t=>{
+ const history=[{id:'response-1',sessionId:'one',kind:'response',title:'one',at:1}];
+ const f=await fixture(t,{notifications:()=>history});await f.enable();
+ const {connectionFromCode,localFetcher}=await import('../integrations/even-g2/src/local-fetch.mjs');
+ const origin=f.controller.state().transport.origin;await f.controller.command({type:'begin-pairing'});
+ const bootstrap=await connectionFromCode(f.controller.state().pairing.code,{origins:[origin],allowLoopback:true});
+ const encrypted=localFetcher(bootstrap.connection,{allowLoopback:true});
+ const paired=await encrypted(origin+'/g2/api/pair',{method:'POST',body:JSON.stringify({code:bootstrap.code,name:'Input regression'})});
+ assert.equal(paired.status,202);const {token,id}=await paired.json();await f.controller.command({type:'approve',id});
+ const poll=async()=>(await f.call('/g2/api/terminal?id=one',{token})).data.attention;
+ assert.deepEqual(await poll(),history[0]);
+ const mobile=action=>encrypted(origin+'/g2/api/mobile',{method:'POST',headers:{Authorization:'Bearer '+token},body:JSON.stringify({version:1,id:randomBytes(16).toString('hex'),sentAt:Date.now(),action})});
+ for(const key of ['up','down','left','right','backspace','escape','ctrl-c','enter']) {
+  assert.equal((await mobile({type:'session.key',sessionId:'one',key})).status,200);
+  assert.deepEqual(await poll(),history[0],`${key} is navigation/control, not a submitted response`);
+ }
+ assert.equal((await mobile({type:'session.interrupt',sessionId:'one'})).status,200);assert.deepEqual(await poll(),history[0]);
+ const body={sessionId:'one',action:'text',text:'answer',requestId:randomBytes(16).toString('hex'),sentAt:Date.now()};
+ assert.equal((await f.call('/g2/api/control',{token,body})).status,200);assert.equal(await poll(),null);
+ f.controller.answer('one','fresh answer','fresh',Date.now()+60000);history.push({...history[0],id:'response-2'});
+ assert.deepEqual(await poll(),history[1]);const writes=f.writes.length;
+ assert.equal((await f.call('/g2/api/control',{token,body})).status,200);assert.equal(f.writes.length,writes);
+ assert.deepEqual(await poll(),history[1],'ledger replay does not acknowledge a newer response');
+});
+
+test('newest current attention survives newer resolved events without mutating history or resurrecting an acknowledged approval',async t=>{
+ const history=[];let loopActive=false;
+ const f=await fixture(t,{notifications:()=>history,loopWarningActive:()=>loopActive});
+ f.sessions[0].provider='codex';f.sessions[0].status='needs_approval';f.sessions[0].exitCode=null;
+ const menu='Would you like to run this command?\n$ npm test\n\n› 1. Yes, proceed (y)\n  2. No (esc)\n\nPress enter to confirm or esc to cancel';
+ f.options.terminals.readBuffer=()=>({buffer:menu,outputOffset:menu.length});
+ await f.enable();const {token}=await f.pair();
+ const publish=kind=>{const event={id:String(history.length),sessionId:'one',title:'one',kind,at:history.length};history.push(event);return event;};
+ const read=async()=>{const response=await f.call('/g2/api/terminal?id=one',{token});assert.equal(response.status,200);return response.data;};
+ const approval=publish('approval');assert.deepEqual((await read()).attention,approval);
+ f.sessions[0].taskBudget={warning:true,paused:false};const budget=publish('budget');assert.deepEqual((await read()).attention,budget);
+ loopActive=true;const loop=publish('loop');assert.deepEqual((await read()).attention,loop);
+ loopActive=false;assert.deepEqual((await read()).attention,budget);
+ f.sessions[0].taskBudget.warning=false;assert.deepEqual((await read()).attention,approval,'resolved budget cannot hide pending approval');
+ history.push({...approval,id:'foreign',sessionId:'private'});assert.deepEqual((await read()).attention,approval,'history callback cannot leak another session');
+ const view=await read();assert.ok(view.interaction);
+ assert.equal((await f.call('/g2/api/control',{token,body:{sessionId:'one',action:'choose',menuId:view.interaction.id,index:0}})).status,200);
+ assert.equal((await read()).attention,null,'selected approval cannot return through history fallback');
+ assert.deepEqual(history.map(e=>e.id),['0','1','2','foreign'],'search does not reverse or delete retained history');
+});
+
+test('response history fallback respects observed progress and submitted input even when intermediate states are not polled',async t=>{
+ const response={id:'response',sessionId:'one',title:'one',kind:'response',at:1},history=[response];
+ const f=await fixture(t,{notifications:()=>history});await f.enable();const {token}=await f.pair();
+ const session=f.sessions[0],poll=async()=>(await f.call('/g2/api/terminal?id=one',{token})).data.attention;
+ const status=value=>{session.status=value;f.controller.observe(IPC.terminalSession,{session});};
+ assert.deepEqual(await poll(),response);
+ status('failed');status('idle');assert.equal(await poll(),null,'failed→idle cannot revive an earlier response notice');
+ status('working');status('idle');assert.deepEqual(await poll(),response,'fresh response can reuse a coalesced notification after real progress');
+ session.taskBudget={warning:true,paused:false};const budget={...response,id:'budget',kind:'budget'};history.push(budget);
+ assert.deepEqual(await poll(),budget);session.taskBudget.warning=false;assert.deepEqual(await poll(),response);
+ assert.equal((await f.call('/g2/api/control',{token,body:{sessionId:'one',action:'text',text:'answered'}})).status,200);
+ assert.equal(await poll(),null,'resolved newer budget must not resurrect a submitted response');
+});
