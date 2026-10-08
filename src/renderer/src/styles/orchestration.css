@@ -150,3 +150,4 @@
 .backlog-usage-breakdown__price-row { grid-template-columns: minmax(0,1fr); }
 .backlog-usage-breakdown > header { align-items: flex-start; flex-direction: column; }
 }
+.launch-flow-picker__task { width: 100%; box-sizing: border-box; resize: vertical; padding: 7px; border: 1px solid rgba(255,255,255,.15); border-radius: 7px; color: inherit; background: #30323f; font: inherit; }

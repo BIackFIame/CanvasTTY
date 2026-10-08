@@ -44,6 +44,7 @@ interface CanvasContextMenuProps {
   materialHasLocation: boolean;
   onAddFiles(): void;
   onPasteFiles(): void;
+  onPinMaterial(): void;
   onRevealMaterial(): void;
   onCopyMaterialPath(): void;
   onBringMaterialToFront(): void;
@@ -71,6 +72,7 @@ export function CanvasContextMenu({
   materialHasLocation,
   onAddFiles,
   onPasteFiles,
+  onPinMaterial,
   onRevealMaterial,
   onCopyMaterialPath,
   onBringMaterialToFront,
@@ -260,6 +262,9 @@ export function CanvasContextMenu({
 
       {kind === "material" && (
         <>
+          <CanvasMenuRow icon="pin" role="menuitem" onClick={onPinMaterial}>
+            {t(locale, "materialPinVersion")}
+          </CanvasMenuRow>
           <CanvasMenuRow icon="folder-open" role="menuitem" disabled={!materialHasLocation} onClick={onRevealMaterial}>
             {t(locale, "materialShowInFolder")}
           </CanvasMenuRow>

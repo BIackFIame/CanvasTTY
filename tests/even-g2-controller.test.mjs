@@ -31,6 +31,7 @@ async function fixture(t, extra = {}) {
     renames = [];
   const terminals = {
     listMetadata: () => sessions.map((s) => ({ ...s })),
+    redactSecrets: text => text,
     geometry: () => ({ cols: 100, rows: 30 }),
     readBuffer: () => ({ buffer: "Ready\r\n", outputOffset: 7 }),
     inputChecked: (id, data) => {
@@ -140,6 +141,7 @@ async function fixture(t, extra = {}) {
   };
   return {
     controller,
+    sessions,
     setAddresses: (value) => {
       addresses = value;
     },
@@ -925,4 +927,30 @@ test("a configure that cannot be saved changes nothing; a revoke that cannot be 
   await f.controller.close();
   const saved = JSON.parse(await readFile(join(f.directory, "even-g2.json"), "utf8"));
   assert.deepEqual(saved.peers.map((peer) => peer.id), [], "the revoke reached the disk once it could");
+});
+
+
+test("glasses clears resolved attention while retaining notification history", async t => {
+  const history=[];let loopActive=false;
+  const f=await fixture(t,{notifications:()=>history,loopWarningActive:()=>loopActive});
+  await f.enable();const {token}=await f.pair(), session=f.sessions[0];
+  session.exitCode=null;
+  const poll=async()=>{const response=await f.call('/g2/api/terminal?id=one',{token});assert.equal(response.status,200);return response.data.attention;};
+  const publish=kind=>{const event={id:String(history.length),sessionId:'one',title:'one',kind,at:Date.now()};history.push(event);return event;};
+  session.status='needs_approval';const approval=publish('approval');assert.deepEqual(await poll(),approval);
+  session.status='working';assert.equal(await poll(),null,'accepted approval is not replayed');
+  session.status='needs_approval';const nextApproval=publish('approval');assert.deepEqual(await poll(),nextApproval,'new permission request remains visible');
+  session.status='idle';session.turnCompleted=false;const response=publish('response');assert.deepEqual(await poll(),response);
+  session.turnCompleted=true;assert.equal(await poll(),null,'completed turn no longer asks for a response');
+  const done=publish('done');assert.deepEqual(await poll(),done);
+  session.status='working';assert.equal(await poll(),null,'new task clears completion notice');
+  session.status='failed';const failed=publish('failed');assert.deepEqual(await poll(),failed);
+  session.status='idle';session.turnCompleted=false;assert.equal(await poll(),null);
+  session.taskBudget={warning:true,paused:false};const budget=publish('budget');assert.deepEqual(await poll(),budget);
+  session.taskBudget={warning:false,paused:true};assert.deepEqual(await poll(),budget);
+  session.taskBudget={warning:false,paused:false};assert.equal(await poll(),null,'reset budget clears notice');
+  session.status='working';loopActive=true;const loop=publish('loop');assert.deepEqual(await poll(),loop);
+  loopActive=false;assert.equal(await poll(),null,'expired or replaced host epoch clears loop notice');
+  loopActive=true;session.exitCode=0;assert.equal(await poll(),null,'exited agent cannot keep an active loop notice');
+  assert.equal(history.length,7,'resolving current attention never deletes historical events');
 });

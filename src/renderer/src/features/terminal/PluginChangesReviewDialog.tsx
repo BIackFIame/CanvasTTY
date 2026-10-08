@@ -405,8 +405,18 @@ export function PluginChangesReviewDialog({
     const actionEpoch = scopeEpochRef.current;
     try {
       const result = await invokeActionRef.current(actionId, input);
+      if (!mountedRef.current || actionEpoch !== scopeEpochRef.current) return;
       setConfirmation(null);
-      if (result.review && actionEpoch === scopeEpochRef.current) onReviewChangeRef.current(mergeReview(reviewRef.current, result.review, false));
+      if (result.review) {
+        // Mutations return the authoritative remaining scope. Pagination alone merges old entries.
+        const available = new Set(result.review.groups.flatMap((candidate) =>
+          candidate.files.map((file) => reviewFileKey(candidate.sessionId, file.path))));
+        knownFileKeys.current = available;
+        setSelectedFiles(new Set(available));
+        setResolutions({});
+        selectGroup(result.review.groups.find((candidate) => candidate.sessionId === selectedGroupId) ?? result.review.groups[0]);
+        onReviewChangeRef.current(result.review);
+      }
       else if (result.tone === "error" && actionEpoch === scopeEpochRef.current) setError(result.message ?? text.groupError);
       else if (result.tone !== "error" && !result.review) onActionResultRef.current(result);
     } catch (reason) {

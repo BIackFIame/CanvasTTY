@@ -263,7 +263,7 @@ export const STICKY_NOTE_DEFAULT_SIZE: Size = { width: 300, height: 220 };
 
 export type MaterialKind = "image" | "text" | "video" | "audio" | "pdf" | "file";
 export type MaterialState = "ready" | "missing" | "moved" | "unreadable";
-export type MaterialVersionReason = "pinned" | "remark" | "handoff" | "result" | "capture";
+export type MaterialVersionReason = "pinned" | "remark" | "capture" | "edit";
 
 export type MaterialOrigin =
   | { kind: "clipboard" }
@@ -276,6 +276,8 @@ export interface MaterialVersion {
   createdAt: number;
   byteSize: number;
   reason: MaterialVersionReason;
+  current: boolean;
+  natural: Size | null;
 }
 
 export interface CanvasMaterial extends SessionBounds {
@@ -294,10 +296,17 @@ export interface CanvasMaterial extends SessionBounds {
   createdAt: number;
 }
 
+export interface MaterialStorageUsage {
+  usedBytes: number;
+  limitBytes: number;
+}
+
 export interface MaterialsSnapshot {
   revision: number;
   loadError?: "unreadable";
   materials: CanvasMaterial[];
+  remarks: MaterialRemark[];
+  storage: MaterialStorageUsage;
 }
 
 export type MaterialRejectionReason = "not-a-file" | "unreadable" | "limit" | "quota" | "too-large" | "empty-clipboard";
@@ -321,12 +330,66 @@ export type MaterialFailure =
   | "not-a-file"
   | "kind-mismatch"
   | "already-on-canvas"
+  | "version-limit"
   | "material-limit"
+  | "remark-limit"
   | "cancelled";
 
 export type MaterialResult = { ok: true } | { ok: false; reason: MaterialFailure };
 
 export type MaterialCreateResult = { ok: true; materialId: string } | { ok: false; reason: MaterialFailure };
+
+export type RemarkAnchor =
+  | { kind: "whole" }
+  | { kind: "region"; x: number; y: number; width: number; height: number }
+  | { kind: "point"; x: number; y: number }
+  | { kind: "lines"; start: number; end: number }
+  | { kind: "time"; start: number; end: number | null }
+  | { kind: "page"; page: number }
+  | { kind: "step"; index: number };
+
+export interface RemarkTarget {
+  materialId: string;
+  versionId: string;
+  anchor: RemarkAnchor;
+}
+
+export type RemarkStatus = "open" | "sent" | "reported" | "accepted" | "reopened";
+
+export interface RemarkReport {
+  handoffId: string;
+  at: number;
+  note: string | null;
+}
+
+export interface MaterialRemark {
+  id: string;
+  number: number;
+  target: RemarkTarget;
+  reference: RemarkTarget | null;
+  text: string;
+  status: RemarkStatus;
+  createdAt: number;
+  updatedAt: number;
+  handoffIds: string[];
+  report: RemarkReport | null;
+}
+
+export interface RemarkDraft {
+  materialId: string;
+  anchor: RemarkAnchor;
+  reference: { materialId: string; anchor: RemarkAnchor } | null;
+  text: string;
+}
+
+export interface RemarkPatch {
+  text?: string;
+  status?: "open" | "accepted" | "reopened";
+}
+
+export type RemarkResult = { ok: true; remark: MaterialRemark } | { ok: false; reason: MaterialFailure };
+
+export type MaterialVersionResult = { ok: true; version: MaterialVersion } | { ok: false; reason: MaterialFailure };
 
 export interface CameraState extends Point {
   zoom: number;
@@ -1719,9 +1782,13 @@ export interface CanvasTTYApi {
     setBounds(id: string, bounds: SessionBounds): void;
     setBoundsBatch(entries: { id: string; bounds: SessionBounds }[]): void;
     remove(id: string): Promise<void>;
+    pinVersion(id: string): Promise<MaterialVersionResult>;
     reveal(id: string): Promise<void>;
     relink(id: string): Promise<MaterialResult>;
     acceptMove(id: string): Promise<MaterialResult>;
+    addRemark(draft: RemarkDraft): Promise<RemarkResult>;
+    updateRemark(id: string, patch: RemarkPatch): Promise<RemarkResult>;
+    deleteRemark(id: string): Promise<void>;
     onChanged(listener: (snapshot: MaterialsSnapshot) => void): () => void;
   };
   limits: {
@@ -1824,6 +1891,7 @@ export interface CanvasTTYApi {
   };
   terminal: {
     onFocusRequested(listener: (id: string) => void): () => void;
+    openFile(id: string, reference: string): Promise<void>;
     fileDropText(files: File[]): string;
     list(): Promise<SessionSnapshot[]>;
     readBuffer(id: string): Promise<TerminalBufferSnapshot>;
@@ -1891,9 +1959,13 @@ export const IPC = {
   materialsSetBounds: "materials:set-bounds",
   materialsSetBoundsBatch: "materials:set-bounds-batch",
   materialsRemove: "materials:remove",
+  materialsPinVersion: "materials:pin-version",
   materialsReveal: "materials:reveal",
   materialsRelink: "materials:relink",
   materialsAcceptMove: "materials:accept-move",
+  materialsAddRemark: "materials:add-remark",
+  materialsUpdateRemark: "materials:update-remark",
+  materialsDeleteRemark: "materials:delete-remark",
   materialsChanged: "materials:changed",
   limitsGet: "limits:get",
   pluginsList: "plugins:list",
@@ -1994,6 +2066,7 @@ export const IPC = {
   githubAuthSignOut: "github-auth:sign-out",
   githubAuthOpenUrl: "github-auth:open-url",
   terminalList: "terminal:list",
+  terminalOpenFile: "terminal:open-file",
   terminalReadBuffer: "terminal:read-buffer",
   terminalCreate: "terminal:create",
   agentsAvailability: "agents:availability",

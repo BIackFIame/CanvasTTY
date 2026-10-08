@@ -436,16 +436,24 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   await budgets.load();
   flushBudgets=()=>budgets.flush();
   const checkpoints = new GitCheckpoints(text => redaction.redact(text),50,join(userDataPath,"checkpoints.json"));
-  const checkpointTurns = new Map<string,Promise<void>>();
-  const checkpointBeforeTurn = (id: string): Promise<void> => {
+  const checkpointTurns = new Map<string,{pending:Promise<void>;signal?:AbortSignal;current:()=>boolean}>();
+  const checkpointBeforeTurn = (id: string, signal?: AbortSignal): Promise<void> => {
     const row=terminalManager?.getMetadata(id);
-    if (!row || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
-    let pending=checkpointTurns.get(id);
-    if (!pending) {
-      pending=checkpoints.capture(id,row.cwd).catch(error => timeline.append(id,"checkpoint","Rollback point unavailable",redaction.redact(String(error))));
-      checkpointTurns.set(id,pending);
+    if (!row || row.exitCode !== null || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
+    if (!terminalManager!.canCaptureCheckpoint(id)) return Promise.resolve();
+    let entry=checkpointTurns.get(id);
+    if (!entry || !entry.current()) {
+      const created={pending:Promise.resolve(),signal,current:terminalManager!.providerSignalGuard(id,{kind:"lifecycle",state:"working"})};
+      created.pending=checkpoints.capture(id,row.cwd,signal).catch(error => {
+        // Keep the failed attempt until the turn ends or its input generation changes.
+        // Retrying at PostToolUse could snapshot edits as if they preceded the turn.
+        const reason=redaction.redact(String(error));
+        console.warn("Rollback point unavailable",reason);
+        void timeline.append(id,"checkpoint","Rollback point unavailable",reason).catch(console.warn);
+      });
+      checkpointTurns.set(id,created);entry=created;
     }
-    return pending;
+    return entry.pending;
   };
   diagnostics.configureRedaction(text => redaction.redact(text));
   diagnosticContext = () => ({
@@ -624,27 +632,44 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     runtimeGateway = new RuntimeGateway({
       runtimeDirectory: lifecycleRuntimeDirectory,
       windowsHostPath,
+      lifecycleGuard: (terminalSessionId, signal) => terminalManager?.providerSignalGuard(terminalSessionId, {
+        kind:"lifecycle",state:signal.state,event:signal.event,...(signal.turnId ? {requestId:signal.turnId} : {})
+      }) ?? (()=>false),
+      beforeLifecycle: async (terminalSessionId, signal, cancellation) => {
+        const manager=terminalManager;
+        if (!manager) return false;
+        const current=manager.providerSignalGuard(terminalSessionId, {
+          kind: "lifecycle", state: signal.state, event: signal.event,
+          ...(signal.turnId ? {requestId:signal.turnId} : {})
+        });
+        if (!current()) return false;
+        const controller=new AbortController(), abort=():void=>controller.abort();
+        cancellation.addEventListener("abort",abort,{once:true});
+        if(cancellation.aborted)abort();
+        // Only a successful write that changes the captured turn cancels its checkpoint; typing and approval replies do not.
+        const unobserve=manager.observeInputWrites(terminalSessionId,()=>()=>{if(!current())abort();});
+        try { await checkpointBeforeTurn(terminalSessionId,controller.signal);return current(); }
+        finally {unobserve();cancellation.removeEventListener("abort",abort);}
+      },
       onSignal: (terminalSessionId, signal) => {
-        const usageRow=terminalManager?.getMetadata(terminalSessionId);
-        if(usageRow?.provider==="codex" && signal.threadId && (!terminalManager?.pluginContext(terminalSessionId)?.environment || terminalManager.pluginContext(terminalSessionId)?.environment?.kind==="worktree")) {
-          const account=terminalManager!.usageAccount(terminalSessionId);
-          const source=usageSourceFor(account.home ?? resolveAgentHistoryPaths().codex);
-          void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
-        }
-        void timeline.append(terminalSessionId,"lifecycle",signal.event ?? signal.state,undefined,"provider-hook").catch(console.warn);
-        if (signal.state !== "working") {
-          checkpointTurns.delete(terminalSessionId);
-        }
-        else void checkpointBeforeTurn(terminalSessionId);
-        terminalManager?.applyProviderSignal(terminalSessionId, {
+        const accepted = terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
           event: signal.event,
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
-        // A subagent's final answer (Codex Stop hook, OpenCode plugin) for get_agent_result and wait_for_agent.
-        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result);
+        if (!accepted) return;
+        const usageRow=terminalManager?.getMetadata(terminalSessionId);
+        if(usageRow?.provider==="codex" && signal.threadId && (!terminalManager?.pluginContext(terminalSessionId)?.environment || terminalManager.pluginContext(terminalSessionId)?.environment?.kind==="worktree")) {
+          const account=terminalManager!.usageAccount(terminalSessionId);
+          const source=usageSourceFor(account.home ?? resolveAgentHistoryPaths().codex);
+          void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
+        }
+        if(signal.state !== "working" && signal.state !== "needs_approval")checkpointTurns.delete(terminalSessionId);
+        // The answer belongs to the accepted provider turn and its host-submitted input generation.
+        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
+        void timeline.append(terminalSessionId,"lifecycle",signal.event ?? signal.state,undefined,"provider-hook").catch(console.warn);
         if (signal.toolOutcome) {
           pluginSessions?.activity({
             type: "tool-outcome",
@@ -672,12 +697,15 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
       onPermissionRequest: async (terminalSessionId, request, signal) => {
+        if (terminalManager?.isCheckpointRestoreActive(terminalSessionId)) return {behavior:"deny",message:"Workspace checkpoint restoration is in progress."};
         try {budgetInputGate(terminalSessionId);}catch(error) {
           const message=redaction.redact(error instanceof Error ? error.message : "Task budget is paused.");
           void timeline.append(terminalSessionId,"budget","Tool blocked by task budget",message).catch(console.warn);
           return {behavior:"deny",message};
         }
-        await checkpointBeforeTurn(terminalSessionId);
+        const current=terminalManager?.providerSignalGuard(terminalSessionId,{kind:"lifecycle",state:"working"});
+        await checkpointBeforeTurn(terminalSessionId, signal);
+        if(!current?.() || terminalManager?.isCheckpointRestoreActive(terminalSessionId))return {behavior:"deny",message:"The agent turn changed while preparing its rollback point."};
         const action=actionFromHook(request.toolName,request.toolInput,request.toolInputPreview);
         const detail=redaction.redact(JSON.stringify({kind:action.kind,command:action.command,paths:action.paths}));
         void timeline.append(terminalSessionId,action.kind === "shell" ? "command" : action.kind === "edit" ? "file" : "tool",request.toolName,detail,"provider-hook").catch(console.warn);
@@ -881,7 +909,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     },
     reviewCost:id=>timeline.usage([id],usagePrices.get()).cost,
     reviewModel:(provider,model)=>model ? providerDirectorySources.models?.(provider)?.models.find(candidate=>candidate!==model) ?? null : null,
-    reviewDiff:worker=>checkpoints.workingDiff(managedTerminals.pluginContext(worker.id)?.workingDirectory ?? worker.cwd),
     onReview:(id,result)=>{if(result.reviewerSessionId)reviewUsageSessions.set(id,result.reviewerSessionId);managedTerminals.setTaskMetadata(id,{reviewRequested:true});void timeline.append(id,"review",result.status,result.notes ?? result.reason,"reviewer").catch(console.warn);}
   });
   budgetInputGate=id=>agentControlService.assertInputAllowed(id);
@@ -1097,6 +1124,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // The Even G2 companion is the last group: nothing on the first frame needs it.
   evenG2 = new EvenG2Controller({
     notifications:(channel,id)=>attention.list(channel,id),
+    loopWarningActive:id=>agentControlService.hasCurrentLoopWarning(id),
     userDataPath, terminals: terminalManager,
     localDiscovery: process.platform === "darwin",
     defaultWorkspace: join(app.getPath("documents"), "CanvasTTY Projects"),
@@ -1517,6 +1545,8 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
     }
   });
   pluginWindows.set(window, pluginId);
+  attachEditContextMenu(window.webContents, () => editMenuLocale(),
+    (template, contents) => Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined }));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     if (!url.startsWith(`canvastty-plugin://${pluginId}/`)) event.preventDefault();
