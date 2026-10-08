@@ -306,6 +306,18 @@ export class GitCheckpoints {
     this.captures=work.then(()=>undefined,()=>undefined);
     return work;
   }
+  private async requireRestorableTrees(cwd:string,worktreeOid:string,indexOid:string):Promise<void> {
+    const entries=await Promise.all([
+      this.git(cwd,["ls-files","--stage","-z"]),
+      this.git(cwd,["ls-tree","-r","-z",worktreeOid]),
+      this.git(cwd,["ls-tree","-r","-z",indexOid])
+    ]);
+    // Inspect modes only at NUL-delimited record starts: paths can contain newlines, tabs or "160000".
+    // The parent snapshot does not retain dirty/untracked nested repository data for a safe recursive restore.
+    if(entries.some(output=>output.split("\0").some(entry=>entry.startsWith("160000 ")))) {
+      throw new Error("Submodule contents are not captured by checkpoints. Restoration is unavailable when the current index or saved checkpoint contains submodules; safeguard the nested repositories and restore them with Git separately.");
+    }
+  }
   private async restoreOne(sessionId:string,cwd:string,id:string):Promise<{ok:boolean;message?:string}> {
     const initial=this.trusted.get(id);
     let release=this.holdPack(initial?.cwd??cwd,initial?.pack);
@@ -314,6 +326,7 @@ export class GitCheckpoints {
       const row=this.trusted.get(id)!;
       if(row.pack!==initial?.pack){await release();release=this.holdPack(row.cwd,row.pack);}
       const indexOid=row.indexOid!;
+      await this.requireRestorableTrees(cwd,target,indexOid);
       await this.captureOne(sessionId, cwd);
       // Capture may prune this checkpoint at a retention limit of one. Re-import its held private pack
       // after capture, immediately before restore, in case Git garbage-collected the earlier import.
