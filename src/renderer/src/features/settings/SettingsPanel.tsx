@@ -26,6 +26,7 @@ import type {
   LimitProviderId,
   LocaleId,
   KeyboardPreset,
+  MaterialStorageUsage,
   MinimapInteractionMode,
   PaletteId,
   PluginContribution,
@@ -82,6 +83,7 @@ import {
 } from "../../lib/providers";
 import { shortcutFromKeyboardEvent, shortcutFromPointerEvent } from "../../lib/shortcuts";
 import { t, type TranslationKey } from "../../lib/i18n";
+import { formatBytes } from "../materials/materialCardModel";
 import {
   createTerminalBorderSkinPreviewStyleController,
   isCustomTerminalBorderSkinId,
@@ -172,6 +174,7 @@ interface SettingsPanelProps {
   onRecheckAgentClis(): Promise<void>;
   plugins: InstalledPlugin[];
   browser: BrowserSnapshot;
+  materialStorage: MaterialStorageUsage | null;
   onClose(): void;
   onChange(patch: Partial<AppSettings>): Promise<void>;
   onPreviewPlugin(sourceUrl: string): Promise<PluginInstallPreview>;
@@ -202,6 +205,7 @@ export function SettingsPanel({
   onRecheckAgentClis,
   plugins,
   browser,
+  materialStorage,
   onClose,
   onChange,
   onPreviewPlugin,
@@ -550,7 +554,10 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ persistStickyNotes: value === "save" })}
                 />
               </SettingGroup>
-              <SettingGroup label={t(locale, "persistMaterials")}>
+              <SettingGroup
+                label={t(locale, "persistMaterials")}
+                description={materialStorage ? `${t(locale, "materialStorageUsed")} ${formatBytes(materialStorage.usedBytes, locale)} / ${formatBytes(materialStorage.limitBytes, locale)}. ${t(locale, "materialStorageRetention")}` : undefined}
+              >
                 <Segmented
                   value={settings.persistMaterials ? "save" : "discard"}
                   options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}

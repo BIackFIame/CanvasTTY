@@ -184,7 +184,8 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   });
   handle(BACKLOG_IPC.previewCheckpoint, (id: string, ref: string) => checkpoints.preview(id,session(id).cwd,ref));
   handle(BACKLOG_IPC.restoreCheckpoint, async (id: string, ref: string) => {
-    const row=session(id); if (row.status === "working" || row.status === "needs_approval") throw new Error("Stop the active turn before restoring files.");
-    const result=await checkpoints.restore(id,row.cwd,ref); await timeline.append(id,"checkpoint","Person restored a checkpoint",ref); return result;
+    session(id);
+    const result=await terminals.withCheckpointRestore(id,cwd=>checkpoints.restore(id,cwd,ref));
+    await timeline.append(id,"checkpoint","Person restored a checkpoint",ref);return result;
   });
 }

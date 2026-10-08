@@ -31,7 +31,7 @@ function validate(value:unknown):UsagePrice[]{
     if(!row || typeof row!=='object' || typeof row.provider!=='string' || !/^[a-z][a-z0-9-]{0,39}$/.test(row.provider)
       || typeof row.model!=='string' || !row.model.trim() || row.model.length>200
       || ![row.inputPerMillion,row.outputPerMillion].every(n=>typeof n==='number' && Number.isFinite(n) && n>=0 && n<=1_000_000))throw new Error("Invalid model price.");
-    const key=`${row.provider}:${row.model}`;if(keys.has(key))throw new Error("Duplicate model price.");keys.add(key);
-    return {provider:row.provider,model:row.model.trim(),inputPerMillion:row.inputPerMillion,outputPerMillion:row.outputPerMillion};
+    const model=row.model.trim(),key=`${row.provider}:${model}`;if(keys.has(key))throw new Error("Duplicate model price.");keys.add(key);
+    return {provider:row.provider,model,inputPerMillion:row.inputPerMillion,outputPerMillion:row.outputPerMillion};
   });
 }

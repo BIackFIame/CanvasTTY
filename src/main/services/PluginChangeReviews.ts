@@ -1,8 +1,9 @@
 import type { PluginChangeReview, PluginChangeReviewFile, PluginReviewTextPage } from "../../shared/contracts.ts";
 
 const MAX_REVIEW_BYTES = 512 * 1024;
-// 400 selected paths plus their conflict resolutions can each consume 120 KiB.
-const MAX_ACTION_BYTES = 256 * 1024;
+// A normalized review may repeat selected paths as conflict-resolution keys in its action.
+// Conflict metadata consumes review space, keeping generated actions below the 1 MiB transport frame.
+const MAX_ACTION_BYTES = 2 * MAX_REVIEW_BYTES;
 const MAX_TEXT = 16_384;
 
 function record(value: unknown): Record<string, unknown> {

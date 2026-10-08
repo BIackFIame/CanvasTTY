@@ -34,7 +34,12 @@ func runHook(args []string) int {
 			input = parsed
 		}
 	}
-	turnID := firstString(field(input, "turn_id"), field(input, "turnId"), field(input, "prompt_id"), field(input, "promptId"))
+	provider, _ := env(envRuntimeProvider)
+	var providerTurn any = undefinedValue{}
+	if provider == "hermes" {
+		providerTurn = field(field(input, "extra"), "turn_id")
+	}
+	turnID := firstString(field(input, "turn_id"), field(input, "turnId"), field(input, "prompt_id"), field(input, "promptId"), providerTurn)
 	threadID := firstString(field(input, "session_id"), field(input, "sessionId"), field(input, "thread_id"),
 		field(input, "threadId"), field(input, "conversation_id"), field(input, "conversationId"))
 	var finalAnswer *string
@@ -53,7 +58,6 @@ func runHook(args []string) int {
 		text := boundedText(*finalAnswer, maxAnswerChars)
 		lastAssistantMessage = &text
 	}
-	provider, _ := env(envRuntimeProvider)
 	toolOutcome := nativeToolOutcome(provider, event, input)
 	reportLifecycle(state, event, turnID, threadID, result, lastAssistantMessage, toolOutcome)
 	return 0
@@ -136,7 +140,7 @@ func reportLifecycle(state, event string, turnID, threadID any, result *jsObject
 }
 
 func nativeToolOutcome(provider, event string, input any) *jsObject {
-	if event != "PostToolUse" && !(provider == "claude" && event == "PostToolUseFailure") && !(provider == "hermes" && event == "post_tool_call") {
+	if event != "PostToolUse" && !((provider == "claude" || provider == "kimi") && event == "PostToolUseFailure") && !(provider == "hermes" && event == "post_tool_call") {
 		return nil
 	}
 	rawToolName, _ := field(input, "tool_name").(string)
@@ -145,11 +149,36 @@ func nativeToolOutcome(provider, event string, input any) *jsObject {
 		toolName = "unknown"
 	}
 	response := field(input, "tool_response")
+	legacyResponse := !isUndefined(response)
+	var extra any = undefinedValue{}
+	if provider == "hermes" && isPlainObject(field(input, "extra")) {
+		extra = field(input, "extra")
+	}
+	if !legacyResponse {
+		if provider == "kimi" {
+			if output, ok := field(input, "tool_output").(string); ok {
+				response = output
+			}
+		} else if provider == "hermes" {
+			response = field(extra, "result")
+		}
+	}
 	resultClass := "unknown"
 	if provider == "claude" && event == "PostToolUse" {
 		resultClass = "success"
 	} else if provider == "claude" && event == "PostToolUseFailure" {
 		if field(input, "is_interrupt") != true {
+			resultClass = "error"
+		}
+	} else if provider == "kimi" && event == "PostToolUseFailure" {
+		resultClass = "error"
+	} else if status, ok := field(extra, "status").(string); provider == "hermes" && !legacyResponse && ok {
+		switch status {
+		case "ok":
+			resultClass = "success"
+		case "blocked":
+			resultClass = "denied"
+		case "error", "timeout":
 			resultClass = "error"
 		}
 	} else {
@@ -162,7 +191,7 @@ func nativeToolOutcome(provider, event string, input any) *jsObject {
 		outcome.set("normalizedActionHash", hashToolOutcome(action))
 	}
 	errorText := firstToolOutcomeString(field(input, "error"), field(input, "tool_error"), field(input, "toolError"),
-		field(response, "error"), field(response, "tool_error"))
+		field(response, "error"), field(response, "tool_error"), field(extra, "error_message"))
 	if resultClass == "error" && errorText != "" {
 		outcome.set("errorHash", hashToolOutcome(normalizeToolOutcomeText(boundedText(errorText, 8192))))
 	}

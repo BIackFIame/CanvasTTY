@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   CanvasMaterial,
+  MaterialRemark,
   MaterialResult,
   MaterialsAddResult,
   MaterialsSnapshot,
   Point,
+  RemarkDraft,
+  RemarkPatch,
+  RemarkResult,
   SessionBounds
 } from "../../../../shared/contracts.ts";
 import { acceptMaterialsSnapshot, EMPTY_MATERIALS_SNAPSHOT, withPendingBounds } from "./materialSnapshot";
 
 export interface MaterialsController {
   materials: CanvasMaterial[];
+  remarks: MaterialRemark[];
   snapshot: MaterialsSnapshot;
   addFiles(files: File[], point: Point): Promise<MaterialsAddResult>;
   pick(point: Point): Promise<MaterialsAddResult>;
@@ -21,6 +26,10 @@ export interface MaterialsController {
   reveal(id: string): Promise<void>;
   relink(id: string): Promise<MaterialResult>;
   acceptMove(id: string): Promise<MaterialResult>;
+  pinVersion(id: string): Promise<MaterialResult>;
+  addRemark(draft: RemarkDraft): Promise<RemarkResult>;
+  updateRemark(id: string, patch: RemarkPatch): Promise<RemarkResult>;
+  deleteRemark(id: string): Promise<void>;
 }
 
 export function useMaterials(): MaterialsController {
@@ -61,6 +70,7 @@ export function useMaterials(): MaterialsController {
 
   return useMemo(() => ({
     materials,
+    remarks: snapshot.remarks,
     snapshot,
     addFiles: (files, point) => window.canvasTTY.materials.addFiles(files, point),
     pick: (point) => window.canvasTTY.materials.pick(point),
@@ -70,6 +80,10 @@ export function useMaterials(): MaterialsController {
     remove: (id) => window.canvasTTY.materials.remove(id),
     reveal: (id) => window.canvasTTY.materials.reveal(id),
     relink: (id) => window.canvasTTY.materials.relink(id),
-    acceptMove: (id) => window.canvasTTY.materials.acceptMove(id)
+    acceptMove: (id) => window.canvasTTY.materials.acceptMove(id),
+    pinVersion: (id) => window.canvasTTY.materials.pinVersion(id),
+    addRemark: (draft) => window.canvasTTY.materials.addRemark(draft),
+    updateRemark: (id, patch) => window.canvasTTY.materials.updateRemark(id, patch),
+    deleteRemark: (id) => window.canvasTTY.materials.deleteRemark(id)
   }), [materials, setBounds, setBoundsBatch, snapshot]);
 }

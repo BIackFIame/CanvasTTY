@@ -20,7 +20,7 @@ export function editContextMenuTemplate(params: EditParams, locale: LocaleId): M
       { role: "selectAll", label: label.selectAll, enabled: params.editFlags.canSelectAll }
     ];
   }
-  if (params.selectionText.trim()) return [{ role: "copy", label: label.copy, enabled: params.editFlags.canCopy }];
+  if (params.selectionText.length > 0) return [{ role: "copy", label: label.copy, enabled: params.editFlags.canCopy }];
   return [];
 }
 
