@@ -103,14 +103,23 @@ export function toolOutcomeFromHook(provider, event, input) {
   const record = isRecord(input) ? input : {};
   const rawToolName = typeof record.tool_name === "string" ? record.tool_name.trim() : "";
   const toolName = boundedOutcomeText(rawToolName.replace(/[\u0000-\u001f\u007f]/gu, ""), MAX_TOOL_OUTCOME_NAME_CHARS) || "unknown";
-  const response = record.tool_response;
+  const extra = provider === "hermes" && isRecord(record.extra) ? record.extra : {};
+  // Provider shell-hook envelopes differ; keep legacy tool_response authoritative when present.
+  const response = record.tool_response !== undefined ? record.tool_response
+    : provider === "kimi" && typeof record.tool_output === "string" ? record.tool_output
+      : provider === "hermes" ? extra.result : undefined;
   const error = firstHookString(record.error, record.tool_error, record.toolError,
     isRecord(response) ? response.error : undefined,
-    isRecord(response) ? response.tool_error : undefined);
+    isRecord(response) ? response.tool_error : undefined, extra.error_message);
   let resultClass = "unknown";
   if (provider === "claude" && event === "PostToolUse") resultClass = "success";
   else if (provider === "claude" && event === "PostToolUseFailure") {
     resultClass = record.is_interrupt === true ? "unknown" : "error";
+  } else if (provider === "kimi" && event === "PostToolUseFailure") resultClass = "error";
+  else if (provider === "hermes" && record.tool_response === undefined && typeof extra.status === "string") {
+    // These are authoritative observer statuses, not words parsed from arbitrary result text.
+    resultClass = extra.status === "ok" ? "success" : extra.status === "blocked" ? "denied"
+      : extra.status === "error" || extra.status === "timeout" ? "error" : "unknown";
   } else {
     resultClass = explicitToolResultClass(response);
   }
@@ -220,7 +229,7 @@ export function sanitizeToolOutcome(value) {
 
 function isCompletedToolEvent(provider, event) {
   if (event === "PostToolUse") return true;
-  if (provider === "claude" && event === "PostToolUseFailure") return true;
+  if ((provider === "claude" || provider === "kimi") && event === "PostToolUseFailure") return true;
   if (provider === "opencode" && (event === "tool.execute.after" || event === "message.part.updated")) return true;
   return provider === "hermes" && event === "post_tool_call";
 }

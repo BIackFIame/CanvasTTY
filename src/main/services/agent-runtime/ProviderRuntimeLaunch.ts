@@ -441,6 +441,8 @@ const KIMI_HOOKS: readonly HookMapping[] = [
   { event: "TurnStarted", state: "working" },
   { event: "PermissionRequest", state: "needs_approval" },
   { event: "PermissionResult", state: "working" },
+  { event: "PostToolUse", state: "working" },
+  { event: "PostToolUseFailure", state: "working" },
   { event: "Stop", state: "idle" },
   { event: "StopFailure", state: "idle" },
   { event: "Interrupt", state: "idle" },
@@ -452,6 +454,7 @@ const HERMES_HOOKS: readonly HookMapping[] = [
   { event: "pre_llm_call", state: "working" },
   { event: "pre_approval_request", state: "needs_approval" },
   { event: "post_approval_response", state: "working" },
+  { event: "post_tool_call", state: "working" },
   { event: "on_session_end", state: "idle" }
 ];
 
