@@ -4,7 +4,7 @@ import { mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { AGENT_RUNTIME_ENV, CAPTURE_RESULT_ENV, MAX_RESULT_CHARS } from "../src/agent-runtime/runtime-protocol.mjs";
+import { AGENT_RUNTIME_ENV, CAPTURE_RESULT_ENV, MAX_RESULT_CHARS, normalizedActionHashFromHook } from "../src/agent-runtime/runtime-protocol.mjs";
 import { finalAnswer } from "../src/agent-runtime/opencode-final-answer.mjs";
 import { RuntimeGateway } from "../src/main/services/agent-runtime/RuntimeGateway.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
@@ -395,4 +395,60 @@ test("OpenCode completed turns get distinct IDs and advance the host epoch witho
  assert.deepEqual(runtimeSignals.filter(s=>s.event==='session.status:busy').map(s=>s.turnEpoch),[1,2]);
  assert.equal(gateway.currentTurnEpoch(childId),null,'completed turn has no active epoch');assert.equal(terminals.answer(childId).text,'answer 2');
  assert.equal(terminals.getMetadata(childId).status,'idle');
+});
+
+
+test("OpenCode direct tool hooks and real ToolPart errors produce one correlated hash-only outcome", {...POSIX,timeout:15000}, async t => {
+  const {gateway,childId,runtimeSignals}=await setup(t);
+  const capability=gateway.registerSession(childId,"opencode",true);
+  const script=`
+    const {CanvasTTYLifecycle}=await import(process.env.PLUGIN_URL);
+    const hooks=await CanvasTTYLifecycle({});
+    const event=(type,properties)=>hooks.event({event:{type,properties}});
+    await event("session.created",{info:{id:"ses_root"}});
+    await event("session.status",{sessionID:"ses_root",status:{type:"busy"}});
+    const input=(callID,tool="bash",sessionID="ses_root")=>({callID,tool,sessionID});
+    const args={command:"private command with credentials"};
+    const before=async(callID,tool="bash",sessionID="ses_root")=>hooks["tool.execute.before"](input(callID,tool,sessionID),{args});
+    const after=(callID,output,tool="bash",sessionID="ses_root")=>hooks["tool.execute.after"]({...input(callID,tool,sessionID),args},output);
+    const part=(callID,state,sessionID="ses_root")=>event("message.part.updated",{sessionID,part:{id:"part-"+callID,messageID:"message",sessionID,type:"tool",callID,tool:"bash",state:{input:args,...state}},time:Date.now()});
+    await before("ok");
+    await Promise.all([after("ok",{title:"private title",output:"private output",metadata:{exit:0}}),
+      part("ok",{status:"completed",title:"private title",output:"private output",metadata:{exit:0}})]);
+    await before("nonzero"); await after("nonzero",{output:"private shell error",metadata:{exit:2}});
+    await before("timeout"); await after("timeout",{output:"private partial output",metadata:{exit:null}});
+    await before("throw"); await after("throw",undefined);
+    await part("throw",{status:"error",error:"private thrown error",time:{start:1,end:2}});
+    await part("throw",{status:"error",error:"private thrown error"});
+    await before("child","bash","child"); await after("child",{output:"child output",metadata:{exit:0}},"bash","child");
+    await part("child",{status:"error",error:"child error"},"child");
+    await after("unseen",{output:"unseen output",metadata:{exit:0}});
+    await before("old");
+    await event("session.status",{sessionID:"ses_root",status:{type:"idle"}});
+    await event("session.status",{sessionID:"ses_root",status:{type:"busy"}});
+    await after("old",{output:"late old output",metadata:{exit:0}});
+    await part("old",{status:"error",error:"late old error"});
+    await before("fresh"); await after("fresh",{output:"private output",metadata:{exit:0}});
+    await before("file","write"); await after("file",{output:"written",metadata:{filepath:"/private/hidden-file"}},"write");
+    await event("session.idle",{sessionID:"ses_root"});
+  `;
+  const run=await runFakeOpenCode(capability,"",false,script);
+  assert.equal(run.code,0,run.stderr);
+  const outcomes=runtimeSignals.filter(signal=>signal.toolOutcome);
+  assert.deepEqual(outcomes.map(signal=>signal.toolOutcome.resultClass),["success","error","unknown","error","success","success"]);
+  assert.deepEqual(outcomes.map(signal=>signal.event),["tool.execute.after","tool.execute.after","tool.execute.after","message.part.updated","tool.execute.after","tool.execute.after"]);
+  assert.equal(new Set(outcomes.slice(0,4).map(signal=>signal.turnEpoch)).size,1);
+  assert.ok(outcomes[4].turnEpoch>outcomes[0].turnEpoch,"completion does not fabricate a new turn, next real busy does");
+  for(const {toolOutcome:outcome} of outcomes) {
+    assert.match(outcome.normalizedActionHash,/^[a-f0-9]{64}$/u);
+    assert.ok(JSON.stringify(outcome).length<1000);
+  }
+  assert.equal(outcomes[0].toolOutcome.normalizedActionHash,outcomes[4].toolOutcome.normalizedActionHash);
+  assert.equal(outcomes[0].toolOutcome.normalizedActionHash,normalizedActionHashFromHook("bash",{command:"private command with credentials"}),"same action identity as permission pretool");
+  assert.equal(outcomes[0].toolOutcome.outputHash,outcomes[4].toolOutcome.outputHash);
+  assert.match(outcomes[1].toolOutcome.errorHash,/^[a-f0-9]{64}$/u);
+  assert.match(outcomes[3].toolOutcome.errorHash,/^[a-f0-9]{64}$/u);
+  assert.equal(outcomes[5].toolOutcome.changedPathHashes.length,1);
+  for(const secret of ["private command","private title","private output","private shell error","private thrown error","hidden-file","late old"])
+    assert.ok(!JSON.stringify(runtimeSignals).includes(secret),secret+" never crosses runtime wire");
 });

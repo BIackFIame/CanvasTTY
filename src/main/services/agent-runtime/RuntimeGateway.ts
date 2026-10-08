@@ -1037,7 +1037,8 @@ function parseToolOutcome(value: unknown): RuntimeToolOutcome {
 
 function isCompletedToolEvent(provider: string, event: string): boolean {
   return event === "PostToolUse" || (provider === "claude" && event === "PostToolUseFailure")
-    || (provider === "hermes" && event === "post_tool_call");
+    || (provider === "hermes" && event === "post_tool_call")
+    || (provider === "opencode" && (event === "tool.execute.after" || event === "message.part.updated"));
 }
 
 function isTurnStart(event: string): boolean {

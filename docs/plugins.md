@@ -342,6 +342,10 @@ A service may offer up to 16 `tools` to agents. They appear in the `canvastty_ag
 
 ### Session events and plugin-owned cards (`sessions:*`)
 
+`canvastty.activity` is a separate host-only integration for the enabled, native-code-trusted Assistant service installed from a canonical Assistant repository. `sessions:events` does not grant activity access. Tool equality fingerprints sent to that service are host-secret HMAC values scoped to the card and fingerprint kind; they are not plain hashes of tool input or output. Install provenance is checked on each delivery.
+OpenCode tool outcomes use its direct `tool.execute.after` hook and terminal `message.part.updated` tool states, correlated with a root-turn `tool.execute.before` call. Duplicate, child-session and obsolete completions are ignored. Shell nonzero exit codes are errors; missing exit status remains unknown. Separately trusted native `after-tool` hooks keep their provider-payload permission: the direct callback supplies `{ input, output }`, and a tool-part completion supplies its provider event. This does not grant `sessions:events` subscribers access to those payloads.
+
+
 A service with `sessions:events` calls `sessions.subscribe` `{ ownedOnly? }` (again after every start). The answer lists the open cards; after that the host sends `canvastty.sessions.event` notifications:
 
 ```ts

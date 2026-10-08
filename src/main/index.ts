@@ -848,6 +848,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // Plugin services see card events and control only the cards they start (EP-4).
   const sessionsForPlugins = new PluginSessions({
     terminals: terminalManager,
+    installRecord:id=>pluginManager?.installRecord(id) ?? null,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
   });
   pluginSessions = sessionsForPlugins;

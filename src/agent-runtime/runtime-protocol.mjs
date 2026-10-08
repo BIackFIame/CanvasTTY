@@ -139,6 +139,34 @@ export function toolOutcomeFromHook(provider, event, input) {
   };
 }
 
+/** OpenCode's direct after hook and terminal ToolPart states, never the generic event wrapper. */
+export function toolOutcomeFromOpenCode(tool, args, value, status = "completed") {
+  if (!isRecord(value)) return undefined; // Some failed task calls invoke after(undefined) before their error part.
+  const metadata = isRecord(value.metadata) ? value.metadata : {};
+  let resultClass = status === "error" || value.isError === true ? "error" : "unknown";
+  if (resultClass !== "error") {
+    if (Object.hasOwn(metadata, "exit")) {
+      resultClass = Number.isInteger(metadata.exit) ? (metadata.exit === 0 ? "success" : "error") : "unknown";
+    } else if (!/^(?:bash|shell)$/iu.test(String(tool))
+      && (typeof value.output === "string" || Array.isArray(value.content))) resultClass = "success";
+  }
+  let output = typeof value.output === "string" ? value.output.slice(0, MAX_TOOL_OUTCOME_OUTPUT_CHARS) : undefined;
+  if (output === undefined && Array.isArray(value.content)) {
+    // MCP after hooks carry content instead of native output. Ignore non-text blocks, and bound work as well as bytes.
+    output = value.content.slice(0, 16).filter(part => isRecord(part) && part.type === "text" && typeof part.text === "string")
+      .map(part => part.text.slice(0, MAX_TOOL_OUTCOME_OUTPUT_CHARS)).join("\n").slice(0, MAX_TOOL_OUTCOME_OUTPUT_CHARS);
+  }
+  // Native write/edit metadata is authoritative; input paths alone do not prove a file was changed.
+  const filePath = typeof metadata.filepath === "string" ? metadata.filepath
+    : isRecord(metadata.filediff) && typeof metadata.filediff.file === "string" ? metadata.filediff.file : undefined;
+  return toolOutcomeFromHook("opencode", "tool.execute.after", {
+    tool_name: tool, tool_input: args,
+    error: typeof value.error === "string" ? value.error : resultClass === "error" ? output : undefined,
+    tool_response: { resultClass, ...(output !== undefined ? { output: output.slice(0, MAX_TOOL_OUTCOME_OUTPUT_CHARS) } : {}),
+      ...(filePath ? { filePath } : {}) }
+  });
+}
+
 function outputHashFromResponse(response) {
   if (response === undefined || response === null) return undefined;
   let text;
@@ -193,6 +221,7 @@ export function sanitizeToolOutcome(value) {
 function isCompletedToolEvent(provider, event) {
   if (event === "PostToolUse") return true;
   if (provider === "claude" && event === "PostToolUseFailure") return true;
+  if (provider === "opencode" && (event === "tool.execute.after" || event === "message.part.updated")) return true;
   return provider === "hermes" && event === "post_tool_call";
 }
 
