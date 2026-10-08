@@ -324,7 +324,7 @@ export class EvenG2Controller {
     let current=false;
     switch(event.kind) {
       case "approval": current=session.status==="needs_approval" && !selectionSent;break;
-      case "response": current=session.status==="idle" && !session.turnCompleted;break;
+      case "response": current=session.status==="idle" && !session.turnCompleted && !this.presentation.hasPendingInput(session.id);break;
       case "done": current=session.status==="done" || session.status==="idle" && session.turnCompleted===true;break;
       case "failed": current=session.status==="failed";break;
       case "budget": current=session.taskBudget?.warning===true || session.taskBudget?.paused===true;break;

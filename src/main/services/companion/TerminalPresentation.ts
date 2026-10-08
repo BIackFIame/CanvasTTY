@@ -44,6 +44,7 @@ interface Screen {
   authoritative: boolean;
   sequence: number;
   turnPending: boolean;
+  inputPending: boolean;
   busySeen: boolean;
   menuFingerprint: string | null;
   menuId: string | null;
@@ -71,6 +72,7 @@ export class TerminalPresentation {
       authoritative: false,
       sequence: 0,
       turnPending: false,
+      inputPending: false,
       busySeen: false,
       menuFingerprint: null,
       menuId: null,
@@ -129,6 +131,8 @@ export class TerminalPresentation {
       if (session.status === "working") {
         screen.turnPending = true;
         screen.busySeen = true;
+      } else if (session.status === "idle" && screen.busySeen) {
+        screen.inputPending = false;
       }
       return;
     }
@@ -172,6 +176,7 @@ export class TerminalPresentation {
     screen.authoritative = true;
     screen.sequence++;
     screen.turnPending = false;
+    screen.inputPending = false;
   }
   clearAnswer(id: string): void {
     const screen = this.screens.get(id);
@@ -185,8 +190,11 @@ export class TerminalPresentation {
   pending(id: string): void {
     const screen = this.screen(id);
     screen.turnPending = true;
+    screen.inputPending = true;
     screen.busySeen = false;
   }
+  /** Successful device input resolves the prior response notice until fresh progress or an answer. */
+  hasPendingInput(id:string):boolean { return this.screens.get(id)?.inputPending ?? false; }
   /**
    * What leaves for the companion device is masked like any text handed out: the whole screen at once, so a key
    * the terminal wrapped over two lines is still found (the registry tolerates the line break), before it is cut.
@@ -267,8 +275,10 @@ export class TerminalPresentation {
         (session.provider !== "codex" ||
           !screen.lastAnswer ||
           (screen.turnPending && screen.busySeen))
-      )
+      ) {
+        if (reply !== screen.lastAnswer) screen.inputPending = false;
         screen.lastAnswer = reply;
+      }
     }
     const body =
       session.status === "needs_approval"

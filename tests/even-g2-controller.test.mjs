@@ -11,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { IPC } from "../src/shared/contracts.ts";
 import { EvenG2Controller } from "../src/main/services/companion/EvenG2Controller.ts";
 
 async function fixture(t, extra = {}) {
@@ -953,4 +954,38 @@ test("glasses clears resolved attention while retaining notification history", a
   loopActive=false;assert.equal(await poll(),null,'expired or replaced host epoch clears loop notice');
   loopActive=true;session.exitCode=0;assert.equal(await poll(),null,'exited agent cannot keep an active loop notice');
   assert.equal(history.length,7,'resolving current attention never deletes historical events');
+});
+
+
+for(const mode of ['text','voice'])test(`accepted glasses ${mode} input resolves response attention until a fresh answer; failed input preserves it`,async t=>{
+ const history=[{id:'response-1',sessionId:'one',title:'one',kind:'response',at:1}];
+ const speech={available:true,model:'fixture',configure(){},async inspect(){},cancel(){},cancelAll(){},async run(body,accept){return{accepted:await accept('next task',()=>false),transcript:'next task'};}};
+ const f=await fixture(t,{notifications:()=>history,speech});await f.enable();const {token}=await f.pair();
+ const poll=async()=>{const result=await f.call('/g2/api/terminal?id=one',{token});assert.equal(result.status,200);return result.data.attention;};
+ const send=()=>f.call(mode==='text'?'/g2/api/control':'/g2/api/voice',{token,body:mode==='text'?{sessionId:'one',action:'text',text:'next task'}:{sessionId:'one',purpose:'input',audio:Buffer.alloc(8000).toString('base64')}});
+ assert.deepEqual(await poll(),history[0]);
+ const write=f.options.terminals.inputChecked;f.options.terminals.inputChecked=()=>false;
+ assert.ok((await send()).status>=400);assert.deepEqual(await poll(),history[0],'no write means no resolved attention');
+ f.options.terminals.inputChecked=write;assert.equal((await send()).status,200);
+ assert.equal(f.sessions[0].status,'idle','fixture provider emits no working event');
+ assert.equal(await poll(),null);assert.equal(await poll(),null,'old notice stays cleared while provider remains idle');
+ f.controller.answer('one','fresh answer','new-turn',Date.now()+60_000);history.push({...history[0],id:'response-2'});
+ assert.deepEqual(await poll(),history[1],'captured fresh answer permits new response attention');
+ assert.equal(history.length,2,'attention history remains untouched');
+});
+
+test('fallback response attention returns after real working-to-idle progress without captured answers',async t=>{
+ const event={id:'response',sessionId:'one',title:'one',kind:'response',at:1};
+ const f=await fixture(t,{notifications:()=>[event]});await f.enable();const {token}=await f.pair();
+ const poll=async()=>(await f.call('/g2/api/terminal?id=one',{token})).data.attention;
+ assert.deepEqual(await poll(),event);
+ await f.call('/g2/api/control',{token,body:{sessionId:'one',action:'text',text:'next task'}});
+ assert.equal(await poll(),null);
+ f.sessions[0].status='working';f.controller.observe(IPC.terminalSession,{session:f.sessions[0]});
+ f.sessions[0].status='idle';f.controller.observe(IPC.terminalSession,{session:f.sessions[0]});
+ assert.deepEqual(await poll(),event,'working flag must not leave fallback response notices permanently suppressed');
+ await f.call('/g2/api/control',{token,body:{sessionId:'one',action:'text',text:'another task'}});assert.equal(await poll(),null);
+ const output='\x1b[2J\x1b[HNew fallback reply';
+ f.controller.observe(IPC.terminalData,{id:'one',data:output,outputOffset:7+output.length});
+ assert.deepEqual(await poll(),event,'a changed parsed reply also resolves pending input without lifecycle hooks');
 });
