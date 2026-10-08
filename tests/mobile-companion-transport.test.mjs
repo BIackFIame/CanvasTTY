@@ -10,7 +10,7 @@ import { HumanQuestionService } from "../src/main/services/HumanQuestionService.
 import { sealLocal, unsealLocal, localOrigin, validateLocalConnection } from "../src/shared/localLink.ts";
 import { connectionFromCode, localFetcher } from "../integrations/even-g2/src/local-fetch.mjs";
 
-async function fixture(t, { lan = false, httpsOrigin = "", questions: withQuestions = false, experimentalEnabled = () => true } = {}) {
+async function fixture(t, { lan = false, httpsOrigin = "", questions: withQuestions = false, experimentalEnabled = () => true, notifications = () => [] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-mobile-test-"));
   const webRoot = join(directory, "g2"), mobileRoot = join(directory, "mobile");
   await mkdir(webRoot);
@@ -42,6 +42,7 @@ async function fixture(t, { lan = false, httpsOrigin = "", questions: withQuesti
   };
   const controller = new EvenG2Controller({
     experimentalEnabled,
+    notifications,
     humanQuestions: questions,
     userDataPath: directory, webRoot, mobileRoot, terminals, speechWorker: join(directory, "missing.py"),
     port: 0, addresses: () => [{ id: "test:127.0.0.1", name: "test", address: "127.0.0.1" }], localDiscovery: false,
@@ -116,7 +117,8 @@ async function fixture(t, { lan = false, httpsOrigin = "", questions: withQuesti
 }
 
 test("HTTPS origin pairs over proxied routes, encrypted mobile forwards; plaintext bearer cannot act", async (t) => {
-  const f = await fixture(t);
+  const f = await fixture(t, { notifications: (channel, id) => channel === "phone" && id === "one"
+    ? [{ id: "notice-1", kind: "done", at: 200, message: "/private notification body" }] : [] });
   const discover = await f.direct("/g2/discover");
   assert.equal(discover.status, 200);
   const pending = await f.pair();
@@ -135,7 +137,7 @@ test("HTTPS origin pairs over proxied routes, encrypted mobile forwards; plainte
   assert.equal(first.status, 200);
   assert.equal(repeated.status, 200);
   assert.deepEqual(f.writes, [{ id: "one", data: "\x03" }]);
-  assert.deepEqual(overview.body.sessions, [{ id: "one", title: "One", provider: "terminal", status: "idle", startedAt: 100, exitCode: null, revision: 2 }]);
+  assert.deepEqual(overview.body.sessions, [{ id: "one", title: "One", provider: "terminal", status: "idle", startedAt: 100, exitCode: null, revision: 2, attention: [{ id: "notice-1", kind: "done", at: 200 }] }]);
   assert.equal(overview.body.providers.terminal, false);
   assert.deepEqual(overview.body.permissions, {
     allowInput: false, allowCreate: false, allowClose: true, allowInterrupt: true, allowRename: true,
