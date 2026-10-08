@@ -860,6 +860,10 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     return terminals.restart(id, { resume: options?.resume === true });
   });
+  ipcMain.handle(IPC.terminalPasteClipboard, (event, id: string, text: string, startedAt: number) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.pasteClipboard(id, text, startedAt);
+  });
   ipcMain.on(IPC.terminalInput, (event, id: string, data: string) => {
     // Fire-and-forget: a foreign sender is dropped instead of throwing into the IPC layer.
     if (!isMainRenderer(event, getMainWindow)) return;

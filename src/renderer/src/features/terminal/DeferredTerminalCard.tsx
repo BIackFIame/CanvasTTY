@@ -186,7 +186,12 @@ function TerminalCardLoading({
             return;
           }
           const text = await window.canvasTTY.clipboard.readText();
-          if (text && acceptsPaste()) sendText(text, startedAt);
+          if (text && acceptsPaste()) {
+            await window.canvasTTY.terminal.pasteClipboard(session.id, text, startedAt);
+            if (acceptsPaste() && !text.startsWith("\u001b") && /[^\x00-\x1f\x7f]/.test(text)) {
+              window.dispatchEvent(new CustomEvent("canvastty:terminal-input", { detail: { sessionId: session.id } }));
+            }
+          }
         })
         .catch(() => undefined)
         .finally(release);

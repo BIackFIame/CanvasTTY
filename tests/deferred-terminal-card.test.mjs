@@ -3,6 +3,8 @@ import test, { after } from "node:test";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
+import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { TerminalPasteMode } from "../src/main/services/TerminalPasteMode.ts";
 import { fire, installMiniDom, typeInto } from "./helpers/mini-dom.mjs";
 
 // react-dom detects the DOM when it is first evaluated, so the document must exist before the bundle loads.
@@ -179,10 +181,11 @@ function HeldWorkspace({loader,row,holds}) {
   selected:true,groupSelected:false,focused:true,focusRevision:0,onRetry(){},onSelect(){},onInputHoldChange(active){holds.push(active);setHeld(active);}},
   render:Card=>h(Card,{sessionId:row.id,focused:true})});
 }
-async function mountHeld(t) {
+async function mountHeld(t, options={}) {
  const loaded=deferred(),loader=createComponentLoader(()=>loaded.promise),reads=[],inputs=[],holds=[];
- globalThis.canvasTTY={terminal:{input:(id,text)=>inputs.push([id,text])},window:{isMacOS:true},clipboard:{hasImage:async()=>false,readText:()=>{const next=deferred();reads.push(next);return next.promise;}}};
- const container=document.createElement('div');document.body.appendChild(container);const root=createRoot(container);let row=session('held'),unmounted=false;
+ const mode=new TerminalPasteMode();if(options.bracketed)mode.accept('\x1b[?2004h');
+ globalThis.canvasTTY={terminal:{input:(id,text)=>inputs.push([id,text]),pasteClipboard:async(id,text,startedAt)=>{if(options.hostPaste)return options.hostPaste(id,text,startedAt);if(options.deliver)await options.deliver();if(row.id!==id||row.startedAt!==startedAt)throw Error('stale launch');inputs.push([id,mode.paste(text)]);}},window:{isMacOS:true},clipboard:{hasImage:async()=>false,readText:()=>{const next=deferred();reads.push(next);return next.promise;}}};
+ const container=document.createElement('div');document.body.appendChild(container);const root=createRoot(container);let row=options.row??session('held'),unmounted=false;
  const render=()=>act(async()=>root.render(h(HeldWorkspace,{loader,row,holds})));
  const unmount=async()=>{if(!unmounted){unmounted=true;await act(async()=>root.unmount());}};
  t.after(async()=>{await unmount();container.parentNode?.removeChild(container);delete globalThis.canvasTTY;});await render();
@@ -219,4 +222,27 @@ for(const transition of ['restart','session roundtrip','unmount'])test(`pending 
  await act(async()=>f.reads[0].resolve('stale'));assert.deepEqual(f.inputs,[]);assert.deepEqual(f.holds,[true,false,true]);
  await act(async()=>f.loaded.resolve(stubCard()));assert.ok(f.shell());await act(async()=>f.reads[1].resolve('new paste'));
  assert.equal(f.shell(),null);assert.deepEqual(f.inputs,[['held','new paste']]);assert.deepEqual(f.holds,[true,false,true,false]);
+});
+for(const bracketed of [true,false])test(`loading clipboard uses negotiated paste semantics for multiline text (bracketed=${bracketed})`,async t=>{
+ const f=await mountHeld(t,{bracketed});await f.paste();await act(async()=>f.reads[0].resolve('first\nsecond\r\nthird\rfour'));
+ assert.deepEqual(f.inputs,[['held',bracketed?'\x1b[200~first\rsecond\rthird\rfour\x1b[201~':'first\rsecond\rthird\rfour']]);
+});
+test('loading hold extends through host delivery and a restart rejects an already dispatched clipboard request',async t=>{
+ const delivery=deferred();const f=await mountHeld(t,{bracketed:true,deliver:()=>delivery.promise});await f.paste();await act(async()=>f.reads[0].resolve('old\npaste'));
+ await act(async()=>f.loaded.resolve(stubCard()));assert.ok(f.shell());assert.deepEqual(f.holds,[true]);
+ await f.change({startedAt:2});await act(async()=>delivery.resolve());assert.deepEqual(f.inputs,[]);assert.deepEqual(f.holds,[true,false]);
+});
+test('loading image paste keeps native Ctrl-V instead of passing image bytes through text paste',async t=>{
+ const f=await mountHeld(t,{bracketed:true});globalThis.canvasTTY.clipboard.hasImage=async()=>true;
+ await f.paste();assert.deepEqual(f.inputs,[['held','\x16']]);assert.equal(f.reads.length,0);
+});
+test('real loading handler delivers overlapping multiline reads through host negotiated mode and emits user-input events',async t=>{
+ let output;const writes=[];const manager=new TerminalManager(()=>{},{get:provider=>({state:'available',provider,executable:'/fixture/codex',launcher:'native',environment:{},checked:[]})},undefined,undefined,true,()=>({pid:51000,process:'codex',write:data=>writes.push(data),resize(){},kill(){},onData:fn=>{output=fn;return{dispose(){}};},onExit(){return{dispose(){}};}}));
+ t.after(()=>manager.disposeAll());const row=manager.create({provider:'codex',profile:'normal',cwd:process.cwd(),position:{x:0,y:0}});
+ const f=await mountHeld(t,{row,hostPaste:(...args)=>manager.pasteClipboard(...args)});const notices=[];
+ t.mock.method(window,'dispatchEvent',event=>{if(event.type==='canvastty:terminal-input')notices.push(event.detail.sessionId);return true;});
+ output('\x1b[?2004h');await f.paste();await f.paste();await act(async()=>f.loaded.resolve(stubCard()));
+ await act(async()=>f.reads[1].resolve('two\nlines'));assert.ok(f.shell());
+ await act(async()=>f.reads[0].resolve('first\r\nlast'));assert.equal(f.shell(),null);
+ assert.deepEqual(writes,['\x1b[200~two\rlines\x1b[201~','\x1b[200~first\rlast\x1b[201~']);assert.deepEqual(notices,[row.id,row.id]);
 });
