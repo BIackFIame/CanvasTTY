@@ -84,7 +84,7 @@ export class GitCheckpoints {
     if (!/^[\w-]{1,100}$/.test(sessionId)) throw new Error("Invalid checkpoint session.");
     return `refs/canvastty/${sessionId}/`;
   }
-  private async git(cwd: string, args: string[], signal?:AbortSignal): Promise<string> {
+  private async git(cwd: string, args: string[], signal?:AbortSignal,previewOverflow?:(partial:string)=>string): Promise<string> {
     signal?.throwIfAborted();
     const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
       GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
@@ -97,7 +97,15 @@ export class GitCheckpoints {
       const key = line.split(/\s/, 1)[0];
       if (/^filter\..*\.(clean|smudge|process|required)$/.test(key)) safe.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
     }
-    return (await exec("git", [...safe, "-C", cwd, ...args], {env, signal, timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();
+    try {return (await exec("git", [...safe, "-C", cwd, ...args], {env, signal, timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();}
+    catch(error) {
+      const output=error as {code?:unknown;message?:unknown;stdout?:unknown};
+      // Only previews can accept a bounded stdout prefix. Timeouts, stderr overflow and real Git errors fail.
+      if(previewOverflow && output.code==="ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && output.message==="stdout maxBuffer length exceeded" && typeof output.stdout==="string") {
+        return previewOverflow(output.stdout.slice(0,output.stdout.lastIndexOf("\n")+1));
+      }
+      throw error;
+    }
   }
   async available(cwd: string, signal?:AbortSignal): Promise<boolean> {
     try { return await realpath(await this.git(cwd, ["rev-parse", "--show-toplevel"],signal)) === await realpath(cwd); }
@@ -287,9 +295,11 @@ export class GitCheckpoints {
   }
   async preview(sessionId: string, cwd: string, id: string): Promise<{text: string; changedFiles: string[]}> {
     const oid=await this.requireRef(sessionId, cwd, id);
-    const text = await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", oid, "--", "."]);
-    const names = await this.git(cwd, ["diff", "--name-only", "--no-ext-diff", "--no-textconv", oid, "--", "."]);
-    return {text: this.redact(text), changedFiles: names.split("\n").filter(Boolean)};
+    let diffTruncated=false,namesTruncated=false;
+    const text = await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", oid, "--", "."],undefined,partial=>{diffTruncated=true;return partial;});
+    const names = await this.git(cwd, ["diff", "--name-only", "--no-ext-diff", "--no-textconv", oid, "--", "."],undefined,partial=>{namesTruncated=true;return partial;});
+    const notice=diffTruncated || namesTruncated ? "\n[Preview truncated at the output limit. Restoration still uses the complete saved checkpoint."+(namesTruncated ? " The changed-file list is also truncated." : "")+"]" : "";
+    return {text: this.redact(text)+notice, changedFiles: this.redact(names).split("\n").filter(Boolean)};
   }
   async restore(sessionId: string, cwd: string, id: string): Promise<{ok: boolean; message?: string}> {
     const work=this.captures.catch(()=>undefined).then(()=>this.restoreOne(sessionId,cwd,id));

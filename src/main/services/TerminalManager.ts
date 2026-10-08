@@ -141,8 +141,6 @@ interface ManagedSession {
   answerTurnGeneration?: number;
   providerTurnId?: string;
   providerTurnGenerations?: Map<string, number>;
-  /** Successful isolated launches may outlive their local wrapper; retain their scope for this card. */
-  isolatedEnvironmentScopes?: {roots:Set<string>;ambiguous:boolean};
   /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
   answer?: { text: string; truncated: boolean; at: number };
   /**
@@ -579,8 +577,8 @@ export class TerminalManager {
     for(const session of this.sessions.values()) {
       // A pending plugin launch has not established its final cwd yet. Do not race its preparation/wrapping.
       if(session.launchTasks?.size)throw new Error("Wait for pending agent launches before restoring files.");
-      const isolated=session.isolatedEnvironmentScopes;
-      if(isolated && (isolated.ambiguous || targetScopeAmbiguous || [...isolated.roots].some(root=>[...targetScopes].some(target=>isPathInside(root,target) || isPathInside(target,root))))) {
+      const isolated=session.extras.isolatedEnvironmentScopes;
+      if(isolated && (isolated.ambiguous || (isolated.roots.length>0 && (targetScopeAmbiguous || isolated.roots.some(root=>[...targetScopes].some(target=>isPathInside(root,target) || isPathInside(target,root))))))) {
         throw new Error("Checkpoint restoration is unavailable for a related isolated environment: pausing or exiting its local wrapper does not prove that the remote/container workload stopped. Stop and verify that workload independently; CanvasTTY has no environment suspension guarantee.");
       }
       let folder:string;
@@ -1877,6 +1875,7 @@ export class TerminalManager {
       ...(descriptor.reviewRequested !== undefined ? {reviewRequested:descriptor.reviewRequested} : {})
     };
     const extras: PersistedSessionExtras = {
+      ...(descriptor.isolatedEnvironmentScopes ? {isolatedEnvironmentScopes:structuredClone(descriptor.isolatedEnvironmentScopes)} : {}),
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
@@ -2819,14 +2818,16 @@ export class TerminalManager {
         return "failed";
       }
       session.process = process;
+      if(environment)session.extras.isolatedEnvironmentScopes ??= {roots:[],ambiguous:false};
       if(isolatedEnvironment) {
-        const evidence=session.isolatedEnvironmentScopes ??= {roots:new Set(),ambiguous:false};
+        const evidence=session.extras.isolatedEnvironmentScopes!;
         // Keep the declaration used for this launch, never re-read a changed/removed plugin at restore time.
         for(const path of [requestedCwd,taskProjectRoot,metadata.cwd,spawn.cwd]) {
           try {
             const root=realpathSync(path);
-            if(evidence.roots.size<32)evidence.roots.add(root);
-            else if(!evidence.roots.has(root))evidence.ambiguous=true;
+            if(!evidence.roots.includes(root)) {
+              if(evidence.roots.length<32)evidence.roots.push(root);else evidence.ambiguous=true;
+            }
           } catch {evidence.ambiguous=true;}
         }
       }

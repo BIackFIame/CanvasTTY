@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {execFileSync} from 'node:child_process';
-import {mkdtemp,writeFile,rm,readdir} from 'node:fs/promises';
+import {mkdtemp,writeFile,rm,readdir,readFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {GitCheckpoints} from '../src/main/services/GitCheckpoints.ts';
@@ -63,4 +63,19 @@ test('restore serializes safety capture and both restores against queued capture
  const captured=f.checkpoints.capture('later',f.project);assert.deepEqual(operations,['capture','index']);
  release.resolve();await Promise.all([restoring,captured]);assert.deepEqual(operations,['capture','index','worktree','capture']);
  const [later]=await f.checkpoints.list('later',f.project);assert.equal((await f.checkpoints.preview('later',f.project,later.id)).text,'');
+});
+
+test('large real Git preview is truncated and redacted while the complete checkpoint remains restorable',{timeout:15000},async t=>{
+ const f=await fixture(t);await writeFile(join(f.project,'file.txt'),'saved text\n');await f.checkpoints.capture('worker',f.project);const [point]=await f.checkpoints.list('worker',f.project);
+ f.checkpoints.redact=text=>text.replaceAll('PREVIEW_SECRET','[REDACTED]');
+ await writeFile(join(f.project,'file.txt'),('PREVIEW_SECRET '+ 'x'.repeat(180)+'\n').repeat(16000));
+ const preview=await f.checkpoints.preview('worker',f.project,point.id);
+ assert.match(preview.text,/Preview truncated/);assert.match(preview.text,/\[REDACTED\]/);assert.doesNotMatch(preview.text,/PREVIEW_SECRET/);assert.ok(Buffer.byteLength(preview.text)<2*1024*1024+512);assert.deepEqual(preview.changedFiles,['file.txt']);
+ await f.checkpoints.restore('worker',f.project,point.id);assert.equal(await readFile(join(f.project,'file.txt'),'utf8'),'saved text\n');
+});
+
+test('preview still rejects real Git command failures instead of calling them truncation',{timeout:10000},async t=>{
+ const f=await fixture(t);await f.checkpoints.capture('worker',f.project);const [point]=await f.checkpoints.list('worker',f.project),original=f.checkpoints.git.bind(f.checkpoints);
+ f.checkpoints.git=(cwd,args,...rest)=>original(cwd,args[0]==='diff'?[...args.slice(0,1),'--definitely-invalid-checkpoint-option',...args.slice(1)]:args,...rest);
+ await assert.rejects(f.checkpoints.preview('worker',f.project,point.id),error=>error.code!==0&&/invalid|usage|unknown/i.test(error.stderr));
 });

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import {mkdtemp,mkdir,rm,realpath} from 'node:fs/promises';
+import {mkdtemp,mkdir,rm,realpath,readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {TerminalManager} from '../src/main/services/TerminalManager.ts';
+import {TerminalSessionStore} from '../src/main/services/TerminalSessionStore.ts';
 import {EnvironmentRegistry} from '../src/main/services/EnvironmentRegistry.ts';
 import {availableRegistry,fakeSpawner} from './helpers/terminal.mjs';
 const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return{promise,resolve};};
@@ -82,20 +83,21 @@ test('shutdown drains a protected transaction before disposing sessions',async t
  await f.terminal.withCheckpointRestore(a.id,async()=>{restored=true;});assert.equal(restored,true);
  });
 
-async function environmentFixture(t,{isolated=true,relocate=false,kind='box',flipDuringWrap=false,removeProjectDuringWrap=false}={}) {
+async function environmentFixture(t,{isolated=true,relocate=false,kind='box',flipDuringWrap=false,removeProjectDuringWrap=false,persist=false}={}) {
  const f=await fixture(t),provider={pluginId:'fixture.environment',pluginName:'Environment',serviceId:'environment',secrets:false,kinds:[{kind,label:'Fixture',keeps:{launch:true,...(isolated===null?{}:{isolated})}}]};
- let providers=[provider];
+ let providers=[provider],resumeFailure=false;
+ if(persist)f.terminal.configureSessionPersistence(new TerminalSessionStore(f.root),"continue");
  const registry=new EnvironmentRegistry({providers:()=>providers,secret:async()=>null,call:async(_plugin,_service,method,params)=>{
   if(method.endsWith('.prepare'))return{ref:{id:'fixture'},label:'Fixture',...(relocate?{cwd:f.other}:{})};
   if(method.endsWith('.wrap')){if(removeProjectDuringWrap)await rm(f.project,{recursive:true});if(flipDuringWrap)provider.kinds[0].keeps.isolated=false;return{command:process.execPath,args:['fake-environment'],cwd:f.other};}
-  if(method.endsWith('.resume'))return{ok:true};
+  if(method.endsWith('.resume'))return resumeFailure?{refuse:{reason:'fixture resume refused'}}:{ok:true};
   return{};
  }});
  f.terminal.configureEnvironments(registry);
  const launched=f.terminal.create({provider:'codex',profile:'normal',cwd:f.project,position:{x:0,y:0},environment:{pluginId:provider.pluginId,kind}});
  await Promise.all([...f.terminal.sessions.get(launched.id).launchTasks]);
  assert.equal(f.calls.length,1);assert.equal(f.terminal.getMetadata(launched.id).exitCode,null);f.idle(launched.id);
- return{...f,launched,provider,registry,remove:()=>{providers=[];}};
+ return{...f,launched,provider,registry,failEnvironmentResume:()=>{resumeFailure=true;},remove:()=>{providers=[];}};
 }
 
 for(const mutation of ['unchanged','flip','remove','during-wrap'])test(`isolated launch rejects restoration before pause or Git, retaining its original declaration (${mutation})`,{timeout:5000},async t=>{
@@ -131,4 +133,39 @@ for(const isolated of [false,null])test(`local worktree environment retains rest
 test('unverifiable isolated launch scope refuses restoration rather than assuming a distinct project',{timeout:5000},async t=>{
  const f=await environmentFixture(t,{removeProjectDuringWrap:true});const distinct=join(f.root,'distinct');await mkdir(distinct);const local=f.create(distinct);f.idle(local.id);
  await assert.rejects(f.terminal.withCheckpointRestore(local.id,async()=>assert.fail()),/isolated environment/);assert.deepEqual(f.events,[]);
+});
+
+for(const condition of ['plugin-removed','resume-failed','declaration-changed','stopped'])test(`isolated launch evidence survives disk reload into a new manager (${condition})`,{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{persist:true,relocate:true});
+ if(condition==='stopped')f.calls[0].process.emitExit(0);
+ await f.terminal.shutdown();
+ const stored=JSON.parse(await readFile(join(f.root,'terminal-sessions.json'),'utf8'));
+ assert.ok(stored.sessions[0].isolatedEnvironmentScopes.roots.includes(f.project));
+ assert.equal(f.terminal.getMetadata(f.launched.id),null);
+ if(condition==='declaration-changed')f.provider.kinds[0].keeps.isolated=false;
+ if(condition==='resume-failed')f.failEnvironmentResume();
+ const calls=[],manager=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner(calls),f.pause);
+ t.after(()=>manager.disposeAll());
+ if(condition!=='plugin-removed')manager.configureEnvironments(f.registry);
+ manager.configureSessionPersistence(new TerminalSessionStore(f.root),'continue');await manager.restorePersistedSessions();
+ await Promise.all([...manager.sessions.get(f.launched.id).launchTasks??[]]);
+ assert.ok(manager.getMetadata(f.launched.id));assert.equal('isolatedEnvironmentScopes' in manager.getMetadata(f.launched.id),false,'history remains host-only');
+ const local=manager.create({provider:'codex',profile:'normal',cwd:f.project,position:{x:0,y:0}});manager.applyProviderSignal(local.id,{state:'idle'});f.events.length=0;
+ await assert.rejects(manager.withCheckpointRestore(local.id,async()=>assert.fail()),/isolated environment/);assert.deepEqual(f.events,[]);
+ await manager.shutdown();const again=await new TerminalSessionStore(f.root).load();assert.deepEqual(again.find(row=>row.id===f.launched.id).isolatedEnvironmentScopes,stored.sessions[0].isolatedEnvironmentScopes);
+});
+
+for(const evidence of [undefined,null,{roots:['relative'],ambiguous:false},{roots:['/absolute'],ambiguous:'no'},{roots:Array.from({length:33},(_,i)=>'/'+i),ambiguous:false}])test(`legacy or malformed isolation evidence restores as unknown rather than losing the card (${JSON.stringify(evidence)})`,{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{persist:true});await f.terminal.shutdown();const file=join(f.root,'terminal-sessions.json'),saved=JSON.parse(await readFile(file,'utf8'));
+ if(evidence===undefined)delete saved.sessions[0].isolatedEnvironmentScopes;else saved.sessions[0].isolatedEnvironmentScopes=evidence;
+ await writeFile(file,JSON.stringify(saved));
+ const manager=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),f.pause);t.after(()=>manager.disposeAll());manager.configureSessionPersistence(new TerminalSessionStore(f.root),'continue');await manager.restorePersistedSessions();
+ assert.ok(manager.getMetadata(f.launched.id));const persisted=await new TerminalSessionStore(f.root).load();assert.deepEqual(persisted[0].isolatedEnvironmentScopes,{roots:[],ambiguous:true});
+ await assert.rejects(manager.withCheckpointRestore(f.launched.id,async()=>assert.fail()),/isolated environment/);await manager.shutdown();
+});
+
+test('verified local environment persists explicit empty isolation history and remains restorable after reload',{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{persist:true,isolated:false,kind:'worktree'});await f.terminal.shutdown();
+ const manager=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),f.pause);t.after(()=>manager.disposeAll());manager.configureEnvironments(f.registry);manager.configureSessionPersistence(new TerminalSessionStore(f.root),'continue');await manager.restorePersistedSessions();await Promise.all([...manager.sessions.get(f.launched.id).launchTasks??[]]);manager.applyProviderSignal(f.launched.id,{state:'idle'});
+ await manager.withCheckpointRestore(f.launched.id,async()=>{});await manager.shutdown();
 });
