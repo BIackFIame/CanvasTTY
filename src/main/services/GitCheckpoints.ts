@@ -292,6 +292,11 @@ export class GitCheckpoints {
     return {text: this.redact(text), changedFiles: names.split("\n").filter(Boolean)};
   }
   async restore(sessionId: string, cwd: string, id: string): Promise<{ok: boolean; message?: string}> {
+    const work=this.captures.catch(()=>undefined).then(()=>this.restoreOne(sessionId,cwd,id));
+    this.captures=work.then(()=>undefined,()=>undefined);
+    return work;
+  }
+  private async restoreOne(sessionId:string,cwd:string,id:string):Promise<{ok:boolean;message?:string}> {
     const initial=this.trusted.get(id);
     let release=this.holdPack(initial?.cwd??cwd,initial?.pack);
     try {
@@ -299,7 +304,7 @@ export class GitCheckpoints {
       const row=this.trusted.get(id)!;
       if(row.pack!==initial?.pack){await release();release=this.holdPack(row.cwd,row.pack);}
       const indexOid=row.indexOid!;
-      await this.capture(sessionId, cwd);
+      await this.captureOne(sessionId, cwd);
       // Capture may prune this checkpoint at a retention limit of one. Re-import its held private pack
       // after capture, immediately before restore, in case Git garbage-collected the earlier import.
       const pack=row.pack&&this.packPath(row.cwd,row.pack);

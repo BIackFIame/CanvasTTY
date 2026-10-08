@@ -58,7 +58,7 @@ test('unauthenticated and stale starts never checkpoint; timeout and throw are b
 const index=await readFile(new URL('../src/main/index.ts',import.meta.url),'utf8');
 const cacheSource=index.slice(index.indexOf('  const checkpointTurns ='),index.indexOf('  diagnostics.configureRedaction'));
 const callbacksSource=index.slice(index.indexOf('      lifecycleGuard:'),index.indexOf('      onSignal:',index.indexOf('      lifecycleGuard:')));
-const callbackCode=(await transform(cacheSource+'\nresult={'+callbacksSource+'};',{loader:'ts',format:'cjs'})).code;
+const callbackCode=(await transform(cacheSource+'\nresult={'+callbacksSource+'}; result.checkpointBeforeTurn=checkpointBeforeTurn;' ,{loader:'ts',format:'cjs'})).code;
 
 test('production barrier skips ineligible sessions, deduplicates success and rejects stale host input even while cleanup is held',{timeout:5000},async t=>{
  const terminals=new TerminalManager(()=>undefined,availableRegistry(),undefined,undefined,true,fakeSpawner([]));t.after(()=>terminals.disposeAll());
@@ -125,4 +125,51 @@ for(const [label,input,approval,changesTurn] of [
  const signal=await entered.promise;assert.equal(terminals.inputChecked(worker.id,input),true);
  assert.equal(signal.aborted,changesTurn);release.resolve();assert.equal(await pending,!changesTurn);assert.equal(saved,!changesTurn);
  assert.equal(terminals.inputWriteObservers.get(worker.id)?.size??0,0);
+});
+
+for(const mode of ['aborted','failed'])test(`production checkpoint ${mode} attempt remains unavailable through PostToolUse and approval until a new submitted turn`,{timeout:5000},async t=>{
+ const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]));t.after(()=>terminals.disposeAll());
+ const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);
+ const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0;
+ const sandbox={terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{captures++;if(captures===1){entered.resolve();await release.promise;if(mode==='aborted')signal.throwIfAborted();throw new Error('capture failed');}}},redaction:{redact:x=>x},console:{warn(){}},AbortController,result:null};runInNewContext(callbackCode,sandbox);
+ const cancel=new AbortController();const first=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},cancel.signal);await entered.promise;
+ if(mode==='aborted')cancel.abort();
+ const post=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'PostToolUse'},new AbortController().signal);
+ terminals.applyProviderSignal(worker.id,{state:'needs_approval'});
+ const approval=sandbox.result.checkpointBeforeTurn(worker.id,new AbortController().signal);
+ assert.equal(captures,1,'cleanup still pending must not allow a second capture');release.resolve();await Promise.all([first,post,approval]);
+ await sandbox.result.checkpointBeforeTurn(worker.id,new AbortController().signal);assert.equal(captures,1,'settled failure remains an attempted turn');
+ terminals.applyProviderSignal(worker.id,{state:'idle'});assert.equal(terminals.inputChecked(worker.id,'new task\r'),true);
+ await sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},new AbortController().signal);assert.equal(captures,2);
+});
+
+test('restoration invalidates held pre-turn delivery and prevents late hooks snapshotting the restored generation', {timeout:5000},async t=>{
+ const paused=new Set(),pause={supported:true,isPaused:p=>paused.has(p),pause(p){paused.add(p);return{supported:true};},resume(p){paused.delete(p);return{supported:true};}};
+ const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),pause);t.after(()=>terminals.disposeAll());
+ const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);terminals.applyProviderSignal(worker.id,{state:'idle'});
+ const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0;
+ const sandbox={terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(captures===1){entered.resolve();await release.promise;}}},redaction:{redact:x=>x},console,AbortController,result:null};runInNewContext(callbackCode,sandbox);
+ const first=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},new AbortController().signal);await entered.promise;
+ await terminals.withCheckpointRestore(worker.id,async()=>{});release.resolve();assert.equal(await first,false);
+ await sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'PostToolUse'},new AbortController().signal);
+ await sandbox.result.checkpointBeforeTurn(worker.id,new AbortController().signal);assert.equal(captures,1);
+ assert.equal(terminals.inputChecked(worker.id,'genuinely new task\r'),true);await sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call'},new AbortController().signal);assert.equal(captures,2);
+});
+
+test('accepted turn end clears a failed attempt; permission callbacks deny during restore and recheck after checkpoint await',{timeout:5000},async t=>{
+ const signalSource=index.slice(index.indexOf('      onSignal: (terminalSessionId, signal)'),index.indexOf('      onAnswerCaptureRevoked:'));
+ const permissionSource=index.slice(index.indexOf('      onPermissionRequest: async (terminalSessionId'),index.indexOf('      // Claude Code\'s lifecycle hooks'));
+ const code=(await transform(cacheSource+'\nresult={'+callbacksSource+signalSource+permissionSource+'};',{loader:'ts',format:'cjs'})).code;
+ const paused=new Set(),pause={supported:true,isPaused:p=>paused.has(p),pause(p){paused.add(p);return{supported:true};},resume(p){paused.delete(p);return{supported:true};}};
+ const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),pause);t.after(()=>terminals.disposeAll());
+ const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);terminals.applyProviderSignal(worker.id,{state:'idle'});
+ const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0,decisions=0,hold=false;
+ const sandbox={terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(hold){entered.resolve();await release.promise;}else throw new Error('unavailable');}},redaction:{redact:x=>x},console:{warn(){}},AbortController,agentControl:undefined,evenG2:undefined,budgetInputGate:()=>{},decisionHooks:{decide:()=>{decisions++;return{behavior:'allow'};}},result:null};runInNewContext(code,sandbox);
+ await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,1);
+ sandbox.result.onSignal(worker.id,{state:'idle'});
+ await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,2,'an accepted end allows the next provider turn');
+ sandbox.result.onSignal(worker.id,{state:'idle'});hold=true;
+ const pending=sandbox.result.onPermissionRequest(worker.id,{},new AbortController().signal);await entered.promise;
+ await terminals.withCheckpointRestore(worker.id,async()=>{const answer=await sandbox.result.onPermissionRequest(worker.id,{},new AbortController().signal);assert.equal(answer.behavior,'deny');});
+ release.resolve();assert.equal((await pending).behavior,'deny');assert.equal(decisions,0);
 });

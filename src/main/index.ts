@@ -405,11 +405,13 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const checkpointBeforeTurn = (id: string, signal?: AbortSignal): Promise<void> => {
     const row=terminalManager?.getMetadata(id);
     if (!row || row.exitCode !== null || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
+    if (!terminalManager!.canCaptureCheckpoint(id)) return Promise.resolve();
     let entry=checkpointTurns.get(id);
-    if (!entry || entry.signal?.aborted || !entry.current()) {
+    if (!entry || !entry.current()) {
       const created={pending:Promise.resolve(),signal,current:terminalManager!.providerSignalGuard(id,{kind:"lifecycle",state:"working"})};
       created.pending=checkpoints.capture(id,row.cwd,signal).catch(error => {
-        if(checkpointTurns.get(id)===created)checkpointTurns.delete(id);
+        // Keep the failed attempt until the turn ends or its input generation changes.
+        // Retrying at PostToolUse could snapshot edits as if they preceded the turn.
         console.warn("Rollback point unavailable",redaction.redact(String(error)));
       });
       checkpointTurns.set(id,created);entry=created;
@@ -626,9 +628,12 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
       onPermissionRequest: async (terminalSessionId, request, signal) => {
+        if (terminalManager?.isCheckpointRestoreActive(terminalSessionId)) return {behavior:"deny",message:"Workspace checkpoint restoration is in progress."};
         try { budgetInputGate(terminalSessionId); }
         catch(error) { return {behavior:"deny",message:redaction.redact(error instanceof Error ? error.message : "Task budget is paused.")}; }
+        const current=terminalManager?.providerSignalGuard(terminalSessionId,{kind:"lifecycle",state:"working"});
         await checkpointBeforeTurn(terminalSessionId, signal);
+        if(!current?.() || terminalManager?.isCheckpointRestoreActive(terminalSessionId))return {behavior:"deny",message:"The agent turn changed while preparing its rollback point."};
         return decisionHooks.decide(terminalSessionId, request, signal);
       },
       // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.

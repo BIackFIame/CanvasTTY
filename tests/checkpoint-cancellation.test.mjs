@@ -53,3 +53,14 @@ test('a hook capture completes at durable publication while old-pack pruning dra
  const after=await f.checkpoints.list('worker',f.project);assert.equal(after.length,1);assert.notEqual(after[0].id,before[0].id);
  const loaded=new GitCheckpoints(text=>text,1,join(f.root,'registry.json'));assert.deepEqual(await loaded.list('worker',f.project),after);
 });
+
+test('restore serializes safety capture and both restores against queued captures and later restores',{timeout:15000},async t=>{
+ const f=await fixture(t);await writeFile(join(f.project,'file.txt'),'saved uncommitted change');await f.checkpoints.capture('worker',f.project);const [point]=await f.checkpoints.list('worker',f.project);
+ await writeFile(join(f.project,'file.txt'),'changed');const entered=deferred(),release=deferred();t.after(()=>release.resolve());
+ const original=f.checkpoints.git.bind(f.checkpoints),operations=[];let hold=true;
+ f.checkpoints.git=async(cwd,args,...rest)=>{if(args[0]==='stash'||args[0]==='restore')operations.push(args[0]==='stash'?'capture':args.includes('--staged')?'index':'worktree');if(args[0]==='restore'&&args.includes('--staged')&&hold){hold=false;entered.resolve();await release.promise;}return original(cwd,args,...rest);};
+ const restoring=f.checkpoints.restore('worker',f.project,point.id);await entered.promise;
+ const captured=f.checkpoints.capture('later',f.project);assert.deepEqual(operations,['capture','index']);
+ release.resolve();await Promise.all([restoring,captured]);assert.deepEqual(operations,['capture','index','worktree','capture']);
+ const [later]=await f.checkpoints.list('later',f.project);assert.equal((await f.checkpoints.preview('later',f.project,later.id)).text,'');
+});
