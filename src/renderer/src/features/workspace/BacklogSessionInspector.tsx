@@ -9,7 +9,7 @@ import { UsageBreakdownPanel } from "./UsageBreakdownPanel";
 import { NetworkPolicyPanel } from "./NetworkPolicyPanel";
 import { InspectorLoadGate } from "./inspectorLoadGate";
 import { useDialogFocus } from "./useDialogFocus";
-import { downloadText } from "./workspaceDom";
+import { downloadText, findSessionCard } from "./workspaceDom";
 import { DraftRevision, shouldHydrateDraft } from "./workspaceAsyncState";
 import { useVisibleRefresh } from "./visibleRefresh";
 
@@ -546,7 +546,7 @@ function safeFilename(value: string): string {
 }
 
 function findSessionInspectorTrigger(sessionId: string): HTMLElement | null {
-  const card = Array.from(document.querySelectorAll<HTMLElement>("[data-session-id]")).find((candidate) => candidate.dataset.sessionId === sessionId);
+  const card = findSessionCard(sessionId);
   return card?.querySelector<HTMLElement>(".terminal-card__action--options") ?? card ?? null;
 }
 

@@ -1,5 +1,5 @@
-import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import { contextBridge, ipcRenderer, webUtils } from "electron";
+import { BACKLOG_IPC, BACKLOG_TERMINAL_IPC, BACKLOG_EVENTS, type BacklogApi } from "../shared/backlog";
 import type {
   AppSettings,
   BrowserActivityStateEvent,
@@ -274,6 +274,10 @@ const api: CanvasTTYApi = {
     )
   },
   terminal: {
+    paste: (id, text) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.paste, id, text),
+    describeFileDrop: (files, sessionId) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.describeFileDrop, files.map((file) => webUtils.getPathForFile(file)), sessionId),
+    searchOutput: (query, sessionIds) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.searchOutput, query, sessionIds),
+    readOutputContext: (id, offset) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.readOutputContext,id,offset),
     onFocusRequested: (listener) => subscribe(BACKLOG_TERMINAL_IPC.focusRequested, listener),
     openFile: (id: string, reference: string) => ipcRenderer.invoke(IPC.terminalOpenFile, id, reference),
     fileDropText: (files: File[]) => terminalFileDropText(
@@ -285,6 +289,7 @@ const api: CanvasTTYApi = {
     create: (request: CreateSessionRequest) => ipcRenderer.invoke(IPC.terminalCreate, request),
     restart: (id: string, options?: { resume?: boolean }) => ipcRenderer.invoke(IPC.terminalRestart, id, options),
     input: (id: string, data: string) => ipcRenderer.send(IPC.terminalInput, id, data),
+    pasteClipboard: (id, text, startedAt) => ipcRenderer.invoke(IPC.terminalPasteClipboard, id, text, startedAt),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.send(IPC.terminalResize, id, cols, rows),
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.terminalBounds, id, bounds),
     rename: (id: string, title: string) => ipcRenderer.invoke(IPC.terminalRename, id, title),

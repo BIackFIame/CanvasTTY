@@ -1897,6 +1897,10 @@ export interface CanvasTTYApi {
     openUrl(url: string): Promise<void>;
   };
   terminal: {
+    paste(id: string, text: string): Promise<void>;
+    describeFileDrop(files: File[], sessionId: string): Promise<{text:string;paths:string[];outsideProject:string[]}>;
+    searchOutput(query: string, sessionIds?: string[]): Promise<TerminalOutputSearchResult>;
+    readOutputContext(id: string, offset: number): Promise<TerminalOutputContext>;
     onFocusRequested(listener: (id: string) => void): () => void;
     openFile(id: string, reference: string): Promise<void>;
     fileDropText(files: File[]): string;
@@ -1906,6 +1910,7 @@ export interface CanvasTTYApi {
     /** `resume` continues the card's own conversation instead of starting a new one. */
     restart(id: string, options?: { resume?: boolean }): Promise<SessionSnapshot>;
     input(id: string, data: string): void;
+    pasteClipboard(id: string, text: string, startedAt: number): Promise<void>;
     resize(id: string, cols: number, rows: number): void;
     setBounds(id: string, bounds: SessionBounds): void;
     rename(id: string, title: string): Promise<SessionMetadata>;
@@ -2084,6 +2089,7 @@ export const IPC = {
   agentChatHistoryResume: "agent-chat-history:resume",
   terminalRestart: "terminal:restart",
   terminalInput: "terminal:input",
+  terminalPasteClipboard: "terminal:paste-clipboard",
   terminalResize: "terminal:resize",
   terminalBounds: "terminal:bounds",
   terminalRename: "terminal:rename",

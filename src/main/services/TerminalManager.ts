@@ -1,3 +1,4 @@
+import { TerminalPasteMode } from "./TerminalPasteMode.ts";
 import { ReviewDiffTracker } from "./ReviewDiffTracker.ts";
 import { GitCheckpoints } from "./GitCheckpoints.ts";
 import { constants as osConstants } from "node:os";
@@ -132,6 +133,7 @@ interface ManagedSession {
   captureResult: boolean;
   captureReviewDiff?: boolean;
   inputBracketedPaste?: boolean;
+  pasteMode?: TerminalPasteMode;
   /** Turns the agent started (its status became working) since launch. */
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
@@ -1387,7 +1389,7 @@ export class TerminalManager {
         : null;
       session.awaitingInitialResize = true;
       session.resumeOnLaunch = resume;
-      session.metadata.startedAt = Date.now();
+      session.metadata.startedAt = Math.max(Date.now(), session.metadata.startedAt + 1);
       session.metadata.status = initialSessionStatus(session.metadata.provider);
       session.metadata.turnCompleted = false;
       session.metadata.exitCode = null;
@@ -1407,7 +1409,7 @@ export class TerminalManager {
       session.lifecycle = this.lifecycleHooksEnabled
         ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
         : null;
-      session.metadata.startedAt = Date.now();
+      session.metadata.startedAt = Math.max(Date.now(), session.metadata.startedAt + 1);
       session.metadata.status = initialSessionStatus(session.metadata.provider);
       session.metadata.exitCode = null;
       session.metadata.failureDetails = null;
@@ -1437,7 +1439,7 @@ export class TerminalManager {
     session.lifecycle = this.lifecycleHooksEnabled
       ? createProviderLifecycleParser(session.metadata.provider, session.metadata.cwd)
       : null;
-    session.metadata.startedAt = Date.now();
+    session.metadata.startedAt = Math.max(Date.now(), session.metadata.startedAt + 1);
     // A restart is a launch the user asked for, so its failure is news even
     // though the card already showed "failed" before they clicked.
     let failureOrigin: FailureOrigin | null = null;
@@ -1589,12 +1591,24 @@ export class TerminalManager {
     for (const wake of [...session.launchWaiters]) wake();
   }
 
-  inputChecked(id: string, data: string, internal: { acknowledgementRetry?: boolean } = {}): boolean {
+  /** Paste follows the current PTY mode; only host callers can request a separate submission suffix. */
+  pasteClipboard(id: string, text: string, startedAt: number, options: { submit?: boolean } = {}): void {
+    const session = this.sessions.get(id);
+    if (typeof text !== "string" || !text || !Number.isFinite(startedAt) || !session
+      || session.metadata.startedAt !== startedAt || !session.pasteMode
+      || !this.inputChecked(id, session.pasteMode.paste(text)
+        + (options.submit ? "\r" : ""), { expectedStartedAt: startedAt })) {
+      throw new Error("Clipboard paste could not be delivered to the current terminal.");
+    }
+  }
+
+  inputChecked(id: string, data: string, internal: { acknowledgementRetry?: boolean; expectedStartedAt?: number } = {}): boolean {
     if(this.isCheckpointRestoreActive(id))return false;
     if (data !== "\x03") { try { this.inputGate?.(id); } catch { return false; } }
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
-    if (!session || session.metadata.exitCode !== null || !session.process) return false;
+    if (!session || session.metadata.exitCode !== null || !session.process
+      || (internal.expectedStartedAt !== undefined && session.metadata.startedAt !== internal.expectedStartedAt)) return false;
     if(data!=="\x03" && this.isSessionBudgetPaused(session))return false;
     const process = session.process;
     const mark = session.turnStarts ?? 0;
@@ -2227,13 +2241,18 @@ export class TerminalManager {
     this.schedulePersistence();
   }
 
+  /** Current host-owned card descriptors, independent of restart persistence and excluding temporary reviewers. */
+  archiveDescriptors(): PersistedTerminalSession[] {
+    return [...this.sessions.values()].filter(session => !session.reviewWorkspace)
+      .map(session => persistedTerminalSession(session.metadata, session.threadId, session.extras));
+  }
+
   private persistSessions(): Promise<void> {
     if (this.sessionRestoreMode === "off" || this.suppressPersistence || !this.sessionStore) {
       return Promise.resolve();
     }
     return this.sessionStore.replace(
-      [...this.sessions.values()].filter((session) => !session.reviewWorkspace)
-        .map((session) => persistedTerminalSession(session.metadata, session.threadId, session.extras))
+      this.archiveDescriptors()
     );
   }
 
@@ -3029,10 +3048,13 @@ export class TerminalManager {
   }
 
   private bindProcess(id: string, session: ManagedSession, process: IPty): void {
+    session.pasteMode = new TerminalPasteMode();
     session.agentBrowser?.retainUntilExit?.();
     process.onData((data) => {
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
+
+      current.pasteMode?.accept(data);
 
       // OpenCode creates its first conversation only after submission, so a fresh home screen has no
       // session.created hook yet. Its rendered prompt and command hints are the startup readiness signal.
@@ -3206,6 +3228,7 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.providerTurnId;
   delete session.providerTurnGenerations;
   delete session.inputBracketedPaste;
+  delete session.pasteMode;
   delete session.hookSignals;
   delete session.cliInputReady;
   delete session.readinessOutput;

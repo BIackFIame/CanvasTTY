@@ -6,6 +6,7 @@ import {execFile} from "node:child_process";
 import {promisify} from "node:util";
 import test from "node:test";
 import {SessionTimelineService} from "../src/main/services/SessionTimelineService.ts";
+import {WorkspaceArchive} from "../src/main/services/WorkspaceArchive.ts";
 import {GitCheckpoints} from "../src/main/services/GitCheckpoints.ts";
 import {OrchestrationBudgetService} from "../src/main/services/OrchestrationBudgetService.ts";
 import {createHash} from "node:crypto";
@@ -214,6 +215,24 @@ test("budget counters keep source identity and replace legacy aliases without do
 
 const descriptor=(dir,id="root")=>({id,provider:"codex",profile:"normal",role:"orchestrator",title:id,titleCustomized:true,cwd:dir,
   position:{x:10,y:20},size:{width:700,height:430},lastState:"running",restore:true});
+test("workspace export excludes credentials and import restores parents before children",async()=>{
+  const dir=await temp();try {
+    const root={...descriptor(dir),threadId:"4dd6ecb4-c094-4c2a-94a1-bb9e87f3104b"},child={...descriptor(dir,"child"),role:"subagent",parentSessionId:"root"};const created=[];
+    const archive=new WorkspaceArchive(dir,{descriptors:()=>[child,{...root,options:{plugin:{token:"fixture-private-token",label:"held-value"}}}],available:()=>true,
+      redact:text=>text.replaceAll("held-value","<redacted>"),setBounds:()=>{},create:request=>{created.push(request);return {...request,id:`new-${created.length}`,buffer:""};}});
+    const text=archive.export();assert.doesNotMatch(text,/fixture-private-token|held-value/);
+    const imported=await archive.import(text,false);assert.equal(imported.sessions.length,2);assert.equal(created[0].role,"orchestrator");assert.equal(created[1].parentSessionId,"new-1");
+    const yolo=JSON.stringify({...JSON.parse(text),sessions:[{...root,profile:"yolo"}]});await assert.rejects(archive.import(yolo,false),/Confirm Bypass/);
+    assert.equal(created[0].resumeThreadId,"4dd6ecb4-c094-4c2a-94a1-bb9e87f3104b","snapshot import explicitly resumes its saved conversation");
+    const preset={id:"daily",name:"Daily",snapshot:text};await archive.savePreset(preset);assert.equal((await archive.presets()).length,1);
+    for(let i=0;i<2;i++) await archive.import((await archive.presets())[0].snapshot,false);
+    assert.equal(created.slice(2).some(request=>request.resumeThreadId),false,"each preset starts new conversations");
+    await writeFile(join(dir,"workspace-presets.json"),JSON.stringify([preset]));
+    assert.equal(JSON.parse((await archive.presets())[0].snapshot).sessions.some(record=>record.threadId),false,"legacy presets also start fresh");
+    await archive.deletePreset("daily");assert.deepEqual(await archive.presets(),[]);
+    const invalid=JSON.stringify({...JSON.parse(text),sessions:[{...root,parentSessionId:"root"}]});await assert.rejects(archive.preview(invalid),/cycle/);
+  } finally {await rm(dir,{recursive:true,force:true});}
+});
 test("git checkpoints leave staged and unstaged edits intact, preview and restore both; retention prunes old captures safely",async()=>{
   const dir=await temp();const git=(...args)=>exec("git",["-C",dir,...args]);try {
     await git("init");await git("config","user.name","Test");await git("config","user.email","test@example.invalid");await git("config","core.autocrlf","false");

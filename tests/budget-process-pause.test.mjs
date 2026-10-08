@@ -94,13 +94,8 @@ test("budget pause suspends and resumes the owned PTY process group, including d
 
   const resumed = terminals.setBudgetPaused(session.id, false);
   assert.equal(resumed.supported, true);
-  const resumeDeadline = Date.now() + 3_000;
-  let afterResume;
-  do {
-    afterResume = await Promise.all([bytes(descendantFile), bytes(parentFile)]);
-    if (afterResume.every((value, index) => value > whilePaused[index])) break;
-    await sleep(20);
-  } while (Date.now() < resumeDeadline);
+  await sleep(250);
+  const afterResume = await Promise.all([bytes(descendantFile), bytes(parentFile)]);
   assert.ok(afterResume[0] > whilePaused[0], "the descendant resumes with its parent");
   assert.ok(afterResume[1] > whilePaused[1], "the PTY shell resumes");
 });

@@ -685,8 +685,8 @@ export function App(): React.JSX.Element {
     environment?: SessionEnvironmentChoice,
     initialPrompt?: string
   ): Promise<void> => {
-    const session = await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions, environment);
-    if (initialPrompt) await window.canvasTTY.backlog.sendInstructions(session.id, initialPrompt);
+    const session=await createSession(provider, profile, cwd, launchPosition ?? undefined, role, launchOptions, environment);
+    if(initialPrompt)await window.canvasTTY.backlog.sendInstructions(session.id,initialPrompt);
     setLaunchPosition(null);
     showToast(provider === "terminal" ? t(settings.locale, "terminalStarted") : `${t(settings.locale, "sessionStarted")}: ${provider}`);
   }, [createSession, launchPosition, settings.locale, showToast]);
@@ -1540,6 +1540,7 @@ export function App(): React.JSX.Element {
         {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
         {ready && <WorkspaceCanvas
           surfacesMounted={surfacesMounted}
+          onPersistSettings={persistSettings}
           settings={workspaceSettings}
           mediaData={mediaData}
           sessions={sessions}

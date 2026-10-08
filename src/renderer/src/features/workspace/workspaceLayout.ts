@@ -1,5 +1,6 @@
 import type { Point, SessionBounds } from "../../../../shared/contracts";
 
+export type WorkspaceLayoutMode = "tree" | "status" | "project" | "grid";
 
 export interface WorkspaceLayoutItem {
   id: string;
@@ -93,6 +94,34 @@ export function arrangeTaskTree(
   return result;
 }
 
+/** Arrange cards in status/project columns or a compact variable-size grid. */
+export function arrangeWorkspace(
+  items: readonly WorkspaceLayoutItem[],
+  mode: Exclude<WorkspaceLayoutMode, "tree">,
+  origin: Point,
+  gapX = GAP_X,
+  gapY = GAP_Y
+): Map<string, SessionBounds> {
+  if (mode === "grid") return arrangeGrid(items, origin, gapX, gapY);
+  const groups = new Map<string, WorkspaceLayoutItem[]>();
+  for (const item of items) {
+    const key = mode === "status" ? statusGroup(item.status) : projectGroup(item.project);
+    const row = groups.get(key) ?? [];
+    row.push(item);
+    groups.set(key, row);
+  }
+  const result = new Map<string, SessionBounds>();
+  let x = origin.x;
+  for (const key of [...groups.keys()].sort((a,b)=>a.localeCompare(b))) {
+    const group = groups.get(key)!;
+    const placements = arrangeGrid(group, { x, y: origin.y }, gapX, gapY);
+    for (const [id, bounds] of placements) result.set(id, bounds);
+    const groupRight = Math.max(...[...placements.values()].map((bounds) => bounds.position.x + bounds.size.width));
+    x = groupRight + gapX;
+  }
+  return result;
+}
+
 export function taskTreeBounds(
   parent: WorkspaceLayoutItem,
   descendants: readonly WorkspaceLayoutItem[],
@@ -114,7 +143,44 @@ export function taskTreeBounds(
   return arrangeTaskTree([parent, ...subtree], parent.bounds.position, gapX, gapY);
 }
 
+function arrangeGrid(items: readonly WorkspaceLayoutItem[], origin: Point, gapX: number, gapY: number): Map<string, SessionBounds> {
+  const columns = Math.max(1, Math.ceil(Math.sqrt(items.length)));
+  const rows = Math.ceil(items.length / columns);
+  const columnWidths = Array.from({ length: columns }, () => 0);
+  const rowHeights = Array.from({ length: rows }, () => 0);
+  items.forEach((item, index) => {
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    columnWidths[column] = Math.max(columnWidths[column], item.bounds.size.width);
+    rowHeights[row] = Math.max(rowHeights[row], item.bounds.size.height);
+  });
+  const columnX: number[] = [];
+  const rowY: number[] = [];
+  for (let index = 0; index < columns; index += 1) {
+    columnX[index] = index === 0 ? origin.x : columnX[index - 1] + columnWidths[index - 1] + gapX;
+  }
+  for (let index = 0; index < rows; index += 1) {
+    rowY[index] = index === 0 ? origin.y : rowY[index - 1] + rowHeights[index - 1] + gapY;
+  }
+  return new Map(items.map((item, index) => {
+    const row = Math.floor(index / columns);
+    const column = index % columns;
+    return [item.id, at(columnX[column], rowY[row], item.bounds)];
+  }));
+}
+
 function at(x: number, y: number, bounds: SessionBounds): SessionBounds {
   return { position: { x, y }, size: { ...bounds.size } };
 }
 
+function statusGroup(status?: string): string {
+  if (status === "working") return "1-working";
+  if (status === "needs_approval") return "2-waiting";
+  if (status === "failed" || status === "unavailable") return "4-failed";
+  if (status === "done") return "3-done";
+  return "5-idle";
+}
+
+function projectGroup(project?: string): string {
+  return project?.trim() || "~/unknown";
+}

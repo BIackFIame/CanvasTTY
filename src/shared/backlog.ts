@@ -1,4 +1,4 @@
-import type { ProviderSecretId } from "./contracts.ts";
+import type { ProviderSecretId, SessionSnapshot } from "./contracts.ts";
 
 export interface TimelineEvent {
   id: string; sessionId: string; at: number; type: string; summary: string;
@@ -11,32 +11,21 @@ export interface UsageSummary {
 }
 export interface UsagePrice {provider:string;model:string;inputPerMillion:number;outputPerMillion:number}
 export interface UsageBreakdown {sessionId:string;provider:string|null;model:string|null;accountId:string|null;taskId:string|null;tokens:{input:number|null;output:number|null;total:number|null};costUsd:number|null;costSource:"reported"|"human-price"|null;source:string;period:"all"|"day"|"week"}
-export type NotificationChannel = "desktop"|"phone"|"glasses";
-export interface NotificationPreferences {version:1;channels:Record<NotificationChannel,boolean>;quietUntil:number|null;importantOnly:boolean;sessionIds:string[]|null}
-export interface AttentionEvent {id:string;sessionId:string;title:string;kind:"response"|"approval"|"done"|"failed"|"budget"|"loop";at:number}
 export type SecretGrantDuration = "10m" | "turn" | "session";
 export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number;turnAvailable:boolean}
 export interface SecretGrant {sessionId:string;secretId:ProviderSecretId;duration:SecretGrantDuration;approvedAt:number;expiresAt:number|null}
-export interface AgentNetworkPolicy {mode:"open"|"allowed-domains"|"offline";providerApis:boolean;packageRegistries:boolean;domains:string[]}
+export interface WorkspacePreset { id: string; name: string; snapshot: string }
+export type NotificationChannel = "desktop"|"phone"|"glasses";
+export interface NotificationPreferences {version:1;channels:Record<NotificationChannel,boolean>;quietUntil:number|null;importantOnly:boolean;sessionIds:string[]|null}
+export interface AttentionEvent {id:string;sessionId:string;title:string;kind:"response"|"approval"|"done"|"failed"|"budget"|"loop";at:number}
 export interface BacklogApi {
+  onTaskBoardChanged(listener:(change:{rootSessionId:string;revision:number})=>void):()=>void;
+  broadcast(sessionIds:string[],text:string):Promise<{delivered:string[];skipped:string[]}>;
   networkPolicy(sessionId?:string):Promise<{policy:AgentNetworkPolicy;available:boolean;reason?:string;projectRoot?:string}>;
   setNetworkPolicy(sessionId:string|undefined,policy:AgentNetworkPolicy):Promise<AgentNetworkPolicy>;
-  secretRequests(sessionId:string):Promise<SecretGrantRequest[]>;
-  secretGrants(sessionId:string):Promise<SecretGrant[]>;
-  approveSecretRequest(sessionId:string,requestId:string,duration:SecretGrantDuration):Promise<SecretGrant>;
-  denySecretRequest(sessionId:string,requestId:string):Promise<void>;
-  revokeSecretGrant(sessionId:string,grantSessionId:string,secretId:ProviderSecretId):Promise<number>;
   notificationPreferences():Promise<NotificationPreferences>;
   setNotificationPreferences(value:NotificationPreferences):Promise<NotificationPreferences>;
   notifications():Promise<AttentionEvent[]>;
-  timeline(sessionId: string, cursor?: string, limit?: number, filter?:{query?:string;types?:string[];sessionIds?:string[]}): Promise<{items: TimelineEvent[]; nextCursor: string | null; facets?: TimelineFacets}>;
-  usagePrices():Promise<UsagePrice[]>;
-  setUsagePrices(rows:UsagePrice[]):Promise<UsagePrice[]>;
-  usageBreakdown(sessionId:string|undefined,period:"all"|"day"|"week"):Promise<UsageBreakdown[]>;
-  usage(sessionId?: string): Promise<UsageSummary>;
-  report(sessionId: string): Promise<string>;
-
-  onTaskBoardChanged(listener:(change:{rootSessionId:string;revision:number})=>void):()=>void;
   sendInstructions(sessionId:string,text:string):Promise<void>;
   tasks(sessionId: string): Promise<{revision:number;tasks: Array<{id:string;rootSessionId:string;title:string;description:string;progress:string;ownerSessionId:string|null;ownerName:string|null;status:"open"|"claimed"|"done"|"closed";dependencies:string[];result:string|null;createdBySessionId:string;createdAt:number;updatedAt:number}>}>;
   addTask(sessionId: string, input: {title:string;description?:string;dependencies?:string[];ownerSessionId?:string|null;ownerName?:string|null}): Promise<unknown>;
@@ -51,9 +40,26 @@ export interface BacklogApi {
   previewFlow(projectRoot:string, flowId:string): Promise<{instructions:string;digest:string|null}>;
   approveFlow(projectRoot:string, flowId:string, digest:string): Promise<void>;
   redactText(text: string): Promise<string>;
+  timeline(sessionId: string, cursor?: string, limit?: number, filter?:{query?:string;types?:string[];sessionIds?:string[]}): Promise<{items: TimelineEvent[]; nextCursor: string | null; facets?: TimelineFacets}>;
+  usagePrices():Promise<UsagePrice[]>;
+  setUsagePrices(rows:UsagePrice[]):Promise<UsagePrice[]>;
+  usageBreakdown(sessionId:string|undefined,period:"all"|"day"|"week"):Promise<UsageBreakdown[]>;
+  secretRequests(sessionId:string):Promise<SecretGrantRequest[]>;
+  secretGrants(sessionId:string):Promise<SecretGrant[]>;
+  approveSecretRequest(sessionId:string,requestId:string,duration:SecretGrantDuration):Promise<SecretGrant>;
+  denySecretRequest(sessionId:string,requestId:string):Promise<void>;
+  revokeSecretGrant(sessionId:string,grantSessionId:string,secretId:ProviderSecretId):Promise<number>;
+  usage(sessionId?: string): Promise<UsageSummary>;
+  report(sessionId: string): Promise<string>;
   checkpoints(sessionId: string): Promise<Array<{id: string; at: number; label?: string}>>;
   previewCheckpoint(sessionId: string, id: string): Promise<{text: string; changedFiles: string[]}>;
   restoreCheckpoint(sessionId: string, id: string): Promise<{ok: boolean; message?: string}>;
+  exportWorkspace(): Promise<string>;
+  previewImport(text: string): Promise<{warnings: string[]; count: number}>;
+  importWorkspace(text: string, options: {confirmBypass: boolean}): Promise<{warnings: string[]; sessions: SessionSnapshot[]}>;
+  workspacePresets(): Promise<WorkspacePreset[]>;
+  saveWorkspacePreset(preset: WorkspacePreset): Promise<WorkspacePreset>;
+  deleteWorkspacePreset(id: string): Promise<void>;
 }
 export interface TaskBudgetSnapshot {
   rootSessionId:string;limits:{tokens:number|null;costUsd:number|null;durationMs:number|null};
@@ -64,39 +70,26 @@ export interface FlowTemplate {
   id:string;name:string;description:string;roles:Array<{id:string;title:string;instruction:string;count:number;model?:string;effort?:string}>;
   finalStep:string;expectedSubagents:number;builtIn:boolean;source?:string;trusted?:boolean;digest?:string;
 }
+export interface AgentNetworkPolicy {mode:"open"|"allowed-domains"|"offline";providerApis:boolean;packageRegistries:boolean;domains:string[]}
 export const BACKLOG_IPC = {
-  networkPolicy:"backlog:network-policy",
-  setNetworkPolicy:"backlog:network-policy-set",
-  secretRequests:"backlog:secret-requests",
-  secretGrants:"backlog:secret-grants",
-  approveSecretRequest:"backlog:secret-approve",
-  denySecretRequest:"backlog:secret-deny",
-  revokeSecretGrant:"backlog:secret-revoke",
-  notificationPreferences:"backlog:notifications-preferences",
-  setNotificationPreferences:"backlog:notifications-set",
-  notifications:"backlog:notifications",
-  timeline: "backlog:timeline",
-  usagePrices:"backlog:usage-prices",
-  setUsagePrices:"backlog:usage-prices-set",
-  usageBreakdown:"backlog:usage-breakdown",
-  usage: "backlog:usage",
-  report: "backlog:report",
-  checkpoints: "backlog:checkpoints", previewCheckpoint: "backlog:checkpoint-preview", restoreCheckpoint: "backlog:checkpoint-restore",
-  sendInstructions:"backlog:instructions",
-  tasks:"backlog:tasks",
-  addTask:"backlog:task-add",
-  assignTask:"backlog:task-assign",
-  closeTask:"backlog:task-close",
-  budget:"backlog:budget",
-  setBudget:"backlog:budget-set",
-  clearBudget:"backlog:budget-clear",
+  broadcast:"backlog:broadcast",
+  networkPolicy:"backlog:network-policy",setNetworkPolicy:"backlog:network-policy-set",
+  usagePrices:"backlog:usage-prices",setUsagePrices:"backlog:usage-prices-set",usageBreakdown:"backlog:usage-breakdown",
+  secretRequests:"backlog:secret-requests",secretGrants:"backlog:secret-grants",approveSecretRequest:"backlog:secret-approve",
+  denySecretRequest:"backlog:secret-deny",revokeSecretGrant:"backlog:secret-revoke",
+  notificationPreferences:"backlog:notifications-preferences",setNotificationPreferences:"backlog:notifications-set",notifications:"backlog:notifications",sendInstructions:"backlog:instructions",
   saveTaskFlow:"backlog:flow-save-task",
-  flows:"backlog:flows",
-  flowInstructions:"backlog:flow-instructions",
-  previewFlow:"backlog:flow-preview",
-  approveFlow:"backlog:flow-approve",
-  redactText:"backlog:redact",
+  previewFlow:"backlog:flow-preview",approveFlow:"backlog:flow-approve",
+  tasks:"backlog:tasks",addTask:"backlog:task-add",assignTask:"backlog:task-assign",closeTask:"backlog:task-close",
+  budget:"backlog:budget",setBudget:"backlog:budget-set",clearBudget:"backlog:budget-clear",flows:"backlog:flows",flowInstructions:"backlog:flow-instructions",
+  redactText: "backlog:redact", timeline: "backlog:timeline", usage: "backlog:usage",
+  report: "backlog:report", checkpoints: "backlog:checkpoints", previewCheckpoint: "backlog:checkpoint-preview",
+  restoreCheckpoint: "backlog:checkpoint-restore", exportWorkspace: "backlog:workspace-export",
+  previewImport: "backlog:workspace-preview", importWorkspace: "backlog:workspace-import",
+  workspacePresets: "backlog:presets", saveWorkspacePreset: "backlog:preset-save", deleteWorkspacePreset: "backlog:preset-delete"
+} as const;
+export const BACKLOG_TERMINAL_IPC = {
+  paste: "terminal:paste-context", describeFileDrop: "terminal:describe-drop",
+  searchOutput: "terminal:search-output", readOutputContext: "terminal:output-context", focusRequested: "terminal:focus-requested"
 } as const;
 export const BACKLOG_EVENTS={taskBoardChanged:"backlog:task-board-changed"} as const;
-
-export const BACKLOG_TERMINAL_IPC = {focusRequested: "terminal:focus-requested"} as const;
