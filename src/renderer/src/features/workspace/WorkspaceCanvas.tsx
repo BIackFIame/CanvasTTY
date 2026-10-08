@@ -243,6 +243,7 @@ type RegionMovePreview = {
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
+  onPersistSettings(patch: Partial<AppSettings>): Promise<void>;
   /**
    * False for the first frame after startup: restored terminals (xterm), plugin canvas iframes and the browser card
    * mount right after that frame was painted, so HOME and the canvas show without waiting for them. Their layout
@@ -1931,6 +1932,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             {workspaceToolsOpen && settings.canvasControlsPlacement === placement && (
               <Suspense fallback={null}>
                 <WorkspaceBacklogTools
+                  onPersistSettings={props.onPersistSettings}
                   sessions={sessions}
                   settings={settings}
                   locale={settings.locale}

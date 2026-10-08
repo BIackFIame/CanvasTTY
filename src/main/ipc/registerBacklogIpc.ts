@@ -220,7 +220,8 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     const result=await workspace.import(text,options?.confirmBypass === true);
     for(const group of groups ?? []) {
       if(!group || typeof group.rootSessionId!=="string") {result.warnings.push("An invalid task group was skipped.");continue;}
-      const restored=result.restoredIds[group.rootSessionId];if(!restored)continue;
+      const restored=Object.hasOwn(result.restoredIds,group.rootSessionId) ? result.restoredIds[group.rootSessionId] : undefined;
+      if(typeof restored!=="string" || !restored)continue;
       try{await deps.board.importGroup(session(restored).cwd,restored,masked(group.tasks),result.restoredIds);}
       catch(error){result.warnings.push(`Task board: ${error instanceof Error ? error.message : "could not be restored"}`);}
     }

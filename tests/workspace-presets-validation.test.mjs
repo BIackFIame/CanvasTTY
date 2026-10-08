@@ -126,3 +126,32 @@ test("preset metadata is canonically normalized, whitelisted and redacted across
   ]) assert.throws(() => archive.savePreset({id: "bad", name: "Bad", snapshot: JSON.stringify(malformed)}));
   assert.equal((await archive.presets()).length, 1);
 });
+
+test('preview and import reject malformed or unsupported canvas envelopes before creating cards', async t => {
+  const directory=await mkdtemp(join(tmpdir(),'ctty-import-canvas-'));
+  t.after(()=>rm(directory,{recursive:true,force:true}));
+  const created=[];
+  const archive=new WorkspaceArchive(directory,{descriptors:()=>[],create:request=>{created.push(request);return{...request,id:`new-${created.length}`};},setBounds(){},available:()=>true,redact:text=>text});
+  for(const canvas of [null,[],[{}],'canvas',1,{}, {version:0},{version:2},{version:'1'},{version:[]},{version:null}]) {
+    const text=JSON.stringify({...JSON.parse(snapshot(directory,'root')),canvas});
+    await assert.rejects(archive.preview(text),/workspace canvas/);
+    await assert.rejects(archive.import(text,false),/workspace canvas/);
+    assert.equal(created.length,0,'invalid envelope cannot launch cards');
+  }
+  for(const extra of [{},{canvas:{version:1,stickyNotes:[],canvasRegions:[],browserCanvas:null}}]) {
+    const text=JSON.stringify({...JSON.parse(snapshot(directory,'root')),...extra});
+    assert.equal((await archive.preview(text)).count,1);
+    assert.equal((await archive.import(text,false)).sessions.length,1);
+  }
+});
+
+test('export supports a complete 100-card round trip and refuses 101 without truncation', async t => {
+  const directory=await mkdtemp(join(tmpdir(),'ctty-export-cap-'));
+  t.after(()=>rm(directory,{recursive:true,force:true}));
+  let records=Array.from({length:100},(_,i)=>descriptor(directory,`card-${i}`));let launches=0;
+  const archive=new WorkspaceArchive(directory,{descriptors:()=>records,create:request=>({...request,id:`new-${++launches}`}),setBounds(){},available:()=>true,redact:text=>text});
+  const exported=archive.export();assert.equal(JSON.parse(exported).sessions.length,100);
+  assert.equal((await archive.preview(exported)).count,100);assert.equal((await archive.import(exported,false)).sessions.length,100);
+  records=[...records,descriptor(directory,'card-100')];
+  assert.throws(()=>archive.export(),/at most 100 cards/);assert.equal(records.length,101);
+});

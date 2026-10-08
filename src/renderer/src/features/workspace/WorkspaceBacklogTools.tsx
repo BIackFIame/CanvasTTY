@@ -21,6 +21,7 @@ interface WorkspaceBacklogToolsProps {
   onUndoLayout(): void;
   onSetBroadcastEnabled(enabled: boolean): void;
   onSendBroadcast(text: string): Promise<void>;
+  onPersistSettings(patch: Partial<AppSettings>): Promise<void>;
   onClose(): void;
 }
 
@@ -36,6 +37,7 @@ export function WorkspaceBacklogTools({
   onUndoLayout,
   onSetBroadcastEnabled,
   onSendBroadcast,
+  onPersistSettings,
   onClose
 }: WorkspaceBacklogToolsProps): React.JSX.Element {
   const bt = (key: BacklogTextKey): string => backlogText(locale, key);
@@ -89,7 +91,7 @@ export function WorkspaceBacklogTools({
 
   const applyImport = async (pending: PendingImport, confirmBypass: boolean): Promise<void> => {
     const result = await api.importWorkspace(pending.text, { confirmBypass });
-    if (Object.keys(pending.canvas).length > 0) await window.canvasTTY.settings.update(pending.canvas);
+    if (Object.keys(pending.canvas).length > 0) await onPersistSettings(pending.canvas);
     setNotice([bt("importComplete"), ...result.warnings].join("\n"));
     setPendingImport(null);
   };

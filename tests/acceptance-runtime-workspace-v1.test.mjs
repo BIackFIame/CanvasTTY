@@ -109,6 +109,10 @@ test("host import opens a v1 workspace with absent newer card fields, remaps tas
   });
 
   const event = { sender: windowWebContents, senderFrame: windowWebContents.mainFrame };
+  const unmappedGroups=JSON.stringify({format:"canvastty-workspace",version:1,sessions:[],
+    tasks:[{rootSessionId:"constructor",tasks:oldTasks},{rootSessionId:"toString",tasks:oldTasks}]});
+  const skippedGroups=await handlers.get(BACKLOG_IPC.importWorkspace)(event,unmappedGroups,{confirmBypass:false});
+  assert.deepEqual(skippedGroups,{warnings:[],sessions:[]},"inherited map entries are not restored roots");
   const imported = await handlers.get(BACKLOG_IPC.importWorkspace)(event, snapshot, { confirmBypass: false });
   assert.equal(imported.sessions.length, 2);
   const [root, child] = imported.sessions;

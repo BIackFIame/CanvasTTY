@@ -367,16 +367,17 @@ export function normalizeImportedTasks(rows: unknown, rootSessionId: string, ses
   if(!Array.isArray(rows) || rows.length>MAX_TASKS || !rows.every(isOrchestrationTask))throw new Error("Invalid workspace task board.");
   const ids=new Map(rows.map(row=>[row.id,remapTaskId(row.id)]));
   if(ids.size!==rows.length)throw new Error("Workspace tasks contain duplicate ids.");
+  const mappedSessionId=(id:string|null):string|null=>id!==null && Object.hasOwn(sessionIds,id) && typeof sessionIds[id]==="string" ? sessionIds[id] : null;
   const imported:OrchestrationTask[]=rows.map(row=>({
     id:ids.get(row.id)!,rootSessionId,title:requiredText(row.title,"title",MAX_TITLE),
     description:optionalText(row.description,"description",MAX_DESCRIPTION) ?? "",
     progress:optionalText(row.progress,"progress",MAX_PROGRESS) ?? "",
-    ownerSessionId:row.ownerSessionId ? sessionIds[row.ownerSessionId] ?? null : null,
-    ownerName:row.ownerSessionId && sessionIds[row.ownerSessionId] ? optionalText(row.ownerName,"ownerName",200) ?? null : null,
-    status:row.status==="claimed" && (!row.ownerSessionId || !sessionIds[row.ownerSessionId]) ? "open" : row.status,
+    ownerSessionId:mappedSessionId(row.ownerSessionId),
+    ownerName:mappedSessionId(row.ownerSessionId) ? optionalText(row.ownerName,"ownerName",200) ?? null : null,
+    status:row.status==="claimed" && !mappedSessionId(row.ownerSessionId) ? "open" : row.status,
     dependencies:validateDependencies(row.dependencies).map(id=>{const mapped=ids.get(id);if(!mapped)throw new Error("Workspace task has a missing dependency.");return mapped;}),
     result:optionalText(row.result,"result",MAX_RESULT) ?? null,
-    createdBySessionId:sessionIds[row.createdBySessionId] ?? rootSessionId,createdAt:row.createdAt,updatedAt:row.updatedAt
+    createdBySessionId:mappedSessionId(row.createdBySessionId) ?? rootSessionId,createdAt:row.createdAt,updatedAt:row.updatedAt
   }));
   assertAcyclic(imported);
   return imported;

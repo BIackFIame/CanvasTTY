@@ -28,8 +28,10 @@ export class WorkspaceArchive {
     this.file = join(userDataPath, "workspace-presets.json");
   }
   export(): string {
+    const sessions=this.deps.descriptors();
+    if(sessions.length>100)throw new Error("Workspace export supports at most 100 cards; close cards before exporting.");
     return JSON.stringify({format: "canvastty-workspace", version: 1, exportedAt: Date.now(),
-      sessions: this.deps.descriptors().map((record) => this.sanitize(record))}, null, 2);
+      sessions: sessions.map((record) => this.sanitize(record))}, null, 2);
   }
   private sanitize(value: unknown): unknown {
     if (typeof value === "string") return this.deps.redact(value);
@@ -41,9 +43,13 @@ export class WorkspaceArchive {
   }
   private parse(text: string): PersistedTerminalSession[] {
     if (typeof text !== "string" || Buffer.byteLength(text) > 2 * 1024 * 1024) throw new Error("Workspace snapshot is too large (maximum 2 MB).");
-    let value: {format?:unknown;version?:unknown;sessions?:unknown};
+    let value: {format?:unknown;version?:unknown;sessions?:unknown;canvas?:unknown};
     try { value = JSON.parse(text) as typeof value; } catch { throw new Error("Workspace snapshot is not valid JSON."); }
     if (!value || value.format !== "canvastty-workspace" || value.version !== 1 || !Array.isArray(value.sessions)) throw new Error("Unsupported workspace snapshot format/version.");
+    if(value.canvas!==undefined) {
+      if(!value.canvas || typeof value.canvas!=="object" || Array.isArray(value.canvas))throw new Error("Invalid workspace canvas.");
+      if((value.canvas as Record<string,unknown>).version!==1)throw new Error("Unsupported workspace canvas version.");
+    }
     const normalized = normalizePersistedTerminalSessions({version: 2, sessions: value.sessions});
     if (normalized.sessions.length !== value.sessions.length || normalized.sessions.length > 100) throw new Error("Workspace contains invalid cards or more than 100 cards.");
     const ids = new Set(normalized.sessions.map((record) => record.id));
@@ -160,9 +166,8 @@ export class WorkspaceArchive {
     }
     let canvas;
     if(source.canvas!==undefined) {
-      if(!source.canvas || typeof source.canvas!=="object" || Array.isArray(source.canvas))throw new Error("Invalid workspace canvas.");
+      // parse() has already validated the optional canvas envelope.
       const value=source.canvas as Record<string,unknown>;
-      if(value.version!==1)throw new Error("Unsupported workspace canvas version.");
       canvas={version:1,canvasRegions:normalizeCanvasRegions(value.canvasRegions),stickyNotes:normalizeStickyNotes(value.stickyNotes),
         browserCanvas:normalizeBrowserCanvas(value.browserCanvas,null)};
     }
