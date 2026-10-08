@@ -103,7 +103,15 @@ function createSecretApiWorker() {
     const bytes = new Uint8Array(length);
     let offset = 0;
     for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
-    return { status: response.status, body: new TextDecoder().decode(bytes), truncated };
+    // A capped stream may end inside a code point. Keep it pending rather than inventing a replacement.
+    let decoded = new TextDecoder().decode(bytes, { stream: truncated });
+    const encoded = new TextEncoder().encode(decoded);
+    // Malformed input can expand to three-byte replacement characters during decoding.
+    if (encoded.byteLength > MAX_RESPONSE_BYTES) {
+      decoded = new TextDecoder().decode(encoded.subarray(0, MAX_RESPONSE_BYTES), { stream: true });
+      truncated = true;
+    }
+    return { status: response.status, body: decoded, truncated };
   }
 
   async function readInput() {

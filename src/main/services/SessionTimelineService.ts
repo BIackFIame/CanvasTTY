@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { Worker, type WorkerOptions } from "node:worker_threads";
-import { applyTimelineBudgetUsageEvent, budgetCounterIdentity, isTimelineCount, MAX_INDEXED_SEGMENTS, nextTimelineUsage, scanTimelineDirectory, timelineUsageContext,
+import { applyTimelineBudgetUsageEvent, budgetCounterIdentity, isTimelineCount, MAX_INDEXED_SEGMENTS, nextTimelineUsage, scanTimelineDirectory, timelineUsageContext, timelineUsageKey,
   indexTimelineTaskSession, type BudgetCounterState, type BudgetUsageContribution, type TimelineDirectoryIndex, type TimelineIndexedUsage, type TimelineTaskSessionIndex,
   type TimelineUsageContext } from "./TimelineIndexScan.ts";
 import { forEachTimelineEvent } from "./TimelineJournalReader.ts";
@@ -57,8 +57,8 @@ function usageCountersChanged(previous:Usage|undefined,next:Usage):boolean {
     || totalTokens(previous)!==totalTokens(next) || previous.cost!==next.cost
     || previous.model!==next.model || previous.accountId!==next.accountId || previous.taskId!==next.taskId;
 }
-function usageKey(sessionId:string,row:Pick<Usage,"source"|"counterId">):string {return JSON.stringify([sessionId,row.source,row.counterId ?? ""]);}
 function usageSession(key:string):string {return (JSON.parse(key) as string[])[0];}
+function snapshotIdentity(sessionId:string,value:Usage):string {return value.counterId===undefined ? timelineUsageKey(sessionId,value) : budgetCounterIdentity(sessionId,value);}
 
 function usageSummary(values:Usage[],prices:UsagePrice[]):UsageSummary {
     if (!values.length) return { tokens: {input: null, output: null, total: null}, cost: null, currency: "USD", source: null };
@@ -97,6 +97,8 @@ export class SessionTimelineService {
   private readonly usageBySession = new Map<string, Usage>();
   private readonly usageKeysBySession = new Map<string, Set<string>>();
   private nextUsageOrder=0;
+  private nextSampleOrder=0;
+  private readonly latestCounterSamples=new Map<string,Usage>();
   private budgetUsageContributions=new Map<string,BudgetUsageContribution>();
   private budgetCounterBaselines=new Map<string,BudgetCounterState>();
   private readonly usageListeners = new Set<(sessionId: string) => void>();
@@ -141,6 +143,8 @@ export class SessionTimelineService {
     this.usageBySession.clear();
     this.usageKeysBySession.clear();
     this.nextUsageOrder=0;
+    this.nextSampleOrder=0;
+    this.latestCounterSamples.clear();
     for (const [key, usage] of index.usage) this.storeUsage(key, usageSession(key), usage);
     this.budgetUsageContributions=index.budgetUsage;
     this.budgetCounterBaselines=index.budgetCounters;
@@ -227,9 +231,10 @@ export class SessionTimelineService {
     if(!isTimelineCount(total) || input!==null && !isTimelineCount(input) || output!==null && !isTimelineCount(output)
       || !source || costUsd!==undefined && costUsd!==null && (!Number.isFinite(costUsd) || costUsd<0)
       || counterId!==undefined && (typeof counterId!=="string" || counterId.length>200))return Promise.reject(new Error("Invalid provider token counter."));
-    const previous=this.usageBySession.get(usageKey(sessionId,{source,counterId}));
     const cost=costUsd ?? null,normalizedContext=timelineUsageContext(context);
-    if(previous?.cumulative && previous.input===input && previous.output===output && previous.total===total
+    const previous=this.usageBySession.get(timelineUsageKey(sessionId,{source,counterId,...normalizedContext}));
+    const latest=this.latestCounterSamples.get(snapshotIdentity(sessionId,{input,output,total,cost,source,counterId,...normalizedContext}));
+    if(previous?.cumulative && previous.sampleOrder===latest?.sampleOrder && previous.input===input && previous.output===output && previous.total===total
       && previous.cost===cost && previous.source===source && previous.counterId===counterId
       && Object.keys(normalizedContext).every(key=>previous[key as keyof UsageContext]===normalizedContext[key as keyof UsageContext]))return Promise.resolve();
     const baseline=options.resumed===true
@@ -316,14 +321,22 @@ export class SessionTimelineService {
 
   usage(sessionIds?: string[],prices:UsagePrice[]=[]): UsageSummary {
     const scope=sessionIds ? new Set(sessionIds) : null;
-    const values:Usage[]=scope ? [] : [...this.usageBySession.values()];
+    const entries:Array<[string,Usage]>=scope ? [] : [...this.usageBySession];
     if (scope) {
       for(const sessionId of scope)for(const key of this.usageKeysBySession.get(sessionId) ?? []) {
-        const value=this.usageBySession.get(key);if(value)values.push(value);
+        const value=this.usageBySession.get(key);if(value)entries.push([key,value]);
       }
-      if(scope.size>1)values.sort((left,right)=>(left.timelineOrder ?? 0)-(right.timelineOrder ?? 0));
+      if(scope.size>1)entries.sort((left,right)=>(left[1].timelineOrder ?? 0)-(right[1].timelineOrder ?? 0));
     }
-    return usageSummary(values,prices);
+    const values=new Map<string,Usage>();
+    for(const [key,value] of entries) {
+      // Cumulative snapshots follow a conversation across cards. Keep its latest observation, including a
+      // lower reset value, not the largest value or a resumed budget baseline. Additive rows remain per-card.
+      const identity=value.cumulative ? `counter:${snapshotIdentity(usageSession(key),value)}` : `additive:${key}`;
+      const previous=values.get(identity);
+      if(!previous || (value.sampleOrder ?? 0)>(previous.sampleOrder ?? 0))values.set(identity,value);
+    }
+    return usageSummary([...values.values()],prices);
   }
 
   usageCounters(sessionId:string,prices:UsagePrice[]=[]):TimelineUsageCounter[] {
@@ -408,10 +421,10 @@ export class SessionTimelineService {
       if(typeof value.source!=="string")return;
       // A resumed provider conversation can move to a new CanvasTTY card: share its baseline by counter identity,
       // while keeping the displayed delta attributed to the card that produced it.
-      const counterKey=value.counterId===undefined
-        ? JSON.stringify([event.sessionId,value.source])
-        : JSON.stringify([value.provider ?? "",value.accountId ?? "",value.source,value.counterId]);
-      const rowKey=JSON.stringify([event.sessionId,counterKey]);
+      const counterKey=snapshotIdentity(event.sessionId,value);
+      // All-time rows are snapshots too: attribute a shared counter to its latest in-scope card once.
+      const rowKey=period==="all" && value.cumulative===true
+        ? JSON.stringify(["cumulative",counterKey]) : JSON.stringify([event.sessionId,counterKey]);
       const base:UsageBreakdown={sessionId:event.sessionId,provider:value.provider ?? null,model:value.model ?? null,accountId:value.accountId ?? null,taskId:value.taskId ?? null,
         tokens:{input:null,output:null,total:null},costUsd:null,costSource:null,source:value.source,period};
       if(value.cumulative===true) {
@@ -501,11 +514,17 @@ export class SessionTimelineService {
     const update = nextTimelineUsage(this.usageBySession, event);
     if (!update) return;
     const previous = this.usageBySession.get(update.key);
-    this.storeUsage(update.key, event.sessionId, update.value);
-    if (usageCountersChanged(previous, update.value)) this.notifyUsageChanged(event.sessionId);
+    const latest=this.latestCounterSamples.get(snapshotIdentity(event.sessionId,update.value));
+    this.storeUsage(update.key, event.sessionId, {...update.value,sampleOrder:this.nextSampleOrder++});
+    if (usageCountersChanged(previous, update.value) || update.value.cumulative && previous?.sampleOrder!==latest?.sampleOrder) this.notifyUsageChanged(event.sessionId);
   }
   private storeUsage(key:string,sessionId:string,value:Usage):void {
     const previous=this.usageBySession.get(key);
+    this.nextSampleOrder=Math.max(this.nextSampleOrder,(value.sampleOrder ?? -1)+1);
+    if(value.cumulative) {
+      const identity=snapshotIdentity(sessionId,value),latest=this.latestCounterSamples.get(identity);
+      if(!latest || (value.sampleOrder ?? 0)>(latest.sampleOrder ?? 0))this.latestCounterSamples.set(identity,value);
+    }
     this.usageBySession.set(key,{...value,timelineOrder:previous?.timelineOrder ?? this.nextUsageOrder++});
     let keys=this.usageKeysBySession.get(sessionId);
     if(!keys){keys=new Set();this.usageKeysBySession.set(sessionId,keys);}

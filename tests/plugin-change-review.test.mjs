@@ -61,7 +61,7 @@ test("human card action input is a bounded JSON object and is copied before plug
   assert.ok(Buffer.byteLength(JSON.stringify(selection)) > 16 * 1024);
   assert.doesNotThrow(() => normalizeCardActionInput(selection), "a valid 400-file selection fits the host action limit");
   assert.deepEqual(normalizeCardActionInput(selection), selection);
-  assert.throws(() => normalizeCardActionInput({ text: "x".repeat(256 * 1024) }), /too large/u);
+  assert.throws(() => normalizeCardActionInput({ text: "x".repeat(1024 * 1024) }), /too large/u);
   const cycle = {}; cycle.self = cycle;
   assert.throws(() => normalizeCardActionInput(cycle), /must be JSON/u);
 });

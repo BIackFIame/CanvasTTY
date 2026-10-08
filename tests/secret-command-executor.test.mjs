@@ -78,6 +78,65 @@ test("the fixed worker caps response bytes before returning them", async () => {
   assert.equal(result.truncated, true);
 });
 
+const responseLimit = 32 * 1024;
+const responseFixtureInput = { secretId: "OPENAI_API_KEY", profile: { protocol: "openai-compatible", baseUrl: "https://api.example.com/v1" }, method: "GET", path: "models" };
+
+test("worker truncation preserves complete UTF-8 characters across byte cap and stream chunks", async () => {
+  for (const character of ["é", "€", "🌍"]) {
+    const encoded = Buffer.from(character);
+    for (let retained = 1; retained <= encoded.length; retained += 1) {
+      const prefix = "a".repeat(responseLimit - retained);
+      const chunks = [Buffer.from(prefix), ...Array.from(encoded, byte => Uint8Array.of(byte)), Buffer.from("tail")];
+      let canceled = false;
+      const result = await performSecretApiRequest(responseFixtureInput, fixtureSecret, async () => ({ status: 200, body: { getReader: () => ({
+        read: async () => chunks.length ? { value: chunks.shift(), done: false } : { done: true },
+        cancel: async () => { canceled = true; }
+      }) } }));
+      assert.equal(result.body, prefix + (retained === encoded.length ? character : ""), `${character}, ${retained} bytes fit`);
+      assert.ok(Buffer.byteLength(result.body) <= responseLimit);
+      assert.equal(result.body.includes("�"), false, "truncating a valid code point never manufactures a replacement");
+      assert.equal(result.truncated, true); assert.equal(canceled, true);
+    }
+    const exact = "a".repeat(responseLimit - encoded.length) + character;
+    const result = await performSecretApiRequest(responseFixtureInput, fixtureSecret, async () => new Response(exact));
+    assert.deepEqual(result, { status: 200, body: exact, truncated: false });
+  }
+});
+
+test("malformed UTF-8 replacement expansion remains within the decoded response byte limit", async () => {
+  for (const bytes of [Buffer.alloc(responseLimit, 0xff), Buffer.concat([Buffer.alloc(responseLimit - 1, 0x61), Buffer.from([0xe2])])]) {
+    const result = await performSecretApiRequest(responseFixtureInput, fixtureSecret, async () => new Response(bytes));
+    assert.ok(Buffer.byteLength(result.body) <= responseLimit);
+    assert.equal(result.truncated, true);
+    assert.equal(result.body, bytes[0] === 0xff ? "�".repeat(Math.floor(responseLimit / 3)) : "a".repeat(responseLimit - 1));
+  }
+  const completeInvalid = await performSecretApiRequest(responseFixtureInput, fixtureSecret, async () => new Response(Uint8Array.of(0xff)));
+  assert.deepEqual(completeInvalid, { status: 200, body: "�", truncated: false }, "small malformed data retains standard decoding semantics");
+});
+
+test("actual secret executor accepts fixed-worker bounded UTF-8 and malformed stream results", async () => {
+  for (const suffix of [Buffer.from("é"), Buffer.from("€"), Buffer.from("🌍"), Buffer.alloc(responseLimit, 0xff)]) {
+    const bytesExpression = suffix[0] === 0xff ? `Buffer.alloc(${responseLimit}, 0xff)`
+      : `Buffer.concat([Buffer.alloc(${responseLimit - 1}, 0x61), Buffer.from(${JSON.stringify([...suffix])})])`;
+    const script = `globalThis.fetch = async () => {
+      const bytes = ${bytesExpression};
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(bytes.subarray(0, 32767)); controller.enqueue(bytes.subarray(32767)); controller.close();
+      } }));
+    }; ${SECRET_API_REQUEST_WORKER_SOURCE}`;
+    // Keep ample room below Windows' 32,767 UTF-16 command-line limit, including quoting and executable path.
+    assert.ok(JSON.stringify([process.execPath, "-e", script]).length < 16_000, "fixture command must fit Windows process creation limits");
+    assert.equal(script.includes(fixtureSecret), false, "the synthetic secret still travels only on stdin");
+    const executor = secretApiRequestExecutor({ containment: () => true,
+      // Only fetch is replaced; the actual bundled worker and executor result validation run unchanged.
+      wrap: request => ({ ...request, args: ["-e", script], cleanup() {} }) });
+    const result = await executor({ secretId: "OPENAI_API_KEY", apiProfile: responseFixtureInput.profile, method: "GET", path: "models",
+      secret: fixtureSecret, cwd: process.cwd(), launchProfile: "normal", provider: "codex", timeoutMs: 5_000, signal: new AbortController().signal });
+    assert.equal(result.status, 200); assert.equal(result.truncated, true); assert.ok(Buffer.byteLength(result.body) <= responseLimit);
+    assert.equal(result.body, suffix[0] === 0xff ? "�".repeat(Math.floor(responseLimit / 3)) : "a".repeat(responseLimit - 1));
+  }
+});
+
 test("only supported provider secrets reach the fixed helper launch", async () => {
   let launched;
   let wrappedEnvironment;

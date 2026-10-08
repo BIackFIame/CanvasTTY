@@ -588,6 +588,7 @@ button { border: 0; }
 .launch-flow-picker__row { display: flex; gap: 6px; }
 .launch-flow-picker__row select { min-width: 0; flex: 1; padding: 7px; border: 1px solid rgba(255,255,255,.15); border-radius: 7px; color: inherit; background: #30323f; }
 .launch-flow-picker__row button { width: 34px; border-radius: 7px; color: inherit; background: rgba(255,255,255,.1); cursor: pointer; }
+.launch-flow-picker__task { width: 100%; box-sizing: border-box; resize: vertical; padding: 7px; border: 1px solid rgba(255,255,255,.15); border-radius: 7px; color: inherit; background: #30323f; font: inherit; }
 .launch-flow-picker small { opacity: .68; }
 .launch-flow-picker__errors { max-height: 100px; overflow: auto; margin: 0; padding-left: 18px; color: #ffb3b7; font: 11px/1.4 var(--font-mono); }
 @media (prefers-reduced-motion: reduce) {
@@ -745,6 +746,56 @@ button { border: 0; }
 .material-card__summary small { color: var(--text-muted-on-dark); font-size: 19px; }
 .material-card--summary:not(.material-card--image) .material-card__summary { display: flex; }
 .material-card--summary .material-card__actions { visibility: hidden; }
+.material-remark-status { --marker: var(--accent); }
+.material-remark-status--sent { --marker: var(--blue); }
+.material-remark-status--reported { --marker: var(--yellow); }
+.material-remark-status--accepted { --marker: var(--success); }
+.material-card__remarks { flex: none; padding: .4em .7em; display: flex; flex-wrap: wrap; align-items: center; gap: .4em; border-bottom: 1px solid rgba(255,255,255,.06); color: var(--text-muted-on-dark); font-size: calc(12px * var(--ui-scale, 1)); }
+.material-card__notice .material-card__remarks { border: 0; justify-content: center; }
+.material-card__chip { min-height: 1.8em; padding: 0 .5em; border-radius: .45em; color: var(--text-dark); background: var(--marker); cursor: pointer; font: 850 .95em/1 var(--font-mono); }
+.material-card--draw { box-shadow: 0 0 0 3px var(--pink), var(--shadow-lg); }
+.material-card--pick { box-shadow: 0 0 0 3px var(--blue), var(--shadow-lg); }
+.material-annotator { position: absolute; z-index: 2; pointer-events: none; }
+.material-annotator--draw, .material-annotator--pick { pointer-events: auto; cursor: crosshair; touch-action: none; }
+.material-annotator--pick { outline: 2px dashed var(--blue); outline-offset: -2px; }
+.material-remark { position: absolute; display: block; border: 2px solid var(--marker); border-radius: 4px; background: color-mix(in srgb, var(--marker) 14%, transparent); pointer-events: auto; cursor: pointer; }
+.material-remark > span { position: absolute; left: -2px; top: -2px; min-width: 1.5em; padding: .12em .38em; border-radius: 4px 0 6px 0; color: var(--text-dark); background: var(--marker); font: 850 11px/1.2 var(--font-mono); text-align: center; }
+.material-remark--stale { border-style: dashed; background: transparent; }
+.material-remark--selected { box-shadow: 0 0 0 3px color-mix(in srgb, var(--marker) 45%, transparent); }
+.material-remark--point { width: 14px; height: 14px; border-radius: 50%; transform: translate(-50%, -50%); }
+.material-remark--point > span { left: 12px; top: -14px; border-radius: 6px; }
+.material-remark--draft { --marker: var(--pink); border-style: dashed; pointer-events: none; }
+.material-remark--reference { --marker: var(--blue); border-style: dashed; pointer-events: none; }
+.material-remark-popover { position: absolute; z-index: 650; max-height: calc(100% - 24px); display: grid; overflow: auto; border-radius: 16px; box-shadow: var(--shadow-lg); pointer-events: auto; }
+.material-remark-popover--hidden { visibility: hidden; pointer-events: none; }
+.material-remark-hint { padding: .55em .5em .55em 1em; display: flex; flex-wrap: wrap; align-items: center; gap: .5em; border: 1px solid rgba(255,255,255,.1); border-radius: 16px; color: var(--text); background: var(--surface); font-size: calc(13px * var(--ui-scale, 1)); }
+.material-remark-hint span { flex: 1; min-width: 10em; }
+.material-remark-hint button { min-height: 2.2em; padding: .3em .75em; border-radius: .6em; color: var(--text); background: rgba(255,255,255,.1); cursor: pointer; font-weight: 850; }
+.material-remark-hint button:first-of-type { color: var(--text-dark); background: var(--pink); }
+.material-remark-editor, .material-remark-panel { padding: .95em; display: grid; gap: .65em; border: 1px solid rgba(255,255,255,.1); border-radius: 16px; color: var(--text); background: var(--surface); font-size: calc(13px * var(--ui-scale, 1)); cursor: default; }
+.material-remark-editor__anchor { color: var(--text-muted-on-dark); font-size: .9em; }
+.material-remark-editor textarea { width: 100%; min-height: 4.5em; padding: .6em .7em; resize: vertical; border: 0; border-radius: .6em; outline: 0; color: var(--text); background: var(--surface-soft); font: 600 1.05em/1.45 "Trebuchet MS", "Segoe UI", sans-serif; user-select: text; }
+.material-remark-editor textarea:focus-visible { box-shadow: inset 0 0 0 2px var(--pink); }
+.material-remark-editor__reference button, .material-remark-editor__chip { min-height: 2.2em; padding: .3em .7em; display: inline-flex; align-items: center; gap: .45em; border-radius: .6em; color: var(--text); background: rgba(255,255,255,.08); cursor: pointer; }
+.material-remark-editor__reference .material-remark-editor__picking { color: var(--text-dark); background: var(--blue); }
+.material-remark-editor__chip { cursor: default; background: color-mix(in srgb, var(--blue) 26%, transparent); }
+.material-remark-editor__chip button { min-height: auto; padding: .1em; background: transparent; }
+.material-remark-editor__actions, .material-remark-panel__actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .45em; }
+.material-remark-editor__actions button, .material-remark-panel__actions button { min-height: 2.4em; padding: .4em .85em; display: inline-flex; align-items: center; gap: .4em; border-radius: .65em; color: var(--text); background: rgba(255,255,255,.1); cursor: pointer; font-weight: 850; }
+.material-remark-editor__actions .material-remark-editor__save, .material-remark-panel__actions .material-remark-panel__primary { color: var(--text-dark); background: var(--primary); }
+.material-remark-editor__actions button:disabled { opacity: .45; cursor: not-allowed; }
+.material-remark-panel__actions .material-remark-panel__danger:hover, .material-remark-panel__actions .material-remark-panel__danger:focus-visible { color: white; background: var(--danger); }
+.material-remark-panel header { display: flex; align-items: center; gap: .55em; }
+.material-remark-panel header strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.material-remark-panel header small { color: var(--text-muted-on-dark); }
+.material-remark-panel header button { width: 2em; height: 2em; display: grid; place-items: center; border-radius: .55em; color: var(--text-muted-on-dark); background: rgba(255,255,255,.06); cursor: pointer; }
+.material-remark-panel__number { padding: .15em .45em; border-radius: .45em; color: var(--text-dark); background: var(--marker); font: 850 1em/1.2 var(--font-mono); }
+.material-remark-panel__text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 1.05em; line-height: 1.45; user-select: text; }
+.material-remark-panel__meta { margin: 0; display: flex; align-items: center; gap: .45em; color: var(--text-muted-on-dark); }
+.material-remark-panel__report { margin: 0; padding: .5em .65em; border-radius: .6em; color: var(--text-dark); background: color-mix(in srgb, var(--yellow) 85%, white); }
+.material-remark-panel__report strong { margin-right: .35em; }
+.material-reference-banner { min-height: 44px; padding: 6px 7px 6px 16px; display: flex; align-items: center; gap: 10px; border-radius: 14px; color: var(--text-dark); background: var(--blue); box-shadow: var(--shadow-md); font-size: calc(13px * var(--ui-scale, 1)); font-weight: 800; pointer-events: auto; }
+.material-reference-banner button { min-height: 32px; padding: 0 12px; border-radius: 9px; color: var(--text); background: var(--surface); cursor: pointer; font-weight: 850; }
 .home-editor-toolbar { position: absolute; left: 50%; top: 18px; z-index: 500; min-height: 48px; padding: 5px 6px 5px 15px; display: flex; align-items: center; gap: 8px; border-radius: 14px; color: white; background: rgba(40,41,52,.96); box-shadow: var(--shadow-md); transform: translateX(-50%); }
 .home-editor-toolbar strong { margin-right: 6px; font-size: 12px; }
 .home-editor-toolbar button { min-height: 36px; padding: 7px 12px; border-radius: 9px; color: white; background: rgba(255,255,255,.1); cursor: pointer; font-size: 11px; font-weight: 850; }

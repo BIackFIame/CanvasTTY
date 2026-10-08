@@ -64,14 +64,15 @@ export class GitCheckpoints {
       console.warn("Could not remove unfinished checkpoint files.",(error as NodeJS.ErrnoException).code ?? "unknown error");
     });
   }
-  private async persist():Promise<void> {
+  private async persist(signal?:AbortSignal):Promise<void> {
     if(!this.storagePath)return;
     const file=this.storagePath, text=JSON.stringify([...this.trusted].map(([id,row])=>({id,...row})));
     const work=this.writes.catch(()=>undefined).then(async()=>{
+      signal?.throwIfAborted();
       await mkdir(dirname(file),{recursive:true,mode:0o700});
       const temp=`${file}.${randomUUID()}.tmp`;
       try {
-        await writeFile(temp,text,{mode:0o600,flag:"wx"});await rename(temp,file);
+        await writeFile(temp,text,{mode:0o600,flag:"wx",signal});signal?.throwIfAborted();await rename(temp,file);
       } catch(error) {
         await rm(temp,{force:true}).catch(()=>undefined);
         throw error;
@@ -83,24 +84,36 @@ export class GitCheckpoints {
     if (!/^[\w-]{1,100}$/.test(sessionId)) throw new Error("Invalid checkpoint session.");
     return `refs/canvastty/${sessionId}/`;
   }
-  private async git(cwd: string, args: string[]): Promise<string> {
+  private async git(cwd: string, args: string[], signal?:AbortSignal,previewOverflow?:(partial:string)=>string): Promise<string> {
+    signal?.throwIfAborted();
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+      GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
     const safe = ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external="];
     // Snapshotting runs outside the agent process; never execute repository-provided clean filters.
-    const configured = await exec("git", [...safe, "-C", cwd, "config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], {timeout: 5000}).catch((error: unknown) => {
+    const configured = await exec("git", [...safe, "-C", cwd, "config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], {env, signal, timeout: 5000}).catch((error: unknown) => {
       if ((error as {code?: unknown}).code === 1) return {stdout: ""}; throw error;
     });
     for (const line of configured.stdout.split("\n")) {
       const key = line.split(/\s/, 1)[0];
       if (/^filter\..*\.(clean|smudge|process|required)$/.test(key)) safe.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
     }
-    return (await exec("git", [...safe, "-C", cwd, ...args], {timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();
+    try {return (await exec("git", [...safe, "-C", cwd, ...args], {env, signal, timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();}
+    catch(error) {
+      const output=error as {code?:unknown;message?:unknown;stdout?:unknown};
+      // Only previews can accept a bounded stdout prefix. Timeouts, stderr overflow and real Git errors fail.
+      if(previewOverflow && output.code==="ERR_CHILD_PROCESS_STDIO_MAXBUFFER" && output.message==="stdout maxBuffer length exceeded" && typeof output.stdout==="string") {
+        return previewOverflow(output.stdout.slice(0,output.stdout.lastIndexOf("\n")+1));
+      }
+      throw error;
+    }
   }
-  async available(cwd: string): Promise<boolean> {
-    try { return await realpath(await this.git(cwd, ["rev-parse", "--show-toplevel"])) === await realpath(cwd); }
+  async available(cwd: string, signal?:AbortSignal): Promise<boolean> {
+    try { return await realpath(await this.git(cwd, ["rev-parse", "--show-toplevel"],signal)) === await realpath(cwd); }
     catch { return false; }
   }
-  async workingDiff(cwd:string):Promise<string> {
-    const parts = [await this.git(cwd,["diff","--no-ext-diff","--no-textconv","--unified=3","HEAD","--"])];
+  async workingDiff(cwd:string, baselineHead?:string):Promise<string> {
+    if (baselineHead !== undefined && !/^[a-f0-9]{40,64}$/u.test(baselineHead)) throw new Error("Invalid review baseline commit.");
+    const parts = [await this.git(cwd,["diff","--no-ext-diff","--no-textconv","--unified=3",baselineHead ?? "HEAD","--"])];
     const root = await realpath(cwd);
     const paths = (await this.git(cwd,["ls-files","--others","--exclude-standard","-z"])).split("\0").filter(Boolean);
     let bytes = Buffer.byteLength(parts[0]), omitted = 0;
@@ -130,23 +143,38 @@ export class GitCheckpoints {
     // Mask the complete collected text before taking the bounded tail consumed by the reviewer.
     return this.redact(parts.join("\n")).slice(-512 * 1024);
   }
-  async capture(sessionId: string, cwd: string): Promise<void> {
-    const work=this.captures.catch(()=>undefined).then(()=>this.captureOne(sessionId,cwd));
-    this.captures=work;await work;
+  async capture(sessionId: string, cwd: string, signal?:AbortSignal): Promise<void> {
+    let commit!:()=>void;
+    const committed=new Promise<void>(resolve=>{commit=resolve;});
+    const work=this.captures.catch(()=>undefined).then(()=>this.captureOne(sessionId,cwd,signal,commit));
+    this.captures=work;
+    if(!signal){await work;return;}
+    // Hook callers stop waiting at the durable commit point (or cancellation), while rollback/pruning stays
+    // serialized. An aborted queued job must never begin snapshotting a later, already-running turn.
+    let abort!:()=>void;
+    const cancelled=new Promise<never>((_resolve,reject)=>{abort=()=>reject(signal.reason ?? new Error("Checkpoint cancelled."));});
+    signal.addEventListener("abort",abort,{once:true});
+    if(signal.aborted)abort();
+    try {await Promise.race([work,committed,cancelled]);}
+    finally {signal.removeEventListener("abort",abort);}
   }
-  private async captureOne(sessionId:string,cwd:string):Promise<void> {
+  private async captureOne(sessionId:string,cwd:string,signal?:AbortSignal,committed?:()=>void):Promise<void> {
+    signal?.throwIfAborted();
     await this.load();
-    if (!await this.available(cwd)) return;
-    const stash = await this.git(cwd, ["stash", "create"]);
-    const hash = stash || await this.git(cwd, ["rev-parse", "HEAD"]);
+    if (!await this.available(cwd,signal)) { signal?.throwIfAborted(); return; }
+    const stash = await this.git(cwd, ["stash", "create"],signal);
+    const hash = stash || await this.git(cwd, ["rev-parse", "HEAD"],signal);
     // A stash's second parent stores its index state. A clean checkpoint can itself be a merge commit,
     // whose second parent is an unrelated branch and must not be used as the saved index.
-    const indexOid = stash ? await this.git(cwd, ["rev-parse", "--verify", `${hash}^2`]) : hash;
+    const indexOid = stash ? await this.git(cwd, ["rev-parse", "--verify", `${hash}^2`],signal) : hash;
     const ref = `${this.prefix(sessionId)}${Date.now()}-${randomUUID()}`;
-    const root=await realpath(cwd),pack=await this.protectObjects(root,hash,indexOid);
+    const root=await realpath(cwd),pack=await this.protectObjects(root,hash,indexOid,signal);
     try {
-      await this.git(cwd, ["update-ref", ref, hash]);
+      signal?.throwIfAborted();
+      await this.git(cwd, ["update-ref", ref, hash],signal);
+      signal?.throwIfAborted();
     } catch(error) {
+      await this.git(cwd,["update-ref","-d",ref]).catch(()=>undefined);
       await this.removePackIfUnreferenced(root,pack);
       throw error;
     }
@@ -155,18 +183,27 @@ export class GitCheckpoints {
     this.trusted.set(ref,{cwd:root,sessionId,oid:hash,indexOid,...(pack ? {pack} : {})});
     let pruned:Array<{id:string;row:{cwd:string;sessionId:string;oid:string;indexOid?:string;pack?:string}}> = [];
     try {
-      const snapshots = await this.list(sessionId, cwd);
+      signal?.throwIfAborted();
+      const prefix=this.prefix(sessionId);
+      const snapshots=[...this.trusted].filter(([id,row])=>id.startsWith(prefix) && row.cwd===root && row.sessionId===sessionId)
+        .map(([id])=>({id,at:Number(id.slice(prefix.length).split("-",1)[0])})).sort((a,b)=>b.at-a.at);
       pruned=snapshots.slice(this.retain).map(({id})=>({id,row:this.trusted.get(id)!}));
       for (const old of pruned) this.trusted.delete(old.id);
       // Commit the registry before discarding older protected packs. If its atomic replacement fails,
       // retain the previous registry and packs so a failed capture cannot destroy the last good checkpoint.
-      await this.persist();
+      await this.persist(signal);
+      signal?.throwIfAborted();
     } catch(error) {
       this.trusted.clear();for(const [id,row] of previous)this.trusted.set(id,row);
-      await this.git(cwd,["update-ref","-d",ref]).catch(()=>undefined);
-      await this.removePackIfUnreferenced(root,pack);
+      // A cancellation can race atomic registry replacement; restore its previous durable contents as well.
+      try {if(signal?.aborted)await this.persist();}
+      finally {
+        await this.git(cwd,["update-ref","-d",ref]).catch(()=>undefined);
+        await this.removePackIfUnreferenced(root,pack);
+      }
       throw error;
     }
+    committed?.();
     for(const old of pruned) {
       await this.git(cwd,["update-ref","-d",old.id]).catch(()=>undefined);
       await this.removePackIfUnreferenced(root,old.row.pack);
@@ -233,34 +270,55 @@ export class GitCheckpoints {
     }
     return oid;
   }
-  private async protectObjects(cwd:string,oid:string,indexOid:string):Promise<string|undefined> {
+  private async protectObjects(cwd:string,oid:string,indexOid:string,signal?:AbortSignal):Promise<string|undefined> {
+    signal?.throwIfAborted();
     if(!this.storagePath)return undefined;
     const directory=dirname(this.packPath(cwd,"placeholder")!);await mkdir(directory,{recursive:true,mode:0o700});
     // Pack only the snapshot commit and trees used by restore, rather than cloning the project's entire ancestry.
-    const objects=new Set([oid,...(await this.git(cwd,["rev-list","--objects","--no-object-names",`${oid}^{tree}`])).split("\n")]);
-    objects.add(indexOid);for(const object of (await this.git(cwd,["rev-list","--objects","--no-object-names",`${indexOid}^{tree}`])).split("\n"))objects.add(object);
+    const objects=new Set([oid,...(await this.git(cwd,["rev-list","--objects","--no-object-names",`${oid}^{tree}`],signal)).split("\n")]);
+    objects.add(indexOid);for(const object of (await this.git(cwd,["rev-list","--objects","--no-object-names",`${indexOid}^{tree}`],signal)).split("\n"))objects.add(object);
     if([...objects].some(object=>!/^[a-f0-9]{40,64}$/u.test(object)))throw new Error("Invalid checkpoint object list.");
     // Git can leave tmp_pack/partial index files when interrupted. Keep each invocation in its own
     // private staging folder so failure cleanup never removes a pack retained by another checkpoint.
     const staging=await mkdtemp(join(directory,`.pending-${process.pid}-`));
     try {
-      const pending=exec("git",["--no-replace-objects","-c","core.hooksPath=/dev/null","-c","pack.threads=1","-C",cwd,"pack-objects","--compression=1",join(staging,"pack")],{timeout:15000,maxBuffer:1024});
+      const pending=exec("git",["--no-replace-objects","-c","core.hooksPath=/dev/null","-c","pack.threads=1","-C",cwd,"pack-objects","--compression=1",join(staging,"pack")],{signal,timeout:15000,maxBuffer:1024});
       pending.child.stdin?.on("error",()=>undefined);
       pending.child.stdin?.end([...objects].join("\n")+"\n");
       const hash=(await pending).stdout.trim();if(!/^[a-f0-9]{40,64}$/u.test(hash))throw new Error("Invalid checkpoint pack hash.");
       // Restore streams the pack to index-pack, which creates its own repository index. Retaining
       // Git's staging .idx would duplicate unused data; only the complete pack is published atomically.
+      signal?.throwIfAborted();
       await rename(join(staging,`pack-${hash}.pack`),this.packPath(cwd,hash)!);
       return hash;
     } finally {await this.removePackStaging(staging);}
   }
   async preview(sessionId: string, cwd: string, id: string): Promise<{text: string; changedFiles: string[]}> {
     const oid=await this.requireRef(sessionId, cwd, id);
-    const text = await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", oid, "--", "."]);
-    const names = await this.git(cwd, ["diff", "--name-only", "--no-ext-diff", "--no-textconv", oid, "--", "."]);
-    return {text: this.redact(text), changedFiles: names.split("\n").filter(Boolean)};
+    let diffTruncated=false,namesTruncated=false;
+    const text = await this.git(cwd, ["diff", "--no-ext-diff", "--no-textconv", oid, "--", "."],undefined,partial=>{diffTruncated=true;return partial;});
+    const names = await this.git(cwd, ["diff", "--name-only", "--no-ext-diff", "--no-textconv", oid, "--", "."],undefined,partial=>{namesTruncated=true;return partial;});
+    const notice=diffTruncated || namesTruncated ? "\n[Preview truncated at the output limit. Restoration still uses the complete saved checkpoint."+(namesTruncated ? " The changed-file list is also truncated." : "")+"]" : "";
+    return {text: this.redact(text)+notice, changedFiles: this.redact(names).split("\n").filter(Boolean)};
   }
   async restore(sessionId: string, cwd: string, id: string): Promise<{ok: boolean; message?: string}> {
+    const work=this.captures.catch(()=>undefined).then(()=>this.restoreOne(sessionId,cwd,id));
+    this.captures=work.then(()=>undefined,()=>undefined);
+    return work;
+  }
+  private async requireRestorableTrees(cwd:string,worktreeOid:string,indexOid:string):Promise<void> {
+    const entries=await Promise.all([
+      this.git(cwd,["ls-files","--stage","-z"]),
+      this.git(cwd,["ls-tree","-r","-z",worktreeOid]),
+      this.git(cwd,["ls-tree","-r","-z",indexOid])
+    ]);
+    // Inspect modes only at NUL-delimited record starts: paths can contain newlines, tabs or "160000".
+    // The parent snapshot does not retain dirty/untracked nested repository data for a safe recursive restore.
+    if(entries.some(output=>output.split("\0").some(entry=>entry.startsWith("160000 ")))) {
+      throw new Error("Submodule contents are not captured by checkpoints. Restoration is unavailable when the current index or saved checkpoint contains submodules; safeguard the nested repositories and restore them with Git separately.");
+    }
+  }
+  private async restoreOne(sessionId:string,cwd:string,id:string):Promise<{ok:boolean;message?:string}> {
     const initial=this.trusted.get(id);
     let release=this.holdPack(initial?.cwd??cwd,initial?.pack);
     try {
@@ -268,13 +326,16 @@ export class GitCheckpoints {
       const row=this.trusted.get(id)!;
       if(row.pack!==initial?.pack){await release();release=this.holdPack(row.cwd,row.pack);}
       const indexOid=row.indexOid!;
-      await this.capture(sessionId, cwd);
+      await this.requireRestorableTrees(cwd,target,indexOid);
+      await this.captureOne(sessionId, cwd);
       // Capture may prune this checkpoint at a retention limit of one. Re-import its held private pack
       // after capture, immediately before restore, in case Git garbage-collected the earlier import.
       const pack=row.pack&&this.packPath(row.cwd,row.pack);
       if(pack)await this.importPack(cwd,pack);
-      await this.git(cwd, ["restore", `--source=${indexOid}`, "--staged", "--", "."]);
+      // Keep the current index until Git removes tracked paths absent from the target worktree.
+      // Restoring the index first would turn post-checkpoint additions into untouched untracked files.
       await this.git(cwd, ["restore", `--source=${target}`, "--worktree", "--", "."]);
+      await this.git(cwd, ["restore", `--source=${indexOid}`, "--staged", "--", "."]);
       return {ok: true, message: "Tracked files restored; the previous work was saved as another checkpoint."};
     } finally {await release();}
   }

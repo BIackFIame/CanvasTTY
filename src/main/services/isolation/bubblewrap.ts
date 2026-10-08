@@ -32,7 +32,7 @@ export function bubblewrapArguments(
     "--unshare-ipc",
     ...(launch.network ? ["--unshare-net"] : []),
     ...(paths.restrictReads ? ["--tmpfs","/",...paths.readableAgain.flatMap(path=>exists(path) ? ["--ro-bind",path,path] : [])] : ["--ro-bind", "/", "/"]),
-    "--dev-bind", "/dev", "/dev",
+    ...(!paths.restrictReads ? ["--dev-bind", "/dev", "/dev"] : []),
     "--proc", "/proc"
   ];
   const seen = new Set<string>();
@@ -96,6 +96,8 @@ export function bubblewrapArguments(
     if (!socket || exists(socket) !== "socket") throw new Error("The restricted-network proxy socket is missing; the agent was not started.");
     args.push("--ro-bind", socket, socket);
   }
+  // Last mount: read exceptions and socket grants must never restore host devices inside a reviewer.
+  if (paths.restrictReads) args.push("--dev", "/dev");
   args.push("--chdir", launch.cwd, "--", launch.command, ...launch.args);
   return args;
 }

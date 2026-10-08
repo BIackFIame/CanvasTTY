@@ -8,7 +8,8 @@ export function subagentWorktreeResolver(dependencies: {
 }): NonNullable<AgentControlOptions["resolveSubagentEnvironment"]> {
   return async request => {
     if (!await dependencies.isGitProject(request.projectRoot)) return null;
-    const provider = dependencies.providers().find(row => row.kinds.some(kind => kind.kind === "worktree"));
+    const provider = dependencies.providers().find(row => row.kinds.some(kind => kind.kind === "worktree"
+      && (!kind.appliesTo || kind.appliesTo.includes(request.provider))));
     return provider ? { pluginId: provider.pluginId, kind: "worktree" } : null;
   };
 }

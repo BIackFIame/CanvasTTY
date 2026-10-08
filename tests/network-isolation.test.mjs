@@ -6,6 +6,7 @@ import { existsSync, mkdtempSync, rmSync, mkdirSync, readFileSync, realpathSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Duplex } from "node:stream";
 import { NetworkPolicyManager, isPublicAddress, validatePolicy } from "../src/main/services/isolation/networkPolicy.ts";
 import { seatbeltProfile } from "../src/main/services/isolation/seatbelt.ts";
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
@@ -189,6 +190,160 @@ test("allowlist proxy authenticates each launch, enforces domains, and pins DNS 
     for (const socket of upstreamSockets) socket.destroy();
     clientSockets.clear();
     upstreamSockets.clear();
+  }
+});
+
+test("allowlist proxy grants domain descendants, preserves wildcard roots, and rejects deceptive suffixes", { timeout: 15_000 }, async (t) => {
+  const sockets = new Set();
+  const trackSocket = (socket) => { sockets.add(socket); socket.once("close", () => sockets.delete(socket)); };
+  const targetServer = createNetServer(trackSocket);
+  const target = await listen(targetServer, 0, "127.0.0.1");
+  let dnsCalls = 0;
+  let dialCalls = 0;
+  const { manager, base } = policyManager(t, {
+    // Exercise the actual TCP proxy on every OS; no native sandbox or public connection is involved.
+    platform: "darwin",
+    resolveAddress: async () => { dnsCalls += 1; return "93.184.216.34"; },
+    openConnection: (address, port) => {
+      assert.equal(address, "93.184.216.34");
+      assert.equal(port, 443);
+      dialCalls += 1;
+      return createConnection({ host: "127.0.0.1", port: target.port });
+    }
+  });
+  const project = join(base, "descendant-project");
+  mkdirSync(project);
+  manager.setProjectPolicy(project, {
+    mode: "allowed-domains", providerApis: false, packageRegistries: false,
+    domains: ["ALLOWED.example.", "*.wild.example", "bücher.example"]
+  });
+  await manager.start();
+  const launch = manager.prepareLaunch(project, "codex");
+  const check = async (grant, host, status) => {
+    const before = dnsCalls;
+    const result = await connectThroughProxy(grant, host, 443, grant.token, trackSocket);
+    assert.equal(result.status, status, host);
+    result.socket?.destroy();
+    assert.equal(dnsCalls - before, status === 200 ? 1 : 0, `${host}: denied domains never reach DNS`);
+  };
+  try {
+    for (const host of ["allowed.example", "api.allowed.example", "deep.api.allowed.example", "API.ALLOWED.EXAMPLE.",
+      "child.wild.example", "deep.child.wild.example", "api.xn--bcher-kva.example"]) await check(launch, host, 200);
+    for (const host of ["notallowed.example", "allowed.example.attacker.test", "wild.example", "notwild.example", "child.wild.example.attacker.test"])
+      await check(launch, host, 403);
+    const beforeHttp = dnsCalls;
+    assert.equal(await httpThroughProxy(launch, "http://allowed.example.attacker.test/"), 403);
+    assert.equal(dnsCalls, beforeHttp, "forwarded HTTP applies the same domain boundary");
+    manager.setProjectPolicy(project, { mode: "allowed-domains", providerApis: true, packageRegistries: false, domains: [] });
+    const providerLaunch = manager.prepareLaunch(project, "antigravity");
+    try {
+      for (const host of ["googleapis.com", "generativelanguage.googleapis.com"]) await check(providerLaunch, host, 200);
+      await check(providerLaunch, "googleapis.com.attacker.test", 403);
+      await check(providerLaunch, "notgoogleapis.com", 403);
+    } finally { providerLaunch.cleanup(); }
+    assert.equal(dialCalls, 9, "only the nine allowed DNS-pinned destinations reached the fake upstream");
+  } finally {
+    launch.cleanup();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolve) => targetServer.close(resolve));
+  }
+});
+
+class PendingProxySocket extends Duplex {
+  connecting = true;
+  writes = [];
+  _read() {}
+  _write(chunk, _encoding, callback) { this.writes.push(Buffer.from(chunk)); callback(); }
+  setTimeout() { return this; }
+  setNoDelay() { return this; }
+  setKeepAlive() { return this; }
+  connectNow() { this.connecting = false; this.emit("connect"); }
+}
+const proxyDeferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+
+async function pendingProxy(t) {
+  let nextDial = proxyDeferred(); const sockets = [], clients = new Set();
+  t.after(() => { for (const socket of clients) socket.destroy(); for (const socket of sockets) socket.destroy(); });
+  const { manager, base } = policyManager(t, {
+    platform: "darwin", resolveAddress: async () => "93.184.216.34",
+    openConnection: (address, port) => {
+      assert.equal(address, "93.184.216.34"); assert.ok([80, 443].includes(port));
+      const socket = new PendingProxySocket(); sockets.push(socket); nextDial.resolve(socket); return socket;
+    }
+  });
+  const project = join(base, "timeout-project"); mkdirSync(project);
+  manager.setProjectPolicy(project, { mode: "allowed-domains", providerApis: false, packageRegistries: false, domains: ["allowed.example"] });
+  await manager.start(); const launch = manager.prepareLaunch(project, "codex");
+  t.after(() => launch.cleanup());
+  const begin = kind => {
+    nextDial = proxyDeferred();
+    if (kind === "connect") return { response: connectThroughProxy(launch, "allowed.example", 443, launch.token, socket => clients.add(socket)), dial: nextDial.promise };
+    const request = httpRequest({ host: "127.0.0.1", port: launch.macProxyPort, path: "http://allowed.example/resource",
+      headers: { "proxy-authorization": `Basic ${Buffer.from(`canvastty:${launch.token}`).toString("base64")}` } });
+    clients.add(request); request.on("error", () => {});
+    const response = new Promise((resolve, reject) => { request.once("response", response => { response.resume(); response.once("end", () => resolve({ status: response.statusCode })); }); request.once("error", reject); });
+    request.end(); return { response, dial: nextDial.promise, request };
+  };
+  return { begin, launch, sockets, track: client => clients.add(client), waitForDial: () => { nextDial = proxyDeferred(); return nextDial.promise; } };
+}
+
+test("proxy pre-connect deadlines refuse pending CONNECT and HTTP and ignore late connection", { timeout: 5_000 }, async t => {
+  const f = await pendingProxy(t); t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const kind of ["connect", "http"]) {
+    const pending = f.begin(kind), socket = await pending.dial;
+    await new Promise(resolve => setImmediate(resolve)); // ClientRequest attaches its socket on nextTick.
+    t.mock.timers.tick(10_000);
+    assert.equal(socket.destroyed, true, `${kind}: pending upstream is destroyed at its connection deadline`);
+    const result = await pending.response; assert.equal(result.status, 502, kind); result.socket?.destroy();
+    socket.connectNow(); assert.equal(socket.destroyed, true, "a late connect cannot reopen the refused tunnel");
+    assert.equal(socket.listenerCount("connect"), 0, "pre-connect listeners are removed");
+  }
+});
+
+test("proxy connection timers stop on connect and leave established slow responses alive", { timeout: 5_000 }, async t => {
+  const f = await pendingProxy(t); t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const kind of ["connect", "http"]) {
+    const pending = f.begin(kind), socket = await pending.dial;
+    await new Promise(resolve => setImmediate(resolve)); socket.connectNow();
+    t.mock.timers.tick(20_000); assert.equal(socket.destroyed, false, `${kind}: established connection survives its former deadline`);
+    if (kind === "http") socket.push("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
+    const result = await pending.response; assert.equal(result.status, 200); result.socket?.destroy();
+    socket.destroy();
+  }
+});
+
+test("connected CONNECT EOF flushes buffered bytes before closing the client", { timeout: 5_000 }, async t => {
+  const f = await pendingProxy(t), pending = f.begin("connect"), socket = await pending.dial;
+  socket.connectNow(); const result = await pending.response; assert.equal(result.status, 200);
+  const received = [result.head];
+  const ended = new Promise((resolve, reject) => { result.socket.on("data", chunk => received.push(chunk)); result.socket.once("end", resolve); result.socket.once("error", reject); });
+  const body = "full buffered response".repeat(4_000);
+  socket.push(body); socket.push(null); socket.end();
+  await ended; assert.equal(Buffer.concat(received).toString(), body); result.socket.destroy();
+});
+
+test("proxy pending dials close on client disconnect and terminate on upstream error or close", { timeout: 5_000 }, async t => {
+  const f = await pendingProxy(t); t.mock.timers.enable({ apis: ["setTimeout"] });
+  for (const kind of ["connect", "http"]) {
+    for (const event of ["error", "close"]) {
+      t.diagnostic(`${kind}: upstream ${event}`);
+      const pending = f.begin(kind), socket = await pending.dial;
+      await new Promise(resolve => setImmediate(resolve));
+      if (event === "error") socket.destroy(new Error("fake dial failure")); else socket.destroy();
+      const result = await pending.response; assert.equal(result.status, 502, `${kind}/${event}`); result.socket?.destroy();
+      t.mock.timers.tick(20_000); assert.equal(socket.listenerCount("connect"), 0);
+    }
+    t.diagnostic(`${kind}: client disconnect`);
+    // A raw client allows CONNECT cancellation before the proxy sends any response.
+    const client = createConnection({ host: "127.0.0.1", port: f.launch.macProxyPort });
+    f.track(client); await new Promise(resolve => client.once("connect", resolve));
+    const dial = f.waitForDial();
+    const path = kind === "connect" ? "allowed.example:443" : "http://allowed.example/resource";
+    client.write(`${kind === "connect" ? "CONNECT" : "GET"} ${path} HTTP/1.1\r\nHost: allowed.example\r\nProxy-Authorization: Basic ${Buffer.from(`canvastty:${f.launch.token}`).toString("base64")}\r\n\r\n`);
+    // Observe creation directly, without waiting for a response that cancellation deliberately prevents.
+    const socket = await dial, closed = new Promise(resolve => socket.once("close", resolve));
+    client.destroy(); await closed; assert.equal(socket.destroyed, true, kind);
+    t.mock.timers.tick(20_000); assert.equal(socket.listenerCount("connect"), 0);
   }
 });
 

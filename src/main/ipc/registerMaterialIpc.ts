@@ -62,6 +62,11 @@ export function registerMaterialIpc(ipcMain: IpcRegistrar, { materials, getMainW
     return materials.remove(requireId(id));
   });
 
+  ipcMain.handle(IPC.materialsPinVersion, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return materials.pinVersion(requireId(id));
+  });
+
   ipcMain.handle(IPC.materialsReveal, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     const location = materials.location(requireId(id));
@@ -78,6 +83,21 @@ export function registerMaterialIpc(ipcMain: IpcRegistrar, { materials, getMainW
   ipcMain.handle(IPC.materialsAcceptMove, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     return materials.acceptMove(requireId(id));
+  });
+
+  ipcMain.handle(IPC.materialsAddRemark, (event, draft: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return materials.addRemark(draft);
+  });
+
+  ipcMain.handle(IPC.materialsUpdateRemark, (event, id: unknown, patch: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return materials.updateRemark(requireId(id), patch);
+  });
+
+  ipcMain.handle(IPC.materialsDeleteRemark, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return materials.deleteRemark(requireId(id));
   });
 }
 

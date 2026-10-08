@@ -168,7 +168,7 @@ async function harness(t, { providers } = {}) {
       if (tab?.status === "ready" && (revisionAfter === null || tab.documentRevision > revisionAfter)) return tab;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
-    throw new Error("tab never became ready");
+    throw new Error(`tab never became ready after revision ${revisionAfter}`);
   };
   // A person's first tab is active in Chromium, as when the Browser card is open.
   await newChromiumTab("https://person.example.test/");
