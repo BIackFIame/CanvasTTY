@@ -2,6 +2,7 @@ import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
+import type { AgentNetworkMode } from "./networkPolicy.ts";
 import { otherSpellings } from "../onDiskPath.ts";
 import { openCodeConfigPaths } from "../inspectedConfig.ts";
 import type { WorktreeGitAccess } from "./worktreeGitAccess.ts";
@@ -27,6 +28,8 @@ export interface IsolationPathInput {
   sessionId: string;
   /** Folders under CanvasTTY's private data this launch was handed (its own control grant, its account home). */
   grantedPrivate?: readonly string[];
+  /** Strict modes may keep runtime/orchestration grants, but never the host-side browser gateway. */
+  networkMode?: AgentNetworkMode;
   /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
   socketFolders?: readonly string[];
   /** Plan: the project is readable only (the CLI's own folders stay writable). */
@@ -159,6 +162,15 @@ export function privateAppData(userDataPath: string): string[] {
   return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", "plugin-data", "checkpoints.json", "checkpoint-objects", "task-budgets.json", "usage-prices.json", "flow-approvals.json", "session-timeline"]
     .map((name) => join(userDataPath, name));
 }
+
+/** Common system daemon sockets that remain mounted from `/` even inside a Linux network namespace. */
+const STRICT_HOST_UNIX_SOCKETS = [
+  "/run/docker.sock",
+  "/run/docker/containerd/docker-containerd.sock",
+  "/run/containerd/containerd.sock",
+  "/run/dbus/system_bus_socket",
+  "/run/podman/podman.sock"
+];
 
 /** Every spelling of a path an agent or the kernel may use: as given, resolved through links, NFC and NFD. */
 export function spellings(path: string): string[] {
@@ -316,16 +328,20 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
         throw new Error("A reviewer runtime file overlaps protected data.");
     }
   }
+  const strictNetwork = input.networkMode !== undefined && input.networkMode !== "open";
+  const browserRuntime = join(input.userDataPath, "browser", "runtime");
   const socketFolders = [
     ...Object.entries(input.env)
-      .filter(([name, value]) => /^CANVASTTY_.*_ADDRESS$/u.test(name) && typeof value === "string" && isAbsolute(value))
+      .filter(([name, value]) => (strictNetwork
+        ? /^CANVASTTY_(?:RUNTIME|ORCHESTRATION)_ADDRESS$/u
+        : /^CANVASTTY_.*_ADDRESS$/u).test(name) && typeof value === "string" && isAbsolute(value))
       .map(([, value]) => dirname(value!)),
     ...(input.socketFolders ?? []),
     input.sessionTemp,
-    join(input.userDataPath, "browser", "runtime"),
+    ...(!strictNetwork ? [browserRuntime] : []),
     join(input.userDataPath, "lifecycle", "runtime"),
     join(input.userDataPath, "orchestration", "runtime")
-  ];
+  ].filter((path) => !strictNetwork || !isWithin(resolve(path), resolve(browserRuntime)));
   return {
     ...(input.restrictHomeReads ? {restrictReads:true} : {}),
     writable: all([
@@ -360,6 +376,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       ...sensitive, ...others, ...privateData, ...(worktree ? worktree.otherAdminDirs : []),
       ...(input.restrictHomeReads ? [home, hostHome] : []),
       ...(input.deniedReadPaths ?? []),
+      ...(strictNetwork ? [browserRuntime, ...STRICT_HOST_UNIX_SOCKETS] : [])
     ]),
     readableAgain: all([...grants, ...movedHomes, ...(worktree ? [project, worktree.adminDir] : []),
       ...(input.restrictHomeReads ? [...ownFolders, ...own.files, input.sessionTemp, input.cwd,
@@ -367,9 +384,9 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
         "/System/Volumes/Preboot/Cryptexes/OS","/dev","/private/var/db/dyld","/private/var/select/sh",
         join(home,".npm"),join(home,".bun"),join(xdg.cache,"npm"),join(xdg.cache,"bun"),...(input.runtimeReadable ?? [])] : [])]),
     socketFolders: all(socketFolders),
-    socketPrefixes: all([dirname(dirname(realish(input.sessionTemp))), "/private/tmp", "/tmp"].map((folder) => join(folder, "ctty-")))
     // The temporary folder a launch's own folder lives in (sessionTemp is <temp root>/ctty-iso-…/tmp), and /tmp: where
     // CanvasTTY's gateways put their sockets when the userData path is too long for one.
+    socketPrefixes: strictNetwork ? [] : all([dirname(dirname(realish(input.sessionTemp))), "/private/tmp", "/tmp"].map((folder) => join(folder, "ctty-")))
   };
 }
 

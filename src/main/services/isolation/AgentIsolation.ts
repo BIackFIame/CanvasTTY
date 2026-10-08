@@ -5,11 +5,12 @@ import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts";
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
-import { isPluginDataPath, worktreeGitAccess } from "./worktreeGitAccess.ts";
 import { isolationPaths } from "./isolationPaths.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments, projectHooks } from "./bubblewrap.ts";
 import { LinuxHostPaths } from "./linuxHostPaths.ts";
+import type { AgentNetworkLaunch, AgentNetworkMode, AgentNetworkSummary, NetworkPolicyManager } from "./networkPolicy.ts";
+import { isPluginDataPath, worktreeGitAccess } from "./worktreeGitAccess.ts";
 import { validateSelectedAccountHome } from "../accountHomeIsolation.ts";
 import { prepareReviewerHome } from "./reviewerHome.ts";
 
@@ -167,6 +168,12 @@ export interface AgentIsolationOptions {
   exists?: (path: string) => boolean;
   /** Linux: the host folders and placeholders bubblewrap needs (shared across launches); tests pass their own. */
   linuxHostPaths?: LinuxHostPaths;
+  /** Optional per-project network policy store and host-side allowlist proxy. */
+  networkPolicy?: NetworkPolicyManager;
+  /** Packaged native canvastty-helper; both strict Linux network modes require its Unix socket guard. */
+  networkHelperPath?: string | null;
+  /** Linux: checks the native helper's Landlock boundary without starting an agent. */
+  networkIsolationProbe?: (helper: string) => string | null;
   /**
    * Linux: runs bubblewrap once with the namespaces a launch uses and returns null when it works, or what it said.
    * bubblewrap can be installed and still unable to create an unprivileged user namespace (Ubuntu 24.04's AppArmor
@@ -178,7 +185,7 @@ export interface AgentIsolationOptions {
 
 export interface IsolationDecisionInput {
   provider: ProviderId;
-  /** Original task project, including launches in a separate reviewer workspace. */
+  /** Project root used to resolve its network policy; omitted by older callers to use the global policy. */
   cwd?: string;
   profile: LaunchProfile;
   /** Not launched by the person: a subagent, or an agent a plugin started. */
@@ -202,8 +209,8 @@ export interface IsolationLaunch {
   sessionId: string;
   provider: ProviderId;
   cwd: string;
-  /** Original project root for validating a linked worktree. */
-  taskProjectRoot?: string;
+  /** Original project root used for policy lookup when cwd is a plugin-provided worktree or container path. */
+  networkProjectRoot?: string;
   command: string;
   args: readonly string[];
   env: Record<string, string>;
@@ -213,7 +220,8 @@ export interface IsolationLaunch {
   accountHome?: string;
   /** Host-derived project/session roots hidden from the diff-only reviewer. */
   deniedReadPaths?: readonly string[];
-  /** A diff-only reviewer uses fresh CLI state and narrowly granted runtime files. */
+  /** Model API hosts of the selected model account; allowed with the provider APIs in allowed-domains mode. */
+  apiDomains?: readonly string[];
   restrictHomeReads?: boolean;
   runtimeReadable?: readonly string[];
   /** The launch profile: in plan the project is not writable. */
@@ -282,11 +290,29 @@ export class AgentIsolation {
     const { provider, delegated } = input;
     let profile = input.profile;
     if (provider === "terminal") return { apply: false, profile };
-    const wanted = delegated || profile !== "normal";
+    let networkMode: AgentNetworkMode = "open";
+    try { networkMode = this.options.networkPolicy?.getPolicy(input.cwd).mode ?? "open"; }
+    catch (error) {
+      return { apply: false, profile, refuse: `The saved agent network policy cannot be read: ${error instanceof Error ? error.message : String(error)} The agent was not started.` };
+    }
+    const strictNetwork = networkMode !== "open";
+    const wanted = delegated || profile !== "normal" || strictNetwork;
     if (!wanted) return { apply: false, profile };
     const containedAuto = profile === "auto" && autoKind(provider) === "contained";
     if (input.environment?.isolated) {
+      if (strictNetwork) return { apply: false, profile, refuse: `${networkMode} network mode cannot be enforced inside ${input.environment.label}. The agent was not started.` };
       return { apply: false, profile, isolation: { state: "environment", reason: `Runs in ${input.environment.label}; the isolation layer of this computer does not apply there.` } };
+    }
+    if (strictNetwork) {
+      if (!this.enabled()) return { apply: false, profile, refuse: `${networkMode} network mode requires agent isolation to be on. The agent was not started.` };
+      const available = this.availability();
+      if ("reason" in available) return { apply: false, profile, refuse: `${networkMode} network mode cannot be enforced: ${available.reason} The agent was not started.` };
+      const socketFailure = this.platform === "linux" ? this.networkIsolationFailure() : null;
+      if (socketFailure) return { apply: false, profile, refuse: `${networkMode} network mode cannot be enforced: ${socketFailure} The agent was not started.` };
+      if (networkMode === "allowed-domains") {
+        const proxy = this.options.networkPolicy?.availability();
+        if (!proxy?.available) return { apply: false, profile, refuse: `allowed-domains network mode cannot be enforced: ${proxy && "reason" in proxy ? proxy.reason : "the proxy manager is not configured"} The agent was not started.` };
+      }
     }
     const lower = (state: SessionIsolation["state"], why: string): IsolationDecision => {
       if (containedAuto && !delegated) {
@@ -308,15 +334,22 @@ export class AgentIsolation {
     return { apply: true, profile, isolation: { state: "on", layer: available.layer } };
   }
 
+  networkPolicyFor(projectRoot: string | undefined, provider: ProviderId): AgentNetworkSummary | null {
+    return this.options.networkPolicy?.getEffectivePolicy(projectRoot, provider) ?? null;
+  }
+
   /** Wraps one launch; throws a LaunchRefusal (fail closed) when the layer cannot be set up. */
   wrap(launch: IsolationLaunch): WrappedLaunch {
     const available = this.availability();
     if ("reason" in available) throw new LaunchRefusal(`agent isolation is not available: ${available.reason} The agent was not started without it.`);
     let folder: string | null = null;
     let releaseHostPaths: (() => void) | null = null;
+    let networkLaunch: AgentNetworkLaunch | null = null;
     const cleanup = (): void => {
       releaseHostPaths?.();
       releaseHostPaths = null;
+      networkLaunch?.cleanup();
+      networkLaunch = null;
       if (folder) rmSync(folder, { recursive: true, force: true });
       folder = null;
     };
@@ -351,7 +384,7 @@ export class AgentIsolation {
       if (launch.deniedReadPaths && deniedReadPaths?.length !== launch.deniedReadPaths.length) {
         throw new LaunchRefusal("A reviewer isolation root could not be verified.");
       }
-      const trustedWorktree = worktreeGitAccess(cwd, launch.taskProjectRoot ?? cwd, this.options.userDataPath);
+      const trustedWorktree = worktreeGitAccess(cwd, launch.networkProjectRoot ?? cwd, this.options.userDataPath);
       if ((requestedCwdInPluginData || isPluginDataPath(cwd, this.options.userDataPath)) && !trustedWorktree) {
         throw new LaunchRefusal("The plugin environment worktree could not be verified against the task's original Git repository. The agent was not started.");
       }
@@ -361,7 +394,7 @@ export class AgentIsolation {
         : validateSelectedAccountHome(this.options.userDataPath, launch.provider, launch.accountHome);
       // A reviewer on the worker's model account: a copy of the account's run file in the reviewer's own temp folder
       // (CanvasTTY's launch-runs stays unreadable to it).
-      const accountRunSource = launch.restrictHomeReads && launch.provider === "opencode"
+      const accountRunSource = launch.restrictHomeReads && launch.provider === "opencode" && launch.apiDomains?.length
         ? accountLaunchRunFile(launchEnvironment.OPENCODE_CONFIG, this.options.userDataPath) : undefined;
       let accountRunConfig: string | undefined;
       if (accountRunSource) {
@@ -373,8 +406,14 @@ export class AgentIsolation {
       const reviewerRuntimeFiles = launch.restrictHomeReads && this.platform === "darwin"
         ? reviewerRuntimeDependencies([launchCommand, ...(launch.runtimeReadable ?? [])], launchEnvironment)
         : [];
+      networkLaunch = this.options.networkPolicy?.prepareLaunch(launch.networkProjectRoot ?? cwd, launch.provider, launch.apiDomains) ?? null;
+      const networkMode = networkLaunch?.mode ?? "open";
+      if (networkMode !== "open" && this.platform === "linux") {
+        const failure = this.networkIsolationFailure();
+        if (failure) throw new LaunchRefusal(`${networkMode} network mode cannot be enforced: ${failure} The agent was not started.`);
+      }
+      if (networkMode !== "open") stripBrowserEnvironment(launchEnvironment);
       const paths = isolationPaths({
-        ...(trustedWorktree ? { worktreeGitAccess: trustedWorktree } : {}),
         provider: launch.provider,
         cwd,
         sessionTemp: temp,
@@ -383,9 +422,11 @@ export class AgentIsolation {
         userDataPath: this.options.userDataPath,
         sessionId: launch.sessionId,
         ...(launch.restrictHomeReads ? { privateRunDirectory: folder } : {}),
+        networkMode,
         ...(deniedReadPaths ? { deniedReadPaths } : {}),
         ...(launch.restrictHomeReads ? { restrictHomeReads: true, runtimeReadable: [...reviewerRuntimeFiles, launchCommand,
-          ...(launch.runtimeReadable ?? [])] } : {}),
+          ...(networkMode !== "open" && this.platform === "linux" ? [this.options.networkHelperPath!] : []), ...(launch.runtimeReadable ?? [])] } : {}),
+        ...(trustedWorktree ? { worktreeGitAccess: trustedWorktree } : {}),
         ...((launch.grantedPrivate || accountHome) ? {
           grantedPrivate: [...(launch.grantedPrivate ?? []), ...(accountHome && !launch.restrictHomeReads ? [accountHome] : [])]
         } : {}),
@@ -399,23 +440,50 @@ export class AgentIsolation {
       const isolationNote = worktreeGitMetadataReadOnly ? `${ISOLATION_NOTE} ${WORKTREE_GIT_NOTE}` : ISOLATION_NOTE;
       const env: Record<string, string> = { ...launchEnvironment, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: isolationNote };
       if (worktreeGitMetadataReadOnly) env.GIT_OPTIONAL_LOCKS = "0";
+      if (networkMode !== "open") {
+        stripProxyEnvironment(env);
+        env.CANVASTTY_NETWORK_MODE = networkMode;
+      }
+      if (networkLaunch?.mode === "allowed-domains" && this.platform === "darwin") {
+        if (!networkLaunch.token || !networkLaunch.macProxyPort) throw new LaunchRefusal("The macOS allowlist proxy was not ready. The agent was not started.");
+        const proxy = `http://canvastty:${networkLaunch.token}@127.0.0.1:${networkLaunch.macProxyPort}`;
+        setProxyEnvironment(env, proxy);
+      }
       if (available.layer === "seatbelt") {
         const profilePath = join(folder, "profile.sb");
-        writeFileSync(profilePath, seatbeltProfile(paths), { mode: 0o600, flag: "wx" });
+        const network = networkLaunch && networkLaunch.mode !== "open" ? {
+          mode: networkLaunch.mode,
+          ...(networkLaunch.mode === "allowed-domains" && networkLaunch.macProxyPort ? { proxyPort: networkLaunch.macProxyPort } : {}),
+          loopbackPorts: claudeHookPorts(launch.provider, launch.args)
+        } as const : undefined;
+        writeFileSync(profilePath, seatbeltProfile(paths, network), { mode: 0o600, flag: "wx" });
         return { command: this.options.sandboxExecPath ?? SANDBOX_EXEC, args: ["-f", profilePath, launchCommand, ...launch.args], env,
           ...(worktreeGitMetadataReadOnly ? { isolationReason: WORKTREE_GIT_NOTE } : {}), cleanup };
       }
       // bubblewrap mounts only what exists: the CLI's own missing folders are created and a missing protected file
       // gets a placeholder first (LinuxHostPaths), both undone by cleanup().
       releaseHostPaths = this.linuxHostPaths.prepare(paths);
-      const kind = (path: string): "file" | "directory" | null => {
-        try { const stat = statSync(path); return stat.isDirectory() ? "directory" : stat.isFile() ? "file" : null; } catch { return null; }
+      const kind = (path: string): "file" | "directory" | "socket" | null => {
+        try { const stat = statSync(path); return stat.isDirectory() ? "directory" : stat.isFile() ? "file" : stat.isSocket() ? "socket" : null; } catch { return null; }
       };
       let command = launchCommand;
       let commandArgs = [...launch.args];
+      if (networkLaunch && networkLaunch.mode !== "open") {
+        if (networkLaunch.mode === "allowed-domains" && (!networkLaunch.unixProxyPath || !networkLaunch.token)) {
+          throw new LaunchRefusal("allowed-domains network mode could not prepare its Linux socket bridge. The agent was not started.");
+        }
+        command = this.options.networkHelperPath!;
+        // These exact addresses come from core grants; no plugin-supplied CANVASTTY_* name grants a socket.
+        const gatewaySockets = [env.CANVASTTY_RUNTIME_ADDRESS, env.CANVASTTY_ORCHESTRATION_ADDRESS].filter((path): path is string => Boolean(path));
+        commandArgs = ["network-bridge", ...(networkLaunch.mode === "offline" ? ["--offline"] : ["--socket", networkLaunch.unixProxyPath!, "--token", networkLaunch.token!]),
+          ...[...new Set(gatewaySockets)].flatMap((path) => ["--allow-socket", path]), "--", launchCommand, ...launch.args];
+      }
       const args = bubblewrapArguments(paths, {
         command, args: commandArgs, cwd,
         ...(launch.env.XDG_RUNTIME_DIR ? { runtimeDir: launch.env.XDG_RUNTIME_DIR } : {}),
+        ...(networkLaunch && networkLaunch.mode !== "open" ? {
+          network: { mode: networkLaunch.mode, ...(networkLaunch.unixProxyPath ? { proxySocketPath: networkLaunch.unixProxyPath } : {}) }
+        } : {})
       }, kind);
       const hooks = projectHooks(cwd);
       const mountPoint = kind(dirname(hooks)) === null && args.includes(hooks);
@@ -449,9 +517,63 @@ export class AgentIsolation {
     return failure;
   }
 
+  private networkIsolationFailure(): string | null {
+    const helper = this.options.networkHelperPath;
+    if (!helper) return "CanvasTTY's native Unix socket guard is missing on Linux.";
+    return this.cachedProbe(`network:${helper}`, () => (this.options.networkIsolationProbe ?? probeNetworkIsolation)(helper));
+  }
+
   private enabled(): boolean {
     try { return this.options.enabled() !== false; } catch { return true; }
   }
+}
+
+function stripProxyEnvironment(env: Record<string, string>): void {
+  for (const key of Object.keys(env)) if (/^(?:https?|all|no)_proxy$/iu.test(key)) delete env[key];
+}
+
+function stripBrowserEnvironment(env: Record<string, string>): void {
+  for (const key of [
+    "CANVASTTY_AGENT_BROWSER_ADDRESS", "CANVASTTY_AGENT_CAPABILITY", "CANVASTTY_AGENT_CONNECTION_ID",
+    "CANVASTTY_AGENT_ID", "CANVASTTY_AGENT_PROVIDER"
+  ]) delete env[key];
+}
+
+function setProxyEnvironment(env: Record<string, string>, proxy: string): void {
+  env.HTTP_PROXY = proxy;
+  env.http_proxy = proxy;
+  env.HTTPS_PROXY = proxy;
+  env.https_proxy = proxy;
+  env.ALL_PROXY = proxy;
+  env.all_proxy = proxy;
+  // The seatbelt profile grants only an exact capability-bearing hook port on loopback; the network proxy itself
+  // rejects private addresses. This lets a generated Claude lifecycle hook reach that one local listener.
+  env.NO_PROXY = "127.0.0.1,localhost,::1";
+  env.no_proxy = env.NO_PROXY;
+}
+
+/** The only direct loopback HTTP request retained in strict mode: a capability-bearing Claude lifecycle hook. */
+function claudeHookPorts(provider: ProviderId, args: readonly string[]): number[] {
+  if (provider !== "claude") return [];
+  const found = new Set<number>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
+    if (!value || typeof value !== "object") return;
+    const record = value as Record<string, unknown>;
+    if (record.type === "http" && typeof record.url === "string" && record.url.startsWith("http://127.0.0.1:")) {
+      const headers = record.headers && typeof record.headers === "object" ? record.headers as Record<string, unknown> : {};
+      const hasCapability = Object.values(headers).some((header) => typeof header === "string" && header.includes("CANVASTTY_RUNTIME_CAPABILITY"));
+      const url = /^http:\/\/127\.0\.0\.1:(\d{1,5})\/claude\/v1\//u.exec(record.url);
+      const port = url ? Number(url[1]) : 0;
+      if (hasCapability && Number.isInteger(port) && port > 0 && port <= 65_535) found.add(port);
+    }
+    for (const item of Object.values(record)) visit(item);
+  };
+  for (const arg of args) {
+    if (!arg.trimStart().startsWith("{")) continue;
+    try { visit(JSON.parse(arg) as unknown); } catch { /* non-JSON provider argument */ }
+  }
+  return [...found];
 }
 
 /** Removes `<project>/.git` when all it holds is the empty `hooks` and `info` mount points. */
@@ -467,7 +589,16 @@ function removeMountPoint(hooks: string): void {
 
 /** Starts `true` under bubblewrap with the namespaces a launch gets: null when it runs, else bubblewrap's first line. */
 export function probeBubblewrap(bwrap: string): string | null {
-  const result = spawnSync(bwrap, ["--die-with-parent", "--unshare-pid", "--unshare-ipc", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"], {
+  return probeIsolationCommand(bwrap, ["--die-with-parent", "--unshare-pid", "--unshare-ipc", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "true"]);
+}
+
+/** Tests the same kernel boundary every strict launch applies; old or disabled Landlock refuses before launch. */
+export function probeNetworkIsolation(helper: string): string | null {
+  return probeIsolationCommand(helper, ["network-bridge", "--probe"]);
+}
+
+function probeIsolationCommand(command: string, args: string[]): string | null {
+  const result = spawnSync(command, args, {
     stdio: ["ignore", "ignore", "pipe"],
     encoding: "utf8",
     timeout: 5_000
@@ -491,6 +622,7 @@ function findOnPath(name: string, exists: (path: string) => boolean): string | n
   return null;
 }
 
+/** The folder of a session's control grant, from the launch environment (it is readable inside the layer). */
 export function controlGrantFolder(env: Readonly<Record<string, string | undefined>>): string | null {
   const connection = env.CANVASTTY_CONTROL_CONNECTION;
   return connection ? dirname(connection) : null;

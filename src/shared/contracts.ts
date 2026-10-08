@@ -508,6 +508,8 @@ export interface SessionIsolation {
   layer?: "seatbelt" | "bubblewrap";
   /** Why it is not on, or what changed because of that (e.g. auto ran as normal). */
   reason?: string;
+  /** Network access enforced for this agent's process tree. */
+  network?: { mode: "open" | "allowed-domains" | "offline"; domains: string[] };
 }
 
 export interface CreateSessionRequest {
@@ -1080,7 +1082,11 @@ export interface GithubAuthStatus {
   authorized: boolean;
   login: string | null;
   tokenExpiresAt: number | null;
+  /** Optional for compatibility with older hosts that do not report device-flow outcomes. */
+  deviceFlowState?: GithubDeviceFlowState;
 }
+
+export type GithubDeviceFlowState = "idle" | "pending" | "denied" | "expired" | "failed" | "cancelled";
 
 export interface GithubDeviceFlowStart {
   userCode: string;
@@ -1886,6 +1892,7 @@ export interface CanvasTTYApi {
   githubAuth: {
     status(): Promise<GithubAuthStatus>;
     start(): Promise<GithubDeviceFlowStart>;
+    cancel(): Promise<void>;
     signOut(): Promise<void>;
     openUrl(url: string): Promise<void>;
   };
@@ -2063,6 +2070,7 @@ export const IPC = {
   windowOpenUpdates: "window:open-updates",
   githubAuthStatus: "github-auth:status",
   githubAuthStart: "github-auth:start",
+  githubAuthCancel: "github-auth:cancel",
   githubAuthSignOut: "github-auth:sign-out",
   githubAuthOpenUrl: "github-auth:open-url",
   terminalList: "terminal:list",

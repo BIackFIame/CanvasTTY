@@ -68,6 +68,7 @@ import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
+import type { AgentNetworkMode } from "./isolation/networkPolicy.ts";
 import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
@@ -315,7 +316,7 @@ export class TerminalManager {
   // spawned while it is set; null while the endpoint is off.
   private controlConnection: ControlConnection | null = null;
   // The operating-system isolation layer (null: none configured, e.g. in unit tests).
-  private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null = null;
+  private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> & Partial<Pick<AgentIsolation, "networkPolicyFor">> | null = null;
   // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
   private readonly isolationCleanups = new Map<string, () => void>();
   /** Open git risk reports by id: the card it belongs to (none once closed) and what neutralize removes. */
@@ -357,7 +358,7 @@ export class TerminalManager {
   }
 
   /** The operating-system isolation layer around delegated and non-manual agents (isolation/AgentIsolation.ts). */
-  configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null): void {
+  configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> & Partial<Pick<AgentIsolation, "networkPolicyFor">> | null): void {
     this.isolation = isolation;
   }
 
@@ -570,7 +571,7 @@ export class TerminalManager {
     const target=this.sessions.get(id);if(!target)throw new Error("Terminal session does not exist.");
     const cwd=realpathSync(this.launchContexts.get(id)?.cwd ?? target.metadata.cwd);
     const targetScopes=new Set([cwd]);let targetScopeAmbiguous=false;
-    for(const path of [target.metadata.cwd,target.metadata.taskScope?.cwd ?? this.taskProjectRoot(target.metadata.cwd,target.metadata.parentSessionId)]) {
+    for(const path of [target.metadata.cwd,target.metadata.taskScope?.cwd ?? this.networkProjectRoot(target.metadata.cwd,target.metadata.parentSessionId)]) {
       try {targetScopes.add(realpathSync(path));}catch {targetScopeAmbiguous=true;}
     }
     const affected:ManagedSession[]=[];
@@ -1117,8 +1118,8 @@ export class TerminalManager {
     if(inheritedTaskRootId && this.budgetPausedTaskRoots.has(inheritedTaskRootId)) {
       throw new LaunchRefusal("This task's usage budget is paused. Clear or raise the task budget before starting another agent.");
     }
-    const taskProjectRoot = continuationScope?.cwd ?? this.taskProjectRoot(request.cwd, request.parentSessionId);
-    const decision = this.decideIsolation(request.provider, request.profile, delegated, null, taskProjectRoot);
+    const networkProjectRoot = continuationScope?.cwd ?? this.networkProjectRoot(request.cwd, request.parentSessionId);
+    const decision = this.decideIsolation(request.provider, request.profile, delegated, null, networkProjectRoot);
     if (decision.refuse) throw new LaunchRefusal(decision.refuse);
     if (reviewerControl && (!decision.apply || decision.profile !== "plan")) {
       throw new LaunchRefusal("A diff-only reviewer requires the operating-system isolation layer and a read-only Plan profile. The reviewer was not started.");
@@ -1163,7 +1164,7 @@ export class TerminalManager {
         ? { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null, failure: null }
         : this.spawnProcess(id, request.provider, request.profile, request.cwd,
           INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, captureResult, role,
-          control.answerCaptureGrantExpiresAt, reviewerControl?.account?.contribution ?? null, request.parentSessionId, taskProjectRoot, reviewerControl, control.captureReviewDiff === true);
+          control.answerCaptureGrantExpiresAt, reviewerControl?.account?.contribution ?? null, request.parentSessionId, networkProjectRoot, reviewerControl, control.captureReviewDiff === true);
     } finally {
       this.startingModels.delete(id);
       this.startingOwners.delete(id);
@@ -1754,6 +1755,16 @@ export class TerminalManager {
     return session?.captureResult ? session.acceptedLifecycleState ?? null : null;
   }
 
+  /** Host-only turn authority: accepted working/approval state for this input generation, on a live PTY. */
+  observedTurnGeneration(id: string): number | null {
+    const session = this.sessions.get(id);
+    if (!session?.process || session.metadata.exitCode !== null || session.metadata.status === "failed"
+      || session.metadata.status === "done" || this.isCheckpointRestoreActive(id)
+      || !["working", "needs_approval"].includes(session.acceptedLifecycleState ?? "")) return null;
+    const generation = session.inputGeneration ?? 0;
+    return session.answerTurnGeneration === generation ? generation : null;
+  }
+
   /** Capture before starting an asynchronous answer read when the source has no provider turn id. */
   answerCaptureGeneration(id: string): number | null {
     const session = this.sessions.get(id);
@@ -2327,7 +2338,7 @@ export class TerminalManager {
     answerCaptureGrantExpiresAt?: number,
     contribution: LaunchContribution | null = null,
     parentSessionId?: string,
-    taskProjectRoot?: string,
+    networkProjectRoot?: string,
     reviewerControl?: ReadOnlyReviewerLaunch,
     captureReviewDiff = this.sessions.get(id)?.captureReviewDiff === true
   ): {
@@ -2338,7 +2349,7 @@ export class TerminalManager {
     failure: LaunchFailure | null;
   } {
     const none = { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null };
-    const projectRoot = taskProjectRoot ?? this.taskProjectRoot(cwd, parentSessionId);
+    const projectRoot = networkProjectRoot ?? this.networkProjectRoot(cwd, parentSessionId);
     const decision = this.launchIsolation(id, provider, profile, role, null, projectRoot);
     if (decision.refuse) return { ...none, failure: { diagnostic: `Launch refused: ${decision.refuse}`, exitCode: 1 } };
     if (reviewerControl && (!decision.apply || decision.profile !== "plan")) {
@@ -2346,7 +2357,7 @@ export class TerminalManager {
     }
     profile = decision.profile;
     const planned = this.planSpawn(id, provider, profile, cwd, resume, captureResult, role, answerCaptureGrantExpiresAt, contribution,
-      reviewerControl ? undefined : this.personTrustedFolder(parentSessionId, cwd), false, decision.apply, Boolean(reviewerControl));
+      reviewerControl ? undefined : this.personTrustedFolder(parentSessionId, cwd), false, decision.apply, decision.isolation?.network?.mode ?? "open", Boolean(reviewerControl));
     if ("failure" in planned) {
       return { ...none, failure: planned.failure };
     }
@@ -2354,7 +2365,7 @@ export class TerminalManager {
     let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
     if (decision.apply) {
       try {
-        spawn = this.wrapIsolated(id, provider, profile, planned, projectRoot, contribution?.accountHome, reviewerControl?.deniedReadPaths);
+        spawn = this.wrapIsolated(id, provider, profile, planned, projectRoot, contribution?.accountHome, reviewerControl?.deniedReadPaths, contribution?.apiDomains);
       } catch (error) {
         planned.cleanup();
         return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
@@ -2412,8 +2423,8 @@ export class TerminalManager {
     return role === "subagent" || Boolean(this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id));
   }
 
-  /** Resolve the original task project for account and reviewer launches. */
-  private taskProjectRoot(cwd: string, parentSessionId?: string): string {
+  /** Project policy follows the user's logical task root through child worktrees and approved handoffs. */
+  private networkProjectRoot(cwd: string, parentSessionId?: string): string {
     let current = parentSessionId ? this.sessions.get(parentSessionId) : undefined;
     let root: ManagedSession | undefined;
     const visited = new Set<string>();
@@ -2425,10 +2436,33 @@ export class TerminalManager {
     return root?.metadata.taskScope?.cwd ?? root?.metadata.cwd ?? cwd;
   }
 
+  /** Revokes live browser capabilities as soon as a policy becomes restrictive. Existing PTYs still need a restart
+   * for OS-level egress enforcement; newly planned launches omit the browser bridge entirely. */
+  revokeBrowserCapabilitiesForStrictNetwork(projectRoot?: string): number {
+    const targetRoot = projectRoot === undefined ? undefined : canonicalProjectPath(projectRoot);
+    let revoked = 0;
+    for (const session of this.sessions.values()) {
+      if (!session.agentBrowser || session.metadata.provider === "terminal") continue;
+      const root = session.metadata.taskScope?.cwd ?? this.networkProjectRoot(session.metadata.cwd, session.metadata.parentSessionId);
+      if (targetRoot !== undefined && canonicalProjectPath(root) !== targetRoot) continue;
+      let mode: AgentNetworkMode | undefined;
+      try { mode = this.isolation?.networkPolicyFor?.(root, session.metadata.provider)?.mode; }
+      catch { mode = "offline"; }
+      if (!mode || mode === "open") continue;
+      const browser = session.agentBrowser;
+      session.agentBrowser = null;
+      try { browser.cleanup(); } catch { /* a revoked gateway lease must not interrupt other session cleanup */ }
+      revoked++;
+    }
+    return revoked;
+  }
+
   private decideIsolation(provider: ProviderId, profile: LaunchProfile, delegated: boolean, environment: { isolated: boolean; label: string } | null,
     cwd?: string): IsolationDecision {
     if (!this.isolation) return { apply: false, profile };
     const decision = this.isolation.decide({ provider, profile, delegated, environment, cwd });
+    const network = this.isolation.networkPolicyFor?.(cwd, provider) ?? null;
+    if (decision.isolation && network) decision.isolation = { ...decision.isolation, network };
     return decision;
   }
 
@@ -2439,8 +2473,8 @@ export class TerminalManager {
   private launchIsolation(id: string, provider: ProviderId, profile: LaunchProfile, role: SessionRole,
     environment: { isolated: boolean; label: string } | null, projectRoot?: string): IsolationDecision {
     const metadata = this.sessions.get(id)?.metadata;
-    const taskProjectRoot = projectRoot ?? metadata?.taskScope?.cwd ?? this.taskProjectRoot(metadata?.cwd ?? "", metadata?.parentSessionId);
-    const decision = this.decideIsolation(provider, profile, this.isDelegated(id, role), environment, taskProjectRoot);
+    const networkProjectRoot = projectRoot ?? metadata?.taskScope?.cwd ?? this.networkProjectRoot(metadata?.cwd ?? "", metadata?.parentSessionId);
+    const decision = this.decideIsolation(provider, profile, this.isDelegated(id, role), environment, networkProjectRoot);
     if (metadata && !decision.refuse) {
       if (decision.isolation) metadata.isolation = decision.isolation;
       else delete metadata.isolation;
@@ -2451,8 +2485,8 @@ export class TerminalManager {
 
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
   private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile,
-    planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }, taskProjectRoot: string,
-    accountHome?: string, deniedReadPaths?: readonly string[]): { command: string; args: string[]; env: Record<string, string> } {
+    planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }, networkProjectRoot: string,
+    accountHome?: string, deniedReadPaths?: readonly string[], apiDomains?: readonly string[]): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
     const grant = controlGrantFolder(planned.env);
@@ -2460,7 +2494,7 @@ export class TerminalManager {
       sessionId: id,
       provider,
       cwd: planned.cwd,
-      taskProjectRoot,
+      networkProjectRoot,
       command: planned.command,
       args: planned.args,
       env: planned.env,
@@ -2469,6 +2503,7 @@ export class TerminalManager {
       ...(deniedReadPaths ? { restrictHomeReads:true, runtimeReadable:[planned.command,
         ...(this.agentRuntime?.readableRuntimePaths?.() ?? [])] } : {}),
       ...(accountHome ? { accountHome } : {}),
+      ...(apiDomains?.length ? { apiDomains } : {}),
       ...(grant ? { grantedPrivate: [grant] } : {})
     });
     this.releaseIsolation(id);
@@ -2518,6 +2553,7 @@ export class TerminalManager {
     trustedFolder?: string,
     environmentWrapped = false,
     isolated = false,
+    networkMode: AgentNetworkMode = "open",
     reviewOnly = false
   ): PlannedSpawn | { failure: LaunchFailure } {
     const providerCli = provider === "terminal" ? undefined : this.providerClis.get(provider);
@@ -2532,6 +2568,7 @@ export class TerminalManager {
       env: { ...terminalEnvironment(), ...providerCli.environment, ...(contribution?.env ?? {}) },
       args: contribution?.args ?? [],
       cwd,
+      networkMode
     } : undefined;
     const agentRuntime = provider === "terminal"
       ? null
@@ -2563,7 +2600,7 @@ export class TerminalManager {
       // and minimax until its MCP configuration is wired (plain PTY for now).
       // devin is cloud-session oriented and takes no browser adapter yet,
       // and antigravity keeps plain PTY integration for the same reason.
-      agentBrowser = reviewOnly || provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
+      agentBrowser = reviewOnly || networkMode !== "open" || provider === "terminal" || provider === "grok" || provider === "omp" || provider === "pi" || provider === "cursor" || provider === "minimax" || provider === "devin" || provider === "antigravity"
         ? null
         : this.agentBrowser?.prepareLaunch({
           terminalSessionId: id,
@@ -2762,7 +2799,7 @@ export class TerminalManager {
     if (choice && !session.extras.environment) {
       if (!environments) return refuse("plugin environments are not available.");
       const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice,
-        projectRoot:metadata.taskScope?.cwd ?? this.taskProjectRoot(metadata.cwd,metadata.parentSessionId) });
+        projectRoot:metadata.taskScope?.cwd ?? this.networkProjectRoot(metadata.cwd,metadata.parentSessionId) });
       if (!live()) {
         // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
         // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.
@@ -2822,6 +2859,7 @@ export class TerminalManager {
           profile: metadata.profile,
           role: metadata.role,
           cwd: metadata.cwd,
+          projectRoot: metadata.taskScope?.cwd ?? this.networkProjectRoot(metadata.cwd,metadata.parentSessionId),
           ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
           restoring,
           resume: resume !== null,
@@ -2845,9 +2883,9 @@ export class TerminalManager {
       if (environment && keeps.launch !== true && metadata.profile !== "normal") {
         return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
       }
-      const taskProjectRoot = metadata.taskScope?.cwd ?? this.taskProjectRoot(metadata.cwd, metadata.parentSessionId);
+      const networkProjectRoot = metadata.taskScope?.cwd ?? this.networkProjectRoot(metadata.cwd, metadata.parentSessionId);
       const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
-        environment ? { isolated: keeps.isolated === true, label: environment.label } : null, taskProjectRoot);
+        environment ? { isolated: keeps.isolated === true, label: environment.label } : null, networkProjectRoot);
       if (decision.refuse) {
         return refuse(decision.refuse);
       }
@@ -2860,7 +2898,8 @@ export class TerminalManager {
       let planned: PlannedSpawn | { failure: LaunchFailure };
       try {
         planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
-          session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
+          session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply,
+          decision.isolation?.network?.mode ?? "open");
       } catch (error) {
         metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
         return "failed";
@@ -2907,7 +2946,7 @@ export class TerminalManager {
       }
       if (decision.apply) {
         try {
-          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, taskProjectRoot, contribution?.accountHome, undefined), cwd: spawn.cwd };
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, networkProjectRoot, contribution?.accountHome, undefined, contribution?.apiDomains), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
         }
@@ -2937,7 +2976,7 @@ export class TerminalManager {
       if(isolatedEnvironment) {
         const evidence=session.extras.isolatedEnvironmentScopes!;
         // Keep the declaration used for this launch, never re-read a changed/removed plugin at restore time.
-        for(const path of [requestedCwd,taskProjectRoot,metadata.cwd,spawn.cwd]) {
+        for(const path of [requestedCwd,networkProjectRoot,metadata.cwd,spawn.cwd]) {
           try {
             const root=realpathSync(path);
             if(!evidence.roots.includes(root)) {

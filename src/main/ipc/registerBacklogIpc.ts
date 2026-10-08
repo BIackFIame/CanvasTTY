@@ -1,3 +1,5 @@
+import type { SecretGrantDuration } from "../../shared/backlog.ts";
+import type { SecretGrantService } from "../services/SecretGrantService.ts";
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
 import { BACKLOG_IPC, BACKLOG_EVENTS, type NotificationPreferences, type UsagePrice } from "../../shared/backlog.ts";
 import type { IpcRegistrar } from "./IpcReadinessGate.ts";
@@ -14,6 +16,7 @@ import type { OrchestrationTemplateService } from "../services/OrchestrationTemp
 import type { UsagePrices } from "../services/UsagePrices.ts";
 import type {SessionReports} from "../services/SessionReports.ts";
 interface Dependencies {
+  secretGrants?: SecretGrantService;
   reports?:SessionReports;
   usagePrices:UsagePrices;
   board:OrchestrationTaskBoard; budgets:OrchestrationBudgetService; flows:OrchestrationTemplateService;
@@ -133,6 +136,40 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     if(!selected.parentSessionId)for(const historicalId of timeline.sessionIds(root(id).id))ids.add(historicalId);
     return [...ids];
   };
+  const secretScope = (id: string): { task: {id:string;cwd:string;startedAt:number}; sessionIds: string[] } => {
+    const task = root(id);
+    const sessionIds = terminals.listMetadata().flatMap((row) => {
+      try { return deps.taskRoot(row.id).id === task.id ? [row.id] : []; }
+      catch { return []; }
+    });
+    return { task, sessionIds: sessionIds.length ? sessionIds : [id] };
+  };
+  const grants = (): SecretGrantService => {
+    if (!deps.secretGrants) throw new Error("Secret-grant controls are unavailable.");
+    return deps.secretGrants;
+  };
+  handle(BACKLOG_IPC.secretRequests, (id: string) => {
+    const scope = secretScope(id);
+    return grants().pending(scope.sessionIds).map((request) => ({ ...request, reason: terminals.redactSecrets(request.reason) }));
+  });
+  handle(BACKLOG_IPC.secretGrants, (id: string) => grants().listGrants(secretScope(id).sessionIds));
+  handle(BACKLOG_IPC.approveSecretRequest, (id: string, requestId: string, duration: SecretGrantDuration) => {
+    if (typeof requestId !== "string" || requestId.length > 64 || !["10m", "turn", "session"].includes(duration)) throw new Error("Invalid secret approval request.");
+    const service = grants(), scope = secretScope(id);
+    if (!service.pending(scope.sessionIds).some((request) => request.id === requestId)) throw new Error("Secret request is outside this task or has expired.");
+    return service.approve(requestId, duration);
+  });
+  handle(BACKLOG_IPC.denySecretRequest, (id: string, requestId: string) => {
+    if (typeof requestId !== "string" || requestId.length > 64) throw new Error("Invalid secret request.");
+    const service = grants(), scope = secretScope(id);
+    if (!service.pending(scope.sessionIds).some((request) => request.id === requestId)) throw new Error("Secret request is outside this task or has expired.");
+    service.deny(requestId);
+  });
+  handle(BACKLOG_IPC.revokeSecretGrant, (id: string, grantSessionId: string, secretId: string) => {
+    const service = grants(), scope = secretScope(id);
+    if (typeof grantSessionId !== "string" || !scope.sessionIds.includes(grantSessionId)) throw new Error("Secret grant is outside this task.");
+    return service.revoke(grantSessionId, secretId);
+  });
   handle(BACKLOG_IPC.usagePrices,()=>deps.usagePrices.get());
   handle(BACKLOG_IPC.setUsagePrices,(rows:UsagePrice[])=>deps.usagePrices.set(rows));
   handle(BACKLOG_IPC.usageBreakdown,(id:string|undefined,period:"all"|"day"|"week")=>{

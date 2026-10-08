@@ -14,6 +14,7 @@ import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { MAX_INSPECTED_CONFIG_BYTES, parseJsonc, readInspectedFile } from "./inspectedConfig.ts";
 import { selectedAccountHome, selectedAccountId, ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
+import { accountContributionDomains } from "./isolation/configuredApiDomains.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
 export interface LaunchContributor {
@@ -81,6 +82,8 @@ export type PreparedLaunch =
     /** Host-derived selected Accounts CLI home, passed transiently to AgentIsolation for exact-path validation. */
     accountHome?: string;
     accountId?:string;
+    /** Model API hosts of the selected model account (allowed-domains mode keeps them reachable). */
+    apiDomains?: string[];
     cleanup(): Promise<void>;
   }
   | { ok: false; reason: string };
@@ -278,6 +281,7 @@ export class LaunchPipeline {
     let thirdPartyModel = false;
     let accountHome: string | undefined;
     let accountId:string|undefined;
+    const apiDomains = new Set<string>();
     for (const answer of answers) {
       if ("refuse" in answer) return refuse(answer.refuse);
     }
@@ -289,6 +293,7 @@ export class LaunchPipeline {
         if(contribution.accountId!==selectedAccountId(context.options))return refuse(`${name} returned an account attribution that differs from the selected account.`);
         accountId=contribution.accountId;
       }
+      if (contributor.pluginId === ACCOUNTS_PLUGIN_ID) for (const host of accountContributionDomains(contribution)) apiDomains.add(host);
       if (context.provider === "terminal" && contribution.args.length > 0) {
         return refuse(`${name} added arguments to a plain terminal, which takes none.`);
       }
@@ -349,7 +354,7 @@ export class LaunchPipeline {
       thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
     return { ok: true, env, args, secrets, envSources, thirdPartyModel, ...(accountHome ? { accountHome } : {}), ...(accountId ? {accountId} : {}),
-      cleanup };
+      ...(apiDomains.size ? { apiDomains: [...apiDomains] } : {}), cleanup };
   }
 
   private async ask(

@@ -376,6 +376,17 @@ test("the policy keeps the helper wherever an HTTP hook could not reach the gate
     return verdict.reason;
   };
   assert.match(refused({}, { platform: "win32" }), /Windows/u);
+  const linuxPolicy = policy({ platform: "linux" });
+  assert.equal(linuxPolicy.verdict({ ...facts, networkMode: "open" }).ok, true);
+  for (const networkMode of ["offline", "allowed-domains"]) {
+    const verdict = linuxPolicy.verdict({ ...facts, networkMode });
+    assert.equal(verdict.ok, false, `Linux ${networkMode} cannot reach the host loopback listener`);
+    assert.match(verdict.reason, /Linux strict network isolation/u);
+  }
+  for (const networkMode of ["offline", "allowed-domains"]) {
+    assert.equal(policy({ platform: "darwin" }).verdict({ ...facts, networkMode }).ok, true,
+      `macOS ${networkMode} can use the narrowly allowed loopback hook port`);
+  }
   assert.match(refused({ environmentWrapped: true }), /environment/u);
   assert.match(refused({ profile: "auto" }), /sandbox/u);
   assert.match(refused({}, { version: () => "2.1.280" }), /older/u);

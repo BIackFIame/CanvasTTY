@@ -4,17 +4,19 @@ import { t } from "../../lib/i18n";
 import type { NotificationPreferences, TaskBudgetSnapshot } from "../../../../shared/backlog";
 import { backlogApi, type BacklogTask } from "./backlogRendererApi";
 import { backlogText, type BacklogTextKey } from "./workspaceBacklogText";
+import { SecretGrantsPanel } from "./SecretGrantsPanel";
 import { UsageBreakdownPanel } from "./UsageBreakdownPanel";
+import { NetworkPolicyPanel } from "./NetworkPolicyPanel";
 import { InspectorLoadGate } from "./inspectorLoadGate";
 import { useDialogFocus } from "./useDialogFocus";
 import { downloadText } from "./workspaceDom";
 import { DraftRevision, shouldHydrateDraft } from "./workspaceAsyncState";
 import { useVisibleRefresh } from "./visibleRefresh";
 
-type InspectorTab = "timeline" | "usage" | "report" | "checkpoints" | "tasks" | "budget" | "notifications";
+type InspectorTab = "timeline" | "usage" | "report" | "checkpoints" | "tasks" | "budget" | "notifications" | "secrets";
 const TAB_LABELS:Record<InspectorTab,BacklogTextKey>={
   timeline:"tabTimeline",usage:"tabUsage",report:"tabReport",checkpoints:"tabCheckpoints",
-  tasks:"tabTasks",budget:"tabBudget",notifications:"tabNotifications"
+  tasks:"tabTasks",budget:"tabBudget",notifications:"tabNotifications",secrets:"tabSecrets"
 };
 const TASK_STATUS_LABELS:Record<BacklogTask["status"],BacklogTextKey>={
   open:"taskOpen",claimed:"taskClaimed",done:"taskDone",closed:"taskClosed"
@@ -136,7 +138,8 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
         const next = await api.notificationPreferences();
         if (!mounted.current) return;
         setNotifications(next);
-
+      } else if (selected === "secrets") {
+        // The secret and network panels load their own scoped snapshots.
       } else {
         const draftRevision = budgetDraftRevision.current.capture();
         const next = await api.budget(rootSessionId);
@@ -292,7 +295,7 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
           <button type="button" onClick={onClose} aria-label={t(locale, "close")}>×</button>
         </header>
         <nav className="backlog-inspector__tabs" aria-label={bt("inspectorTabs")}>
-          {(["timeline", "usage", "report", "checkpoints", "tasks", "budget", "notifications"] as const).map((name) => (
+          {(["timeline", "usage", "report", "checkpoints", "tasks", "budget", "notifications", "secrets"] as const).map((name) => (
             <button key={name} type="button" aria-pressed={tab === name} onClick={() => { setTab(name); setPreview(null); }}>
               {bt(TAB_LABELS[name])}
             </button>
@@ -353,6 +356,10 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
               <UsageBreakdownPanel sessionId={rootSessionId} filename={`${safeFilename(session.title)}-usage.csv`} locale={locale} onError={onPanelError} />
             </div>
           )}
+          {tab === "secrets" && <div className="backlog-safety-panels">
+            <SecretGrantsPanel sessionId={rootSessionId} sessions={taskMembers} locale={locale} onError={onPanelError} />
+            <NetworkPolicyPanel sessionId={rootSessionId} />
+          </div>}
           {tab === "report" && report !== "" && (
             <div className="backlog-report">
               <button className="backlog-inspector__secondary" type="button" onClick={downloadReport}>{bt("exportReport")}</button>

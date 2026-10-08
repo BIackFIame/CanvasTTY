@@ -1328,6 +1328,100 @@
         }
       },
       {
+        "name": "request_secret",
+        "description": "Ask the person to approve temporary use of one configured provider secret for typed provider API requests. This only creates a pending UI request; never ask the person to paste a key into chat or tool arguments. Approval is scoped to this session and lasts 10 minutes, until this turn ends, or until the session ends.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "secretId": {
+              "type": "string",
+              "enum": [
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "XAI_API_KEY",
+                "GOOGLE_API_KEY",
+                "ZAI_API_KEY",
+                "MINIMAX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "DEVIN_API_KEY",
+                "CURSOR_API_KEY"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          },
+          "required": [
+            "secretId",
+            "reason"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "name": "run_secret_request",
+        "description": "Send a typed HTTPS API request using a configured provider secret for which this session has current human approval. secretId selects the approved key; apiProfileId optionally selects a human-saved profile using that same key. The host chooses the profile base URL and protocol authentication. Supply only a relative API path, method and optional JSON body; custom origins, headers, redirects and executable commands are unavailable. The response body is masked and capped, and the host may refuse if it cannot enforce isolation.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "secretId": {
+              "type": "string",
+              "enum": [
+                "OPENAI_API_KEY",
+                "ANTHROPIC_API_KEY",
+                "XAI_API_KEY",
+                "GOOGLE_API_KEY",
+                "ZAI_API_KEY",
+                "MINIMAX_API_KEY",
+                "OPENROUTER_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "DEVIN_API_KEY",
+                "CURSOR_API_KEY"
+              ]
+            },
+            "apiProfileId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "method": {
+              "type": "string",
+              "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE"
+              ]
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048
+            },
+            "body": {
+              "type": "object",
+              "maxProperties": 1024,
+              "additionalProperties": true
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 300000
+            }
+          },
+          "required": [
+            "secretId",
+            "method",
+            "path"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
         "name": "apply_orchestration_template",
         "description": "Get the roles, expected number of subagents and final-step instructions for a flow, ready to apply to a task.",
         "inputSchema": {

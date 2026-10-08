@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test from "node:test";
-import { AgentIsolation, ISOLATION_FOLDER_PREFIX, probeBubblewrap } from "../src/main/services/isolation/AgentIsolation.ts";
+import { AgentIsolation, ISOLATION_FOLDER_PREFIX, probeBubblewrap, probeNetworkIsolation } from "../src/main/services/isolation/AgentIsolation.ts";
 import { isolationPaths } from "../src/main/services/isolation/isolationPaths.ts";
 import { seatbeltProfile } from "../src/main/services/isolation/seatbelt.ts";
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
@@ -59,9 +59,9 @@ function isolation(w, options = {}) {
 }
 
 /** Runs `sh -c script` under the generated profile; returns stdout lines. */
-function run(w, script, { provider = "codex", env = {}, granted, cwd = w.project, taskProjectRoot } = {}) {
+function run(w, script, { provider = "codex", env = {}, granted, cwd = w.project, networkProjectRoot } = {}) {
   const wrapped = isolation(w).wrap({ sessionId: "s1", provider, cwd: cwd.normalize("NFC"), command: "/bin/sh", args: ["-c", script],
-    env: { ...w.env, ...env }, ...(granted ? { grantedPrivate: granted } : {}), ...(taskProjectRoot ? { taskProjectRoot } : {}) });
+    env: { ...w.env, ...env }, ...(granted ? { grantedPrivate: granted } : {}), ...(networkProjectRoot ? { networkProjectRoot } : {}) });
   try {
     const result = spawnSync(wrapped.command, wrapped.args, { cwd, env: wrapped.env, encoding: "utf8", timeout: 20_000 });
     return { lines: result.stdout.split("\n").filter(Boolean), stderr: result.stderr, env: wrapped.env };
@@ -177,6 +177,9 @@ test("the bubblewrap check reports what bubblewrap said, and a missing binary", 
   assert.equal(probeBubblewrap(ok), null);
   assert.match(probeBubblewrap(join(dir, "missing")), /ENOENT/u);
   await writeFile(ok, "#!/bin/sh\n[ \"$1\" = network-bridge ] && [ \"$2\" = --probe ] && [ \"$#\" = 2 ]\n", { mode: 0o755 });
+  assert.equal(probeNetworkIsolation(ok), null, "the guard probe executes the native helper's exact capability check");
+  assert.match(probeNetworkIsolation(fake), /Permission denied/u);
+  assert.match(probeNetworkIsolation(join(dir, "missing")), /ENOENT/u);
 });
 
 test("the paths: the project and the CLI's own folders writable; other CLIs' credentials, keys and CanvasTTY's tokens unreadable", async (t) => {
@@ -266,11 +269,11 @@ test("host validation refuses a linked worktree sharing the primary checkout bra
   const duplicate = addPrimaryBranchDuplicate(fixture);
   assert.equal(worktreeGitAccess(duplicate, fixture.main, w.userData), null);
   const linux = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
-  assert.throws(() => linux.wrap({ sessionId: "shared", provider: "codex", cwd: duplicate, taskProjectRoot: fixture.main,
+  assert.throws(() => linux.wrap({ sessionId: "shared", provider: "codex", cwd: duplicate, networkProjectRoot: fixture.main,
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u);
   const outsideAlias = join(fixture.worktrees, "outside-alias");
   await symlink(fixture.main, outsideAlias, "dir");
-  assert.throws(() => linux.wrap({ sessionId: "alias", provider: "codex", cwd: outsideAlias, taskProjectRoot: fixture.main,
+  assert.throws(() => linux.wrap({ sessionId: "alias", provider: "codex", cwd: outsideAlias, networkProjectRoot: fixture.main,
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u,
   "a lexical plugin-data path that resolves outside is still rejected");
 });
@@ -339,7 +342,7 @@ test("seatbelt, for real: Plan refuses a provider home that overlaps its read-on
   const fixture = await linkedWorktree(w);
   const original = await readFile(join(fixture.actor, "tracked.txt"), "utf8");
   const layer = isolation(w);
-  assert.throws(() => layer.wrap({ sessionId: "plan-overlap", provider: "codex", cwd: fixture.actor, taskProjectRoot: fixture.main,
+  assert.throws(() => layer.wrap({ sessionId: "plan-overlap", provider: "codex", cwd: fixture.actor, networkProjectRoot: fixture.main,
     command: "/bin/sh", args: ["-c", "echo should-not-run >> tracked.txt"], profile: "plan", env: { ...w.env, CODEX_HOME: fixture.actor } }),
   /overlaps the read-only project/u, "fail closed before the command could be launched with a writable project root");
   assert.equal(await readFile(join(fixture.actor, "tracked.txt"), "utf8"), original);
@@ -564,7 +567,7 @@ test("seatbelt, for real: a plugin worktree stays editable while Git metadata an
     `echo changed > "${join(fixture.common, "refs", "heads", "actor-branch.evil")}" 2>/dev/null && echo SIBLING-REF-CREATE-ok || echo SIBLING-REF-CREATE-denied`,
     `echo changed > "${join(fixture.common, "index")}" 2>/dev/null && echo COMMON-INDEX-WRITE-ok || echo COMMON-INDEX-WRITE-denied`,
     `echo changed > "${join(actorGit, "HEAD")}" 2>/dev/null && echo WORKTREE-HEAD-WRITE-ok || echo WORKTREE-HEAD-WRITE-denied`
-  ].join("; "), { cwd: fixture.actor, taskProjectRoot: fixture.main,
+  ].join("; "), { cwd: fixture.actor, networkProjectRoot: fixture.main,
     env: { CODEX_HOME: fixture.common, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
   assert.deepEqual(lines, ["PARENT-READ-denied", "SIBLING-READ-denied", "PRIMARY-SOURCE-READ-ok", "PRIMARY-SOURCE-WRITE-denied", "PARENT-WRITE-denied", "SIBLING-WRITE-denied",
     "GIT-STATUS-ok", "GIT-ADD-denied", "GIT-COMMIT-denied", "OBJECT-TRUNCATE-denied", "OBJECT-DELETE-denied", "OBJECT-HARDLINK-denied",

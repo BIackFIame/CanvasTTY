@@ -20,6 +20,10 @@ import type { OrchestrationBudgetService } from "../OrchestrationBudgetService.t
 import type { OrchestrationTaskBoard, OrchestrationTaskPatch } from "../OrchestrationTaskBoard.ts";
 import type { OrchestrationTemplateService } from "../OrchestrationTemplateService.ts";
 
+import type { SecretGrantService } from "../SecretGrantService.ts";
+
+const SECRET_TOOL_NAMES = new Set(["request_secret", "run_secret_request"]);
+
 const TASK_TOOL_NAMES = new Set(["list_tasks", "claim_task", "update_task", "complete_task"]);
 const ORCHESTRATOR_ONLY_ADDITIONAL_TOOLS = new Set(["retry_agent"]);
 
@@ -27,6 +31,8 @@ export interface ScopedOrchestrationIntegrations {
   taskBoard?: OrchestrationTaskBoard;
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
   templates?: OrchestrationTemplateService;
+  /** Main-process grant manager; approval/revocation APIs are never exposed through agent tools. */
+  secretGrants?: Pick<SecretGrantService, "requestSecret" | "runSecretRequest">;
 }
 
 /**
@@ -58,6 +64,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     if (this.control.isReadOnlyReviewer(sessionId)) return [];
     const session = this.control.status(sessionId);
     const core = ORCHESTRATION_TOOL_DEFINITIONS.filter((tool) => {
+      if (SECRET_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.secretGrants) && session.provider !== "terminal";
       if (TASK_TOOL_NAMES.has(tool.name)) return Boolean(this.integrations.taskBoard);
       if (tool.name === "get_task_budget") return Boolean(this.integrations.budget);
       if (tool.name === "list_orchestration_templates" || tool.name === "apply_orchestration_template") return Boolean(this.integrations.templates);
@@ -77,6 +84,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (this.control.isReadOnlyReviewer(sessionId)) {
         throw orchestrationBridgeError("INVALID_REQUEST", "Read-only reviewers cannot call agent or plugin tools.", false);
       }
+      if (SECRET_TOOL_NAMES.has(request.tool)) return await this.secretTool(sessionId, request.tool, request.arguments, signal);
       if (isPluginOrchestrationTool(request.tool)) return await this.plugin(sessionId, session, request);
       if (TASK_TOOL_NAMES.has(request.tool)) {
         if (session.provider === "terminal") throw orchestrationBridgeError("INVALID_REQUEST", "Plain terminals cannot use the orchestration task board.", false);
@@ -125,6 +133,40 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         error instanceof Error ? error.message : "Orchestration command failed.",
         true
       );
+    }
+  }
+
+  private async secretTool(sessionId: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const service = this.integrations.secretGrants;
+    if (!service) throw orchestrationBridgeError("INVALID_REQUEST", "Secret-grant controls are unavailable.", false);
+    if (this.control.status(sessionId).provider === "terminal") {
+      throw orchestrationBridgeError("INVALID_REQUEST", "Provider secrets are available to agent sessions only.", false);
+    }
+    try {
+      this.control.assertInputAllowed(sessionId);
+      if (tool === "request_secret") {
+        const request = service.requestSecret(
+          sessionId,
+          args.secretId as string,
+          this.control.maskText(args.reason as string, 1_000)
+        );
+        return { pendingApproval: true, request };
+      }
+      if (tool === "run_secret_request") {
+        const result = await service.runSecretRequest(sessionId, {
+          secretId: args.secretId as string,
+          ...(typeof args.apiProfileId === "string" ? { apiProfileId: args.apiProfileId } : {}),
+          method: args.method as string,
+          path: args.path as string,
+          ...(args.body && typeof args.body === "object" && !Array.isArray(args.body) ? { body: args.body as Record<string, unknown> } : {}),
+          ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {})
+        }, signal);
+        return { ...result };
+      }
+      throw new Error("Unsupported secret operation.");
+    } catch (error) {
+      if (signal?.aborted) throw canceledError();
+      throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : "Secret operation failed.", false);
     }
   }
 

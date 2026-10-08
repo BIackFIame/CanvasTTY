@@ -163,13 +163,13 @@ test('accepted turn end clears a failed attempt; permission callbacks deny durin
  const paused=new Set(),pause={supported:true,isPaused:p=>paused.has(p),pause(p){paused.add(p);return{supported:true};},resume(p){paused.delete(p);return{supported:true};}};
  const terminals=new TerminalManager(()=>{},availableRegistry(),undefined,undefined,true,fakeSpawner([]),pause);t.after(()=>terminals.disposeAll());
  const worker=terminals.create({provider:'grok',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});terminals.resize(worker.id,80,24);terminals.applyProviderSignal(worker.id,{state:'idle'});
- const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0,decisions=0,hold=false;
- const sandbox={timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(hold){entered.resolve();await release.promise;}else throw new Error('unavailable');}},redaction:{redact:x=>x},console:{warn(){}},AbortController,agentControl:undefined,evenG2:undefined,budgetInputGate:()=>{},decisionHooks:{decide:()=>{decisions++;return{behavior:'allow'};}},result:null};runInNewContext(code,sandbox);
+ const entered=deferred(),release=deferred();t.after(()=>release.resolve());let captures=0,decisions=0,hold=false;const ended=[];
+ const sandbox={secretGrants:{turnEnded:id=>ended.push(id),revalidateTurn:()=>{}},timeline:{append:async()=>{}},terminalManager:terminals,checkpoints:{capture:async()=>{captures++;if(hold){entered.resolve();await release.promise;}else throw new Error('unavailable');}},redaction:{redact:x=>x},console:{warn(){}},AbortController,agentControl:undefined,evenG2:undefined,budgetInputGate:()=>{},decisionHooks:{decide:()=>{decisions++;return{behavior:'allow'};}},result:null};runInNewContext(code,sandbox);
  await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,1);
  sandbox.result.onSignal(worker.id,{state:'idle'});
  await sandbox.result.beforeLifecycle(worker.id,{state:'working'},new AbortController().signal);assert.equal(captures,2,'an accepted end allows the next provider turn');
- sandbox.result.onSignal(worker.id,{state:'idle'});hold=true;
+ sandbox.result.onSignal(worker.id,{state:'idle'});hold=true;assert.deepEqual(ended,[worker.id,worker.id],'accepted idle signals revoke turn grants');
  const pending=sandbox.result.onPermissionRequest(worker.id,{},new AbortController().signal);await entered.promise;
- await terminals.withCheckpointRestore(worker.id,async()=>{const answer=await sandbox.result.onPermissionRequest(worker.id,{},new AbortController().signal);assert.equal(answer.behavior,'deny');});
+ await terminals.withCheckpointRestore(worker.id,async()=>{sandbox.result.onSignal(worker.id,{state:'idle'});assert.equal(ended.length,2,'rejected stale signals cannot revoke grants');const answer=await sandbox.result.onPermissionRequest(worker.id,{},new AbortController().signal);assert.equal(answer.behavior,'deny');});
  release.resolve();assert.equal((await pending).behavior,'deny');assert.equal(decisions,0);
 });

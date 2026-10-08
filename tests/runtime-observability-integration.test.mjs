@@ -9,7 +9,7 @@ const callback=source.slice(start,source.indexOf('      onAnswerCaptureRevoked:'
 const code=(await transform('result={'+callback+'};',{loader:'ts',format:'cjs'})).code;
 test('production signal handler gates observability and correlated answers on host acceptance',async()=>{
  const calls=[];let accept=false;
- const sandbox={result:null,console,
+ const sandbox={result:null,console,secretGrants:{turnEnded:()=>calls.push(["secret-turn-end"]),revalidateTurn:()=>calls.push(["secret-revalidate"])},
   terminalManager:{
    applyProviderSignal:(id,signal)=>{calls.push(['apply',signal]);return accept;},
    getMetadata:()=>({provider:'codex',model:'model'}),pluginContext:()=>null,

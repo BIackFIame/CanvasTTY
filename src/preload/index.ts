@@ -224,6 +224,7 @@ const api: CanvasTTYApi = {
   githubAuth: {
     status: () => ipcRenderer.invoke(IPC.githubAuthStatus),
     start: () => ipcRenderer.invoke(IPC.githubAuthStart),
+    cancel: () => ipcRenderer.invoke(IPC.githubAuthCancel),
     signOut: () => ipcRenderer.invoke(IPC.githubAuthSignOut),
     openUrl: (url: string) => ipcRenderer.invoke(IPC.githubAuthOpenUrl, url)
   },
