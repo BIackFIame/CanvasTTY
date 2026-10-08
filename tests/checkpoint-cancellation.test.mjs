@@ -9,7 +9,7 @@ const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);re
 async function fixture(t){
  const root=await mkdtemp(join(tmpdir(),'ctty-cancel-point-')),project=join(root,'project');
  const git=(...args)=>execFileSync('git',args,{cwd:root,encoding:'utf8',env:{...process.env,GIT_CONFIG_GLOBAL:process.platform==='win32'?'NUL':'/dev/null',GIT_CONFIG_NOSYSTEM:'1'}}).trim();
- git('init','-q',project);git('-C',project,'config','user.name','Fixture');git('-C',project,'config','user.email','fixture@example.invalid');
+ git('init','-q',project);git('-C',project,'config','user.name','Fixture');git('-C',project,'config','user.email','fixture@example.invalid');git('-C',project,'config','core.autocrlf','false');git('-C',project,'config','core.eol','lf');
  await writeFile(join(project,'file.txt'),'base');git('-C',project,'add','.');git('-C',project,'commit','-qm','base');
  const checkpoints=new GitCheckpoints(text=>text,1,join(root,'registry.json'));
  t.after(async()=>{await checkpoints.captures.catch(()=>{});await rm(root,{recursive:true,force:true});});
@@ -58,10 +58,10 @@ test('restore serializes safety capture and both restores against queued capture
  const f=await fixture(t);await writeFile(join(f.project,'file.txt'),'saved uncommitted change');await f.checkpoints.capture('worker',f.project);const [point]=await f.checkpoints.list('worker',f.project);
  await writeFile(join(f.project,'file.txt'),'changed');const entered=deferred(),release=deferred();t.after(()=>release.resolve());
  const original=f.checkpoints.git.bind(f.checkpoints),operations=[];let hold=true;
- f.checkpoints.git=async(cwd,args,...rest)=>{if(args[0]==='stash'||args[0]==='restore')operations.push(args[0]==='stash'?'capture':args.includes('--staged')?'index':'worktree');if(args[0]==='restore'&&args.includes('--staged')&&hold){hold=false;entered.resolve();await release.promise;}return original(cwd,args,...rest);};
+ f.checkpoints.git=async(cwd,args,...rest)=>{if(args[0]==='stash'||args[0]==='restore')operations.push(args[0]==='stash'?'capture':args.includes('--staged')?'index':'worktree');if(args[0]==='restore'&&args.includes('--worktree')&&hold){hold=false;entered.resolve();await release.promise;}return original(cwd,args,...rest);};
  const restoring=f.checkpoints.restore('worker',f.project,point.id);await entered.promise;
- const captured=f.checkpoints.capture('later',f.project);assert.deepEqual(operations,['capture','index']);
- release.resolve();await Promise.all([restoring,captured]);assert.deepEqual(operations,['capture','index','worktree','capture']);
+ const captured=f.checkpoints.capture('later',f.project);assert.deepEqual(operations,['capture','worktree']);
+ release.resolve();await Promise.all([restoring,captured]);assert.deepEqual(operations,['capture','worktree','index','capture']);
  const [later]=await f.checkpoints.list('later',f.project);assert.equal((await f.checkpoints.preview('later',f.project,later.id)).text,'');
 });
 

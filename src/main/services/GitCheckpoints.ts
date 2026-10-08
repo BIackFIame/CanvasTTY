@@ -319,8 +319,10 @@ export class GitCheckpoints {
       // after capture, immediately before restore, in case Git garbage-collected the earlier import.
       const pack=row.pack&&this.packPath(row.cwd,row.pack);
       if(pack)await this.importPack(cwd,pack);
-      await this.git(cwd, ["restore", `--source=${indexOid}`, "--staged", "--", "."]);
+      // Keep the current index until Git removes tracked paths absent from the target worktree.
+      // Restoring the index first would turn post-checkpoint additions into untouched untracked files.
       await this.git(cwd, ["restore", `--source=${target}`, "--worktree", "--", "."]);
+      await this.git(cwd, ["restore", `--source=${indexOid}`, "--staged", "--", "."]);
       return {ok: true, message: "Tracked files restored; the previous work was saved as another checkpoint."};
     } finally {await release();}
   }
