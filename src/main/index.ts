@@ -924,7 +924,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     terminals: terminalManager,
     handoffTaskOwner:async(sourceId,replacementId)=>{
       const root=agentControlService.taskRoot(sourceId);
-      await taskBoard.transferOwner(root.cwd,root.id,sourceId,replacementId,managedTerminals.getMetadata(replacementId)?.title);
+      const transferred = await taskBoard.transferOwnerWithRollback(root.cwd,root.id,sourceId,replacementId,managedTerminals.getMetadata(replacementId)?.title);
+      return transferred.rollback;
     },
     installRecord:id=>pluginManager?.installRecord(id) ?? null,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)

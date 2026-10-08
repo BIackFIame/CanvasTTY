@@ -49,7 +49,7 @@ export interface PluginSessionEvent {
 }
 
 interface TerminalPort {
-  create(request: CreateSessionRequest, control?: { origin?: "plugin"; ownerPluginId?: string; continueTaskFrom?:string }): SessionSnapshot;
+  create(request: CreateSessionRequest, control?: { origin?: "plugin"; ownerPluginId?: string; continueTaskFrom?:string; reuseTaskEnvironmentFrom?:string }): SessionSnapshot;
   listMetadata(): SessionMetadata[];
   pluginContext(id: string): {
     metadata: SessionMetadata;
@@ -71,7 +71,7 @@ interface TerminalPort {
 export interface PluginSessionsDependencies {
   terminals: TerminalPort;
   experimentalEnabled?: () => boolean;
-  handoffTaskOwner?(sourceId:string,replacementId:string):Promise<void>;
+  handoffTaskOwner?(sourceId:string,replacementId:string):Promise<void | (() => Promise<void>)>;
   /** Live host install provenance; absent or untrusted records never receive activity. */
   installRecord?(pluginId:string):PluginInstallRecord|null;
   /** Sends a notification to a running service; false when it is not running. */
@@ -200,17 +200,28 @@ export class PluginSessions {
       ...(values.model !== undefined ? {model:values.model as string} : metadata.model ? {model:metadata.model} : {}),
       ...(values.effort !== undefined ? {effort:values.effort as CreateSessionRequest["effort"]} : metadata.effort ? {effort:metadata.effort} : {}),
       ...(values.launchOptions ? {launchOptions:values.launchOptions as CreateSessionRequest["launchOptions"]} : {})},
-      {origin:"plugin",ownerPluginId:pluginId,continueTaskFrom:metadata.id});
+      {origin:"plugin",ownerPluginId:pluginId,continueTaskFrom:metadata.id,...(source.environment ? {reuseTaskEnvironmentFrom:metadata.id} : {})});
+    let rollback: void | (() => Promise<void>) = undefined;
     try {
       this.deps.terminals.inheritTaskScope?.(metadata.id,created.id);
       const delivered=await this.deps.terminals.deliverInput(created.id,`${this.deps.terminals.redactSecrets(values.summary)}\r`);
       this.requireExperimental();
       if (!delivered.delivered) throw new Error("Replacement did not accept the handoff; the original agent is still running.");
-      await this.deps.handoffTaskOwner?.(metadata.id,created.id);
+      rollback = await this.deps.handoffTaskOwner?.(metadata.id,created.id);
+      this.requireExperimental();
       this.deps.terminals.completeTaskContinuation?.(metadata.id,created.id);
       this.deps.terminals.dispose(metadata.id,{keepEnvironmentData:true});
       return this.summary(created.id);
-    } catch (error) { this.deps.terminals.dispose(created.id,{keepEnvironmentData:true}); throw error; }
+    } catch (error) {
+      if (rollback) {
+        try { await rollback(); }
+        catch (rollbackError) {
+          // Keep an available replacement: it may still own tasks whose compensation could not be persisted.
+          throw new AggregateError([error, rollbackError], `Handoff failed and task ownership could not be restored. Replacement ${created.id} was retained if still available; inspect the task board before retrying.`);
+        }
+      }
+      this.deps.terminals.dispose(created.id,{keepEnvironmentData:true}); throw error;
+    }
   }
   activity(event: PluginActivity): void {
     const quotaEvent = event.type === "limit.exhausted" || event.type === "route.outcome";

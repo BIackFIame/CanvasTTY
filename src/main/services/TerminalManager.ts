@@ -170,6 +170,10 @@ interface ManagedSession {
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
+  /** Host launch choice, retained after prepare for exact continuation authorization. */
+  environmentLaunchChoice?: SessionEnvironmentChoice;
+  /** Until completion, source owns release; failed replacement must not release its worktree. */
+  borrowedEnvironment?: { sourceId: string; startedAt: number; environment: PersistedEnvironmentRef };
   /** Bumped by every launch the person or the app asks for (create, restart, restore); input waits for one. */
   launchEpoch: number;
   /** Initial measured-grid launch was requested while its task budget was paused. */
@@ -907,10 +911,15 @@ export class TerminalManager {
   completeTaskContinuation(sourceId:string,replacementId:string):void {
     if(!this.sessions.has(sourceId) || !this.sessions.has(replacementId))throw new Error("Handoff card is unavailable.");
     const source=this.sessions.get(sourceId)!,replacement=this.sessions.get(replacementId)!;
+    const borrowed = replacement.borrowedEnvironment;
+    if (borrowed && (borrowed.sourceId !== sourceId || borrowed.startedAt !== source.metadata.startedAt || borrowed.environment !== source.extras.environment)) {
+      throw new Error("The source worktree changed during handoff.");
+    }
     if(source.extras.environment?.kind==="worktree") {
       replacement.extras.environment=source.extras.environment;replacement.environmentReady=source.environmentReady;
       if(source.metadata.environment)replacement.metadata.environment={...source.metadata.environment};
       delete source.extras.environment;
+      delete replacement.borrowedEnvironment;
       this.emitSession(replacement.metadata);
     }
     for(const row of this.sessions.values())if(row.metadata.parentSessionId===sourceId){row.metadata.parentSessionId=replacementId;this.emitSession(row.metadata);}
@@ -1286,7 +1295,7 @@ export class TerminalManager {
 
   create(
     request: CreateSessionRequest,
-    control: { captureReviewDiff?: boolean; captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string } = {}
+    control: { captureReviewDiff?: boolean; captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string; reuseTaskEnvironmentFrom?:string } = {}
   ): SessionSnapshot {
     const reviewerControl = this.readOnlyReviewerRequests.get(request);
     if (reviewerControl) this.readOnlyReviewerRequests.delete(request);
@@ -1353,9 +1362,19 @@ export class TerminalManager {
       throw new LaunchRefusal("A diff-only reviewer requires the operating-system isolation layer and a read-only Plan profile. The reviewer was not started.");
     }
     if (decision.profile !== request.profile) request = { ...request, profile: decision.profile };
+    const continuation = control.reuseTaskEnvironmentFrom ? this.sessions.get(control.reuseTaskEnvironmentFrom) : undefined;
+    if (control.reuseTaskEnvironmentFrom && (!continuation || control.continueTaskFrom !== control.reuseTaskEnvironmentFrom
+      || request.environment || continuation.extras.environment?.kind !== "worktree" || !continuation.environmentReady
+      || request.cwd !== (this.launchContexts.get(continuation.metadata.id)?.cwd ?? continuation.metadata.cwd))) {
+      throw new LaunchRefusal("The source worktree is unavailable or changed; handoff was not launched locally.");
+    }
+    const borrowedEnvironment = continuation?.extras.environment;
+    const continuationChoice = borrowedEnvironment ? continuation!.environmentLaunchChoice
+      ?? continuation!.extras.executionAuthorization?.target.environment
+      ?? { pluginId: borrowedEnvironment.pluginId, kind: borrowedEnvironment.kind } : undefined;
     const environmentChoice = reviewerControl ? null : this.environments
-      ? this.environments.normalizeChoice(request.provider, request.environment) ?? null
-      : request.environment === undefined ? null : failWith("Plugin environments are not available.");
+      ? this.environments.normalizeChoice(request.provider, continuationChoice ?? request.environment) ?? null
+      : request.environment === undefined && !borrowedEnvironment ? null : failWith("Plugin environments are not available.");
     const execution = this.authorizeExecution({...request,environment:environmentChoice??undefined}, control.continueTaskFrom ?? request.parentSessionId, launchOptions, reviewerControl?.account?.contribution.accountId);
 
     const id = reviewerControl?.account?.id ?? randomUUID();
@@ -1440,16 +1459,19 @@ export class TerminalManager {
           ? { ...(this.sessions.get(control.continueTaskFrom)?.extras.executionPrivacy ?? executionPrivacyFromOptions(this.sessions.get(control.continueTaskFrom)?.extras.options)) }
           : executionPrivacyFromOptions(launchOptions),
         ...(launchOptions ? { options: launchOptions } : {}),
-        ...(environmentChoice ? { environmentChoice } : {}),
+        ...(borrowedEnvironment ? { environment: borrowedEnvironment } : environmentChoice ? { environmentChoice } : {}),
         ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
       },
       launchToken: 0,
       launchCleanup: null,
       restoringLaunch: false,
-      environmentReady: false,
+      environmentReady: Boolean(borrowedEnvironment),
+      ...(environmentChoice ? { environmentLaunchChoice: structuredClone(environmentChoice) } : {}),
+      ...(borrowedEnvironment ? { borrowedEnvironment: { sourceId: continuation!.metadata.id, startedAt: continuation!.metadata.startedAt, environment: borrowedEnvironment } } : {}),
       launchEpoch: 0,
       launchWaiters: new Set()
     };
+    if (borrowedEnvironment) metadata.environment = environmentBadge(borrowedEnvironment);
     this.sessions.set(id, session);
     const reviewerAccount = reviewerControl?.account?.contribution;
     if (reviewerAccount) {
@@ -2104,9 +2126,9 @@ export class TerminalManager {
       }
     }
     const environment = session.extras.environment;
-    if (environment && this.environments) {
+    if (environment && this.environments && !session.borrowedEnvironment) {
       if (!this.quitting) {
-        void this.environments.release(environment, id, { keepData: options.keepEnvironmentData ?? environment.kind!=="worktree", reason: "closed" });
+        void this.environments.release(environment, id, { keepData: [...this.sessions.values()].some(row => row.borrowedEnvironment?.environment === environment) || (options.keepEnvironmentData ?? environment.kind!=="worktree"), reason: "closed" });
       } else if (this.sessionRestoreMode === "off") {
         // Nothing is saved, so the environment will not come back: stop its compute, keep its data.
         this.quitReleases.push(this.environments.release(environment, id, {
@@ -2962,7 +2984,16 @@ export class TerminalManager {
       return "failed";
     };
     const environments = this.environments;
-    const check=():void=>this.assertExecutionAuthorization(session.extras.executionAuthorization,metadata.provider);
+    const check=():void=>{
+      const borrowed = session.borrowedEnvironment;
+      if (borrowed) {
+        const source = this.sessions.get(borrowed.sourceId);
+        if (!source || source.metadata.startedAt !== borrowed.startedAt || source.extras.environment !== borrowed.environment) {
+          throw new LaunchRefusal("The source worktree changed or closed during handoff.");
+        }
+      }
+      this.assertExecutionAuthorization(session.extras.executionAuthorization,metadata.provider);
+    };
     check();
     const approved=session.extras.executionAuthorization?.target;
     if(this.executionPolicy().enabled && approved && approved.accountId!=="default") {

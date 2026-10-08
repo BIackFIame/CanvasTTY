@@ -360,8 +360,13 @@ test("consented account handoff continues in the same real worktree after an alt
     "both the original and its replacement were launched in the same worktree");
   assert.equal(environmentCalls.filter(call => call.method === "canvastty.environment.prepare").length, 1,
     "handoff reuses the prepared worktree instead of asking the environment plugin for another");
-  assert.equal(environmentCalls.filter(call => call.method === "canvastty.environment.wrap").length, 1,
-    "the source was wrapped by its environment; the replacement's actual isolation wrapper runs around the same cwd");
+  const wraps = environmentCalls.filter(call => call.method === "canvastty.environment.wrap");
+  assert.deepEqual(wraps.map(call => call.params.sessionId), [source.id, failedReplacement.id, replacement.id],
+    "each launch uses the already prepared environment before isolation, including the refused replacement");
+  assert.ok(wraps.every(call => JSON.stringify(call.params.ref) === JSON.stringify(sourceRef)),
+    "every wrap uses the original worktree ref");
+  assert.equal(environmentCalls.filter(call => call.method === "canvastty.environment.resume").length, 0,
+    "borrowing the current environment does not resume or prepare it again");
   assert.equal(ptyCalls.at(-1).command, SANDBOX_EXEC, "the replacement goes through macOS's real AgentIsolation wrapper");
   assert.ok(networkRoots.every(path => path === project), `expected task-root isolation decisions: ${JSON.stringify(networkRoots)}`);
 

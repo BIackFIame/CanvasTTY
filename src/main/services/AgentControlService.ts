@@ -312,6 +312,7 @@ export class AgentControlService {
     this.requireBudgetActive(parent.id);
     const { childrenCount } = this.assertSpawnCapacity(parent.id);
     const cascade = childrenCount;
+    const strategyReview = this.executionContext(parent.id).strategy?.review === "required";
     const created = this.terminals.create({
       provider: request.provider,
       ...(request.executionTargetId?{executionTargetId:request.executionTargetId}:{}),
@@ -328,10 +329,9 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
+    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true || strategyReview });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
-    const strategyReview = this.executionContext(parent.id).strategy?.review === "required";
     if (strategyReview) this.strategyReviews.add(created.id);
     if (request.review === true || strategyReview) this.trackReview(created.id);
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);

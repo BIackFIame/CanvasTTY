@@ -16,7 +16,7 @@ const wait = async predicate => {
  for (let i=0;i<200;i++) { if (predicate()) return; await new Promise(resolve=>setTimeout(resolve,5)); }
  throw new Error('Fixture did not reach expected state');
 };
-async function fixture(t) {
+async function fixture(t, executionGoal) {
  const root = realpathSync(await mkdtemp(join(tmpdir(),'ctty-review-attribution-')));
  const project = join(root,'project'); await mkdir(project);
  git(project,'init'); await writeFile(join(project,'.gitignore'),'.workers/\n');
@@ -36,7 +36,7 @@ async function fixture(t) {
   wrap:launch=>({command:launch.command,args:[...launch.args],env:launch.env,cleanup(){}})});
  t.after(async()=>{terminals.disposeAll();await rm(root,{recursive:true,force:true});});
  const control=new AgentControlService(terminals,{reviewModel:()=> 'fixture-reviewer',waitTiming:{checkMs:1,settleMs:0,quietMs:10}});
- const parent=terminals.create({provider:'codex',profile:'normal',cwd:project,role:'orchestrator',position:{x:0,y:0}});
+ const parent=terminals.create({provider:'codex',profile:'normal',cwd:project,role:'orchestrator',position:{x:0,y:0},...(executionGoal ? {executionGoal} : {})});
  return {root,project,worktree,terminals,control,parent,calls,prompts};
 }
 
@@ -169,4 +169,16 @@ test('a competitor starting while the diff is read invalidates the in-flight res
  const other=f.terminals.create({provider:'terminal',profile:'normal',cwd:f.worktree,position:{x:0,y:0}});
  f.terminals.dispose(other.id);
  await assert.rejects(pending,/Another managed session/u);
+});
+
+// Use the production TerminalManager reader: a mock reviewDiff hides missing launch baselines.
+test('deep strategy captures a worker baseline without an explicit review request',async t=>{
+ const f=await fixture(t,'deep');
+ const worker=await f.control.spawn({parentSessionId:f.parent.id,provider:'codex',cwd:f.worktree,review:false});
+ await writeFile(join(f.worktree,'tracked.txt'),'strategy worker change\n');
+ assert.match(await f.terminals.readReviewDiff(worker.id),/strategy worker change/u);
+ f.calls.at(-1).process.emitExit(0);
+ const result=await f.control.resultWithReview(worker.id);
+ assert.equal(result.review.status,'accepted',result.review.reason);
+ assert.equal(f.prompts.length,1);assert.match(f.prompts[0],/strategy worker change/u);
 });

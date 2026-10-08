@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -206,16 +207,38 @@ export class OrchestrationTaskBoard {
 
   /** Handoff updates the source's current unfinished tasks in one persisted board transaction. */
   async transferOwner(projectRoot: string, rootSessionId: string, sourceId: string, replacementId: string, replacementName?: string): Promise<number> {
+    return (await this.transferOwnerWithRollback(projectRoot, rootSessionId, sourceId, replacementId, replacementName)).count;
+  }
+
+  /** A host-only compensation receipt; later edits/completion/reassignment are never overwritten. */
+  async transferOwnerWithRollback(projectRoot: string, rootSessionId: string, sourceId: string, replacementId: string, replacementName?: string): Promise<{ count: number; rollback(): Promise<void> }> {
     for (const [value, field] of [[rootSessionId, "rootSessionId"], [sourceId, "sourceId"], [replacementId, "replacementId"]]) requireId(value, field);
     const name = optionalName(replacementName) ?? replacementId;
-    return this.mutate(projectRoot, rootSessionId, state => {
-      let transferred = 0;
+    const changes = await this.mutate(projectRoot, rootSessionId, state => {
+      const changed: { before: OrchestrationTask; after: OrchestrationTask }[] = [];
       for (const task of state.tasks) {
         if (task.rootSessionId !== rootSessionId || task.ownerSessionId !== sourceId || task.status === "done" || task.status === "closed") continue;
-        task.ownerSessionId = replacementId; task.ownerName = name; task.status = "claimed"; task.updatedAt = Date.now(); transferred++;
+        const before = copyTask(task);
+        task.ownerSessionId = replacementId; task.ownerName = name; task.status = "claimed"; task.updatedAt = Date.now();
+        changed.push({ before, after: copyTask(task) });
       }
-      return transferred;
+      return changed;
     });
+    return { count: changes.length, rollback: async () => {
+      if (!changes.length) return;
+      const remaining = await this.mutate(projectRoot, rootSessionId, state => {
+        let remaining = 0;
+        for (const change of changes) {
+          const index = state.tasks.findIndex(task => task.id === change.after.id && task.rootSessionId === rootSessionId);
+          if (index < 0) continue;
+          const current = state.tasks[index]!;
+          if (isDeepStrictEqual(current, change.after)) state.tasks[index] = copyTask(change.before);
+          else if (current.ownerSessionId === replacementId && current.status !== "done" && current.status !== "closed") remaining++;
+        }
+        return remaining;
+      });
+      if (remaining) throw new Error(`${remaining} transferred task(s) changed concurrently and still need the replacement owner.`);
+    } };
   }
 
   /** Person/UI operations use explicit methods that bypass agent ownership while retaining the same atomic store. */
