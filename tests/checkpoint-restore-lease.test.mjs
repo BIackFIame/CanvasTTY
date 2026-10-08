@@ -4,6 +4,7 @@ import {mkdtemp,mkdir,rm,realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {TerminalManager} from '../src/main/services/TerminalManager.ts';
+import {EnvironmentRegistry} from '../src/main/services/EnvironmentRegistry.ts';
 import {availableRegistry,fakeSpawner} from './helpers/terminal.mjs';
 const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return{promise,resolve};};
 async function fixture(t,{supported=true,ui=true}={}){
@@ -14,7 +15,7 @@ async function fixture(t,{supported=true,ui=true}={}){
  const create=(cwd=project)=>{const row=terminal.create({provider:'codex',profile:'normal',cwd,position:{x:0,y:0}});terminal.resize(row.id,80,24);return row;};
  const idle=id=>terminal.applyProviderSignal(id,{kind:'lifecycle',state:'idle',event:'SessionStart'});
  t.after(async()=>{terminal.disposeAll();await rm(root,{recursive:true,force:true});});
- return{terminal,project,other,create,idle,calls,writes,paused,events,pause,failPause:()=>{failPause=true;},failResume:()=>{failResume=true;}};
+ return{root,terminal,project,other,create,idle,calls,writes,paused,events,pause,failPause:()=>{failPause=true;},failResume:()=>{failResume=true;}};
 }
 
 test('restore excludes all input, launches, restart and lifecycle for affected owned sessions; unrelated close and deferred target close remain safe',async t=>{
@@ -80,3 +81,54 @@ test('shutdown drains a protected transaction before disposing sessions',async t
  const f=await fixture(t),a=f.create(),other=f.create(f.other);f.idle(a.id);f.calls[1].process.emitExit(0);await rm(f.other,{recursive:true});let restored=false;
  await f.terminal.withCheckpointRestore(a.id,async()=>{restored=true;});assert.equal(restored,true);
  });
+
+async function environmentFixture(t,{isolated=true,relocate=false,kind='box',flipDuringWrap=false,removeProjectDuringWrap=false}={}) {
+ const f=await fixture(t),provider={pluginId:'fixture.environment',pluginName:'Environment',serviceId:'environment',secrets:false,kinds:[{kind,label:'Fixture',keeps:{launch:true,...(isolated===null?{}:{isolated})}}]};
+ let providers=[provider];
+ const registry=new EnvironmentRegistry({providers:()=>providers,secret:async()=>null,call:async(_plugin,_service,method,params)=>{
+  if(method.endsWith('.prepare'))return{ref:{id:'fixture'},label:'Fixture',...(relocate?{cwd:f.other}:{})};
+  if(method.endsWith('.wrap')){if(removeProjectDuringWrap)await rm(f.project,{recursive:true});if(flipDuringWrap)provider.kinds[0].keeps.isolated=false;return{command:process.execPath,args:['fake-environment'],cwd:f.other};}
+  if(method.endsWith('.resume'))return{ok:true};
+  return{};
+ }});
+ f.terminal.configureEnvironments(registry);
+ const launched=f.terminal.create({provider:'codex',profile:'normal',cwd:f.project,position:{x:0,y:0},environment:{pluginId:provider.pluginId,kind}});
+ await Promise.all([...f.terminal.sessions.get(launched.id).launchTasks]);
+ assert.equal(f.calls.length,1);assert.equal(f.terminal.getMetadata(launched.id).exitCode,null);f.idle(launched.id);
+ return{...f,launched,provider,registry,remove:()=>{providers=[];}};
+}
+
+for(const mutation of ['unchanged','flip','remove','during-wrap'])test(`isolated launch rejects restoration before pause or Git, retaining its original declaration (${mutation})`,{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{flipDuringWrap:mutation==='during-wrap'});
+ if(mutation==='flip')f.provider.kinds[0].keeps.isolated=false;
+ if(mutation==='remove')f.remove();
+ let mutated=false;
+ await assert.rejects(f.terminal.withCheckpointRestore(f.launched.id,async()=>{mutated=true;}),/isolated environment.*local wrapper/);
+ assert.equal(mutated,false);assert.deepEqual(f.events,[]);
+});
+
+test('isolated sibling original project cannot be hidden by prepared and wrapper cwd; distinct verified projects remain usable',{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{relocate:true}),sibling=f.create();f.idle(sibling.id);
+ assert.equal(f.terminal.getMetadata(f.launched.id).cwd,f.other);
+ await assert.rejects(f.terminal.withCheckpointRestore(sibling.id,async()=>assert.fail()),/isolated environment/);assert.deepEqual(f.events,[]);
+ const distinct=join(f.root,'distinct');await mkdir(distinct);const local=f.create(distinct);f.idle(local.id);let restored=false;
+ await f.terminal.withCheckpointRestore(local.id,async()=>{restored=true;});assert.equal(restored,true);
+});
+
+test('isolated scope survives wrapper exit and same-card local restart',{timeout:5000},async t=>{
+ const f=await environmentFixture(t);f.calls[0].process.emitExit(0);f.events.length=0;
+ await assert.rejects(f.terminal.withCheckpointRestore(f.launched.id,async()=>assert.fail()),/does not prove/);assert.deepEqual(f.events,[]);
+ f.provider.kinds[0].keeps.isolated=false;f.terminal.restart(f.launched.id);await Promise.all([...f.terminal.sessions.get(f.launched.id).launchTasks]);f.idle(f.launched.id);
+ await assert.rejects(f.terminal.withCheckpointRestore(f.launched.id,async()=>assert.fail()),/isolated environment/);
+
+});
+
+for(const isolated of [false,null])test(`local worktree environment retains restore support (${isolated===false?'explicit local':'undeclared isolated'})`,{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{isolated,kind:'worktree'});let restored=false;
+ await f.terminal.withCheckpointRestore(f.launched.id,async()=>{restored=true;assert.equal(f.paused.size,1);});assert.equal(restored,true);assert.equal(f.paused.size,0);
+});
+
+test('unverifiable isolated launch scope refuses restoration rather than assuming a distinct project',{timeout:5000},async t=>{
+ const f=await environmentFixture(t,{removeProjectDuringWrap:true});const distinct=join(f.root,'distinct');await mkdir(distinct);const local=f.create(distinct);f.idle(local.id);
+ await assert.rejects(f.terminal.withCheckpointRestore(local.id,async()=>assert.fail()),/isolated environment/);assert.deepEqual(f.events,[]);
+});

@@ -141,6 +141,8 @@ interface ManagedSession {
   answerTurnGeneration?: number;
   providerTurnId?: string;
   providerTurnGenerations?: Map<string, number>;
+  /** Successful isolated launches may outlive their local wrapper; retain their scope for this card. */
+  isolatedEnvironmentScopes?: {roots:Set<string>;ambiguous:boolean};
   /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
   answer?: { text: string; truncated: boolean; at: number };
   /**
@@ -569,10 +571,18 @@ export class TerminalManager {
     if(this.checkpointRestore)throw new Error("Another checkpoint restoration is already in progress.");
     const target=this.sessions.get(id);if(!target)throw new Error("Terminal session does not exist.");
     const cwd=realpathSync(this.launchContexts.get(id)?.cwd ?? target.metadata.cwd);
+    const targetScopes=new Set([cwd]);let targetScopeAmbiguous=false;
+    for(const path of [target.metadata.cwd,target.metadata.taskScope?.cwd ?? this.taskProjectRoot(target.metadata.cwd,target.metadata.parentSessionId)]) {
+      try {targetScopes.add(realpathSync(path));}catch {targetScopeAmbiguous=true;}
+    }
     const affected:ManagedSession[]=[];
     for(const session of this.sessions.values()) {
       // A pending plugin launch has not established its final cwd yet. Do not race its preparation/wrapping.
       if(session.launchTasks?.size)throw new Error("Wait for pending agent launches before restoring files.");
+      const isolated=session.isolatedEnvironmentScopes;
+      if(isolated && (isolated.ambiguous || targetScopeAmbiguous || [...isolated.roots].some(root=>[...targetScopes].some(target=>isPathInside(root,target) || isPathInside(target,root))))) {
+        throw new Error("Checkpoint restoration is unavailable for a related isolated environment: pausing or exiting its local wrapper does not prove that the remote/container workload stopped. Stop and verify that workload independently; CanvasTTY has no environment suspension guarantee.");
+      }
       let folder:string;
       try {folder=realpathSync(this.launchContexts.get(session.metadata.id)?.cwd ?? session.metadata.cwd);}
       catch(error) {if(session.metadata.exitCode!==null)continue;throw error;}
@@ -2628,6 +2638,7 @@ export class TerminalManager {
       return "failed";
     };
     const environments = this.environments;
+    const requestedCwd=metadata.cwd;
 
     if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused())return "superseded";
     if(!live())return "superseded";
@@ -2716,7 +2727,8 @@ export class TerminalManager {
       }
 
       // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
-      const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+      const keeps = environment ? environments?.keeps?.(environment) ?? {} : {};
+      const isolatedEnvironment=Boolean(environment && keeps.isolated===true);
       if (environment && keeps.launch !== true && metadata.profile !== "normal") {
         return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
       }
@@ -2807,6 +2819,17 @@ export class TerminalManager {
         return "failed";
       }
       session.process = process;
+      if(isolatedEnvironment) {
+        const evidence=session.isolatedEnvironmentScopes ??= {roots:new Set(),ambiguous:false};
+        // Keep the declaration used for this launch, never re-read a changed/removed plugin at restore time.
+        for(const path of [requestedCwd,taskProjectRoot,metadata.cwd,spawn.cwd]) {
+          try {
+            const root=realpathSync(path);
+            if(evidence.roots.size<32)evidence.roots.add(root);
+            else if(!evidence.roots.has(root))evidence.ambiguous=true;
+          } catch {evidence.ambiguous=true;}
+        }
+      }
       if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
         metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
       } else {
