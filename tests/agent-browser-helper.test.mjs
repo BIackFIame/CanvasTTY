@@ -31,10 +31,24 @@ import {
   BridgeClientError,
   GatewayClient,
   createMcpDispatcher,
+  errorResponse,
   formatToolResult,
   isLocalEndpoint,
   readIdentity
 } from "../src/agent-browser/mcp-helper.mjs";
+
+test("MCP initialization preserves gateway failure reasons without exposing unexpected errors", async () => {
+  const dispatch = createMcpDispatcher({
+    async connect() {
+      throw new BridgeClientError({ code: "AUTH_REPLAYED", message: "Agent browser capability was already used.", retryable: false });
+    }
+  });
+  const reply = await dispatch({ jsonrpc: "2.0", id: 1, method: "initialize" })
+    .catch((error) => errorResponse(1, error));
+  assert.equal(reply.error.code, -32603);
+  assert.match(reply.error.message, /AUTH_REPLAYED: Agent browser capability was already used/);
+  assert.equal(errorResponse(2, new Error("private details")).error.message, "Internal error");
+});
 import {
   AGENT_BROWSER_ENV,
   AgentBrowserBridge
@@ -167,6 +181,7 @@ test("MCP screenshot result uses image content without duplicating base64 in tex
 
 test("PTY bridge keeps the one-time capability in child env only and honors the kill switch", () => {
   const revoked = [];
+  const retained = [];
   const gateway = {
     isEnabled: true,
     setEnabled(value) { this.isEnabled = value; },
@@ -181,7 +196,8 @@ test("PTY bridge keeps the one-time capability in child env only and honors the 
         authenticated: new Promise(() => {})
       };
     },
-    revokeTerminalSession(id) { revoked.push(id); }
+    revokeTerminalSession(id) { revoked.push(id); },
+    holdPendingForTerminal(id) { retained.push(id); }
   };
   const bridge = new AgentBrowserBridge(gateway, {
     helper: { command: "/usr/bin/node", args: ["/app/mcp-helper.mjs"] },
@@ -200,7 +216,12 @@ test("PTY bridge keeps the one-time capability in child env only and honors the 
   assert.equal(launch.environment[AGENT_BROWSER_ENV.provider], "codex");
   assert.equal(JSON.stringify(launch.args).includes("one-time-secret-token"), false);
   assert.equal(JSON.stringify(launch.args).includes("terminal-id"), false);
+  assert.deepEqual(retained, []);
+  launch.retainUntilExit();
+  assert.deepEqual(retained, ["connection-id"]);
   launch.cleanup();
+  launch.retainUntilExit();
+  assert.deepEqual(retained, ["connection-id"]);
   assert.deepEqual(revoked, ["terminal-id"]);
 
   const openCodeLaunch = bridge.prepareLaunch({

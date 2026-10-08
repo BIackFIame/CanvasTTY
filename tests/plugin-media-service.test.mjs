@@ -82,3 +82,50 @@ async function createService(userDataPath) {
   await service.load();
   return service;
 }
+
+test("a playlist write does not follow a link planted at its temporary name", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-plugin-playlist-link-"));
+  const libraryPath = join(root, "Music");
+  const outside = join(root, "outside.txt");
+  try {
+    await mkdir(join(libraryPath, "Playlists"), { recursive: true });
+    await writeFile(outside, "untouched");
+    const { symlink, readdir } = await import("node:fs/promises");
+    await symlink(outside, join(libraryPath, "Playlists", "road-trip.m3u8.tmp"));
+    const service = await createService(root);
+    const library = await service.addLibrary(PLUGIN_ID, libraryPath);
+    const written = await service.writePlaylist(PLUGIN_ID, library.id, "road-trip.m3u8", "#EXTM3U\nsong.flac\n");
+    assert.equal(written.relativePath, "Playlists/road-trip.m3u8");
+    assert.equal(await readFile(outside, "utf8"), "untouched");
+    assert.equal(await readFile(join(libraryPath, "Playlists", "road-trip.m3u8"), "utf8"), "#EXTM3U\nsong.flac\n");
+    assert.deepEqual((await readdir(join(libraryPath, "Playlists"))).filter((name) => name.endsWith(".tmp") && name !== "road-trip.m3u8.tmp"), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a folder pick that finishes during or after uninstall stores no grant", async () => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-plugin-media-uninstall-"));
+  const libraryPath = join(root, "Music");
+  try {
+    await mkdir(libraryPath, { recursive: true });
+    let installed = true;
+    const service = new PluginMediaService(root, () => { if (!installed) throw new Error("Plugin is not installed."); });
+    await service.load();
+    // The pick answered and the grant is on its way (its folder checks are still running) when uninstall starts.
+    const during = service.addLibrary(PLUGIN_ID, libraryPath);
+    service.beginRemoval(PLUGIN_ID);
+    await service.revokeAll(PLUGIN_ID);
+    await assert.rejects(during, /being uninstalled/u);
+    // The same with uninstall already over: the plugin is unknown by then.
+    const after = service.addLibrary(PLUGIN_ID, libraryPath);
+    installed = false;
+    service.endRemoval(PLUGIN_ID);
+    await assert.rejects(after, /not installed/u);
+    installed = true;
+    assert.deepEqual(service.listLibraries(PLUGIN_ID), []);
+    assert.deepEqual(await (await createService(root)).listLibraries(PLUGIN_ID), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

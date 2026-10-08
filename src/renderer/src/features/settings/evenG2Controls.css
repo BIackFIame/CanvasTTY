@@ -1,4 +1,6 @@
 .g2-settings {
+  --g2-inset: 22px;
+  container-type: inline-size;
   border: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
   border-radius: 14px;
   background: var(--surface-soft);
@@ -52,7 +54,7 @@
   display: flex;
   gap: 14px;
   align-items: center;
-  padding: 22px;
+  padding: 22px var(--g2-inset);
 }
 .g2-settings__heading h3 {
   font-size: 17px;
@@ -95,10 +97,11 @@
   color: var(--text-dark);
 }
 .g2-settings__entry {
-  padding: 17px 22px;
+  padding: 17px var(--g2-inset);
   background: color-mix(in srgb, var(--surface) 60%, transparent);
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 18px;
   justify-content: space-between;
 }
@@ -111,12 +114,31 @@
 }
 .g2-settings__entry button {
   flex-shrink: 0;
+  margin-left: auto;
+}
+.g2-settings__network {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: 0 var(--g2-inset) 18px;
+  flex-wrap: wrap;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+}
+.g2-settings__network p {
+  margin: 0;
+  max-width: 36ch;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted-on-dark);
+  overflow-wrap: anywhere;
 }
 .g2-steps {
   display: flex;
   gap: 6px;
   border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
-  padding: 15px 22px 0;
+  padding: 15px var(--g2-inset) 0;
 }
 .g2-steps button {
   flex: 1;
@@ -144,7 +166,7 @@
   border-color: var(--primary);
 }
 .g2-settings__body {
-  padding: 22px;
+  padding: var(--g2-inset);
 }
 .g2-settings__body h4 {
   font-size: 17px;
@@ -155,6 +177,10 @@
   font-size: 12px;
   line-height: 1.65;
   color: var(--text-muted-on-dark);
+}
+.g2-settings__body a,
+.g2-settings__body code {
+  overflow-wrap: anywhere;
 }
 .g2-settings__body ol {
   padding-left: 19px;
@@ -309,7 +335,7 @@
   color: var(--blue);
 }
 .g2-peer {
-  margin: 0 20px 18px;
+  margin: 0 var(--g2-inset) 18px;
   border-top: 1px solid color-mix(in srgb, var(--text) 13%, transparent);
   padding-top: 18px;
 }
@@ -355,15 +381,106 @@
   background: color-mix(in srgb, var(--danger) 20%, var(--surface));
   padding: 11px 15px;
   border-radius: 8px;
-  margin: 0 20px 14px;
+  margin: 0 var(--g2-inset) 14px;
 }
 .g2-settings__body .g2-settings__error {
   margin: 12px 0;
 }
-@media (max-width: 950px) {
+.g2-settings > button.g2-link {
+  margin: 0 var(--g2-inset) var(--g2-inset);
+}
+.g2-controls {
+  display: grid;
+  gap: .8em;
+  padding-top: .65em;
+}
+.g2-controls > .g2-settings {
+  margin: 0;
+}
+.g2-controls--overview > .g2-settings {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+.g2-controls--overview .g2-settings__heading {
+  grid-column: 1;
+  grid-row: 1;
+  min-width: 0;
+  gap: .75em;
+  padding: .9em;
+}
+.g2-controls--overview .g2-settings__heading > div {
+  min-width: 0;
+}
+.g2-controls--overview .g2-settings__heading h3 {
+  margin: 0 0 .3em;
+  font-size: 1.1em;
+}
+.g2-controls--overview .g2-settings__heading p {
+  font-size: .9em;
+  line-height: 1.4;
+}
+.g2-controls--overview .g2-settings__heading .g2-settings__hint {
+  margin-top: .3em;
+}
+.g2-controls--overview .g2-settings__icon {
+  width: 2.9em;
+  height: 2.9em;
+  border-radius: .7em;
+}
+.g2-controls--overview .g2-settings__icon svg {
+  max-width: 1.9em;
+}
+.g2-controls--overview .g2-settings__entry {
+  grid-column: 2;
+  grid-row: 1;
+  max-width: 14em;
+  padding: .9em .9em .9em 0;
+  gap: .5em;
+  background: transparent;
+}
+.g2-controls--overview .g2-settings__entry button {
+  min-width: 0;
+  flex-shrink: 1;
+  margin: 0;
+  font-size: .9em;
+}
+.g2-settings__connections {
+  min-width: 0;
+  grid-column: 1 / -1;
+}
+.g2-settings__connections > .g2-muted {
+  margin: 0 .9em .65em;
+  overflow-wrap: anywhere;
+}
+.g2-settings__connections > .g2-link {
+  margin: 0 .9em .65em;
+}
+.g2-settings__connections:empty {
+  display: none;
+}
+.g2-controls--overview .g2-settings__error {
+  grid-column: 1 / -1;
+}
+@container (max-width: 28rem) {
+  .g2-controls--overview .g2-settings__heading {
+    grid-column: 1 / -1;
+  }
+  .g2-controls--overview .g2-settings__entry {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    max-width: none;
+    padding: 0 .9em .9em;
+    align-items: stretch;
+  }
+}
+@container (max-width: 42rem) {
+  .g2-settings > * {
+    --g2-inset: 17px;
+  }
   .g2-settings__heading {
     gap: 10px;
-    padding: 17px;
+    padding: var(--g2-inset);
   }
   .g2-settings__heading h3 {
     font-size: 15px;
@@ -377,14 +494,24 @@
   .g2-settings__entry {
     align-items: flex-start;
     flex-direction: column;
-    padding: 17px;
+    padding: 17px var(--g2-inset);
+  }
+  .g2-settings__entry button {
+    margin-left: 0;
+  }
+  .g2-settings__network {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .g2-settings__network button {
+    margin-left: 0;
   }
   .g2-settings__body {
-    padding: 17px;
+    padding: var(--g2-inset);
   }
   .g2-steps {
-    padding-left: 12px;
-    padding-right: 12px;
+    padding-left: var(--g2-inset);
+    padding-right: var(--g2-inset);
   }
   .g2-steps button {
     padding: 8px 5px;

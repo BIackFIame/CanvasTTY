@@ -1,0 +1,1 @@
+{ "name": "canvastty-bench-runtime", "private": true, "main": "boot.cjs", "type": "commonjs" }

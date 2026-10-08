@@ -1,7 +1,7 @@
 import type { Point, RadialLauncherItemId } from "../../../../shared/contracts";
 
-export const RADIAL_LAUNCHER_RADIUS = 126;
-export const RADIAL_LAUNCHER_DEAD_ZONE = 28;
+const RADIAL_LAUNCHER_RADIUS = 126;
+const RADIAL_LAUNCHER_DEAD_ZONE = 28;
 
 export function radialItemOffset(index: number, count: number, radius = RADIAL_LAUNCHER_RADIUS): Point {
   if (count <= 0) return { x: 0, y: 0 };

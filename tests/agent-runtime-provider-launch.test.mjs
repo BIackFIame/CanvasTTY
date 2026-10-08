@@ -6,7 +6,13 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { parse as parseYaml } from "yaml";
 
-import { AGENT_RUNTIME_ENV } from "../src/agent-runtime/runtime-protocol.mjs";
+import {
+  AGENT_RUNTIME_ENV,
+  CAPTURE_RESULT_ENV,
+  OPENCODE_DECISIONS_ENV,
+  CAPTURE_ANSWER_ENV,
+  CAPTURE_ANSWER_EXPIRES_AT_ENV
+} from "../src/agent-runtime/runtime-protocol.mjs";
 import { AgentRuntimeBridge } from "../src/main/services/agent-runtime/AgentRuntimeBridge.ts";
 import {
   ProviderRuntimeLaunchAdapters,
@@ -41,6 +47,8 @@ test("Claude and Codex receive automatic lifecycle hooks without prompt or respo
   assert.equal(settings.showStatusInTerminalTab, true);
   assert.match(settings.hooks.UserPromptSubmit[0].hooks[0].command, /working.*UserPromptSubmit/u);
   assert.match(settings.hooks.PermissionRequest[0].hooks[0].command, /needs_approval.*PermissionRequest/u);
+  assert.match(settings.hooks.PostToolUse[0].hooks[0].command, /PostToolUse/u);
+  assert.match(settings.hooks.PostToolUseFailure[0].hooks[0].command, /PostToolUseFailure/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /idle.*Stop/u);
   assert.match(settings.hooks.Stop[0].hooks[0].command, /^ELECTRON_RUN_AS_NODE='1' /u);
   assert.equal(JSON.stringify(settings).includes('"prompt":'), false);
@@ -70,12 +78,40 @@ test("helper process flags stay scoped to hook commands instead of the agent PTY
 test("revoking CanvasTTY lifecycle hooks leaves every provider launch unmodified", async (t) => {
   const root = await fixture(t);
   const adapters = adaptersFor(root);
-  for (const provider of ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi"]) {
+  for (const provider of ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]) {
     const launch = adapters.prepare(provider, `session-${provider}`, false);
     assert.deepEqual(launch.args, []);
     assert.deepEqual(launch.environment, {});
     launch.releaseConfiguration();
   }
+});
+
+test("providers without a hook adapter never write Grok's shared hook configuration", async (t) => {
+  const root = await fixture(t);
+  const adapters = adaptersFor(root);
+  for (const provider of ["cursor", "minimax", "devin", "antigravity"]) {
+    const launch = adapters.prepare(provider, `session-${provider}`, true);
+    assert.deepEqual(launch.args, [], provider);
+    assert.deepEqual(launch.environment, {}, provider);
+    await assert.rejects(readFile(join(root, "grok", "hooks", "canvastty-runtime-hooks.json"), "utf8"), /ENOENT/u, provider);
+    launch.releaseConfiguration();
+  }
+});
+
+test("ordinary OMP launches load the lifecycle extension without modifying shared configuration", async (t) => {
+  const root = await fixture(t);
+  const launch = adaptersFor(root).prepare("omp", "session-omp");
+  assert.deepEqual(launch.args, ["--extension", join(root, "omp-extension.mjs")]);
+  assert.deepEqual(launch.environment, {});
+  await assert.rejects(readFile(join(root, "grok", "hooks", "canvastty-runtime-hooks.json")), /ENOENT/u);
+  launch.releaseConfiguration();
+});
+
+test("ordinary Pi launches receive a session identity extension", async t => {
+  const root = await fixture(t);
+  const launch = adaptersFor(root).prepare("pi", "session-pi");
+  assert.deepEqual(launch.args, ["--extension", join(root, "omp-extension.mjs")]);
+  launch.releaseConfiguration();
 });
 
 test("a revoked shared-config launch removes stale hooks held by an older live session", async (t) => {
@@ -133,10 +169,21 @@ test("revoking CanvasTTY lifecycle hooks immediately detaches live capabilities 
     cwd: root
   });
   assert.equal(active.environment[AGENT_RUNTIME_ENV.terminalSessionId], "session-active");
+  assert.equal(active.environment[CAPTURE_ANSWER_ENV], undefined);
+  assert.equal(active.environment[CAPTURE_ANSWER_EXPIRES_AT_ENV], undefined);
   assert.equal(bridge.currentStatus("session-active"), "idle");
 
+  const granted = bridge.prepareLaunch({
+    terminalSessionId: "session-answer-granted",
+    provider: "codex",
+    cwd: root,
+    answerCaptureGrantExpiresAt: Date.now() + 60_000
+  });
+  assert.equal(granted.environment[CAPTURE_ANSWER_ENV], "1");
+  assert.equal(Number(granted.environment[CAPTURE_ANSWER_EXPIRES_AT_ENV]) > Date.now(), true);
+
   bridge.setCoreHooksEnabled(false);
-  assert.deepEqual(revocations, ["session-active"]);
+  assert.deepEqual(revocations, ["session-active", "session-answer-granted"]);
   assert.equal(bridge.currentStatus("session-active"), null);
 
   const revoked = bridge.prepareLaunch({
@@ -146,11 +193,11 @@ test("revoking CanvasTTY lifecycle hooks immediately detaches live capabilities 
   });
   assert.equal(AGENT_RUNTIME_ENV.address in revoked.environment, false);
   assert.deepEqual(revoked.args, []);
-  assert.deepEqual(registrations, ["session-active"]);
+  assert.deepEqual(registrations, ["session-active", "session-answer-granted"]);
 
   bridge.setCoreHooksEnabled(true);
   assert.equal(bridge.currentStatus("session-revoked"), null);
-  assert.deepEqual(registrations, ["session-active"]);
+  assert.deepEqual(registrations, ["session-active", "session-answer-granted"]);
 
   const restarted = bridge.prepareLaunch({
     terminalSessionId: "session-restarted",
@@ -158,11 +205,44 @@ test("revoking CanvasTTY lifecycle hooks immediately detaches live capabilities 
     cwd: root
   });
   assert.equal(restarted.environment[AGENT_RUNTIME_ENV.terminalSessionId], "session-restarted");
-  assert.deepEqual(registrations, ["session-active", "session-restarted"]);
+  assert.deepEqual(registrations, ["session-active", "session-answer-granted", "session-restarted"]);
 
   active.cleanup();
+  granted.cleanup();
   revoked.cleanup();
   restarted.cleanup();
+});
+
+test("a late cleanup of an earlier launch does not detach the relaunch under the same card id", async (t) => {
+  const root = await fixture(t);
+  const leases = new Map();
+  const revocations = [];
+  const gateway = {
+    registerSession(terminalSessionId, provider) {
+      const capabilityToken = `token-${leases.size}-${revocations.length}-${Math.random()}`;
+      leases.set(terminalSessionId, capabilityToken);
+      return { address: join(root, "agent-runtime.sock"), terminalSessionId, provider, capabilityToken };
+    },
+    revokeTerminalSession(terminalSessionId, capabilityToken) {
+      revocations.push(terminalSessionId);
+      if (capabilityToken !== undefined && leases.get(terminalSessionId) !== capabilityToken) return;
+      leases.delete(terminalSessionId);
+    },
+    currentStatus(terminalSessionId) {
+      return leases.has(terminalSessionId) ? "idle" : null;
+    }
+  };
+  const bridge = new AgentRuntimeBridge(gateway, runtimeOptionsFor(root));
+  const first = bridge.prepareLaunch({ terminalSessionId: "session-reused", provider: "codex", cwd: root });
+  const second = bridge.prepareLaunch({ terminalSessionId: "session-reused", provider: "codex", cwd: root });
+
+  first.cleanup();
+  assert.equal(bridge.currentStatus("session-reused"), "idle");
+
+  // Turning status hooks off still finds and detaches the live relaunch.
+  bridge.setCoreHooksEnabled(false);
+  assert.equal(gateway.currentStatus("session-reused"), null);
+  second.cleanup();
 });
 
 test("trusted plugin hooks remain independent from CanvasTTY status hooks", async (t) => {
@@ -376,3 +456,68 @@ function runtimeOptionsFor(root, qwenSystemSettingsPath, pluginHooks) {
     environment: {}
   };
 }
+
+
+test("result capture independently provisions a minimal transport and survives disabling lifecycle UI",async t=>{
+  const root=await fixture(t),registrations=[],leases=new Map();let serial=0;
+  const gateway={
+    registerSession(id,provider,capture,_grant,decisions){const capability={address:join(root,'runtime.sock'),terminalSessionId:id,provider,capabilityToken:String(++serial)};leases.set(id,capability.capabilityToken);registrations.push({id,capture,decisions});return capability;},
+    revokeTerminalSession(id,token){if(token===undefined||leases.get(id)===token)leases.delete(id);},
+    currentStatus:id=>leases.has(id)?'idle':null
+  };
+  const bridge=new AgentRuntimeBridge(gateway,{...runtimeOptionsFor(root),coreHooksEnabled:false,wantsDecisions:()=>true,permissionGate:{command:helper.command,args:[join(root,'permission-gate.mjs')]}});
+  for(const provider of ['codex','opencode']){
+    const launch=bridge.prepareLaunch({terminalSessionId:provider,provider,cwd:root,captureResult:true,decisions:false});
+    assert.equal(launch.environment[CAPTURE_RESULT_ENV],'1');
+    assert.ok(launch.environment[AGENT_RUNTIME_ENV.capabilityToken]);assert.equal(launch.decisions,false);
+    if(provider==='codex'){
+      const events=launch.args.filter(arg=>/^hooks\.[A-Z]/u.test(arg)).map(arg=>arg.split('=')[0]);
+      assert.deepEqual(events,['hooks.SessionStart','hooks.UserPromptSubmit','hooks.PermissionRequest','hooks.PostToolUse','hooks.Stop']);
+      assert.ok(!launch.args.some(arg=>arg.includes('permission-gate')));
+    }else{
+      assert.equal(launch.environment.CANVASTTY_LIFECYCLE_HOOKS_ENABLED,'0');
+      assert.equal(launch.environment[OPENCODE_DECISIONS_ENV],undefined);
+      assert.ok(JSON.parse(launch.environment.OPENCODE_CONFIG_CONTENT).plugin.length);
+    }
+    bridge.setCoreHooksEnabled(true);bridge.setCoreHooksEnabled(false);
+    assert.equal(gateway.currentStatus(provider),'idle','result lease retained');assert.equal(bridge.currentStatus(provider),null);
+    launch.cleanup();launch.cleanup();assert.equal(gateway.currentStatus(provider),null);
+  }
+  assert.deepEqual(registrations.map(({capture,decisions})=>({capture,decisions})),[{capture:true,decisions:false},{capture:true,decisions:false}]);
+  const old=bridge.prepareLaunch({terminalSessionId:'reused',provider:'codex',cwd:root,captureResult:true,decisions:false});
+  const replacement=bridge.prepareLaunch({terminalSessionId:'reused',provider:'codex',cwd:root,captureResult:true,decisions:false});
+  old.cleanup();assert.equal(gateway.currentStatus('reused'),'idle');replacement.cleanup();assert.equal(gateway.currentStatus('reused'),null);
+});
+
+
+test("Kimi and Hermes core overlays register completion helpers without native plugin hooks and restore user hooks", async t => {
+  const root=await fixture(t), adapters=adaptersFor(root);
+  const originals={
+    kimi:'model = "user-model"\n\n[[hooks]]\nevent = "PostToolUse"\ncommand = "user-kimi-hook"\ntimeout = 10\n',
+    hermes:'model:\n  default: user-model\nhooks:\n  post_tool_call:\n    - command: user-hermes-hook\n      timeout: 10\n'
+  };
+  for(const provider of ["kimi","hermes"]){
+    const home=join(root,provider), path=join(home,provider==="kimi"?"config.toml":"config.yaml");
+    await mkdir(home,{recursive:true});await writeFile(path,originals[provider]);
+    const disabled=adapters.prepare(provider,provider+"-disabled",false);
+    assert.deepEqual(disabled.args,[]);assert.deepEqual(disabled.environment,{});
+    assert.equal(await readFile(path,"utf8"),originals[provider],"disabled lifecycle leaves user config untouched");
+    disabled.releaseConfiguration();
+    const enabled=adapters.prepare(provider,provider+"-enabled",true);
+    const configured=await readFile(path,"utf8");
+    if(provider==="kimi"){
+      const blocks=configured.split("[[hooks]]").filter(block=>/event = "PostToolUse"/u.test(block));
+      assert.equal(blocks.length,2);
+      assert.match(blocks[1],/hook-helper\.mjs.*'working' 'PostToolUse'/u);
+      assert.ok(blocks[0].includes("user-kimi-hook"));
+      assert.match(configured,/event = "PostToolUseFailure"\ncommand = .*hook-helper\.mjs.*'working' 'PostToolUseFailure'/u);
+    }else{
+      const entries=parseYaml(configured).hooks.post_tool_call;
+      assert.equal(entries.length,2);assert.equal(entries[0].command,"user-hermes-hook");
+      assert.match(entries[1].command,/hook-helper\.mjs.*'working' 'post_tool_call'/u);
+    }
+    assert.doesNotMatch(configured,/plugin-hook-runner/u,"core outcome transport does not depend on a native plugin");
+    enabled.releaseConfiguration();enabled.releaseConfiguration();
+    assert.equal(await readFile(path,"utf8"),originals[provider],"only temporary core hooks removed, cleanup idempotent");
+  }
+});

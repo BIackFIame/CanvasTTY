@@ -39,6 +39,17 @@ export function normalizeBrowserViewportBounds(value: unknown): BrowserViewportB
   };
 }
 
+/** Two normalized viewports place the page exactly alike (the renderer reports sub-pixel moves that round the same). */
+export function sameBrowserViewport(a: BrowserViewportBounds, b: BrowserViewportBounds): boolean {
+  const clipA = a.clipBounds;
+  const clipB = b.clipBounds;
+  const sameClip = clipA === undefined || clipB === undefined
+    ? clipA === clipB
+    : clipA.x === clipB.x && clipA.y === clipB.y && clipA.width === clipB.width && clipA.height === clipB.height;
+  return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height && a.surface === b.surface
+    && a.canvasScale === b.canvasScale && a.showAgentPresence === b.showAgentPresence && sameClip;
+}
+
 export function clipBrowserViewportBounds(
   bounds: BrowserViewportBounds,
   hostSize: Size

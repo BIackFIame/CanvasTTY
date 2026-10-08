@@ -1,10 +1,10 @@
 import type { Point, SessionBounds, Size } from "../../../../shared/contracts";
 
-export const SNAP_GRID = 10;
-export const SNAP_THRESHOLD = 10;
-export const SNAP_GAP = 20;
-export const MIN_TERMINAL_SIZE: Size = { width: 420, height: 260 };
-export const MAX_TERMINAL_SIZE: Size = { width: 1_600, height: 1_100 };
+const SNAP_GRID = 10;
+const SNAP_THRESHOLD = 10;
+const SNAP_GAP = 20;
+const MIN_TERMINAL_SIZE: Size = { width: 420, height: 260 };
+const MAX_TERMINAL_SIZE: Size = { width: 1_600, height: 1_100 };
 
 export type ResizeDirection = "n" | "ne" | "e" | "se" | "s" | "sw" | "w" | "nw";
 

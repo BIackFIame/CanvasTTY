@@ -17,9 +17,15 @@ import {
   type AvailableProviderCli,
   type ProviderCliRegistry
 } from "./providerCliRegistry.ts";
+import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
 
 const CACHE_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
+// `codex app-server` holds about 55-60 MB while it runs. It is started by the
+// first Codex limits read and stopped after this long without one, so it is not
+// kept for the whole session when nothing reads limits (window hidden, no
+// widget, Even G2 idle). The renderer reads every 60 s while it is visible.
+const CODEX_IDLE_MS = 3 * 60_000;
 const MAX_LINE_BYTES = 1_048_576;
 const MAX_BUFFER_BYTES = MAX_LINE_BYTES * 2;
 const MAX_WINDOWS = 12;
@@ -50,6 +56,13 @@ interface PendingRequest {
   timer: NodeJS.Timeout;
 }
 
+interface GrokCredential {
+  token: string;
+  authMode: number;
+  expiresAt: number;
+  sessionExpired: boolean;
+}
+
 export class LimitsService {
   private codex: CodexAppServerClient;
   private kimi: KimiWebUsageClient;
@@ -64,10 +77,17 @@ export class LimitsService {
   private lastGoodGrok: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
   private disposed = false;
 
-  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown") {
+  private readonly codexIdleMs: number;
+  private readonly onSnapshot: ((snapshot: LimitsSnapshot) => void) | undefined;
+  private readonly claudeUsageOptions: ClaudeUsageReadOptions | undefined;
+
+  constructor(providerClis: ProviderCliRegistry, clientVersion = "unknown", options: { codexIdleMs?: number; onSnapshot?: (snapshot: LimitsSnapshot) => void; claudeUsageOptions?: ClaudeUsageReadOptions } = {}) {
     this.providerClis = providerClis;
     this.clientVersion = clientVersion;
-    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion);
+    this.codexIdleMs = options.codexIdleMs ?? CODEX_IDLE_MS;
+    this.onSnapshot=options.onSnapshot;
+    this.claudeUsageOptions = options.claudeUsageOptions;
+    this.codex = new CodexAppServerClient(availableCli(providerClis, "codex"), clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(providerClis, "kimi"));
   }
 
@@ -86,6 +106,14 @@ export class LimitsService {
     return structuredClone(await this.inFlight);
   }
 
+  /**
+   * The last snapshot a read produced, however old, without starting one: no process, file or network access.
+   * Null before the first read finished (or after the provider CLIs changed).
+   */
+  peek(): LimitsSnapshot | null {
+    return this.cache ? structuredClone(this.cache.value) : null;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -98,7 +126,7 @@ export class LimitsService {
     if (this.disposed) return;
     this.codex.dispose();
     this.kimi.dispose();
-    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion);
+    this.codex = new CodexAppServerClient(availableCli(this.providerClis, "codex"), this.clientVersion, this.codexIdleMs);
     this.kimi = new KimiWebUsageClient(availableCli(this.providerClis, "kimi"));
     this.cache = null;
     this.lastGoodCodex = null;
@@ -124,6 +152,7 @@ export class LimitsService {
     };
 
     this.cache = { cachedAt: Date.now(), value };
+    try { this.onSnapshot?.(structuredClone(value)); } catch { /* A UI observer cannot invalidate a successful provider read. */ }
     return value;
   }
 
@@ -168,7 +197,7 @@ export class LimitsService {
       return unavailable("claude", "claude-usage-api", "cli-not-found", checkedAt);
     }
     try {
-      const raw = await readClaudeUsage(this.clientVersion);
+      const raw = await readClaudeUsage(this.clientVersion, this.claudeUsageOptions);
       const windows = normalizeClaudeLimits(raw);
       if (windows.length === 0) throw new LimitsAdapterError("protocol-error");
 
@@ -402,10 +431,11 @@ async function readOpenCodeGoUsage(clientVersion: string): Promise<unknown> {
 async function readGrokUsage(clientVersion: string): Promise<unknown> {
   const configRoot = process.env.GROK_HOME || join(homedir(), ".grok");
   const credentials = await readCredentialFile(join(configRoot, "auth.json"), "not-authenticated");
-  const accessToken = selectGrokAccessToken(credentials);
-  if (!accessToken) throw new LimitsAdapterError("not-authenticated");
+  const credential = selectGrokCredential(credentials);
+  if (!credential) throw new LimitsAdapterError("not-authenticated");
+  if (credential.sessionExpired) throw new LimitsAdapterError("session-expired");
 
-  return fetchUsageJson(GROK_BILLING_URL, accessToken, {
+  return fetchUsageJson(GROK_BILLING_URL, credential.token, {
     "x-xai-token-auth": "xai-grok-cli",
     "user-agent": `canvastty/${clientVersion}`
   });
@@ -445,17 +475,18 @@ async function readFirstCredentialFile(
   throw new LimitsAdapterError(missingReason);
 }
 
-function selectGrokAccessToken(credentials: Record<string, unknown>): string | null {
+function selectGrokCredential(credentials: Record<string, unknown>): GrokCredential | null {
   const candidates = Object.values(credentials)
     .filter(isRecord)
     .map((credential) => ({
       token: cleanSecret(credential.key),
       authMode: credential.auth_mode === "oidc" ? 1 : 0,
-      expiresAt: numericValue(credential.expires_at) ?? 0
+      expiresAt: numericValue(credential.expires_at) ?? 0,
+      sessionExpired: cleanSecret(credential.refresh_token) !== null && hasExpired(credential.expires_at)
     }))
-    .filter((candidate): candidate is { token: string; authMode: number; expiresAt: number } => candidate.token !== null)
+    .filter((candidate): candidate is GrokCredential => candidate.token !== null)
     .sort((left, right) => right.authMode - left.authMode || right.expiresAt - left.expiresAt);
-  return candidates[0]?.token ?? null;
+  return candidates[0] ?? null;
 }
 
 async function readCredentialFile(path: string, missingReason: LimitUnavailableReason): Promise<Record<string, unknown>> {
@@ -563,6 +594,9 @@ class KimiWebUsageClient {
   private async startChild(): Promise<void> {
     if (!this.cli) throw new LimitsAdapterError("cli-not-found");
     const port = await reserveLoopbackPort();
+    // dispose() during the await found no child to stop; starting one now would
+    // leave `kimi web` (a local server with a token in its URL) running.
+    if (this.disposed) throw new LimitsAdapterError("protocol-error");
     const launch = providerChildProcessLaunch(
       this.cli,
       ["web", "--no-open", "--port", String(port), "--log-level", "silent"]
@@ -677,26 +711,50 @@ class CodexAppServerClient {
   private ready: Promise<void> | null = null;
   private pending = new Map<number, PendingRequest>();
   private nextId = 1;
-  private buffer = "";
   private disposed = false;
+  private idleTimer: NodeJS.Timeout | null = null;
   private readonly cli: AvailableProviderCli | null;
   private readonly clientVersion: string;
+  private readonly idleMs: number;
 
-  constructor(cli: AvailableProviderCli | null, clientVersion: string) {
+  constructor(cli: AvailableProviderCli | null, clientVersion: string, idleMs: number) {
     this.cli = cli;
     this.clientVersion = clientVersion;
+    this.idleMs = idleMs;
   }
 
   async readRateLimits(): Promise<unknown> {
-    await this.ensureConnected();
-    return this.request("account/rateLimits/read");
+    this.clearIdleTimer();
+    try {
+      await this.ensureConnected();
+      return await this.request("account/rateLimits/read");
+    } finally {
+      this.scheduleIdleStop();
+    }
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearIdleTimer();
     this.rejectPending("protocol-error");
     this.stopChild();
+  }
+
+  /** Stops the app-server once no read came for `idleMs`; the next read starts it again. */
+  private scheduleIdleStop(): void {
+    this.clearIdleTimer();
+    if (this.disposed || !this.child || this.pending.size > 0) return;
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.pending.size === 0) this.resetConnection();
+    }, this.idleMs);
+    this.idleTimer.unref();
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   private ensureConnected(): Promise<void> {
@@ -734,9 +792,8 @@ class CodexAppServerClient {
     }
 
     this.child = child;
-    this.buffer = "";
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => this.consume(chunk));
+    const lines = new NdjsonLineReader({ maxLineBytes: MAX_LINE_BYTES });
+    child.stdout.on("data", (chunk: Buffer) => this.consume(child, lines, chunk));
     child.stdin.on("error", () => this.connectionFailed("protocol-error", child));
     child.stderr.resume();
     child.once("error", (error: NodeJS.ErrnoException) => {
@@ -789,25 +846,19 @@ class CodexAppServerClient {
     }
   }
 
-  private consume(chunk: string): void {
-    if (this.disposed) return;
-    this.buffer += chunk;
-    if (Buffer.byteLength(this.buffer) > MAX_BUFFER_BYTES) {
-      this.connectionFailed("protocol-error", this.child);
+  private consume(child: ChildProcessWithoutNullStreams, lines: NdjsonLineReader, chunk: Buffer): void {
+    if (this.disposed || child !== this.child) return;
+    let complete: Buffer[];
+    try {
+      complete = lines.push(chunk);
+    } catch {
+      this.connectionFailed("protocol-error", child);
       return;
     }
-
-    for (;;) {
-      const newline = this.buffer.indexOf("\n");
-      if (newline < 0) return;
-      const line = this.buffer.slice(0, newline).trim();
-      this.buffer = this.buffer.slice(newline + 1);
-      if (!line) continue;
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) {
-        this.connectionFailed("protocol-error", this.child);
-        return;
-      }
-      this.consumeLine(line);
+    for (const raw of complete) {
+      if (child !== this.child) return;
+      const line = raw.toString("utf8").trim();
+      if (line) this.consumeLine(line);
     }
   }
 
@@ -856,7 +907,6 @@ class CodexAppServerClient {
   private stopChild(): void {
     const child = this.child;
     this.child = null;
-    this.buffer = "";
     if (!child) return;
 
     child.removeAllListeners("error");
@@ -1009,7 +1059,13 @@ export function normalizeKimiLimits(raw: unknown): LimitWindow[] {
   const payload = isRecord(raw.data) ? raw.data : raw;
   if (payload.kind === "error") {
     const message = typeof payload.message === "string" ? payload.message.toLowerCase() : "";
-    throw new LimitsAdapterError(message.includes("auth") || message.includes("login") ? "not-authenticated" : "protocol-error");
+    throw new LimitsAdapterError(
+      message.includes("auth") || message.includes("login")
+        ? "not-authenticated"
+        : message.includes("timed out")
+          ? "timeout"
+          : "protocol-error"
+    );
   }
   const windows: LimitWindow[] = [];
   const managedSummary = payload.summary;
@@ -1083,6 +1139,40 @@ export function normalizeKimiLimits(raw: unknown): LimitWindow[] {
         resetsAt
       });
       if (windows.length >= MAX_WINDOWS) break;
+    }
+  }
+
+  const managedUsages = isRecord(payload.quota) && isRecord(payload.quota.usages) ? payload.quota.usages : null;
+  if (managedUsages) {
+    const definitions: Array<{
+      key: "limit5h" | "limit7d" | "monthTotal";
+      id: string;
+      slot: "primary" | "secondary";
+      label: string;
+      windowMinutes: number | null;
+    }> = [
+      { key: "limit5h", id: "kimi:managed:300", slot: "primary", label: "5h", windowMinutes: 300 },
+      { key: "limit7d", id: "kimi:weekly", slot: "secondary", label: "7d", windowMinutes: 10_080 },
+      { key: "monthTotal", id: "kimi:monthly", slot: "secondary", label: "monthly", windowMinutes: null }
+    ];
+    for (const { key, id, slot, label, windowMinutes } of definitions) {
+      const candidate = managedUsages[key];
+      if (!isRecord(candidate)) continue;
+      const usedRatio = numericValue(candidate.usedRatio);
+      const resetsAt = epochMilliseconds(candidate.resetAt);
+      if (usedRatio === null && resetsAt === null) continue;
+      windows.push({
+        id,
+        bucketId: "kimi",
+        slot,
+        isDefaultBucket: true,
+        label,
+        usedPercent: usedRatio === null ? null : clampPercent(usedRatio * 100),
+        used: null,
+        limit: null,
+        windowMinutes,
+        resetsAt
+      });
     }
   }
 
@@ -1197,6 +1287,11 @@ function epochMilliseconds(value: unknown): number | null {
   if (number === null || number <= 0) return null;
   const milliseconds = number < 1_000_000_000_000 ? number * 1_000 : number;
   return Number.isSafeInteger(Math.trunc(milliseconds)) ? Math.trunc(milliseconds) : null;
+}
+
+function hasExpired(value: unknown): boolean {
+  const expiresAt = epochMilliseconds(value);
+  return expiresAt !== null && expiresAt <= Date.now();
 }
 
 function clampPercent(value: number): number {

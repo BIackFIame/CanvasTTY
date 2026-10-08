@@ -43,6 +43,11 @@ export interface WindowsPipeHostTransportOptions {
   startupTimeoutMs?: number;
   platform?: NodeJS.Platform;
   spawnHost?: typeof spawn;
+  /**
+   * The endpoint a previous host of the same gateway published. A restarted host listens on it again, so clients
+   * that already hold the address (and their reconnect tokens) can come back; omitted, the host picks a fresh name.
+   */
+  pipeName?: string;
 }
 
 interface RelayFrame {
@@ -60,7 +65,7 @@ interface RelayFrame {
  */
 export class WindowsPipeHostTransport extends EventEmitter {
   private readonly options: Required<Pick<WindowsPipeHostTransportOptions, "parentPid" | "startupTimeoutMs" | "platform">>
-    & Pick<WindowsPipeHostTransportOptions, "hostPath" | "spawnHost">;
+    & Pick<WindowsPipeHostTransportOptions, "hostPath" | "spawnHost" | "pipeName">;
   private readonly sockets = new Map<number, WindowsRelaySocket>();
   private decoder = new RelayFrameDecoder();
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -77,8 +82,12 @@ export class WindowsPipeHostTransport extends EventEmitter {
       parentPid: options.parentPid ?? process.pid,
       startupTimeoutMs: options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       platform: options.platform ?? process.platform,
-      spawnHost: options.spawnHost
+      spawnHost: options.spawnHost,
+      pipeName: options.pipeName
     };
+    if (options.pipeName !== undefined && !isGeneratedPipeName(options.pipeName)) {
+      throw new Error("Windows agent pipe host name is not one the host generates.");
+    }
   }
 
   get address(): string {
@@ -111,7 +120,10 @@ export class WindowsPipeHostTransport extends EventEmitter {
     const spawnHost = this.options.spawnHost ?? spawn;
     const child = spawnHost(
       this.options.hostPath,
-      ["--parent-pid", String(this.options.parentPid)],
+      [
+        "--parent-pid", String(this.options.parentPid),
+        ...(this.options.pipeName ? ["--pipe-name", this.options.pipeName] : [])
+      ],
       {
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
@@ -120,6 +132,16 @@ export class WindowsPipeHostTransport extends EventEmitter {
       }
     ) as ChildProcessWithoutNullStreams;
     this.child = child;
+    // A write or end after the host died raises EPIPE on stdin; without a
+    // listener that is an uncaught exception in the main process.
+    const pipeFailure = (name: string) => (error: Error) => {
+      if (this.child !== child) return;
+      this.fail(new Error(`Windows agent pipe host ${name} failed: ${error.message}`));
+    };
+    child.stdin.on("error", pipeFailure("input"));
+    child.stdout.on("error", pipeFailure("output"));
+    // stderr is diagnostics only.
+    child.stderr.on("error", () => undefined);
 
     return await new Promise<string>((resolve, reject) => {
       let settled = false;
@@ -140,6 +162,9 @@ export class WindowsPipeHostTransport extends EventEmitter {
           for (const frame of this.decoder.push(chunk)) {
             if (frame.type === HOST_TO_PARENT.ready && !settled) {
               const endpoint = parseReadyEndpoint(frame);
+              if (this.options.pipeName && endpoint !== this.options.pipeName) {
+                throw new Error("Windows pipe host listened on a different endpoint than requested.");
+              }
               this.endpoint = endpoint;
               this.started = true;
               settled = true;
@@ -161,9 +186,14 @@ export class WindowsPipeHostTransport extends EventEmitter {
       });
       child.once("error", (error) => {
         settleError(new Error(`Windows agent pipe host could not start: ${error.message}`));
-        this.fail(error);
+        if (this.child === child) this.fail(error);
       });
       child.once("exit", (code, signal) => {
+        // A host this transport already gave up on (fail() kills without waiting) must not end its successor.
+        if (this.child !== child) {
+          settleError(new Error("Windows agent pipe host exited."));
+          return;
+        }
         const details = this.stderr.trim();
         const suffix = details ? ` ${details}` : "";
         const failure = new Error(
@@ -406,6 +436,11 @@ function parseReadyEndpoint(frame: RelayFrame): string {
     throw new Error("Windows pipe host returned an invalid local endpoint.");
   }
   return endpoint;
+}
+
+/** The names the native host generates: the fixed prefix and 16 random bytes in lowercase hex. */
+function isGeneratedPipeName(value: string): boolean {
+  return /^\\\\\.\\pipe\\canvastty-agent-[0-9a-f]{32}$/u.test(value);
 }
 
 function safeHostMessage(payload: Buffer): string {

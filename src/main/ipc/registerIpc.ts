@@ -1,59 +1,82 @@
-import { extname } from "node:path";
-import { readFile, stat } from "node:fs/promises";
-import { app, BrowserWindow, clipboard, dialog, ipcMain, shell } from "electron";
-import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
+import { realpath } from "node:fs/promises";
+import { app, BrowserWindow, clipboard, dialog, shell } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions, WebContents } from "electron";
 import type {
   AppSettings,
+  AgentChatHistoryProviderId,
   AgentCliAvailability,
   BrowserCommand,
   CanvasNavigationPointerBindingInput,
+  CustomTerminalBorderSkinId,
   CreateSessionRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
+  PluginLaunchFieldOptions,
+  PixelSkinPackInstallRequest,
+  PixelSkinZipInstallRequest,
+  PixelSkinSlot,
+  PixelTerminalBorderSkinId,
   ProviderId,
+  ProviderSecretId,
+  Point,
   SessionBounds
 } from "../../shared/contracts";
-import { IPC } from "../../shared/contracts";
+import { IPC, PROVIDER_SECRET_IDS, isProviderId } from "../../shared/contracts";
 import { isCanvasNavigationMouseButton } from "../../shared/canvasNavigation";
-import { observeWindowState, readWindowState } from "../windowState";
+import { createWindowStateObserver, readWindowState } from "../windowState";
 import type { SettingsStore } from "../services/SettingsStore";
+import { isCustomTerminalBorderSkinId, type SkinRegistry } from "../services/SkinRegistry";
+import { isPixelSkinSlot, isPixelTerminalBorderSkinId, type PixelSkinPackRegistry } from "../services/PixelSkinPackRegistry";
 import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
+import type { AgentChatHistoryService } from "../services/AgentChatHistoryService";
 import type { LimitsService } from "../services/LimitsService";
 import type { PluginManager } from "../services/PluginManager";
+import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
+import type { PluginCards } from "../services/PluginCards";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
+import type { ProviderSecretsService } from "../services/ProviderSecretsService";
 import type { BrowserService } from "../services/BrowserService";
+import type { IpcRegistrar } from "./IpcReadinessGate";
 import { normalizePluginBrowserUrl } from "../services/browser/PluginBrowserOpenPolicy";
 import { PluginBrowserOpenBroker } from "./PluginBrowserOpenBroker";
 import type { GithubAuthService } from "../services/GithubAuthService";
 import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
+import { readHomeMedia } from "../services/homeMedia";
+import { openTerminalFile } from "../services/terminalFileEditor";
 
-const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
-const MEDIA_MIME: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".webp": "image/webp",
-  ".gif": "image/gif"
-};
+interface CriticalDependencies {
+  settings: SettingsStore;
+  terminalBorderSkins: SkinRegistry;
+  pixelSkinPacks: PixelSkinPackRegistry;
+  providerClis: ProviderCliRegistry;
+  plugins: PluginManager;
+  getMainWindow(): BrowserWindow | null;
+}
 
 interface Dependencies {
   settings: SettingsStore;
-  providerClis: ProviderCliRegistry;
   recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
+  agentChatHistory: AgentChatHistoryService;
   limits: LimitsService;
   plugins: PluginManager;
+  pluginServices: PluginServiceSupervisor;
+  pluginCards: PluginCards;
   pluginMedia: PluginMediaService;
   pluginSecrets: PluginSecretsService;
+  providerSecrets: ProviderSecretsService;
   browser: BrowserService;
   githubAuth: GithubAuthService;
   hermesHud: HermesHudService;
+  executionAccountRoutes?(provider:ProviderId):Promise<Array<{accountId:string;model:string;endpoint:string;kind:string;state:string}>>;
+  launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
   getMainWindow(): BrowserWindow | null;
   applyBrowserSettings(settings: AppSettings): Promise<void> | void;
   setCanvasNavigationShortcutCapture(active: boolean): void;
+  setCanvasNavigationTerminalEditFocus(contents: WebContents, active: boolean): void;
   setCanvasNavigationPointerBinding(input: CanvasNavigationPointerBindingInput): void;
   openPluginWindow(pluginId: string, contributionId: string): Promise<void>;
   closePluginWindows(pluginId: string): void;
@@ -62,36 +85,29 @@ interface Dependencies {
   broadcastPluginStorageChange(pluginId: string, key: string, value: unknown): void;
 }
 
-export function registerIpc({
+/**
+ * The handlers the renderer's first frame depends on (settings, appearance, CLI availability, installed plugins,
+ * window chrome), registered as soon as the few services behind them are loaded — before terminals, gateways, the
+ * browser and the other services start. Returns the window-state observer the main entry point keeps current.
+ */
+export function registerCriticalIpc(ipcMain: IpcRegistrar, {
   settings,
+  terminalBorderSkins,
+  pixelSkinPacks,
   providerClis,
-  recheckProviderClis,
-  terminals,
-  limits,
   plugins,
-  pluginMedia,
-  pluginSecrets,
-  browser,
-  githubAuth,
-  hermesHud,
-  getMainWindow,
-  applyBrowserSettings,
-  setCanvasNavigationShortcutCapture,
-  setCanvasNavigationPointerBinding,
-  openPluginWindow,
-  closePluginWindows,
-  requestPluginLauncher,
-  requestPluginCanvas,
-  broadcastPluginStorageChange
-}: Dependencies): void {
-  const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
-  const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
-    plugins.assertPermission(pluginId, "browser:open");
-    await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
-  };
-
-  ipcMain.handle(IPC.clipboardRead, () => clipboard.readText());
-  ipcMain.on(IPC.clipboardWrite, (_event, text: string) => {
+  getMainWindow
+}: CriticalDependencies): (window: BrowserWindow | null) => void {
+  ipcMain.handle(IPC.clipboardRead, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return clipboard.readText();
+  });
+  ipcMain.handle(IPC.clipboardHasImage, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return !clipboard.readImage().isEmpty();
+  });
+  ipcMain.on(IPC.clipboardWrite, (event, text: string) => {
+    if (!isMainRenderer(event, getMainWindow)) return;
     if (typeof text === "string" && text.length > 0) clipboard.writeText(text);
   });
   ipcMain.handle(IPC.externalOpenUrl, (event, value: unknown) => {
@@ -103,17 +119,144 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     return app.getVersion();
   });
-  ipcMain.handle(IPC.settingsGet, () => settings.get());
+  ipcMain.handle(IPC.settingsGet, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return settings.get();
+  });
+  ipcMain.handle(IPC.terminalBorderSkinsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminalBorderSkins.list();
+  });
+  ipcMain.handle(IPC.terminalBorderSkinsGet, (event, id: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!isCustomTerminalBorderSkinId(id)) throw new Error("Custom terminal skin ID is invalid.");
+    return terminalBorderSkins.get(id as CustomTerminalBorderSkinId);
+  });
+  terminalBorderSkins.onChanged(() => {
+    const window = getMainWindow();
+    if (window && !window.isDestroyed()) window.webContents.send(IPC.terminalBorderSkinsChanged);
+  });
+  ipcMain.handle(IPC.pixelSkinsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.list();
+  });
+  ipcMain.handle(IPC.pixelSkinsInstall, (event, request: PixelSkinPackInstallRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.install(request);
+  });
+  ipcMain.handle(IPC.pixelSkinsInstallZip, (event, request: PixelSkinZipInstallRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    return pixelSkinPacks.installZip(request.archive, request.name, request.apertures);
+  });
+  ipcMain.handle(IPC.pixelSkinsReadAsset, (event, id: unknown, slot: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!isPixelTerminalBorderSkinId(id) || !isPixelSkinSlot(slot)) return null;
+    return pixelSkinPacks.readAsset(id as PixelTerminalBorderSkinId, slot as PixelSkinSlot);
+  });
+  pixelSkinPacks.onChanged(() => {
+    const window = getMainWindow();
+    if (window && !window.isDestroyed()) window.webContents.send(IPC.pixelSkinsChanged);
+  });
   ipcMain.handle(IPC.agentsAvailability, (event) => {
     assertMainRenderer(event, getMainWindow);
     return providerCliAvailability(providerClis);
   });
+
+  ipcMain.handle(IPC.pluginsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return plugins.list();
+  });
+
+  const observeMainWindow = createWindowStateObserver<BrowserWindow>((window, state) => {
+    if (!window.isDestroyed()) window.webContents.send(IPC.windowState, state);
+  });
+  observeMainWindow(getMainWindow());
+
+  // Window controls come only from the app's own renderer; a foreign sender is dropped or refused.
+  ipcMain.on(IPC.windowMinimize, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.minimize();
+  });
+  ipcMain.handle(IPC.windowToggleMaximize, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    const window = BrowserWindow.fromWebContents(event.sender);
+    if (!window) return readWindowState(null);
+    window.isMaximized() ? window.unmaximize() : window.maximize();
+    return readWindowState(window);
+  });
+  ipcMain.on(IPC.windowClose, (event) => {
+    if (isMainRenderer(event, getMainWindow)) BrowserWindow.fromWebContents(event.sender)?.close();
+  });
+  ipcMain.handle(IPC.windowGetState, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return readWindowState(BrowserWindow.fromWebContents(event.sender));
+  });
+
+  return observeMainWindow;
+}
+
+export function registerIpc(ipcMain: IpcRegistrar, {
+  settings,
+  recheckProviderClis,
+  terminals,
+  agentChatHistory,
+  limits,
+  plugins,
+  pluginServices,
+  pluginCards,
+  pluginMedia,
+  pluginSecrets,
+  providerSecrets,
+  browser,
+  githubAuth,
+  hermesHud,
+  launchFieldOptions,
+  executionAccountRoutes,
+  getMainWindow,
+  applyBrowserSettings,
+  setCanvasNavigationShortcutCapture,
+  setCanvasNavigationTerminalEditFocus,
+  setCanvasNavigationPointerBinding,
+  openPluginWindow,
+  closePluginWindows,
+  requestPluginLauncher,
+  requestPluginCanvas,
+  broadcastPluginStorageChange
+}: Dependencies): void {
+  const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
+  // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
+  // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
+  const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
+    const serviceId = stringValue(values.serviceId, "serviceId");
+    plugins.assertService(pluginId, serviceId);
+    return pluginServices.request(pluginId, serviceId, stringValue(values.method, "method"), values.params);
+  };
+  const requestPluginBrowserOpen = async (pluginId: string, value: unknown): Promise<void> => {
+    plugins.assertPermission(pluginId, "browser:open");
+    await pluginBrowserOpenBroker.request(pluginId, normalizePluginBrowserUrl(value));
+  };
+
   ipcMain.handle(IPC.agentsRecheck, (event) => {
     assertMainRenderer(event, getMainWindow);
     return recheckProviderClis();
   });
-  ipcMain.handle(IPC.settingsUpdate, async (_event, patch: Partial<AppSettings>) => {
+  ipcMain.handle(IPC.agentChatHistoryProviders, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return agentChatHistory.providers();
+  });
+  ipcMain.handle(IPC.agentChatHistoryList, (event, provider: AgentChatHistoryProviderId, cursor?: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (cursor !== undefined && (typeof cursor !== "string" || cursor.length > 64)) throw new Error("Invalid history cursor.");
+    return agentChatHistory.list(provider, cursor);
+  });
+  ipcMain.handle(IPC.agentChatHistoryResume, (event, provider: AgentChatHistoryProviderId, id: string, position: Point) => {
+    assertMainRenderer(event, getMainWindow);
+    if (!position || !Number.isFinite(position.x) || !Number.isFinite(position.y)) throw new Error("Invalid history card position.");
+    return agentChatHistory.resume(provider, id, position);
+  });
+  ipcMain.handle(IPC.settingsUpdate, async (event, patch: Partial<AppSettings>) => {
+    assertMainRenderer(event, getMainWindow);
     const next = await settings.update(patch);
+    agentChatHistory.settingsChanged();
     await applyBrowserSettings(next);
     return next;
   });
@@ -121,6 +264,11 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     if (typeof active !== "boolean") return;
     setCanvasNavigationShortcutCapture(active);
+  });
+  ipcMain.on(IPC.canvasNavigationTerminalEditFocus, (event, active: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof active !== "boolean") return;
+    setCanvasNavigationTerminalEditFocus(event.sender, active);
   });
   ipcMain.on(IPC.canvasNavigationPointerBinding, (event, input: unknown) => {
     assertMainRenderer(event, getMainWindow);
@@ -139,6 +287,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickDirectory, async (event, defaultPath?: string) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose a project folder",
@@ -152,6 +301,7 @@ export function registerIpc({
   });
 
   ipcMain.handle(IPC.dialogPickMedia, async (event) => {
+    assertMainRenderer(event, getMainWindow);
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: OpenDialogOptions = {
       title: "Choose Home media",
@@ -161,27 +311,30 @@ export function registerIpc({
     const result = owner
       ? await dialog.showOpenDialog(owner, options)
       : await dialog.showOpenDialog(options);
-    const path = result.filePaths[0];
-    if (result.canceled || !path) return null;
-    return { path, dataUrl: await readMedia(path) };
+    const picked = result.filePaths[0];
+    if (result.canceled || !picked) return null;
+    // Save the file the person picked, not a link to it, so a later read is
+    // not redirected by changing the link.
+    const path = await realpath(picked);
+    return { path, dataUrl: await readHomeMedia(path) };
   });
 
-  ipcMain.handle(IPC.mediaRead, async (_event, path: string) => {
+  ipcMain.handle(IPC.mediaRead, async (event, path: string) => {
+    assertMainRenderer(event, getMainWindow);
     if (typeof path !== "string" || settings.get().mediaPath !== path) return null;
     try {
-      return await readMedia(path);
+      return await readHomeMedia(path);
     } catch (error) {
       console.warn("CanvasTTY media could not be read.", error);
       return null;
     }
   });
 
-  ipcMain.handle(IPC.limitsGet, () => limits.get());
-
-  ipcMain.handle(IPC.pluginsList, (event) => {
+  ipcMain.handle(IPC.limitsGet, (event) => {
     assertMainRenderer(event, getMainWindow);
-    return plugins.list();
+    return limits.get();
   });
+
   ipcMain.handle(IPC.pluginsSearch, (event, query: string) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof query !== "string") throw new Error("Search query is required.");
@@ -217,25 +370,29 @@ export function registerIpc({
     closePluginWindows(pluginId);
     return plugins.updatePlugin(pluginId);
   });
-  ipcMain.handle(IPC.pluginsPreviewInstall, (_event, sourceUrl: string) => {
+  ipcMain.handle(IPC.pluginsPreviewInstall, (event, sourceUrl: string) => {
+    assertMainRenderer(event, getMainWindow);
     if (typeof sourceUrl !== "string") throw new Error("GitHub URL is required.");
     return plugins.previewInstall(sourceUrl);
   });
-  ipcMain.handle(IPC.pluginsInstall, (_event, token: string, selectedModules?: string[]) => {
+  ipcMain.handle(IPC.pluginsInstall, (event, token: string, selectedModules?: string[]) => {
+    assertMainRenderer(event, getMainWindow);
     if (typeof token !== "string") throw new Error("Plugin preview token is invalid.");
     if (selectedModules !== undefined && (
       !Array.isArray(selectedModules) || selectedModules.some((item) => typeof item !== "string")
     )) throw new Error("Plugin module selection is invalid.");
     return plugins.install(token, selectedModules);
   });
-  ipcMain.handle(IPC.pluginsSetModules, async (_event, pluginId: string, selectedModules: string[]) => {
+  ipcMain.handle(IPC.pluginsSetModules, async (event, pluginId: string, selectedModules: string[]) => {
+    assertMainRenderer(event, getMainWindow);
     if (!Array.isArray(selectedModules) || selectedModules.some((item) => typeof item !== "string")) {
       throw new Error("Plugin module selection is invalid.");
     }
     closePluginWindows(pluginId);
     return plugins.setModules(pluginId, selectedModules);
   });
-  ipcMain.handle(IPC.pluginsSetEnabled, async (_event, pluginId: string, enabled: boolean) => {
+  ipcMain.handle(IPC.pluginsSetEnabled, async (event, pluginId: string, enabled: boolean) => {
+    assertMainRenderer(event, getMainWindow);
     if (typeof enabled !== "boolean") throw new Error("Plugin enabled state is invalid.");
     try {
       return await plugins.setEnabled(pluginId, enabled);
@@ -255,18 +412,74 @@ export function registerIpc({
     }
     return plugins.setHookEnabled(pluginId, hookId, enabled);
   });
-  ipcMain.handle(IPC.pluginsUninstall, async (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsSetNativeCodeTrusted, (event, pluginId: string, trusted: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof trusted !== "boolean") throw new Error("Plugin native code state is invalid.");
+    return plugins.setNativeCodeTrusted(pluginId, trusted);
+  });
+  ipcMain.handle(IPC.pluginsSetDecisionsMayAllow, (event, pluginId: string, allowed: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
+    return plugins.setDecisionsMayAllow(pluginId, allowed);
+  });
+  ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");
+    return pluginServices.report(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsServiceRequest, (
+    event,
+    pluginId: string,
+    serviceId: string,
+    method: string,
+    params: unknown
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return requestPluginService(pluginId, { serviceId, method, params });
+  });
+  ipcMain.handle(IPC.pluginsCardDecorations, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginCards.decorations();
+  });
+  ipcMain.handle(IPC.pluginsInvokeCardAction, (event, pluginId: unknown, actionId: unknown, sessionId: unknown, input?: unknown) => {
+    // Only the app window's own card menu invokes actions; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof actionId !== "string" || typeof sessionId !== "string") {
+      throw new Error("Card action request is invalid.");
+    }
+    return pluginCards.invoke(pluginId, actionId, sessionId, input);
+  });
+  ipcMain.handle(IPC.executionAccountRoutes,(event,provider:unknown)=>{assertMainRenderer(event,getMainWindow);if(typeof provider!=="string")throw new Error("Invalid provider.");return executionAccountRoutes?.(provider as ProviderId)??[];});
+  ipcMain.handle(IPC.pluginsLaunchFieldOptions, (event, pluginId: unknown, provider: unknown) => {
+    // Only the app's own launcher asks; plugin surfaces cannot reach this channel.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof provider !== "string") throw new Error("Launch option request is invalid.");
+    return launchFieldOptions(pluginId, provider as ProviderId);
+  });
+  ipcMain.handle(IPC.pluginsUninstall, async (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     closePluginWindows(pluginId);
-    await pluginSecrets.revokeAll(pluginId);
-    await pluginMedia.revokeAll(pluginId);
-    await plugins.uninstall(pluginId);
+    // Uninstall first: it stops the plugin's services before removing its files, and afterwards
+    // no surface or service of the plugin passes authorization, so nothing can write a secret or
+    // media grant after they are revoked. A failed uninstall keeps the plugin's secrets.
+    // A media folder pick still open refuses to store its grant while this runs (and after, the plugin is gone).
+    pluginMedia.beginRemoval(pluginId);
+    try {
+      await plugins.uninstall(pluginId);
+      await pluginSecrets.revokeAll(pluginId);
+      await pluginMedia.revokeAll(pluginId);
+    } finally {
+      pluginMedia.endRemoval(pluginId);
+    }
+    pluginServices.forget(pluginId);
   });
   ipcMain.handle(IPC.pluginsOpenCanvas, (
-    _event,
+    event,
     pluginId: string,
     contributionId: string,
     sourceCanvasInstanceId?: string
   ) => {
+    assertMainRenderer(event, getMainWindow);
     const target = plugins.contribution(pluginId, contributionId);
     if (target.kind !== "canvas-app") throw new Error("Plugin contribution is not a canvas app.");
     requestPluginCanvas({
@@ -277,10 +490,12 @@ export function registerIpc({
         : {})
     });
   });
-  ipcMain.handle(IPC.pluginsOpenWindow, (_event, pluginId: string, contributionId: string) => (
-    openPluginWindow(pluginId, contributionId)
-  ));
-  ipcMain.handle(IPC.pluginsOpenExternal, async (_event, pluginId: string, value: string) => {
+  ipcMain.handle(IPC.pluginsOpenWindow, (event, pluginId: string, contributionId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return openPluginWindow(pluginId, contributionId);
+  });
+  ipcMain.handle(IPC.pluginsOpenExternal, async (event, pluginId: string, value: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "external:open");
     const url = normalizeExternalUrl(value);
     await shell.openExternal(url);
@@ -289,61 +504,90 @@ export function registerIpc({
     assertMainRenderer(event, getMainWindow);
     await requestPluginBrowserOpen(pluginId, value);
   });
-  ipcMain.handle(IPC.pluginsStorageGet, (_event, pluginId: string, key: string) => (
-    plugins.storageGet(pluginId, key)
-  ));
-  ipcMain.handle(IPC.pluginsStorageSet, async (_event, pluginId: string, key: string, value: unknown) => {
+  ipcMain.handle(IPC.pluginsStorageGet, (event, pluginId: string, key: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return plugins.storageGet(pluginId, key);
+  });
+  ipcMain.handle(IPC.pluginsStorageSet, async (event, pluginId: string, key: string, value: unknown) => {
+    assertMainRenderer(event, getMainWindow);
     await plugins.storageSet(pluginId, key, value);
     broadcastPluginStorageChange(pluginId, key, value);
   });
-  ipcMain.handle(IPC.pluginsSecretsGet, (_event, pluginId: string, key: string) => (
-    pluginSecrets.get(pluginId, key)
-  ));
-  ipcMain.handle(IPC.pluginsSecretsSet, (_event, pluginId: string, key: string, value: string) => (
-    pluginSecrets.set(pluginId, key, value)
-  ));
-  ipcMain.handle(IPC.pluginsSecretsDelete, (_event, pluginId: string, key: string) => (
-    pluginSecrets.delete(pluginId, key)
-  ));
-  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => (
-    pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia)
-  ));
-  ipcMain.handle(IPC.pluginsMediaListLibraries, (_event, pluginId: string) => (
-    pluginMedia.listLibraries(pluginId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaScanLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.scanLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.revokeLibrary(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsList, (_event, pluginId: string, libraryId: string) => (
-    pluginMedia.listPlaylists(pluginId, libraryId)
-  ));
-  ipcMain.handle(IPC.pluginsPlaylistsRead, (_event, pluginId: string, libraryId: string, playlistId: string) => (
-    pluginMedia.readPlaylist(pluginId, libraryId, playlistId)
-  ));
+  ipcMain.handle(IPC.pluginsSecretsGet, (event, pluginId: string, key: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginSecrets.get(pluginId, key);
+  });
+  ipcMain.handle(IPC.pluginsSecretsSet, (event, pluginId: string, key: string, value: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginSecrets.set(pluginId, key, value);
+  });
+  ipcMain.handle(IPC.pluginsSecretsDelete, (event, pluginId: string, key: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginSecrets.delete(pluginId, key);
+  });
+  ipcMain.handle(IPC.providerSecretsStatus, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return providerSecrets.status();
+  });
+  ipcMain.handle(IPC.providerSecretsSet, (event, secretId: string, value: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return providerSecrets.set(providerSecretValue(secretId), value);
+  });
+  ipcMain.handle(IPC.providerSecretsClear, (event, secretId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return providerSecrets.delete(providerSecretValue(secretId));
+  });
+  ipcMain.handle(IPC.pluginsMediaPickLibrary, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pickPluginMediaLibrary(event, pluginId, plugins, pluginMedia);
+  });
+  ipcMain.handle(IPC.pluginsMediaListLibraries, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listLibraries(pluginId);
+  });
+  ipcMain.handle(IPC.pluginsMediaScanLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.scanLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsMediaRevokeLibrary, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.revokeLibrary(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsList, (event, pluginId: string, libraryId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.listPlaylists(pluginId, libraryId);
+  });
+  ipcMain.handle(IPC.pluginsPlaylistsRead, (event, pluginId: string, libraryId: string, playlistId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.readPlaylist(pluginId, libraryId, playlistId);
+  });
   ipcMain.handle(IPC.pluginsPlaylistsWrite, (
-    _event,
+    event,
     pluginId: string,
     libraryId: string,
     name: string,
     content: string
-  ) => pluginMedia.writePlaylist(
-    pluginId,
-    stringValue(libraryId, "libraryId"),
-    stringValue(name, "name"),
-    playlistContent(content)
-  ));
-  ipcMain.handle(IPC.pluginsHermesHudStatus, (_event, pluginId: string) => {
+  ) => {
+    assertMainRenderer(event, getMainWindow);
+    return pluginMedia.writePlaylist(
+      pluginId,
+      stringValue(libraryId, "libraryId"),
+      stringValue(name, "name"),
+      playlistContent(content)
+    );
+  });
+  ipcMain.handle(IPC.pluginsHermesHudStatus, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.status();
   });
-  ipcMain.handle(IPC.pluginsHermesHudOpen, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudOpen, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.open();
   });
-  ipcMain.handle(IPC.pluginsHermesHudClose, (_event, pluginId: string) => {
+  ipcMain.handle(IPC.pluginsHermesHudClose, (event, pluginId: string) => {
+    assertMainRenderer(event, getMainWindow);
     plugins.assertPermission(pluginId, "hermes:hud");
     return hermesHud.close();
   });
@@ -397,7 +641,7 @@ export function registerIpc({
     }
     if (method === "sessions.list") {
       plugins.assertPermission(pluginId, "sessions:read");
-      return terminals.list().map((session) => ({
+      return terminals.listMetadata().map((session) => ({
         id: session.id,
         provider: session.provider,
         title: session.title,
@@ -466,6 +710,7 @@ export function registerIpc({
         playlistContent(values.content)
       );
     }
+    if (method === "service.request") return requestPluginService(pluginId, values);
     if (method === "window.open") {
       const targetId = stringValue(values.contributionId, "contributionId");
       const target = plugins.contribution(pluginId, targetId);
@@ -580,6 +825,10 @@ export function registerIpc({
       expiresAt: flow.expiresAt
     };
   });
+  ipcMain.handle(IPC.githubAuthCancel, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return githubAuth.cancelDeviceFlow();
+  });
   ipcMain.handle(IPC.githubAuthSignOut, (event) => {
     assertMainRenderer(event, getMainWindow);
     return githubAuth.signOut();
@@ -590,38 +839,76 @@ export function registerIpc({
     return shell.openExternal(safeGithubUrl(value));
   });
 
-  ipcMain.handle(IPC.terminalList, () => terminals.list());
+  ipcMain.handle(IPC.terminalList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.list();
+  });
+  ipcMain.handle(IPC.terminalOpenFile, (event, id: unknown, reference: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session ID is required.");
+    const session = terminals.getMetadata(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    return openTerminalFile(reference, session.cwd);
+  });
   ipcMain.handle(IPC.terminalReadBuffer, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof id !== "string") throw new Error("Terminal session ID is required.");
     return terminals.readBuffer(id);
   });
-  ipcMain.handle(IPC.terminalCreate, (_event, request: CreateSessionRequest) => terminals.create(request));
-  ipcMain.handle(IPC.terminalRestart, (_event, id: string) => terminals.restart(id));
-  ipcMain.on(IPC.terminalInput, (_event, id: string, data: string) => terminals.input(id, data));
-  ipcMain.on(IPC.terminalResize, (_event, id: string, cols: number, rows: number) => {
+  ipcMain.handle(IPC.terminalCreate, (event, request: CreateSessionRequest) => {
+    assertMainRenderer(event, getMainWindow);
+    if (request?.executionGoal !== undefined && !settings.get().experimentalBacklogEnabled) throw new Error("Experimental execution strategies are disabled.");
+    return terminals.create(request);
+  });
+  ipcMain.handle(IPC.terminalRestart, (event, id: string, options?: { resume?: unknown }) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.restart(id, { resume: options?.resume === true });
+  });
+  ipcMain.handle(IPC.terminalPasteClipboard, (event, id: string, text: string, startedAt: number) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.pasteClipboard(id, text, startedAt);
+  });
+  ipcMain.on(IPC.terminalInput, (event, id: string, data: string) => {
+    // Fire-and-forget: a foreign sender is dropped instead of throwing into the IPC layer.
+    if (!isMainRenderer(event, getMainWindow)) return;
+    terminals.input(id, data);
+  });
+  ipcMain.on(IPC.terminalResize, (event, id: string, cols: number, rows: number) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
     terminals.resize(id, cols, rows);
   });
-  ipcMain.on(IPC.terminalBounds, (_event, id: string, bounds: SessionBounds) => terminals.setBounds(id, bounds));
-  ipcMain.handle(IPC.terminalRename, (_event, id: string, title: string) => terminals.rename(id, title));
-  ipcMain.handle(IPC.terminalDispose, (_event, id: string) => terminals.dispose(id));
-
-  const publishWindowState = (window: BrowserWindow): void => {
-    if (!window.isDestroyed()) window.webContents.send(IPC.windowState, readWindowState(window));
-  };
-
-  const mainWindow = getMainWindow();
-  if (mainWindow) observeWindowState(mainWindow, () => publishWindowState(mainWindow));
-
-  ipcMain.on(IPC.windowMinimize, (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
-  ipcMain.handle(IPC.windowToggleMaximize, (event) => {
-    const window = BrowserWindow.fromWebContents(event.sender);
-    if (!window) return readWindowState(null);
-    window.isMaximized() ? window.unmaximize() : window.maximize();
-    return readWindowState(window);
+  ipcMain.on(IPC.terminalBounds, (event, id: string, bounds: SessionBounds) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string") return;
+    terminals.setBounds(id, bounds);
   });
-  ipcMain.on(IPC.windowClose, (event) => BrowserWindow.fromWebContents(event.sender)?.close());
-  ipcMain.handle(IPC.windowGetState, (event) => readWindowState(BrowserWindow.fromWebContents(event.sender)));
+  ipcMain.handle(IPC.terminalRename, (event, id: string, title: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.rename(id, title);
+  });
+  ipcMain.handle(IPC.terminalSetRestore, (event, id: string, restore: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session id is invalid.");
+    return terminals.setRestore(id, restore);
+  });
+  ipcMain.handle(IPC.terminalResolveGitRisk, (event, reportId: unknown, action: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof reportId !== "string" || reportId.length > 64) throw new Error("Git warning id is invalid.");
+    if (action !== "neutralize" && action !== "keep") throw new Error("Git warning action is invalid.");
+    return terminals.resolveGitRisk(reportId, action);
+  });
+  ipcMain.handle(IPC.terminalDispose, (event, id: string, options?: { keepEnvironmentData?: unknown }) => {
+    assertMainRenderer(event, getMainWindow);
+    // Environment data is kept unless the person explicitly chose Remove.
+    return terminals.dispose(id, { keepEnvironmentData: options?.keepEnvironmentData !== false });
+  });
+  // Fire-and-forget, like the other stream-reporting channels: a malformed
+  // report is ignored rather than rejecting into the renderer.
+  ipcMain.on(IPC.terminalSetVisible, (event, id: unknown, visible: unknown) => {
+    if (!isMainRenderer(event, getMainWindow) || typeof id !== "string" || typeof visible !== "boolean") return;
+    terminals.setVisible(id, visible);
+  });
+
 }
 
 function isCanvasNavigationPointerBindingInput(
@@ -638,7 +925,19 @@ function isCanvasNavigationPointerBindingInput(
     && typeof input.shiftKey === "boolean";
 }
 
-function assertMainRenderer(
+function isMainRenderer(
+  event: IpcMainEvent | IpcMainInvokeEvent,
+  getMainWindow: () => BrowserWindow | null
+): boolean {
+  try {
+    assertMainRenderer(event, getMainWindow);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function assertMainRenderer(
   event: IpcMainEvent | IpcMainInvokeEvent,
   getMainWindow: () => BrowserWindow | null
 ): void {
@@ -738,19 +1037,11 @@ async function pickPluginMediaLibrary(
 }
 
 function providerValue(value: unknown): ProviderId {
-  if (value === "terminal" || value === "codex" || value === "claude" || value === "qwen" || value === "kimi" || value === "opencode" || value === "hermes" || value === "grok" || value === "omp" || value === "pi") return value;
+  if (isProviderId(value)) return value;
   throw new Error("Plugin requested an unknown launcher provider.");
 }
 
-async function readMedia(path: string): Promise<string> {
-  const mime = MEDIA_MIME[extname(path).toLowerCase()];
-  if (!mime) throw new Error("Unsupported media type.");
-
-  const metadata = await stat(path);
-  if (!metadata.isFile() || metadata.size > MAX_MEDIA_BYTES) {
-    throw new Error("Media must be a file smaller than 25 MB.");
-  }
-
-  const content = await readFile(path);
-  return `data:${mime};base64,${content.toString("base64")}`;
+function providerSecretValue(value: string): ProviderSecretId {
+  if ((PROVIDER_SECRET_IDS as readonly string[]).includes(value)) return value as ProviderSecretId;
+  throw new Error("Provider secret id is unknown.");
 }

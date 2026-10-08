@@ -14,7 +14,15 @@ import type {
   PluginUpdateStatus
 } from "../../../../shared/contracts";
 import { t, type TranslationKey } from "../../lib/i18n";
-import { INSTALLED_PAGE_SIZE, SHOWCASE_PAGE_SIZE, clampPage, pageCount, paginate } from "./pluginPagination";
+import { pollWhileOpen, STOP_POLLING } from "../settings/settingsPolling";
+import {
+  INSTALLED_PAGE_SIZE,
+  SHOWCASE_PAGE_SIZE,
+  clampPage,
+  pageCount,
+  paginate,
+  unresolvedPageUrls
+} from "./pluginPagination";
 import { compareSemver } from "../../../../shared/hostVersion";
 import { UiIcon } from "../../components/UiIcon";
 
@@ -37,6 +45,8 @@ interface PluginSettingsSectionProps {
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
+  /** Settings is open; the section's polling runs only then. */
+  open?: boolean;
 }
 
 export function PluginSettingsSection({
@@ -54,7 +64,8 @@ export function PluginSettingsSection({
   onSetPluginModules,
   onSetPluginEnabled,
   onUninstallPlugin,
-  onOpenPluginContribution
+  onOpenPluginContribution,
+  open = true
 }: PluginSettingsSectionProps): React.JSX.Element {
   const locale = settings.locale;
   const [sourceUrl, setSourceUrl] = useState("");
@@ -170,6 +181,15 @@ export function PluginSettingsSection({
   const [githubCode, setGithubCode] = useState<GithubDeviceFlowStart | null>(null);
   const [githubBusy, setGithubBusy] = useState(false);
   const [codeCopied, setCodeCopied] = useState(false);
+  const githubFlowNoticeKey = githubStatus?.deviceFlowState === "denied"
+    ? "githubAuthDenied"
+    : githubStatus?.deviceFlowState === "expired"
+      ? "githubAuthExpired"
+      : githubStatus?.deviceFlowState === "failed"
+        ? "githubAuthFailed"
+        : githubStatus?.deviceFlowState === "cancelled"
+          ? "githubAuthCancelled"
+          : null;
   const [showcasePreviews, setShowcasePreviews] = useState<Record<string, PluginInstallPreview>>({});
   const [showcaseManifests, setShowcaseManifests] = useState<Record<string, PluginManifest>>({});
   const [selectedShowcase, setSelectedShowcase] = useState<string | null>(null);
@@ -183,36 +203,33 @@ export function PluginSettingsSection({
   useEffect(() => {
     if (!githubCode) return;
     let cancelled = false;
-    let timer: number | null = null;
-
-    const poll = async (): Promise<void> => {
+    // The main process owns the device flow; this only reads its status, so it pauses while Settings is
+    // closed and picks up (sign-in finished or code expired) as soon as Settings opens again.
+    const stop = pollWhileOpen(open, githubCode.interval * 1000, async () => {
+      // A transient status read failure is retried on the next tick.
+      const status = await window.canvasTTY.githubAuth.status();
+      if (cancelled) return STOP_POLLING;
+      setGithubStatus(status);
+      if (status.authorized) {
+        setGithubCode(null);
+        return STOP_POLLING;
+      }
+      if (status.deviceFlowState && status.deviceFlowState !== "idle" && status.deviceFlowState !== "pending") {
+        setGithubCode(null);
+        return STOP_POLLING;
+      }
       if (Date.now() >= githubCode.expiresAt) {
-        if (!cancelled) {
-          setGithubCode(null);
-          setError(t(locale, "githubAuthExpired"));
-        }
-        return;
+        setGithubStatus({ ...status, deviceFlowState: "expired" });
+        setGithubCode(null);
+        return STOP_POLLING;
       }
-      try {
-        const status = await window.canvasTTY.githubAuth.status();
-        if (cancelled) return;
-        setGithubStatus(status);
-        if (status.authorized) {
-          setGithubCode(null);
-          return;
-        }
-      } catch {
-        // The main process owns the device flow; a transient status read can retry.
-      }
-      timer = window.setTimeout(() => void poll(), githubCode.interval * 1000);
-    };
-
-    timer = window.setTimeout(() => void poll(), githubCode.interval * 1000);
+      return undefined;
+    }, { immediate: false });
     return () => {
       cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
+      stop();
     };
-  }, [githubCode, locale]);
+  }, [githubCode, locale, open]);
 
   const inspect = async (): Promise<void> => {
     if (busy || sourceUrl.trim().length === 0) return;
@@ -248,32 +265,14 @@ export function PluginSettingsSection({
   };
 
   const runSearch = async (): Promise<void> => {
-    if (searching || searchQuery.trim().length === 0 || !githubAuthorized) return;
+    if (searching || searchQuery.trim().length === 0) return;
     setSearching(true);
     setError(null);
     try {
       const results = await onSearchPlugins(searchQuery);
       setSearchResults(results);
       setSelectedShowcase(null);
-      const urls = results.map((result) => result.url);
-      if (urls.length > 0) {
-        const [manifests, icons] = await Promise.all([
-          onPreviewManifests(urls).catch(() => ({} as Record<string, PluginManifest>)),
-          onFetchPluginIcons(urls).catch(() => ({} as Record<string, string | null>))
-        ]);
-        const byName: Record<string, PluginManifest> = {};
-        for (const result of results) {
-          const manifest = manifests[result.url];
-          if (manifest) byName[result.fullName] = manifest;
-        }
-        setShowcaseManifests(byName);
-        const iconsByName: Record<string, string | null> = {};
-        for (const result of results) {
-          const icon = icons[result.url];
-          if (icon !== undefined) iconsByName[result.fullName] = icon;
-        }
-        setShowcaseIcons(iconsByName);
-      }
+      // Manifests and icons load per-page (see the effect below), not for the full result set here.
     } catch (reason) {
       setError(errorMessage(reason, t(locale, "pluginSearchFailed")));
       setSearchResults([]);
@@ -283,7 +282,7 @@ export function PluginSettingsSection({
   };
 
   const runShowcase = async (): Promise<void> => {
-    if (loadingShowcase || !githubAuthorized) return;
+    if (loadingShowcase) return;
     setLoadingShowcase(true);
     setError(null);
     try {
@@ -294,27 +293,7 @@ export function PluginSettingsSection({
       setShowcaseIcons({});
       setShowcaseManifests({});
       setSelectedShowcase(null);
-      const urls = results.map((result) => result.url);
-      if (urls.length > 0) {
-        // Batch-load manifests (descriptions etc.) and icons with two IPC
-        // round-trips, so expanding a tile afterwards is instant.
-        const [manifests, icons] = await Promise.all([
-          onPreviewManifests(urls).catch(() => ({} as Record<string, PluginManifest>)),
-          onFetchPluginIcons(urls).catch(() => ({} as Record<string, string | null>))
-        ]);
-        const byName: Record<string, PluginManifest> = {};
-        for (const result of results) {
-          const manifest = manifests[result.url];
-          if (manifest) byName[result.fullName] = manifest;
-        }
-        setShowcaseManifests(byName);
-        const iconsByName: Record<string, string | null> = {};
-        for (const result of results) {
-          const icon = icons[result.url];
-          if (icon !== undefined) iconsByName[result.fullName] = icon;
-        }
-        setShowcaseIcons(iconsByName);
-      }
+      // Manifests and icons load per-page (see the effect below), not for the full result set here.
     } catch (reason) {
       setError(errorMessage(reason, t(locale, "pluginSearchFailed")));
       setShowcase([]);
@@ -322,6 +301,60 @@ export function PluginSettingsSection({
       setLoadingShowcase(false);
     }
   };
+
+  // Loads manifests (descriptions etc.) and icons only for the showcase/search page currently on
+  // screen, and only for entries that page has not already resolved. Previously the full result set
+  // was fetched right after search/showcase returned, which meant paging through results the user
+  // never scrolled to still cost a manifest and an icon request per entry.
+  useEffect(() => {
+    const results = searchResults ?? showcase;
+    if (!results || results.length === 0) return;
+    const pendingManifestUrls = unresolvedPageUrls(
+      results, showcasePage, SHOWCASE_PAGE_SIZE, new Set(Object.keys(showcaseManifests))
+    );
+    const pendingIconUrls = unresolvedPageUrls(
+      results, showcasePage, SHOWCASE_PAGE_SIZE, new Set(Object.keys(showcaseIcons))
+    );
+    if (pendingManifestUrls.length === 0 && pendingIconUrls.length === 0) return;
+    let cancelled = false;
+    Promise.all([
+      pendingManifestUrls.length > 0
+        ? onPreviewManifests(pendingManifestUrls).catch(() => ({} as Record<string, PluginManifest>))
+        : Promise.resolve({} as Record<string, PluginManifest>),
+      pendingIconUrls.length > 0
+        ? onFetchPluginIcons(pendingIconUrls).catch(() => ({} as Record<string, string | null>))
+        : Promise.resolve({} as Record<string, string | null>)
+    ]).then(([manifests, icons]) => {
+      if (cancelled) return;
+      if (pendingManifestUrls.length > 0) {
+        setShowcaseManifests((current) => {
+          const next = { ...current };
+          for (const result of results) {
+            const manifest = manifests[result.url];
+            if (manifest) next[result.fullName] = manifest;
+          }
+          return next;
+        });
+      }
+      if (pendingIconUrls.length > 0) {
+        setShowcaseIcons((current) => {
+          const next = { ...current };
+          for (const result of results) {
+            const icon = icons[result.url];
+            if (icon !== undefined) next[result.fullName] = icon;
+          }
+          return next;
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+    // showcaseManifests/showcaseIcons are read (as the "already resolved" set), not depended on: including them
+    // would refire this effect on every write it makes; each write only ever shrinks pendingManifestUrls/
+    // pendingIconUrls for the same page towards [], so the omission cannot leave a page permanently unfetched.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchResults, showcase, showcasePage, onPreviewManifests, onFetchPluginIcons]);
 
   const copyGithubCode = (code: string): void => {
     window.canvasTTY.clipboard.writeText(code);
@@ -346,10 +379,29 @@ export function PluginSettingsSection({
     try {
       const flow = await window.canvasTTY.githubAuth.start();
       setGithubCode(flow);
-      setGithubStatus({ configured: true, authorized: false, login: null, tokenExpiresAt: null });
+      setGithubStatus({ configured: true, authorized: false, login: null, tokenExpiresAt: null, deviceFlowState: "pending" });
       await openGithubAuthorization(flow, target);
     } catch (reason) {
       setError(errorMessage(reason, t(locale, "githubAuthNotConfigured")));
+    } finally {
+      setGithubBusy(false);
+    }
+  };
+
+  const runGithubCancel = async (): Promise<void> => {
+    if (githubBusy || !githubCode) return;
+    setGithubBusy(true);
+    setError(null);
+    try {
+      await window.canvasTTY.githubAuth.cancel();
+      const status = await window.canvasTTY.githubAuth.status();
+      setGithubStatus(status);
+      if (status.authorized || (status.deviceFlowState && status.deviceFlowState !== "idle" && status.deviceFlowState !== "pending")) {
+        setGithubCode(null);
+        setCodeCopied(false);
+      }
+    } catch (reason) {
+      setError(errorMessage(reason, t(locale, "githubAuthCancelFailed")));
     } finally {
       setGithubBusy(false);
     }
@@ -365,7 +417,8 @@ export function PluginSettingsSection({
         configured: current?.configured ?? false,
         authorized: false,
         login: null,
-        tokenExpiresAt: null
+        tokenExpiresAt: null,
+        deviceFlowState: "idle"
       }));
       setGithubCode(null);
     } finally {
@@ -811,6 +864,10 @@ export function PluginSettingsSection({
             </span>
           )}
         </h3>
+        {!githubAuthorized && !githubCode && <p className="plugin-github-optional">{t(locale, "githubAuthOptional")}</p>}
+        {!githubAuthorized && !githubCode && githubFlowNoticeKey && (
+          <p className="plugin-github-flow-notice" role="status">{t(locale, githubFlowNoticeKey)}</p>
+        )}
         {githubStatus?.authorized ? (
           <div>
             <div className="plugin-github-row">
@@ -858,6 +915,9 @@ export function PluginSettingsSection({
               <button type="button" disabled={githubBusy} onClick={() => void openGithubAuthorization(githubCode, "external")}>
                 {t(locale, "githubAuthOpenExternal")}
               </button>
+              <button type="button" className="plugin-github-cancel" disabled={githubBusy} onClick={() => void runGithubCancel()}>
+                {t(locale, "githubAuthCancel")}
+              </button>
             </div>
           </div>
         ) : githubStatus && !githubConfigured ? (
@@ -866,7 +926,7 @@ export function PluginSettingsSection({
       </section>
 
       <div className="plugin-showcase-wrap">
-        <section className={`setting-group plugin-showcase-group${githubAuthorized ? "" : " plugin-showcase-group--off"}`}>
+        <section className="setting-group plugin-showcase-group">
           <h3>
             {t(locale, "pluginShowcase")}
             <button
@@ -920,11 +980,6 @@ export function PluginSettingsSection({
           </div>
         )}
         </section>
-        {!githubAuthorized && (
-          <div className="plugin-showcase-lock">
-            <span>{t(locale, "showcaseRequiresGithub")}</span>
-          </div>
-        )}
       </div>
     </div>
   );
@@ -1043,6 +1098,7 @@ function HookManifestWarning({
 
 function permissionKey(permission: PluginPermission): TranslationKey {
   return ({
+    "model:route": "permissionModelRoute",
     storage: "permissionStorage",
     secrets: "permissionSecrets",
     "sessions:read": "permissionSessionsRead",
@@ -1054,6 +1110,16 @@ function permissionKey(permission: PluginPermission): TranslationKey {
     "playlists:read": "permissionPlaylistsRead",
     "playlists:write": "permissionPlaylistsWrite",
     "hermes:hud": "permissionHermesHud",
+    "launch:contribute": "permissionLaunchContribute",
+    "environment:provide": "permissionEnvironmentProvide",
+    "decision:provide": "permissionDecisionProvide",
+    "tools:agents": "permissionToolsAgents",
+    "sessions:events": "permissionSessionsEvents",
+    "sessions:read-screen": "permissionSessionsReadScreen",
+    "sessions:launch": "permissionSessionsLaunch",
+    "sessions:control": "permissionSessionsControl",
+    "cards:decorate": "permissionCardsDecorate",
+    "browser:engine": "permissionBrowserEngine",
     network: "permissionNetwork"
   } as const)[permission];
 }

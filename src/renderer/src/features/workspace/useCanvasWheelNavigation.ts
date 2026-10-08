@@ -10,14 +10,12 @@ import {
   canvasNavigationMouseButtonFromDomButton,
   canvasWheelIntent,
   isCanvasNavigationBindingActive,
-  normalizeCanvasWheelDeltas,
   shouldCanvasOwnWheel,
   type CanvasWheelDeltas
 } from "../../../../shared/canvasNavigation";
-import {
-  isFocusedCanvasWidgetTarget,
-  isPriorityLocalCanvasWheelTarget
-} from "./canvasWidgetFocus";
+import { routeCanvasWheelEvent } from "./canvasWheelRouting";
+import { createGestureSettle } from "./gestureSettle";
+import { createRafAccumulator } from "./rafAccumulator";
 import type { CanvasWidgetFocusState } from "./useCanvasWidgetFocus";
 
 export interface CanvasWheelInput extends CanvasWheelDeltas {
@@ -41,12 +39,11 @@ export interface CanvasWheelNavigationController {
   routeWidgetWheelToCanvas: boolean;
   /** True from the first zooming step until 160 ms of silence. */
   zooming: boolean;
+  /** True from the first wheel (trackpad) pan step until 160 ms of silence. */
+  wheelPanning: boolean;
   applyCanvasWheel(event: CanvasWheelInput): void;
   zoomBy(factor: number): void;
 }
-
-/** Trail after the last zoom step before the gesture is considered over. */
-const MARK_GESTURE_SETTLE_MS = 160;
 
 export function useCanvasWheelNavigation({
   viewport,
@@ -61,21 +58,13 @@ export function useCanvasWheelNavigation({
   const canvasOverrideActiveRef = useRef(false);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
-  const panFrame = useRef<number | null>(null);
-  const pendingPan = useRef<Point>({ x: 0, y: 0 });
   const [zooming, setZooming] = useState(false);
-  const zoomSettleTimer = useRef<number | null>(null);
-
-  // Trailing edge only: every zoom step restarts the timer, so a continuous
-  // wheel or pinch keeps the gesture open and only silence closes it.
-  const markZoomGesture = useCallback((): void => {
-    setZooming(true);
-    if (zoomSettleTimer.current !== null) window.clearTimeout(zoomSettleTimer.current);
-    zoomSettleTimer.current = window.setTimeout(() => {
-      zoomSettleTimer.current = null;
-      setZooming(false);
-    }, MARK_GESTURE_SETTLE_MS);
-  }, []);
+  const [zoomGesture] = useState(() => createGestureSettle(setZooming));
+  const markZoomGesture = zoomGesture.mark;
+  // A wheel pan only translates the scene, so compositing it (app.css) moves the cached raster
+  // instead of repainting every card on every frame; unlike a zoom there is no scale to go stale.
+  const [wheelPanning, setWheelPanning] = useState(false);
+  const [panGesture] = useState(() => createGestureSettle(setWheelPanning));
 
   const zoomAt = useCallback((clientX: number, clientY: number, nextZoom: number): void => {
     const bounds = viewport.current?.getBoundingClientRect();
@@ -93,38 +82,58 @@ export function useCanvasWheelNavigation({
     });
   }, [cameraRef, commitCamera, markZoomGesture, viewport]);
 
-  const flushPan = useCallback((): void => {
-    if (panFrame.current !== null) {
-      cancelAnimationFrame(panFrame.current);
-      panFrame.current = null;
-    }
-    const delta = pendingPan.current;
-    if (delta.x === 0 && delta.y === 0) return;
-    pendingPan.current = { x: 0, y: 0 };
-    commitCamera({
+  // Both accumulators coalesce every wheel event of a burst into one commit per animation
+  // frame. A trackpad pan already batched this way; a pinch-zoom used to commit camera state
+  // (and re-render every card) on each of its many events, so it now batches identically.
+  const commitCameraRef = useRef(commitCamera);
+  commitCameraRef.current = commitCamera;
+  const zoomAtRef = useRef(zoomAt);
+  zoomAtRef.current = zoomAt;
+
+  const [panAccumulator] = useState(() => createRafAccumulator<Point>(
+    (pending, next) => ({ x: (pending?.x ?? 0) + next.x, y: (pending?.y ?? 0) + next.y }),
+    (delta) => commitCameraRef.current({
       ...cameraRef.current,
       x: cameraRef.current.x - delta.x,
       y: cameraRef.current.y - delta.y
-    });
-  }, [cameraRef, commitCamera]);
+    })
+  ));
+  const [zoomAccumulator] = useState(() => createRafAccumulator<{ clientX: number; clientY: number; factor: number }>(
+    (pending, next) => ({
+      clientX: next.clientX,
+      clientY: next.clientY,
+      factor: (pending?.factor ?? 1) * next.factor
+    }),
+    (value) => zoomAtRef.current(
+      value.clientX,
+      value.clientY,
+      clamp(cameraRef.current.zoom * value.factor, 0.2, 1.35)
+    )
+  ));
+
+  const flushPan = useCallback((): void => {
+    panAccumulator.flush();
+  }, [panAccumulator]);
 
   const applyCanvasWheel = useCallback((event: CanvasWheelInput): void => {
     window.canvasTTY.canvasNavigation.armOwnerWheelSequence(event.clientX, event.clientY);
     const intent = canvasWheelIntent(event, event, settingsRef.current);
     if (intent.kind === "pan") {
-      pendingPan.current.x += intent.deltaX;
-      pendingPan.current.y += intent.deltaY;
-      if (panFrame.current === null) panFrame.current = requestAnimationFrame(flushPan);
+      panGesture.mark();
+      panAccumulator.push({ x: intent.deltaX, y: intent.deltaY });
       return;
     }
     flushPan();
-    zoomAt(event.clientX, event.clientY, clamp(cameraRef.current.zoom * intent.factor, 0.2, 1.35));
-  }, [cameraRef, flushPan, zoomAt]);
+    markZoomGesture();
+    zoomAccumulator.push({ clientX: event.clientX, clientY: event.clientY, factor: intent.factor });
+  }, [flushPan, markZoomGesture, panAccumulator, panGesture, zoomAccumulator]);
 
   useEffect(() => () => {
-    if (panFrame.current !== null) cancelAnimationFrame(panFrame.current);
-    if (zoomSettleTimer.current !== null) window.clearTimeout(zoomSettleTimer.current);
-  }, []);
+    panAccumulator.dispose();
+    zoomAccumulator.dispose();
+    zoomGesture.dispose();
+    panGesture.dispose();
+  }, [panAccumulator, panGesture, zoomAccumulator, zoomGesture]);
 
   useEffect(() => window.canvasTTY.canvasNavigation.onOverrideState(({ wheelActive, navigationActive }) => {
     wheelOverrideActiveRef.current = wheelActive;
@@ -210,30 +219,13 @@ export function useCanvasWheelNavigation({
     const element = viewport.current;
     if (!element) return;
     const handleWheel = (event: WheelEvent): void => {
-      // A priority-local surface (Browser panels, HOME session list) keeps the
-      // wheel over its own scroll area, so the freeze marker on the card must
-      // not outrank it; explicit capture modes still claim the wheel below.
-      const priorityLocalOwner = isPriorityLocalCanvasWheelTarget(event.target);
-      const browserFreezeOwned = !priorityLocalOwner
-        && event.target instanceof Element
-        && event.target.closest('[data-browser-canvas-wheel-owner="canvas"]') !== null;
-      const ownedByCanvas = browserFreezeOwned || shouldCanvasOwnWheel({
-        overFocusedWidget: priorityLocalOwner
-          || isFocusedCanvasWidgetTarget(event.target, widgetFocusRef.current.id),
+      routeCanvasWheelEvent(event, {
+        focusedWidgetId: widgetFocusRef.current.id,
         captureMode: settingsRef.current.canvasWheelCaptureMode,
         wheelOverrideActive: wheelOverrideActiveRef.current,
-        navigationOverrideActive: canvasOverrideActiveRef.current
-      });
-      if (!ownedByCanvas) return;
-      event.preventDefault();
-      event.stopPropagation();
-      const bounds = element.getBoundingClientRect();
-      applyCanvasWheel({
-        clientX: event.clientX,
-        clientY: event.clientY,
-        ...normalizeCanvasWheelDeltas(event.deltaX, event.deltaY, event.deltaMode, bounds),
-        ctrlKey: event.ctrlKey,
-        metaKey: event.metaKey
+        navigationOverrideActive: canvasOverrideActiveRef.current,
+        getBounds: () => element.getBoundingClientRect(),
+        applyCanvasWheel
       });
     };
     element.addEventListener("wheel", handleWheel, { capture: true, passive: false });
@@ -262,6 +254,7 @@ export function useCanvasWheelNavigation({
       navigationOverrideActive: canvasOverrideActive
     }),
     zooming,
+    wheelPanning,
     applyCanvasWheel,
     zoomBy
   };

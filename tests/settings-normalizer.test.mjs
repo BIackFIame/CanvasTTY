@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { keyboardPresetShortcuts } from "../src/shared/contracts.ts";
 import {
   normalizeHomeGridSize,
   normalizeHomeLayout,
@@ -12,7 +13,7 @@ import {
 
 const fallback = {
   locale: "en",
-  restoreTerminalSessions: false,
+  sessionRestoreMode: "off",
   persistCanvasRegions: true,
   persistStickyNotes: true,
   palette: "sage",
@@ -25,7 +26,7 @@ const fallback = {
     media: "#D5A2C9"
   },
   sessionRowColorMode: "status",
-  homeLauncherProviders: ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi"],
+  homeLauncherProviders: ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"],
   homeLimitProviders: ["codex", "claude", "qwen", "kimi", "opencode", "grok"],
   canvasLauncherItems: ["codex", "claude", "qwen", "opencode", "terminal"],
   radialLauncherItems: ["codex", "claude", "qwen", "opencode", "note", "terminal", "browser", "settings"],
@@ -33,7 +34,12 @@ const fallback = {
   agentLifecycleHooksEnabled: true,
   uiScale: 1,
   canvasColor: "sage",
+  canvasBackground: "none",
   pattern: "dots",
+  terminalBorderSkin: "classic",
+  terminalSkinDetail: "detailed",
+  terminalSkinAnimationEnabled: true,
+  appSkin: "classic",
   snapToGrid: true,
   invertTerminalWheel: true,
   invertCanvasWheel: false,
@@ -52,7 +58,7 @@ const fallback = {
   minimapInteractionMode: "click",
   shortcutHintsPlacement: "bottom-right",
   canvasControlsPlacement: "bottom-left",
-  shortcuts: { home: "Home", renameWindow: "F2" },
+  shortcuts: { home: "Home", renameWindow: "F2", toggleFullscreen: "Meta+F" },
   mediaPath: null,
   mediaFit: "cover",
   lastDirectory: "/",
@@ -68,7 +74,8 @@ const fallback = {
   browserCanvas: null,
   browserAgentAccess: true,
   browserShowAgentPresence: true,
-  browserRestoreTabs: true
+  browserRestoreTabs: true,
+  browserPauseHiddenTabs: true
 };
 
 test("keeps valid wheel, edge pan, zoom, and focus values", () => {
@@ -130,6 +137,8 @@ test("older settings files without the new keys inherit defaults", () => {
   assert.deepEqual(normalized.homeLauncherProviders, fallback.homeLauncherProviders);
   assert.deepEqual(normalized.homeLimitProviders, fallback.homeLimitProviders);
   assert.equal(normalized.canvasColor, fallback.canvasColor);
+  assert.equal(normalized.terminalBorderSkin, "classic");
+  assert.equal(normalized.appSkin, "classic");
   assert.equal(normalized.edgePan, fallback.edgePan);
   assert.equal(normalized.edgePanSpeed, fallback.edgePanSpeed);
   assert.equal(normalized.zoomSensitivity, fallback.zoomSensitivity);
@@ -141,6 +150,84 @@ test("older settings files without the new keys inherit defaults", () => {
   assert.equal(normalized.agentLifecycleHooksEnabled, true);
   assert.equal(normalized.persistCanvasRegions, true);
   assert.equal(normalized.persistStickyNotes, true);
+});
+
+test("terminal border skin accepts supported choices and rejects unknown values", () => {
+  for (const skin of ["classic", "minimal", "glass", "cyber", "nord", "gradient", "cybercore", "titanium", "retro", "sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse"]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).terminalBorderSkin, skin);
+  }
+  assert.equal(normalizeSettings({ terminalBorderSkin: "custom:aurora" }, fallback).terminalBorderSkin, "custom:aurora");
+  for (const skin of ["custom:", "custom:Bad", "custom:two words", "custom:../escape", "custom:a/b", `custom:${"a".repeat(49)}`]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).terminalBorderSkin, "classic");
+  }
+  assert.equal(normalizeSettings({ terminalBorderSkin: "unknown" }, fallback).terminalBorderSkin, "classic");
+  assert.equal(normalizeSettings({ terminalBorderSkin: "botanical" }, fallback).terminalBorderSkin, "classic");
+});
+
+test("terminal skin animation setting is boolean and persists independently of the selected skin", async () => {
+  assert.equal(normalizeSettings({ terminalSkinDetail: "minimal" }, fallback).terminalSkinDetail, "minimal");
+  assert.equal(normalizeSettings({ terminalSkinDetail: "master" }, fallback).terminalSkinDetail, "detailed");
+  assert.equal(normalizeSettings({ terminalSkinAnimationEnabled: false }, fallback).terminalSkinAnimationEnabled, false);
+  assert.equal(normalizeSettings({ terminalSkinAnimationEnabled: "false" }, fallback).terminalSkinAnimationEnabled, true);
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-skin-motion-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBorderSkin: "sakura", terminalSkinDetail: "minimal", terminalSkinAnimationEnabled: false });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.terminalBorderSkin, "sakura");
+    assert.equal(restored.terminalSkinDetail, "minimal");
+    assert.equal(restored.terminalSkinAnimationEnabled, false);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("canvas backgrounds migrate once and persist independently of terminal borders", async () => {
+  const pixel = "pixel:12345678-1234-1234-1234-123456789abc";
+  for (const skin of ["sakura", "matrix", "forest-cabin", "gold-black", "cat", "gothic-eclipse", pixel]) {
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin }, fallback).canvasBackground, skin);
+    assert.equal(normalizeSettings({ terminalBorderSkin: skin, canvasBackground: "none" }, fallback).canvasBackground, "none");
+    assert.equal(normalizeSettings({ terminalBorderSkin: "classic", canvasBackground: skin }, fallback).canvasBackground, skin);
+  }
+  for (const invalid of ["glass", "custom:aurora", "pixel:bad", "../background.png", null, 1]) {
+    assert.equal(normalizeSettings({ canvasBackground: invalid }, fallback).canvasBackground, "none");
+  }
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-"));
+  try {
+    await writeFile(join(dir, "settings.json"), JSON.stringify({ terminalBorderSkin: "sakura" }));
+    const store = new SettingsStore(dir, "en");
+    assert.equal((await store.load()).canvasBackground, "sakura");
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).canvasBackground, "sakura");
+    await store.update({ terminalBorderSkin: "cat" });
+    assert.equal((await new SettingsStore(dir, "en").load()).canvasBackground, "sakura");
+    await store.update({ canvasBackground: pixel });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBorderSkin, "cat");
+    await store.update({ canvasBackground: "none" });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.canvasBackground, "none");
+    assert.equal(restored.terminalBorderSkin, "cat");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("application skin accepts supported choices and rejects unknown values", () => {
+  for (const skin of ["classic", "atelier", "signal", "greenhouse", "midnight"]) {
+    assert.equal(normalizeSettings({ appSkin: skin }, fallback).appSkin, skin);
+  }
+  assert.equal(normalizeSettings({ appSkin: "unknown" }, fallback).appSkin, "classic");
+});
+
+test("terminal border skin persists across settings reload", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-terminal-border-skin-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBorderSkin: "cyber" });
+    assert.equal(JSON.parse(await readFile(join(dir, "settings.json"), "utf8")).terminalBorderSkin, "cyber");
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBorderSkin, "cyber");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("preserves an explicit lifecycle hook revocation", () => {
@@ -160,7 +247,8 @@ test("terminal restore remains opt-in and canvas regions are bounded and normali
     }]
   }, fallback);
 
-  assert.equal(normalized.restoreTerminalSessions, true);
+  // The old on/off switch continued conversations, so "on" migrates to "continue".
+  assert.equal(normalized.sessionRestoreMode, "continue");
   assert.deepEqual(normalized.canvasRegions, [{
     id: "region-1",
     title: "Backend",
@@ -168,7 +256,11 @@ test("terminal restore remains opt-in and canvas regions are bounded and normali
     position: { x: 20, y: 30 },
     size: { width: 360, height: 3_000 }
   }]);
-  assert.equal(normalizeSettings({ restoreTerminalSessions: "yes" }, fallback).restoreTerminalSessions, false);
+  assert.equal(normalizeSettings({ restoreTerminalSessions: "yes" }, fallback).sessionRestoreMode, "off");
+  assert.equal(normalizeSettings({ restoreTerminalSessions: false }, fallback).sessionRestoreMode, "off");
+  assert.equal(normalizeSettings({ sessionRestoreMode: "reopen", restoreTerminalSessions: true }, fallback).sessionRestoreMode, "reopen");
+  assert.equal(normalizeSettings({ sessionRestoreMode: "later" }, fallback).sessionRestoreMode, "off");
+  assert.equal("restoreTerminalSessions" in normalized, false);
 });
 
 test("colored regions and notes use independent exit persistence gates", async () => {
@@ -218,6 +310,56 @@ test("colored regions and notes use independent exit persistence gates", async (
     assert.equal(restored.persistStickyNotes, false);
     assert.deepEqual(restored.canvasRegions, [region]);
     assert.deepEqual(restored.stickyNotes, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a failed settings save does not publish its value and a later update persists cleanly", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-settings-failed-save-"));
+
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.load();
+    const persist = store.persist.bind(store);
+    store.persist = async () => {
+      throw new Error("synthetic settings write failure");
+    };
+
+    await assert.rejects(store.update({ palette: "night" }), /synthetic settings write failure/);
+    assert.equal(store.get().palette, "sage");
+    let persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
+    assert.equal(persisted.palette, "sage");
+
+    store.persist = persist;
+    await store.update({ locale: "ru" });
+
+    persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
+    assert.equal(persisted.palette, "sage");
+    assert.equal(persisted.locale, "ru");
+    assert.equal(store.get().palette, "sage");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("concurrent settings updates keep their write-queue order", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-settings-write-queue-"));
+
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.load();
+
+    await Promise.all([
+      store.update({ palette: "night" }),
+      store.update({ locale: "ru" })
+    ]);
+
+    const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
+    assert.equal(persisted.palette, "night");
+    assert.equal(persisted.locale, "ru");
+    assert.equal(store.get().palette, "night");
+    assert.equal(store.get().locale, "ru");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -313,7 +455,7 @@ test("a persisted pre-Grok launcher subset gains Grok exactly once", async () =>
     }));
     const store = new SettingsStore(dir, "en");
     const loaded = await store.load();
-    assert.deepEqual(loaded.homeLauncherProviders, ["codex", "kimi", "hermes", "grok", "omp", "pi"]);
+    assert.deepEqual(loaded.homeLauncherProviders, ["codex", "kimi", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
 
     await store.update({ homeLauncherProviders: ["codex", "claude", "kimi", "opencode", "hermes"] });
     const reloaded = new SettingsStore(dir, "en");
@@ -347,7 +489,7 @@ test("the pre-Qwen default selections gain Qwen while curated subsets remain unc
       homeLimitProviders: ["kimi"]
     }));
     const curated = await new SettingsStore(curatedDir, "en").load();
-    assert.deepEqual(curated.homeLauncherProviders, ["codex", "hermes", "omp", "pi"]);
+    assert.deepEqual(curated.homeLauncherProviders, ["codex", "hermes", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
     assert.deepEqual(curated.homeLimitProviders, ["kimi"]);
   } finally {
     await Promise.all([
@@ -369,7 +511,7 @@ test("the Qwen migration does not rerun the older expanded-limit migration", asy
     assert.deepEqual(loaded.homeLimitProviders, ["codex", "claude", "kimi"]);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 15);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, ["codex", "claude", "kimi"]);
   } finally {
@@ -388,11 +530,11 @@ test("the limit-display migration preserves a version-three launcher subset", as
     }));
     const store = new SettingsStore(dir, "en");
     const loaded = await store.load();
-    assert.deepEqual(loaded.homeLauncherProviders, ["codex", "kimi", "omp", "pi"]);
+    assert.deepEqual(loaded.homeLauncherProviders, ["codex", "kimi", "omp", "pi", "cursor", "minimax", "devin", "antigravity"]);
     assert.deepEqual(loaded.homeLimitProviders, fallback.homeLimitProviders);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 15);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, fallback.homeLimitProviders);
   } finally {
@@ -412,7 +554,7 @@ test("the expanded limit migration preserves a curated version-four subset", asy
     assert.deepEqual(loaded.homeLimitProviders, ["kimi"]);
 
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 15);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.agentLifecycleHooksEnabled, true);
     assert.deepEqual(persisted.homeLimitProviders, ["kimi"]);
   } finally {
@@ -529,7 +671,9 @@ test("fresh installs default to scroll pan and key-gated widget wheel input", as
     assert.equal(store.get().browserRestoreTabs, true);
     assert.equal(store.get().persistCanvasRegions, true);
     assert.equal(store.get().persistStickyNotes, true);
-    assert.deepEqual(store.get().shortcuts, { home: "Home", renameWindow: "F2" });
+    const preset = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
+    assert.equal(store.get().keyboardPreset, preset);
+    assert.deepEqual(store.get().shortcuts, keyboardPresetShortcuts(preset));
     const persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
     assert.equal(Object.hasOwn(persisted, "zoomOverApplications"), false);
   } finally {
@@ -564,7 +708,7 @@ test("existing profiles migrate minimap interaction to click and persist later c
     const store = new SettingsStore(dir, "en");
     assert.equal((await store.load()).minimapInteractionMode, "click");
     let persisted = JSON.parse(await readFile(join(dir, "settings.json"), "utf8"));
-    assert.equal(persisted.settingsVersion, 15);
+    assert.equal(persisted.settingsVersion, 21);
     assert.equal(persisted.minimapInteractionMode, "click");
 
     await store.update({ minimapInteractionMode: "drag" });
@@ -692,7 +836,7 @@ test("invalid explicit key mode fails closed without replacing action shortcuts"
   }, fallback, "darwin");
   assert.equal(normalized.canvasWheelCaptureMode, "off");
   assert.equal(normalized.canvasWheelOverride, null);
-  assert.deepEqual(normalized.shortcuts, { home: "Meta+Space", renameWindow: "F2" });
+  assert.deepEqual(normalized.shortcuts, { home: "Meta+Space", renameWindow: "F2", toggleFullscreen: "Meta+F" });
 });
 
 test("mode changes persist the compatible legacy boolean and preserve the hidden binding", async () => {
@@ -725,8 +869,10 @@ test("normalizes browser agent access, indicators, and tab restore preferences",
   const disabled = normalizeSettings({
     browserAgentAccess: false,
     browserShowAgentPresence: false,
-    browserRestoreTabs: false
+    browserRestoreTabs: false,
+    browserPauseHiddenTabs: false
   }, fallback);
+  assert.equal(disabled.browserPauseHiddenTabs, false);
   assert.equal(disabled.browserAgentAccess, false);
   assert.equal(disabled.browserShowAgentPresence, false);
   assert.equal(disabled.browserRestoreTabs, false);
@@ -734,8 +880,10 @@ test("normalizes browser agent access, indicators, and tab restore preferences",
   const invalid = normalizeSettings({
     browserAgentAccess: "yes",
     browserShowAgentPresence: "sometimes",
-    browserRestoreTabs: 1
+    browserRestoreTabs: 1,
+    browserPauseHiddenTabs: "off"
   }, fallback);
+  assert.equal(invalid.browserPauseHiddenTabs, true, "pausing hidden tabs is on unless turned off");
   assert.equal(invalid.browserAgentAccess, true);
   assert.equal(invalid.browserShowAgentPresence, true);
   assert.equal(invalid.browserRestoreTabs, true);
@@ -780,14 +928,20 @@ test("valid custom shortcuts survive normalization", () => {
   }, fallback);
   assert.equal(normalized.focusActivation, "double");
   assert.equal(normalized.showShortcutHints, false);
-  assert.deepEqual(normalized.shortcuts, { home: "Ctrl+H", renameWindow: "Ctrl+Shift+R" });
+  assert.deepEqual(normalized.shortcuts, { home: "Ctrl+H", renameWindow: "Ctrl+Shift+R", toggleFullscreen: "Meta+F" });
+});
+
+test("fullscreen shortcuts migrate, retain custom bindings and reject conflicts", () => {
+  assert.equal(normalizeSettings({ shortcuts: { home: "Home", renameWindow: "F2" } }, fallback).shortcuts.toggleFullscreen, "Meta+F");
+  assert.equal(normalizeSettings({ shortcuts: { toggleFullscreen: "Ctrl+Shift+F" } }, fallback).shortcuts.toggleFullscreen, "Ctrl+Shift+F");
+  assert.deepEqual(normalizeSettings({ shortcuts: { toggleFullscreen: "F2" } }, fallback).shortcuts, fallback.shortcuts);
 });
 
 test("mouse buttons survive action shortcut normalization", () => {
   const normalized = normalizeSettings({
     shortcuts: { home: "Mouse4", renameWindow: "Ctrl+Mouse5" }
   }, fallback);
-  assert.deepEqual(normalized.shortcuts, { home: "Mouse4", renameWindow: "Ctrl+Mouse5" });
+  assert.deepEqual(normalized.shortcuts, { home: "Mouse4", renameWindow: "Ctrl+Mouse5", toggleFullscreen: "Meta+F" });
 });
 
 test("normalizes canvas overlay positions independently", () => {
@@ -832,7 +986,7 @@ test("normalization preserves action shortcuts and allows modifier-only navigati
     shortcuts: { home: "Alt+H", renameWindow: "F2" },
     canvasNavigationOverride: "Alt"
   }, fallback, "darwin");
-  assert.deepEqual(conflict.shortcuts, { home: "Alt+H", renameWindow: "F2" });
+  assert.deepEqual(conflict.shortcuts, { home: "Alt+H", renameWindow: "F2", toggleFullscreen: "Meta+F" });
   assert.equal(conflict.canvasNavigationOverride, "Alt");
 
   const reserved = normalizeSettings({ canvasNavigationOverride: "Meta" }, fallback, "darwin");
@@ -842,7 +996,7 @@ test("normalization preserves action shortcuts and allows modifier-only navigati
   const migratedConflict = normalizeSettings({
     shortcuts: { home: "Alt+H", renameWindow: "F2" }
   }, fallback, "darwin");
-  assert.deepEqual(migratedConflict.shortcuts, { home: "Alt+H", renameWindow: "F2" });
+  assert.deepEqual(migratedConflict.shortcuts, { home: "Alt+H", renameWindow: "F2", toggleFullscreen: "Meta+F" });
   assert.equal(migratedConflict.canvasNavigationOverride, "Alt");
 });
 
@@ -896,4 +1050,22 @@ test("drops overlapping Home placements and always preserves a Settings entry po
   ]);
 
   assert.deepEqual(layout.map((item) => item.widgetId), ["core.settings"]);
+});
+
+test("a provider recheck during a settings update does not write the settings without the update", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-settings-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SettingsStore(root, "en");
+  await store.load();
+  const providers = ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"];
+  const availability = Object.fromEntries(providers.map((provider) => [provider, provider !== "grok"]));
+  const updating = store.update({ palette: "night" });
+  const rechecking = store.setAvailableProviders(availability);
+  await Promise.all([updating, rechecking]);
+  const memory = store.get();
+  const disk = JSON.parse(await readFile(join(root, "settings.json"), "utf8"));
+  assert.equal(memory.palette, "night");
+  assert.equal(disk.palette, "night", "the file keeps the update");
+  assert.equal(disk.homeLauncherProviders.includes("grok"), false);
+  assert.deepEqual(disk.homeLauncherProviders, memory.homeLauncherProviders);
 });

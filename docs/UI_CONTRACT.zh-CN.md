@@ -2,6 +2,16 @@
 
 [English](UI_CONTRACT.md) · [Русский](UI_CONTRACT.ru.md) · [简体中文](UI_CONTRACT.zh-CN.md)
 
+## CanvasTTY 更新
+
+“更新”页面显示当前版本、手动检查、可用稳定版本与发布说明、下载进度、安装就绪状态及错误。检查发现更新时，工作区显示包含版本号和“下载”操作的紧凑通知；下载期间显示进度，就绪后显示“安装”操作。点击通知标题可打开“更新”查看详情。Windows 便携版则打开发布页，不提供应用内下载。关闭通知后，同一版本和阶段在当前窗口会话期间不会重复提示；新版本或就绪阶段仍可显示新通知。安装与重启仅在用户明确操作后进行；关闭仍在运行的会话前须确认。重新打开设置时立即显示主进程中的当前状态。后台检查不会弹出对话框，也不会开始下载。
+
+在 macOS 上，CanvasTTY 应用菜单包含“检查更新…”项。选择后会打开“更新”页面，并执行与应用内按钮相同的手动检查。菜单文字随所选语言变化；此操作不会开始下载或安装。
+
+## 问题报告
+
+“关于”包含问题描述表单、附带诊断的说明和接收服务地址。仅明确点击时发送；未配置服务或正在发送时禁用按钮。成功后显示报告编号；失败后保留描述以便重试。使用当前设置语言和样式，不附加终端内容或对话。
+
 本契约用于保持已批准的 MVP 概念，并防止 feature ownership 漂移。
 
 ## Home 区域
@@ -19,7 +29,7 @@
 - 未检测到 CLI 的 agent 仍显示在 Settings 中，以缺失状态和官方外部安装链接替代启用开关。“再次检查”无需重启即可刷新检测、启动器可用性和限额，且不影响运行中的 session。后来检测到的 CLI 必须由用户手动重新选择。检测到文件不代表已登录或支持限额读取。
 
 - 点击服务商会打开该服务商的 Focus Card。服务商固定，不提供第二个 provider selector。
-- Focus Card 只包含 provider mark、project folder、Normal/YOLO profile、launch action 与上下文危险确认。
+- Focus Card 只包含 provider mark、project folder、Normal/Auto/YOLO profile（Auto 仅在 CLI 自带自动模式时出现）、launch action 与上下文危险确认。
 - Settings 顶部使用 General、Appearance、Agents、Controls、Browser、Plugins 分区。General 负责语言；Appearance 负责两个互相独立的颜色设置：按角色划分的 HOME palette preset/custom color，以及 Canvas background。修改其中一个不得重绘另一个。Appearance 还负责 Canvas pattern、shortcut hint、system HOME tile 与 HOME editor 入口。自定义 HOME 颜色只接受经过校验的 `#RRGGBB` 值，并且绝不重绘 provider mark；Agents 独立决定 HOME launcher 中显示哪些 provider 按钮，以及 HOME 限额 tile 中显示哪些真实服务商的限额行；一个选择不得改变另一个；Controls 负责 click focus、hover focus、window snapping、edge panning、zoom sensitivity、wheel direction、普通 scroll 的 pan/zoom、widget 上 Off/On/Key wheel/pinch capture、完整 canvas navigation override 与 action shortcut；Browser 负责 agent access、agent indicator visibility、tab restore、download、脱敏 activity 与 browser data 清理；Plugins 负责 install preview、permission review、installed-plugin list、enable/disable/uninstall 与 contribution action。Media control 不出现在这里。
 - Click focus 有 Off、Single click、Double click 三种明确模式，默认 Off。即使 camera focus 为 Off，selection 与可见 outline 仍然有效；Double click 模式不会在第一次点击时跳转 camera。
 - 当前 Terminal 与内置 Browser 之间的 selection 是排他的：点击空白 canvas 会清除选择。Input focus 独立保存，因此未来加入 multi-selection 时无需重新定义 wheel ownership。
@@ -40,6 +50,7 @@
 - Semantic summary 模式中，点击卡片仍会选中并显示 outline，camera focus 只遵循 Off/Single click/Double click。Renderer、xterm 与 plugin 卡片使用和正常 scale 相同的 wheel focus 矩阵：只有 focused 且具备 input 的卡片能在 Off 或 Key 未按下时保留 wheel；On、激活的 Key binding 或完整 navigation override 会把它交给 canvas。Browser summary 与其他 non-native placeholder surface 的 wheel/pinch 始终归 canvas。
 - Terminal 任意 edge/corner 都是 resize target。最小 card size 为 `420 × 260`；resize 更新 xterm viewport 并保持对边不动。
 - 在任意 canvas zoom 下，实时终端 selection 都跟随可见指针位置。有文字选择时，`Ctrl+C`/`Ctrl+Shift+C` 或 `Cmd+C` 复制；`Ctrl+Shift+V`/`Cmd+V` 与 `Shift+Insert` 从系统剪贴板粘贴。没有选择时，普通 `Ctrl+C` 仍是 PTY interrupt。`Shift+Enter` 向 PTY 发送换行 sequence（`ESC [ 13 ; 2 u`），而不是提交当前行。
+- Controls 提供默认关闭的 **Copy on selection** 设置，保存后立即应用于所有智能体和终端，包括全屏卡片。鼠标完成非空文本选择后复制到系统剪贴板，保留高亮；搜索结果和清除选择不会复制。启用后，所有桌面平台都可按住 Shift 在接管鼠标的 TUI 中选择文本；macOS 的终端鼠标适配器将 Shift 转为 xterm 的 Option 选择，同时保留 canvas 的 Option 导航。
 - Canvas plugin app 使用同一 movable card grammar、`54px` header、resize/snap behavior，以及 `0.5×` 以下的 semantic summary。`window` contribution 打开 CanvasTTY 管理的独立 sandbox window；不支持嵌入任意原生窗口。
 - 内置 Browser 是唯一的可移动、可调整尺寸 core canvas card，而不是 plugin contribution。它使用与其他 canvas card 相同的 `54px` 外层窗口 header，将 identity 与 hide-card action 和下方内部 tab strip 分开。可信 DOM chrome 负责 tab/favicon、address/search、back/forward/reload、download、per-tab provider badge、site dialog 以及明确的 Close tab/Close all。隐藏卡片会保留 tab 与共享的已认证 Chromium profile。低于 `0.5×`、Edit HOME 期间及可信 dialog/popover 后方，native page 会由稳定 semantic surface 替代；卡片或 camera 移动时它保持实时渲染，并跟随按帧合并的 viewport geometry。
 - 仅有 authenticated connection 或 heartbeat 不会显示智能体 presence。智能体实际发出 browser command 后才显示品牌 badge，获得真实 pointer position 后才显示 cursor。Claude 使用 `#D97757`，Codex 使用 `#10A37F`，Qwen 使用 `#6D44E8`，Kimi 使用 `#7C5CFC`，OpenCode 使用 `#5A5858`，Hermes 使用 `#D6A700`，未知 provider 使用 `#7A8291`。Browser Settings 可单独控制 indicator visibility 而不撤销访问；智能体访问 kill switch 会撤销连接本身。

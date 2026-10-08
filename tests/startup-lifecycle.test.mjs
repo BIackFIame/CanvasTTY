@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { stripTypeScriptTypes } from "node:module";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
@@ -7,33 +7,169 @@ import { startupPageUrl } from "../src/main/startupPage.ts";
 
 const mainPath = new URL("../src/main/index.ts", import.meta.url);
 
-test("closing during service startup stops renderer loading without a failure dialog", async () => {
+/** startApplication from the main entry, run against stubs: the order of its startup steps is what is tested. */
+async function startApplicationWith(context) {
   const source = await readFile(mainPath, "utf8");
   const start = source.slice(source.indexOf("async function startApplication"), source.indexOf("function buildProviderCliRegistry"));
-  let loads = 0;
-  let failures = 0;
+  return runInNewContext(`${stripTypeScriptTypes(start)}; startApplication`, context);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+const turn = () => new Promise((resolve) => setImmediate(resolve));
+
+function startupContext(events, overrides = {}) {
+  const gate = {
+    failed: null,
+    settled: false,
+    fail(error) { this.failed = error; events.push(`gate failed ${error.message}`); },
+    settle() { this.settled = true; events.push("gate settled"); }
+  };
   const context = {
+    Error,
     startupRunning: false,
     shutdownRunning: false,
     shutdownComplete: false,
     servicesReady: false,
-    mainWindow: { isDestroyed: () => false },
+    appSurfaceReady: false,
+    installMacMenu: null,
+    pendingMenuUpdateCheck: false,
+    checkUpdatesFromMenu: null,
+    mainWindow: null,
     process: { env: {} },
     shellWindowGone: () => false,
-    initializeServices: async () => { context.shutdownRunning = true; },
-    loadApplication: async () => { loads += 1; },
-    showStartupFailure: async () => { failures += 1; }
+    createWindow: () => { events.push("window"); return {}; },
+    ipcGate: gate,
+    ipcReadinessGate: () => gate,
+    markMainBoot: () => undefined,
+    mainBootMarks: () => [],
+    diagnostics: { record: () => undefined },
+    initializeServices: async (ipc) => { events.push(ipc === gate ? "services (gated)" : "services"); },
+    loadApplicationSurface: async () => { events.push("surface"); },
+    runStartupSmokes: async () => { events.push("smokes"); },
+    showStartupFailure: async (_window, error) => { events.push(`failure ${error.message}`); },
+    ...overrides
   };
-  const startApplication = runInNewContext(`${stripTypeScriptTypes(start)}; startApplication`, context);
+  return { context, gate };
+}
+
+test("the application surface loads while services start, and its IPC goes through the readiness gate", async () => {
+  const events = [];
+  const services = deferred();
+  const surface = deferred();
+  const { context, gate } = startupContext(events, {
+    initializeServices: (ipc) => { events.push(ipc === gate ? "services (gated)" : "services"); return services.promise; },
+    loadApplicationSurface: () => { events.push("surface"); return surface.promise; }
+  });
+  const startApplication = await startApplicationWith(context);
+  const startup = startApplication();
+  await turn();
+  // Both started, neither finished: the renderer no longer waits for every service before it loads.
+  assert.deepEqual(events, ["window", "services (gated)", "surface"]);
+  surface.resolve();
+  await turn();
+  assert.deepEqual(events, ["window", "services (gated)", "surface"], "nothing is reported before the services settle");
+  services.resolve();
+  await startup;
+  assert.deepEqual(events, ["window", "services (gated)", "surface", "gate settled", "smokes"]);
+  assert.equal(context.startupRunning, false);
+});
+
+test("a service failure is shown only after the surface load settled, and waiting calls fail with it", async () => {
+  // The failure page replaces the surface: navigating over a page that is still loading reports that page's
+  // ERR_ABORTED late, and Electron's load promise takes it as its own. So the failure waits for the surface.
+  const events = [];
+  const surface = deferred();
+  const { context, gate } = startupContext(events, {
+    initializeServices: async () => { events.push("services"); throw new Error("gateway could not start"); },
+    loadApplicationSurface: () => { events.push("surface"); return surface.promise; }
+  });
+  const startApplication = await startApplicationWith(context);
+  const startup = startApplication();
+  await turn();
+  await turn();
+  assert.deepEqual(events, ["window", "services", "surface"]);
+  surface.resolve();
+  await startup;
+  assert.deepEqual(events, ["window", "services", "surface", "gate failed gateway could not start", "failure gateway could not start"]);
+  assert.equal(gate.settled, false);
+
+  // A surface that failed to load on a live window is a startup failure too.
+  events.length = 0;
+  context.initializeServices = async () => { events.push("services"); };
+  context.loadApplicationSurface = async () => { events.push("surface"); throw new Error("renderer bundle missing"); };
   await startApplication();
-  assert.equal(loads, 0);
-  assert.equal(failures, 0);
+  assert.deepEqual(events, ["window", "services", "surface", "gate settled", "failure renderer bundle missing"]);
+});
+
+test("closing during startup stops quietly, with no failure page", async () => {
+  const events = [];
+  let gone = false;
+  const { context } = startupContext(events, {
+    shellWindowGone: () => gone,
+    initializeServices: async () => { events.push("services"); gone = true; throw new Error("Object has been destroyed"); }
+  });
+  const startApplication = await startApplicationWith(context);
+  await startApplication();
+  assert.deepEqual(events, ["window", "services", "surface"]);
   assert.equal(context.startupRunning, false);
 
-  context.shutdownRunning = false;
-  context.initializeServices = async () => { throw new Error("real startup error"); };
+  // A quit already under way never starts anything.
+  events.length = 0;
+  gone = false;
+  context.shutdownRunning = true;
   await startApplication();
-  assert.equal(failures, 1, "a real error on a live window still reaches the failure page");
+  assert.deepEqual(events, []);
+});
+
+test("a restart after the services are up loads the surface without starting them again", async () => {
+  const events = [];
+  const { context } = startupContext(events, { servicesReady: true, ipcGate: null });
+  const startApplication = await startApplicationWith(context);
+  await startApplication();
+  assert.deepEqual(events, ["window", "surface", "smokes"]);
+});
+
+test("loading the application surface removes the startup page from browser history", async () => {
+  const source = await readFile(mainPath, "utf8");
+  const body = source.slice(
+    source.indexOf("async function loadApplicationSurface"),
+    source.indexOf("async function runStartupSmokes(")
+  );
+
+  assert.match(body, /navigationHistory\.clear\(\)/);
+  assert.ok(
+    body.indexOf("navigationHistory.clear()") > body.lastIndexOf("await window.load"),
+    "history is cleared only after the application surface finishes loading"
+  );
+});
+
+test("dependencies only some paths need are not imported when the main process starts", async () => {
+  // Each costs its import time on every launch (electron-updater about 30 ms): they load
+  // through lazyRequire on first use. The smoke runners are test code behind env flags.
+  const lazy = ["electron-updater", "yaml", "secure-remote-password/client.js", "secure-remote-password/server.js", "@xterm/headless"];
+  const root = new URL("../src/main/", import.meta.url);
+  const files = (await readdir(root, { recursive: true })).filter((file) => file.endsWith(".ts"));
+  const main = await readFile(mainPath, "utf8");
+  assert.match(main, /await import\("\.\/services\/updates\/ElectronUpdaterAdapter"\)/);
+  assert.doesNotMatch(main, /^import\s+(?!type\b)[^;]*?from\s+"\.\/services\/updates\/(?:ElectronUpdaterAdapter|AwaitedNsisUpdater)"/gmu);
+  const lazyUpdaterModules = new Set([
+    "services/updates/ElectronUpdaterAdapter.ts",
+    "services/updates/AwaitedNsisUpdater.ts"
+  ]);
+  const staticImports = [];
+  for (const file of files) {
+    if (lazyUpdaterModules.has(file.replaceAll("\\", "/"))) continue;
+    const source = await readFile(new URL(file, root), "utf8");
+    for (const match of source.matchAll(/^import\s+(?!type\b)[^;]*?from\s+"([^"]+)"/gmu)) {
+      if (lazy.includes(match[1]) || /ElectronSmoke$/u.test(match[1])) staticImports.push(`${file}: ${match[1]}`);
+    }
+  }
+  assert.deepEqual(staticImports, []);
 });
 
 test("main process acquires the single-instance lock before readiness", async () => {
@@ -75,9 +211,33 @@ test("startup window is visible immediately and failures remain visible", async 
   const source = await readFile(mainPath, "utf8");
 
   assert.match(source, /show: true/);
-  assert.match(source, /startupPageUrl\(\{ locale: app\.getLocale\(\), isMacOS: process\.platform === "darwin" \}\)/);
+  // One navigation at startup: the application surface itself, no intermediate startup page to race.
+  const createWindow = source.slice(source.indexOf("function createWindow"), source.indexOf("function shellWindowGone"));
+  assert.doesNotMatch(createWindow, /loadURL|loadFile/);
+  // The failure page still reports a startup that could not complete.
+  assert.match(source, /startupPageUrl\(\{ locale: app\.getLocale\(\), isMacOS: process\.platform === "darwin", error: detail \}\)/);
   assert.match(source, /showStartupFailure/);
   assert.doesNotMatch(source, /ready-to-show/);
+});
+
+test("services register their IPC in groups: first-frame reads before sessions restore, the rest after", async () => {
+  const source = await readFile(mainPath, "utf8");
+  const init = source.slice(source.indexOf("async function initializeServices"), source.indexOf("async function loadApplicationSurface"));
+  const at = (pattern) => {
+    const index = init.search(pattern);
+    assert.notEqual(index, -1, String(pattern));
+    return index;
+  };
+  const critical = at(/registerCriticalIpc\(ipc,/);
+  assert.ok(at(/settings\.load\(\)/) < critical, "settings are loaded before their handlers exist");
+  assert.ok(at(/pluginManager\.load\(\)/) < critical);
+  assert.ok(critical < at(/restorePersistedSessions\(\)/), "the first frame's reads do not wait for terminals");
+  const core = at(/registerIpc\(ipc,/);
+  assert.ok(at(/restorePersistedSessions\(\)/) < core, "terminal:list answers only once sessions are restored");
+  assert.ok(at(/await Promise\.all\(\[browserReady, storesLoaded\]\)/) < core, "browser store, secrets, media and GitHub auth load first");
+  assert.ok(core < at(/ipc\.handle\(IPC\.evenG2State/), "the companion is the last group");
+  assert.ok(at(/await evenG2\.load\(\)/) < at(/ipc\.handle\(IPC\.evenG2State/));
+  assert.doesNotMatch(init, /ipcMain\.(handle|on)\(/, "every handler goes through the readiness gate");
 });
 
 test("startup failure page escapes diagnostic text", () => {

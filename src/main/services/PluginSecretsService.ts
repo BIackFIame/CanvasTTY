@@ -18,6 +18,8 @@ type AssertPermission = (pluginId: string, permission: PluginPermission) => void
 export class PluginSecretsService {
   private readonly root: string;
   private readonly writes = new Map<string, Promise<void>>();
+  /** Plugin id -> revocations queued or running. Writes are refused while one is pending. */
+  private readonly revoking = new Map<string, number>();
   private readonly assertPermission: AssertPermission;
   private readonly encryption: SecretEncryption;
 
@@ -63,10 +65,17 @@ export class PluginSecretsService {
 
   async revokeAll(pluginId: string): Promise<void> {
     assertPluginId(pluginId);
-    await this.queue(pluginId, async () => {
-      await rm(this.path(pluginId), { force: true });
-      await rm(`${this.path(pluginId)}.tmp`, { force: true });
-    });
+    this.revoking.set(pluginId, (this.revoking.get(pluginId) ?? 0) + 1);
+    try {
+      await this.queue(pluginId, async () => {
+        await rm(this.path(pluginId), { force: true });
+        await rm(`${this.path(pluginId)}.tmp`, { force: true });
+      });
+    } finally {
+      const remaining = (this.revoking.get(pluginId) ?? 1) - 1;
+      if (remaining > 0) this.revoking.set(pluginId, remaining);
+      else this.revoking.delete(pluginId);
+    }
   }
 
   private authorize(pluginId: string, key: string): void {
@@ -79,7 +88,12 @@ export class PluginSecretsService {
   }
 
   private async mutate(pluginId: string, mutation: (values: Record<string, string>) => void): Promise<void> {
+    // A write queued behind a revocation would run after it and recreate the file uninstall removed.
+    if (this.revoking.has(pluginId)) throw new Error("Plugin secrets are being removed.");
     await this.queue(pluginId, async () => {
+      // Authorization was checked when the write was requested; the plugin may have been
+      // uninstalled while earlier writes ran, and then this one must not land.
+      this.assertPermission(pluginId, "secrets");
       const values = await this.read(pluginId);
       mutation(values);
       const keys = Object.keys(values);

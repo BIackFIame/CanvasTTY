@@ -1,0 +1,299 @@
+import { NdjsonDecoderBase } from "../../../agent-runtime/ndjson.mjs";
+import {
+  MAX_ORCHESTRATION_PAYLOAD_BYTES,
+  canonicalStringify,
+  isApprovedOrchestrationTool,
+  isPluginOrchestrationTool,
+  validateOrchestrationArguments
+} from "../../../agent-browser/orchestration-catalog.mjs";
+import type { McpToolDefinition } from "../../../agent-browser/orchestration-catalog.mjs";
+
+export const ORCHESTRATION_BRIDGE_PROTOCOL_VERSION = 1 as const;
+export const ORCHESTRATION_HEARTBEAT_INTERVAL_MS = 5_000;
+export const ORCHESTRATION_HEARTBEAT_EXPIRY_MS = 15_000;
+export const MAX_CONNECTED_ORCHESTRATORS = 8;
+export const MAX_INFLIGHT_ORCHESTRATION_COMMANDS = 4;
+
+// The helper discovers the orchestration bridge exactly the way it discovers
+// the browser bridge: child-environment placeholders resolved at PTY launch.
+export const ORCHESTRATION_ENV = Object.freeze({
+  address: "CANVASTTY_ORCHESTRATION_ADDRESS",
+  capabilityToken: "CANVASTTY_ORCHESTRATION_CAPABILITY",
+  terminalSessionId: "CANVASTTY_TERMINAL_SESSION_ID",
+  // The gateway checks it on authenticate, so the helper must get the one the capability was issued for.
+  connectionId: "CANVASTTY_ORCHESTRATION_CONNECTION_ID"
+});
+
+export type OrchestrationToolName =
+  | "ask_user"
+  | "spawn_agent"
+  | "send_to_agent"
+  | "observe_agent"
+  | "get_agent_result"
+  | "cancel_agent"
+  | "list_agents";
+
+export interface OrchestrationRequest {
+  id: string;
+  /** A core tool, or a plugin tool `<pluginId>__<name>` (EP-6). */
+  tool: OrchestrationToolName | string;
+  arguments: Record<string, unknown>;
+}
+
+export type OrchestrationResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: { code: string; message: string } };
+
+/** The only implementation the gateway accepts; AgentControlService is
+ * wrapped by a scoping adapter, never called directly by the protocol. */
+export interface OrchestrationCommandHandler {
+  /** `signal` aborts when the orchestrator cancels the request or disconnects. */
+  execute(sessionId: string, request: OrchestrationRequest, signal?: AbortSignal): Promise<Record<string, unknown>>;
+  /** The tools this session sees (core tools for orchestrators, plugin tools by role). */
+  listTools?(sessionId: string): McpToolDefinition[];
+}
+
+export interface OrchestrationCapability {
+  address: string;
+  connectionId: string;
+  terminalSessionId: string;
+  capabilityToken: string;
+  authenticated: Promise<void>;
+}
+
+export interface AuthenticateOrchestrationMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "authenticate";
+  connectionId: string;
+  terminalSessionId: string;
+  capabilityToken: string;
+}
+
+export interface OrchestrationRequestMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "request";
+  id: string;
+  tool: OrchestrationToolName | string;
+  arguments: Record<string, unknown>;
+}
+
+/** Asks which tools this session sees; answered with a response `{ tools }`. */
+export interface OrchestrationListToolsMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "list_tools";
+  id: string;
+}
+
+export interface OrchestrationHeartbeatMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "heartbeat";
+  timestamp: number;
+}
+
+export interface OrchestrationCancelMessage {
+  v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+  type: "cancel";
+  id: string;
+}
+
+export type OrchestrationClientMessage =
+  | AuthenticateOrchestrationMessage
+  | OrchestrationRequestMessage
+  | OrchestrationListToolsMessage
+  | OrchestrationHeartbeatMessage
+  | OrchestrationCancelMessage;
+
+export type OrchestrationBridgeErrorCode =
+  | "AUTH_INVALID"
+  | "AUTH_REPLAYED"
+  | "BRIDGE_BUSY"
+  | "CANCELED"
+  | "INVALID_REQUEST"
+  | "PAYLOAD_TOO_LARGE"
+  | "SESSION_EXPIRED"
+  | "TIMEOUT"
+  | "INTERNAL_ERROR";
+
+export interface OrchestrationBridgeErrorPayload {
+  code: OrchestrationBridgeErrorCode;
+  message: string;
+  retryable: boolean;
+}
+
+export type OrchestrationServerMessage =
+  | {
+    v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+    type: "authenticated";
+    heartbeatIntervalMs: number;
+    heartbeatExpiryMs: number;
+    reconnectToken: string;
+  }
+  | {
+    v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+    type: "heartbeat_ack";
+    timestamp: number;
+  }
+  | {
+    v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+    type: "response";
+    id: string;
+    result?: Record<string, unknown>;
+    error?: OrchestrationBridgeErrorPayload;
+  }
+  | {
+    v: typeof ORCHESTRATION_BRIDGE_PROTOCOL_VERSION;
+    type: "error";
+    error: OrchestrationBridgeErrorPayload;
+  };
+
+export function parseOrchestrationClientMessage(
+  value: unknown,
+  authenticated: boolean
+): OrchestrationClientMessage {
+  const object = strictObject(value, "message");
+  const type = requiredString(object, "type", 32);
+  if (object.v !== ORCHESTRATION_BRIDGE_PROTOCOL_VERSION) {
+    throw orchestrationProtocolError("Unsupported orchestration bridge protocol version.");
+  }
+
+  if (type === "authenticate") {
+    assertExactKeys(object, ["v", "type", "connectionId", "terminalSessionId", "capabilityToken"]);
+    if (authenticated) {
+      throw orchestrationBridgeError("AUTH_REPLAYED", "This connection is already authenticated.", false);
+    }
+    return {
+      v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION,
+      type,
+      connectionId: requiredString(object, "connectionId", 128),
+      terminalSessionId: requiredString(object, "terminalSessionId", 128),
+      capabilityToken: requiredString(object, "capabilityToken", 128)
+    };
+  }
+
+  if (!authenticated) {
+    throw orchestrationBridgeError("AUTH_INVALID", "Authenticate before sending commands.", false);
+  }
+
+  if (type === "heartbeat") {
+    assertExactKeys(object, ["v", "type", "timestamp"]);
+    if (typeof object.timestamp !== "number" || !Number.isFinite(object.timestamp)) {
+      throw orchestrationProtocolError("heartbeat.timestamp must be finite.");
+    }
+    return { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type, timestamp: object.timestamp };
+  }
+
+  if (type === "cancel") {
+    assertExactKeys(object, ["v", "type", "id"]);
+    return {
+      v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION,
+      type,
+      id: requiredString(object, "id", 128)
+    };
+  }
+
+  if (type === "list_tools") {
+    assertExactKeys(object, ["v", "type", "id"]);
+    return { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type, id: requiredString(object, "id", 128) };
+  }
+
+  if (type === "request") {
+    assertExactKeys(object, ["v", "type", "id", "tool", "arguments"]);
+    const id = requiredString(object, "id", 128);
+    if (isPluginOrchestrationTool(object.tool)) {
+      // The host checks plugin tool arguments against the plugin's own schema.
+      const args = object.arguments === undefined ? {} : strictObject(object.arguments, "arguments");
+      return { v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION, type, id, tool: object.tool as string, arguments: args };
+    }
+    if (!isApprovedOrchestrationTool(object.tool)) {
+      throw orchestrationProtocolError("Unsupported orchestration tool.");
+    }
+    const validation = validateOrchestrationArguments(object.tool as string, object.arguments);
+    if (!validation.ok) throw orchestrationProtocolError(validation.error);
+    return {
+      v: ORCHESTRATION_BRIDGE_PROTOCOL_VERSION,
+      type,
+      id,
+      tool: object.tool as OrchestrationToolName,
+      arguments: validation.value as Record<string, unknown>
+    };
+  }
+
+  throw orchestrationProtocolError(`Unsupported orchestration bridge message type: ${type}.`);
+}
+
+export function encodeOrchestrationServerMessage(message: OrchestrationServerMessage): Buffer {
+  const json = canonicalStringify(message);
+  if (Buffer.byteLength(json, "utf8") > MAX_ORCHESTRATION_PAYLOAD_BYTES) {
+    throw orchestrationBridgeError("PAYLOAD_TOO_LARGE", "Orchestration response exceeds 128KB.", false);
+  }
+  return Buffer.from(`${json}\n`, "utf8");
+}
+
+/** Decodes the orchestration NDJSON stream: lines over 128KB and lines that are not JSON are protocol errors. */
+export class OrchestrationNdjsonDecoder extends NdjsonDecoderBase {
+  constructor() {
+    super({
+      maxLineBytes: MAX_ORCHESTRATION_PAYLOAD_BYTES,
+      tooLarge: orchestrationPayloadError,
+      invalid: () => orchestrationProtocolError("Orchestration message is not valid JSON.")
+    });
+  }
+}
+
+export function orchestrationBridgeError(
+  code: OrchestrationBridgeErrorCode,
+  message: string,
+  retryable: boolean
+): Error & { bridgeError: OrchestrationBridgeErrorPayload } {
+  return Object.assign(new Error(message), {
+    bridgeError: { code, message, retryable } satisfies OrchestrationBridgeErrorPayload
+  });
+}
+
+export function asOrchestrationBridgeError(error: unknown): OrchestrationBridgeErrorPayload {
+  if (
+    error
+    && typeof error === "object"
+    && "bridgeError" in error
+    && error.bridgeError
+    && typeof error.bridgeError === "object"
+  ) return error.bridgeError as OrchestrationBridgeErrorPayload;
+  if (error instanceof Error && error.name === "AbortError") {
+    return { code: "CANCELED", message: "Orchestration command was canceled.", retryable: true };
+  }
+  return { code: "INTERNAL_ERROR", message: "Orchestration bridge failed.", retryable: true };
+}
+
+function orchestrationProtocolError(message: string): Error & { bridgeError: OrchestrationBridgeErrorPayload } {
+  return orchestrationBridgeError("INVALID_REQUEST", message, false);
+}
+
+function orchestrationPayloadError(): Error & { bridgeError: OrchestrationBridgeErrorPayload } {
+  return orchestrationBridgeError("PAYLOAD_TOO_LARGE", "Orchestration message exceeds 128KB.", false);
+}
+
+function strictObject(value: unknown, name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw orchestrationProtocolError(`${name} must be an object.`);
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw orchestrationProtocolError(`${name} must be plain JSON.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function assertExactKeys(value: Record<string, unknown>, allowed: string[]): void {
+  const allowlist = new Set(allowed);
+  for (const key of Object.keys(value)) {
+    if (!allowlist.has(key)) throw orchestrationProtocolError(`message.${key} is not allowed.`);
+  }
+}
+
+function requiredString(value: Record<string, unknown>, key: string, maximum: number): string {
+  const candidate = value[key];
+  if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > maximum) {
+    throw orchestrationProtocolError(`message.${key} must be a non-empty string of at most ${maximum} characters.`);
+  }
+  return candidate;
+}

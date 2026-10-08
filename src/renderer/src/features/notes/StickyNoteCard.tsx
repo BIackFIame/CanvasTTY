@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import type { CameraStore } from "../workspace/cameraStore";
 import type { LocaleId, Point, SessionBounds, StickyNote } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -8,15 +9,18 @@ import {
   MAX_STICKY_NOTE_SIZE,
   MIN_STICKY_NOTE_SIZE
 } from "./stickyNoteBounds";
+import { stickyNoteWheelAttributes } from "./stickyNoteWheelAttributes";
 
 interface StickyNoteCardProps {
   note: StickyNote;
   locale: LocaleId;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   stackIndex: number;
   editRequest: number;
   snapEnabled: boolean;
-  snapTargets: readonly SessionBounds[];
+  /** The current layout's snap targets for this card; asked once when a drag or resize starts. */
+  getSnapTargets(): readonly SessionBounds[];
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onTextChange(id: string, text: string): void;
   onClose(id: string): void;
@@ -28,6 +32,8 @@ interface DragState {
   pointerId: number;
   startClient: Point;
   startBounds: SessionBounds;
+  /** Taken at the start: the other cards do not move while this one is dragged. */
+  snapTargets: readonly SessionBounds[];
 }
 
 interface ResizeState extends DragState {
@@ -40,11 +46,11 @@ const RESIZE_DIRECTIONS: ResizeDirection[] = ["n", "ne", "e", "se", "s", "sw", "
 export function StickyNoteCard({
   note,
   locale,
-  zoom,
+  camera,
   stackIndex,
   editRequest,
   snapEnabled,
-  snapTargets,
+  getSnapTargets,
   onBoundsChange,
   onTextChange,
   onClose,
@@ -124,7 +130,8 @@ export function StickyNoteCard({
     dragState.current = {
       pointerId: event.pointerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -134,11 +141,11 @@ export function StickyNoteCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     applyBounds({
-      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
+      position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, state.snapTargets) : rawPosition,
       size: state.startBounds.size
     });
   };
@@ -170,7 +177,8 @@ export function StickyNoteCard({
       pointerId: event.pointerId,
       direction,
       startClient: { x: event.clientX, y: event.clientY },
-      startBounds: liveBounds.current
+      startBounds: liveBounds.current,
+      snapTargets: snapEnabled ? getSnapTargets() : []
     };
   };
 
@@ -181,8 +189,8 @@ export function StickyNoteCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const constrained = constrainStickyNoteResize({
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),
@@ -198,7 +206,7 @@ export function StickyNoteCard({
       }
     }, state.direction);
     applyBounds(snapEnabled
-      ? snapResize(constrained, state.direction, snapTargets, {
+      ? snapResize(constrained, state.direction, state.snapTargets, {
           min: MIN_STICKY_NOTE_SIZE,
           max: MAX_STICKY_NOTE_SIZE
         })
@@ -213,12 +221,15 @@ export function StickyNoteCard({
     onBoundsChange(note.id, liveBounds.current);
   };
 
+  const wheelAttributes = stickyNoteWheelAttributes(note.id);
+
   return (
     <article
       className={`sticky-note-card ${groupSelected ? "sticky-note-card--selected" : ""}`}
       data-interactive="true"
       data-sticky-note-id={note.id}
       data-canvas-layer-id={`note:${note.id}`}
+      {...wheelAttributes.card}
       data-wheel-owner="local"
       style={{
         zIndex: stackIndex,
@@ -250,6 +261,7 @@ export function StickyNoteCard({
         </button>
       </header>
       <textarea
+        {...wheelAttributes.editor}
         ref={editor}
         className="sticky-note-card__editor"
         value={text}

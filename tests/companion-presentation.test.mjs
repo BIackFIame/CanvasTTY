@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { TerminalPresentation } from "../src/main/services/companion/TerminalPresentation.ts";
+import { SecretRedactionRegistry } from "../src/main/services/safety/SecretRedaction.ts";
 import {
   latestCodexReply,
   cleanTerminalText,
@@ -7,6 +9,30 @@ import {
   codexMenu,
 } from "../src/main/services/companion/presentation.ts";
 const before = `• Старый ответ.\n\n› Пинг\n\n• Понг. Связь работает.\n\n› Сколько будет 120 умножить на 365?\n\n• 120 × 365 = 43 800.\n\n────────────────────────\n\n› Ask Codex to do anything\n\n  gpt-6-astra xhigh · ~/project`;
+
+test("G2 answer cache expires with its capture grant and clears on revocation", async () => {
+  const now = Date.now;
+  let clock = 10_000;
+  Date.now = () => clock;
+  try {
+    const session = { id: "codex-one", provider: "codex", status: "idle" };
+    const presentation = new TerminalPresentation({
+      listMetadata: () => [session],
+      geometry: () => ({ cols: 80, rows: 24 }),
+      readBuffer: () => ({ buffer: "› Ask Codex to do anything", outputOffset: 0 })
+    });
+    presentation.answer(session.id, "private captured answer", "turn-one", 10_100);
+    assert.match((await presentation.read(session.id)).body, /private captured answer/u);
+    clock = 10_100;
+    assert.doesNotMatch((await presentation.read(session.id)).body, /private captured answer/u);
+    presentation.answer(session.id, "revoked answer", "turn-two", 20_000);
+    presentation.clearAnswer(session.id);
+    assert.doesNotMatch((await presentation.read(session.id)).body, /revoked answer/u);
+  } finally {
+    Date.now = now;
+  }
+});
+
 test("latest answer excludes all old questions, old answers, separators and model footer", () => {
   assert.equal(latestCodexReply(before), "120 × 365 = 43 800.");
 });
@@ -96,4 +122,53 @@ test("old status warnings are not prepended to an active Codex menu title", () =
   );
   assert.match(menu.title, /^Select Model/);
   assert.doesNotMatch(menu.title, /Heads up/);
+});
+
+test("only sessions the glasses read get a headless screen; a first read later shows what live parsing shows", async () => {
+  const ids = ["s0", "s1", "s2"];
+  const buffers = new Map(ids.map((id) => [id, ""]));
+  const port = {
+    listMetadata: () => ids.map((id) => ({ id, provider: "claude", status: "idle", title: id })),
+    geometry: () => ({ cols: 60, rows: 12 }),
+    readBuffer: (id) => ({ buffer: buffers.get(id), outputOffset: buffers.get(id).length })
+  };
+  const lazy = new TerminalPresentation(port);
+  const live = new TerminalPresentation(port);
+  await lazy.read("s0");
+  await live.read("s1");
+  for (let i = 0; i < 400; i++) {
+    for (const id of ids) {
+      const data = `\x1b[3${i % 7}m${id} line ${i}\x1b[0m ${"·".repeat(i % 50)}\r\n${i % 40 === 0 ? "\x1b[2J\x1b[H" : ""}`;
+      buffers.set(id, buffers.get(id) + data);
+      const event = { id, data, outputOffset: buffers.get(id).length };
+      lazy.observe("terminal:data", event);
+      live.observe("terminal:data", event);
+    }
+  }
+  const parsed = (presentation) => [...presentation.screens].filter(([, screen]) => screen.terminal).map(([id]) => id);
+  assert.deepEqual(parsed(lazy), ["s0"], "output of sessions nobody reads is not parsed");
+  assert.deepEqual(await lazy.read("s1"), await live.read("s1"), "a first read from the scrollback matches the live screen");
+  assert.deepEqual(parsed(lazy), ["s0", "s1"]);
+  lazy.observe("terminal:removed", { id: "s1" });
+  assert.deepEqual(parsed(lazy), ["s0"]);
+  lazy.close();
+  live.close();
+});
+
+test("the companion gets the screen and answers masked, also a key the terminal wrapped over two lines", async () => {
+  const registry = new SecretRedactionRegistry();
+  const secret = "held-value-0123456789-abcdefghij";
+  registry.add("session:plain", [secret]);
+  const session = { id: "plain", provider: "claude", status: "idle" };
+  const presentation = new TerminalPresentation({
+    listMetadata: () => [session],
+    geometry: () => ({ cols: 20, rows: 6 }),
+    readBuffer: () => ({ buffer: `key: ${secret}\r\n$ `, outputOffset: 0 }),
+    redactSecrets: (text) => registry.redact(text)
+  });
+  const view = await presentation.read(session.id);
+  assert.equal(view.body.includes("0123456789"), false, view.body);
+  assert.match(view.body, /<redacted:secret>/u);
+  presentation.answer(session.id, `the key is ${secret}`, "turn-one", Date.now() + 60_000);
+  assert.equal((await presentation.read(session.id)).body.includes(secret), false);
 });

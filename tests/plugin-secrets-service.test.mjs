@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -61,4 +61,48 @@ test("rejects invalid keys and oversized values", async (t) => {
   const { service } = await fixture(t);
   await assert.rejects(() => service.set(pluginId, "not a key", "secret"), /key is invalid/);
   await assert.rejects(() => service.set(pluginId, "token", "x".repeat(16 * 1024 + 1)), /16 KB/);
+});
+
+async function uninstallableFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-plugin-secrets-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const state = { installed: true };
+  const service = new PluginSecretsService(
+    root,
+    () => {
+      if (!state.installed) throw new Error("Plugin is not installed.");
+    },
+    fakeEncryption()
+  );
+  await service.load();
+  const secretFile = join(root, "plugin-secrets", `${pluginId}.bin`);
+  const secretFileExists = () => access(secretFile).then(() => true, () => false);
+  return { service, state, secretFileExists };
+}
+
+test("a secret write requested right after revokeAll is refused and leaves no file", async (t) => {
+  const { service, secretFileExists } = await uninstallableFixture(t);
+  await service.set(pluginId, "token", "before");
+
+  const [revoked, written] = await Promise.allSettled([
+    service.revokeAll(pluginId),
+    service.set(pluginId, "token", "after")
+  ]);
+
+  assert.equal(revoked.status, "fulfilled");
+  assert.equal(written.status, "rejected");
+  assert.match(written.reason.message, /being removed/);
+  assert.equal(await secretFileExists(), false);
+  // Once the revocation finished, a reinstalled plugin can store secrets again.
+  await service.set(pluginId, "token", "reinstalled");
+  assert.equal(await service.get(pluginId, "token"), "reinstalled");
+});
+
+test("a queued secret write is refused when the plugin is uninstalled before it runs", async (t) => {
+  const { service, state, secretFileExists } = await uninstallableFixture(t);
+  const written = service.set(pluginId, "token", "late");
+  state.installed = false;
+  await assert.rejects(written, /not installed/);
+  await service.revokeAll(pluginId);
+  assert.equal(await secretFileExists(), false);
 });

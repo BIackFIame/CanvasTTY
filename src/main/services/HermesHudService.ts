@@ -8,7 +8,7 @@ import {
   type ProviderCliRegistry
 } from "./providerCliRegistry.ts";
 
-export const HERMES_DESKTOP_RUNTIME_FILENAME = "desktop-runtime.json";
+const HERMES_DESKTOP_RUNTIME_FILENAME = "desktop-runtime.json";
 
 interface HermesDesktopRuntimeState {
   version: 1;

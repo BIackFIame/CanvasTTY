@@ -1,0 +1,19 @@
+{
+  "apiVersion": 2,
+  "id": "com.example.deny-rm",
+  "name": "Deny rm -rf",
+  "version": "1.0.0",
+  "description": "Minimal decision service: blocks rm -rf of anything at the top of the working folder (rm -rf *, rm -rf src). Everything else it leaves alone.",
+  "author": "CanvasTTY contributors",
+  "permissions": ["decision:provide"],
+  "services": [
+    {
+      "id": "guard",
+      "title": "rm -rf guard",
+      "description": "Answers deny for rm -rf at the top of the working folder.",
+      "entry": "services/guard.mjs",
+      "decide": { "events": ["pre-tool"], "timeoutMs": 5000 }
+    }
+  ],
+  "contributions": []
+}

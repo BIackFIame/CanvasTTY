@@ -1,14 +1,20 @@
+import { normalizeExecutionPolicy, defaultExecutionPolicy } from "../../shared/executionPolicy.ts";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { isHomeMediaPath } from "./homeMedia.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
+  ApiProfile,
+  ApiProfileProtocol,
   AppSettings,
+  AppSkinId,
   BrowserCanvasState,
   CanvasLauncherItemId,
   CanvasRegion,
   CanvasColorId,
+  CanvasBackgroundId,
   CanvasOverlayPlacement,
   CanvasWheelCaptureMode,
   CanvasPatternId,
@@ -24,22 +30,32 @@ import type {
   MinimapInteractionMode,
   PaletteId,
   PluginCanvasInstance,
+  PixelSkinPreferredDetail,
+  ProviderSecretId,
   RadialLauncherItemId,
+  SessionRestoreMode,
   SessionRowColorMode,
   ShortcutBindings,
+  TerminalLinkOpenMode,
   StickyNote,
+  TerminalBorderSkinId,
   ZoomSensitivity
 } from "../../shared/contracts";
 import {
+  API_PROFILE_PROTOCOLS,
+  BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_HOME_ACCENT_COLORS,
   DEFAULT_HOME_GRID_SIZE,
   DEFAULT_HOME_LAYOUT,
   DEFAULT_RADIAL_LAUNCHER_ITEMS,
+  keyboardPresetShortcuts,
+  shortcutsShareContext,
   DEFAULT_UI_SCALE,
   HOME_GRID_MAX_COLUMNS,
   HOME_GRID_MAX_ROWS,
+  PROVIDER_SECRET_IDS,
   HOME_GRID_MIN_COLUMNS,
   HOME_GRID_MIN_ROWS,
   RADIAL_LAUNCHER_ITEMS,
@@ -49,39 +65,45 @@ import {
   UI_SCALE_MIN,
   UI_SCALE_STEP
 } from "../../shared/contracts.ts";
+import { isTerminalBorderSkinId } from "./SkinRegistry.ts";
+import { isDefaultLaunchProfile, type DefaultLaunchProfile } from "../../shared/autoMode.ts";
 import {
   canvasNavigationPlatform,
   defaultCanvasWheelBinding,
   normalizeCanvasOverrideBinding,
   type CanvasNavigationPlatform
 } from "../../shared/canvasNavigation.ts";
+import { AGENT_PROVIDERS, LIMIT_PROVIDERS } from "../../shared/contracts.ts";
 
 const LOCALES = new Set<LocaleId>(["ru", "en"]);
+const SESSION_RESTORE_MODES = new Set<SessionRestoreMode>(["off", "reopen", "continue"]);
 const PALETTES = new Set<PaletteId>(["sage", "lilac", "night"]);
 const HOME_ACCENT_PRESETS = new Set<HomeAccentPresetId>(["classic", "warm", "cool", "mono", "custom"]);
 const SESSION_ROW_COLOR_MODES = new Set<SessionRowColorMode>(["monochrome", "status"]);
 const CANVAS_COLORS = new Set<CanvasColorId>(["sage", "lilac", "night", "sand", "mist", "rose", "slate"]);
 const PATTERNS = new Set<CanvasPatternId>(["dots", "grid", "waves", "diagonal", "rings", "none"]);
+const APP_SKINS = new Set<AppSkinId>(["classic", "atelier", "signal", "greenhouse", "midnight"]);
 const MEDIA_FITS = new Set<MediaFit>(["cover", "contain"]);
-const SETTINGS_VERSION = 15;
+// 21: the on/off "restoreTerminalSessions" became sessionRestoreMode (off / reopen / continue).
+const SETTINGS_VERSION = 21;
 const GROK_LAUNCHER_SETTINGS_VERSION = 3;
 const EXPANDED_LIMIT_SETTINGS_VERSION = 5;
 const QWEN_SETTINGS_VERSION = 6;
-const PROVIDER_ADDITIONS_SETTINGS_VERSION = 15;
+const PROVIDER_ADDITIONS_SETTINGS_VERSION = 19;
 // Providers appended to the persisted HOME dock for operators whose profile predates them.
-const ADDED_AGENT_PROVIDERS: AgentProviderId[] = ["omp", "pi"];
+const ADDED_AGENT_PROVIDERS: AgentProviderId[] = ["omp", "pi", "cursor", "minimax", "devin", "antigravity"];
 const LEGACY_AGENT_PROVIDERS: AgentProviderId[] = ["codex", "claude", "kimi", "opencode", "hermes"];
 const PRE_QWEN_AGENT_PROVIDERS: AgentProviderId[] = [...LEGACY_AGENT_PROVIDERS, "grok"];
-const AGENT_PROVIDERS = new Set<AgentProviderId>(["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi"]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const LEGACY_LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "kimi"];
 const PRE_QWEN_LIMIT_PROVIDERS: LimitProviderId[] = [...LEGACY_LIMIT_PROVIDERS, "opencode", "grok"];
-const LIMIT_PROVIDERS: LimitProviderId[] = ["codex", "claude", "qwen", "kimi", "opencode", "grok"];
 const LIMIT_PROVIDER_SET = new Set<LimitProviderId>(LIMIT_PROVIDERS);
 const CANVAS_LAUNCHER_ITEM_SET = new Set<CanvasLauncherItemId>(CANVAS_LAUNCHER_ITEMS);
 const RADIAL_LAUNCHER_ITEM_SET = new Set<RadialLauncherItemId>(RADIAL_LAUNCHER_ITEMS);
 const EDGE_PAN_SPEEDS = new Set<EdgePanSpeed>(["slow", "normal", "fast"]);
 const ZOOM_SENSITIVITIES = new Set<ZoomSensitivity>(["slow", "normal", "fast"]);
 const FOCUS_ACTIVATIONS = new Set<FocusActivation>(["off", "single", "double"]);
+const TERMINAL_LINK_OPEN_MODES = new Set<TerminalLinkOpenMode>(["canvas", "external", "ask"]);
 const CANVAS_WHEEL_CAPTURE_MODES = new Set<CanvasWheelCaptureMode>(["off", "always", "key"]);
 const CANVAS_OVERLAY_PLACEMENTS = new Set<CanvasOverlayPlacement>([
   "top-left",
@@ -91,7 +113,6 @@ const CANVAS_OVERLAY_PLACEMENTS = new Set<CanvasOverlayPlacement>([
 ]);
 const MINIMAP_INTERACTION_MODES = new Set<MinimapInteractionMode>(["click", "drag"]);
 const SHORTCUT_MODIFIERS = new Set(["Ctrl", "Alt", "Shift", "Meta"]);
-const DEFAULT_SHORTCUTS: ShortcutBindings = { home: "Home", renameWindow: "F2" };
 
 export class SettingsStore {
   private readonly filePath: string;
@@ -105,9 +126,9 @@ export class SettingsStore {
     this.filePath = join(userDataPath, "settings.json");
     this.platform = canvasNavigationPlatform(platform);
     this.availableProviders = new Set(availability
-      ? [...AGENT_PROVIDERS].filter((provider) => availability[provider])
+      ? AGENT_PROVIDERS.filter((provider) => availability[provider])
       : AGENT_PROVIDERS);
-    this.value = filterUnavailableProviders(createDefaults(systemLocale, this.platform), this.availableProviders);
+    this.value = filterUnavailableProviders(createDefaults(systemLocale, platform), this.availableProviders);
   }
 
   async load(): Promise<AppSettings> {
@@ -139,6 +160,9 @@ export class SettingsStore {
         && ADDED_AGENT_PROVIDERS.some((provider) => !persistedLauncherProviders.includes(provider));
       this.hasPersistedLegacyWheelCapture = Object.hasOwn(source, "zoomOverApplications");
       const needsMigration = !("useScrollWheelToZoom" in source)
+        || !("keyboardPreset" in source)
+        || (source.keyboardPreset === "linux"
+          && (source.shortcuts as Partial<ShortcutBindings> | undefined)?.terminalCopy === "Ctrl+C")
         || !("canvasNavigationOverride" in source)
         || !("canvasWheelOverride" in source)
         || !("canvasWheelCaptureMode" in source)
@@ -150,18 +174,33 @@ export class SettingsStore {
         || !("canvasLauncherItems" in source)
         || !("radialLauncherItems" in source)
         || !("radialLauncherEnabled" in source)
+        || !("experimentalBacklogEnabled" in source)
         || !("agentLifecycleHooksEnabled" in source)
+        || !("baseProtectionEnabled" in source)
         || !("uiScale" in source)
         || !("canvasColor" in source)
+        || !("canvasBackground" in source)
         || !("minimapPlacement" in source)
         || !("minimapInteractionMode" in source)
         || !("shortcutHintsPlacement" in source)
         || !("canvasControlsPlacement" in source)
-        || !("restoreTerminalSessions" in source)
+        || !("attentionQueueVisible" in source)
+        || !("attentionQueuePlacement" in source)
+        || !("agentChatHistoryVisible" in source)
+        || !("agentChatHistoryPlacement" in source)
+        || !("agentChatHistoryExpandMode" in source)
+        || !("agentChatHistorySearchAgents" in source)
+        || !("agentChatHistorySearchSessions" in source)
+        || !("agentControlEnabled" in source)
+        || !("defaultLaunchProfiles" in source)
+        || !("sessionRestoreMode" in source)
+        || !("terminalLinkOpenMode" in source)
         || !("persistCanvasRegions" in source)
         || !("persistStickyNotes" in source)
+        || !("persistMaterials" in source)
         || !("canvasRegions" in source)
         || !("stickyNotes" in source)
+        || !("apiProfiles" in source)
         || source.canvasColor === "palette"
         || source.settingsVersion !== SETTINGS_VERSION;
       let migratedCandidate: Record<string, unknown> = source;
@@ -203,10 +242,10 @@ export class SettingsStore {
       const availabilityChanged = providerSelectionsChanged(normalized, this.value);
       if (!this.value.persistCanvasRegions) this.value.canvasRegions = [];
       if (!this.value.persistStickyNotes) this.value.stickyNotes = [];
-      if (needsMigration || availabilityChanged) await this.persist();
+      if (needsMigration || availabilityChanged) await this.queuePersist();
     } catch (error) {
       if (isMissingFile(error)) {
-        await this.persist();
+        await this.queuePersist();
       } else {
         console.warn("CanvasTTY settings could not be loaded; defaults are used.", error);
       }
@@ -219,56 +258,95 @@ export class SettingsStore {
     return structuredClone(this.value);
   }
 
+  /** A narrow copy for the per-input authorization check, excluding unrelated canvas/settings state. */
+  executionPolicy(): AppSettings["executionPolicy"] {
+    return structuredClone(this.value.executionPolicy);
+  }
+
   async setAvailableProviders(availability: AgentCliAvailability): Promise<AppSettings> {
-    this.availableProviders = new Set([...AGENT_PROVIDERS].filter((provider) => availability[provider]));
-    const filtered = filterUnavailableProviders(this.value, this.availableProviders);
-    if (providerSelectionsChanged(this.value, filtered)) {
+    this.availableProviders = new Set(AGENT_PROVIDERS.filter((provider) => availability[provider]));
+    // Filter in queue order: a snapshot taken while an update() is still
+    // writing lacks that update, and persisting it afterwards dropped the
+    // update from the file (it stayed only in memory).
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const filtered = filterUnavailableProviders(this.value, this.availableProviders);
+      if (!providerSelectionsChanged(this.value, filtered)) return;
+      await this.persist(filtered);
       this.value = filtered;
-      await this.persist();
-    }
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 
   async update(patch: Partial<AppSettings>): Promise<AppSettings> {
-    if (patch.canvasWheelCaptureMode !== undefined) this.hasPersistedLegacyWheelCapture = true;
-    const nextPatch = patch.canvasWheelCaptureMode === "key"
-      && patch.canvasWheelOverride === undefined
-      && this.value.canvasWheelOverride === null
-      ? { ...patch, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) }
-      : patch;
-    this.value = filterUnavailableProviders(
-      normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform),
-      this.availableProviders
-    );
-    await this.persist();
+    const updatePatch = structuredClone(patch);
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
+      const nextHasPersistedLegacyWheelCapture = this.hasPersistedLegacyWheelCapture
+        || updatePatch.canvasWheelCaptureMode !== undefined;
+      const nextPatch = updatePatch.canvasWheelCaptureMode === "key"
+        && updatePatch.canvasWheelOverride === undefined
+        && this.value.canvasWheelOverride === null
+        ? { ...updatePatch, canvasWheelOverride: defaultCanvasWheelBinding(this.platform) }
+        : updatePatch;
+      const nextValue = filterUnavailableProviders(
+        normalizeSettings({ ...this.value, ...nextPatch }, this.value, this.platform),
+        this.availableProviders
+      );
+
+      await this.persist(nextValue, nextHasPersistedLegacyWheelCapture);
+      this.value = nextValue;
+      this.hasPersistedLegacyWheelCapture = nextHasPersistedLegacyWheelCapture;
+    });
+    this.writeQueue = write;
+    await write;
     return this.get();
   }
 
-  private persist(): Promise<void> {
+  private queuePersist(
+    value: AppSettings = this.value,
+    hasPersistedLegacyWheelCapture = this.hasPersistedLegacyWheelCapture
+  ): Promise<void> {
+    const write = this.writeQueue.catch(() => undefined)
+      .then(() => this.persist(value, hasPersistedLegacyWheelCapture));
+    this.writeQueue = write;
+    return write;
+  }
+
+  private persist(
+    value: AppSettings = this.value,
+    hasPersistedLegacyWheelCapture = this.hasPersistedLegacyWheelCapture
+  ): Promise<void> {
     const persistedValue: Partial<AppSettings> & {
       settingsVersion: number;
       zoomOverApplications?: boolean;
     } = {
-      ...this.value,
-      canvasRegions: this.value.persistCanvasRegions ? this.value.canvasRegions : [],
-      stickyNotes: this.value.persistStickyNotes ? this.value.stickyNotes : [],
+      ...value,
+      canvasRegions: value.persistCanvasRegions ? value.canvasRegions : [],
+      stickyNotes: value.persistStickyNotes ? value.stickyNotes : [],
       settingsVersion: SETTINGS_VERSION
     };
-    if (this.hasPersistedLegacyWheelCapture) {
-      persistedValue.zoomOverApplications = this.value.canvasWheelCaptureMode === "always";
+    if (hasPersistedLegacyWheelCapture) {
+      persistedValue.zoomOverApplications = value.canvasWheelCaptureMode === "always";
     }
     const snapshot = JSON.stringify(persistedValue, null, 2);
     const temporaryPath = `${this.filePath}.tmp`;
 
-    const write = this.writeQueue.catch(() => undefined).then(async () => {
+    return (async () => {
       await mkdir(dirname(this.filePath), { recursive: true });
       await writeFile(temporaryPath, snapshot, "utf8");
       await rename(temporaryPath, this.filePath);
-    });
-    this.writeQueue = write;
-
-    return write;
+    })();
   }
+}
+
+/** The old boolean migrates as it behaved: saved windows continued their conversations. */
+function normalizeSessionRestoreMode(source: Record<string, unknown>, fallback: SessionRestoreMode | undefined): SessionRestoreMode {
+  if (SESSION_RESTORE_MODES.has(source.sessionRestoreMode as SessionRestoreMode)) {
+    return source.sessionRestoreMode as SessionRestoreMode;
+  }
+  if (typeof source.restoreTerminalSessions === "boolean") return source.restoreTerminalSessions ? "continue" : "off";
+  return fallback ?? "off";
 }
 
 function isLegacyDefaultLimitSelection(candidate: unknown[] | null): boolean {
@@ -283,12 +361,13 @@ function isPreQwenDefaultSelection<T extends string>(candidate: unknown[] | null
     && providers.every((provider) => candidate.includes(provider));
 }
 
-function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform): AppSettings {
+function createDefaults(systemLocale: string, platform: string): AppSettings {
   return {
     locale: systemLocale.toLowerCase().startsWith("ru") ? "ru" : "en",
-    restoreTerminalSessions: false,
+    sessionRestoreMode: "off",
     persistCanvasRegions: true,
     persistStickyNotes: true,
+    persistMaterials: true,
     palette: "sage",
     homeAccentPreset: "classic",
     homeAccentColors: { ...DEFAULT_HOME_ACCENT_COLORS },
@@ -299,10 +378,20 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS],
     radialLauncherEnabled: false,
     agentLifecycleHooksEnabled: true,
+    experimentalBacklogEnabled: false,
+    executionPolicy: defaultExecutionPolicy(),
+    baseProtectionEnabled: true,
     uiScale: DEFAULT_UI_SCALE,
     canvasColor: "sage",
+    canvasBackground: "none",
     pattern: "dots",
+    terminalBorderSkin: "classic",
+    terminalSkinDetail: "detailed",
+    terminalSkinAnimationEnabled: true,
+    appSkin: "classic",
     snapToGrid: true,
+    copyOnSelect: false,
+    terminalLinkOpenMode: "ask",
     invertTerminalWheel: true,
     invertCanvasWheel: false,
     edgePan: false,
@@ -310,7 +399,7 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     zoomSensitivity: "normal",
     useScrollWheelToZoom: false,
     canvasWheelCaptureMode: "key",
-    canvasWheelOverride: defaultCanvasWheelBinding(platform),
+    canvasWheelOverride: defaultCanvasWheelBinding(canvasNavigationPlatform(platform)),
     canvasNavigationOverride: "Alt",
     focusActivation: "off",
     hoverFocus: false,
@@ -320,11 +409,13 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     minimapInteractionMode: "click",
     shortcutHintsPlacement: "bottom-right",
     canvasControlsPlacement: "bottom-left",
-    shortcuts: { ...DEFAULT_SHORTCUTS },
+    keyboardPreset: platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux",
+    shortcuts: keyboardPresetShortcuts(platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux"),
     mediaPath: null,
     mediaFit: "cover",
     lastDirectory: homedir(),
     acknowledgedDangerousProfiles: [],
+    apiProfiles: [],
     homeGridSize: { ...DEFAULT_HOME_GRID_SIZE },
     homeLayout: structuredClone(DEFAULT_HOME_LAYOUT),
     canvasRegions: [],
@@ -333,8 +424,74 @@ function createDefaults(systemLocale: string, platform: CanvasNavigationPlatform
     browserCanvas: null,
     browserAgentAccess: true,
     browserShowAgentPresence: true,
-    browserRestoreTabs: true
+    browserRestoreTabs: true,
+    browserPauseHiddenTabs: true,
+    attentionNotifications: true,
+    attentionQueueVisible: true,
+    attentionQueuePlacement: "bottom-right",
+    agentChatHistoryVisible: false,
+    agentChatHistoryPlacement: "top-left",
+    agentChatHistoryExpandMode: "hover",
+    agentChatHistorySearchAgents: "current",
+    agentChatHistorySearchSessions: "filtered",
+    agentControlEnabled: false,
+    agentIsolation: "on",
+    orchestrationMaxDepth: DEFAULT_ORCHESTRATION_MAX_DEPTH,
+    orchestrationMaxSubagents: DEFAULT_ORCHESTRATION_MAX_SUBAGENTS,
+    defaultLaunchProfile: "auto",
+    defaultLaunchProfiles: {}
   };
+}
+
+export const DEFAULT_ORCHESTRATION_MAX_DEPTH = 2;
+export const DEFAULT_ORCHESTRATION_MAX_SUBAGENTS = 8;
+export const MAX_ORCHESTRATION_DEPTH = 4;
+export const MAX_ORCHESTRATION_SUBAGENTS = 32;
+
+function boundedInteger(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  return typeof value === "number" && Number.isInteger(value) && value >= minimum && value <= maximum ? value : fallback;
+}
+
+const API_PROFILE_PROTOCOL_SET = new Set<ApiProfileProtocol>(API_PROFILE_PROTOCOLS);
+const MAX_API_PROFILES = 32;
+
+// Invalid entries are dropped, never repaired: a profile that no longer matches
+// the schema must disappear rather than silently point a runtime at a wrong
+// endpoint or credential.
+export function normalizeApiProfiles(
+  value: unknown,
+  fallback: readonly ApiProfile[]
+): ApiProfile[] {
+  if (!Array.isArray(value)) return [...fallback];
+  const seen = new Set<string>();
+  const profiles: ApiProfile[] = [];
+  for (const candidate of value) {
+    if (profiles.length >= MAX_API_PROFILES) break;
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const record = candidate as Record<string, unknown>;
+    const id = typeof record.id === "string" && record.id.length > 0 && record.id.length <= 64 ? record.id : null;
+    const name = typeof record.name === "string" && record.name.trim().length > 0 && record.name.length <= 80 ? record.name : null;
+    const protocol = API_PROFILE_PROTOCOL_SET.has(record.protocol as ApiProfileProtocol)
+      ? record.protocol as ApiProfileProtocol
+      : null;
+    const secretRef = (PROVIDER_SECRET_IDS as readonly string[]).includes(record.secretRef as string)
+      ? record.secretRef as ProviderSecretId
+      : null;
+    const baseUrl = record.baseUrl === undefined
+      ? undefined
+      : typeof record.baseUrl === "string" && /^https:\/\//u.test(record.baseUrl) && record.baseUrl.length <= 500
+        ? record.baseUrl
+        : "invalid";
+    const defaultModel = typeof record.defaultModel === "string" && record.defaultModel.trim().length > 0 && record.defaultModel.length <= 200
+      ? record.defaultModel
+      : undefined;
+    if (!id || seen.has(id) || !name || !protocol || !secretRef || baseUrl === "invalid") continue;
+    seen.add(id);
+    profiles.push(baseUrl || defaultModel
+      ? { id, name, protocol, ...(baseUrl ? { baseUrl } : {}), secretRef, ...(defaultModel ? { defaultModel } : {}) }
+      : { id, name, protocol, secretRef });
+  }
+  return profiles;
 }
 
 export function normalizeSettings(
@@ -347,15 +504,23 @@ export function normalizeSettings(
   }
 
   const source = candidate as Partial<AppSettings> & { zoomOverApplications?: unknown };
-  const mediaPath = source.mediaPath === null || typeof source.mediaPath === "string"
+  // Only an absolute path to a supported image is kept; anything else keeps the
+  // previous choice. The main process reads this file for the Home screen.
+  const mediaPath = source.mediaPath === null || isHomeMediaPath(source.mediaPath)
     ? source.mediaPath
-    : fallback.mediaPath;
+    : isHomeMediaPath(fallback.mediaPath) ? fallback.mediaPath : null;
   const acknowledged = Array.isArray(source.acknowledgedDangerousProfiles)
     ? source.acknowledgedDangerousProfiles.filter(
-      (provider): provider is AgentProviderId => AGENT_PROVIDERS.has(provider as AgentProviderId)
+      (provider): provider is AgentProviderId => AGENT_PROVIDER_SET.has(provider as AgentProviderId)
     )
     : fallback.acknowledgedDangerousProfiles;
-  const shortcuts = normalizeShortcuts(source.shortcuts, fallback.shortcuts);
+  // Only the named Linux preset inherits the corrected copy key; Custom keeps its saved binding.
+  const shortcuts = normalizeShortcuts(
+    source.keyboardPreset === "linux" && source.shortcuts?.terminalCopy === "Ctrl+C"
+      ? { ...source.shortcuts, terminalCopy: "Ctrl+Shift+C" }
+      : source.shortcuts,
+    fallback.shortcuts
+  );
   const navigationOverrideCandidate = source.canvasNavigationOverride === undefined
     ? fallback.canvasNavigationOverride
     : source.canvasNavigationOverride;
@@ -399,6 +564,10 @@ export function normalizeSettings(
     source.radialLauncherItems,
     fallback.radialLauncherItems ?? DEFAULT_RADIAL_LAUNCHER_ITEMS
   );
+  const defaultLaunchProfiles = normalizeDefaultLaunchProfiles(
+    source.defaultLaunchProfiles,
+    fallback.defaultLaunchProfiles ?? {}
+  );
   const palette = PALETTES.has(source.palette as PaletteId) ? source.palette as PaletteId : fallback.palette;
   const canvasColorCandidate = (source as Record<string, unknown>).canvasColor;
   const canvasColor = canvasColorCandidate === undefined || canvasColorCandidate === "palette"
@@ -406,18 +575,29 @@ export function normalizeSettings(
     : CANVAS_COLORS.has(canvasColorCandidate as CanvasColorId)
       ? canvasColorCandidate as CanvasColorId
       : fallback.canvasColor;
+  // Preserve the visible background once when loading a profile from before independent backgrounds.
+  const canvasBackgroundCandidate = source.canvasBackground === undefined
+    ? source.terminalBorderSkin
+    : source.canvasBackground;
+  const canvasBackground: CanvasBackgroundId = canvasBackgroundCandidate === "none"
+    || (BUNDLED_CANVAS_BACKGROUND_IDS as readonly unknown[]).includes(canvasBackgroundCandidate)
+    || (typeof canvasBackgroundCandidate === "string" && canvasBackgroundCandidate.startsWith("pixel:")
+      && isTerminalBorderSkinId(canvasBackgroundCandidate))
+    ? canvasBackgroundCandidate as CanvasBackgroundId
+    : fallback.canvasBackground ?? "none";
 
   return {
     locale: LOCALES.has(source.locale as LocaleId) ? source.locale as LocaleId : fallback.locale,
-    restoreTerminalSessions: typeof source.restoreTerminalSessions === "boolean"
-      ? source.restoreTerminalSessions
-      : fallback.restoreTerminalSessions ?? false,
+    sessionRestoreMode: normalizeSessionRestoreMode(source as Record<string, unknown>, fallback.sessionRestoreMode),
     persistCanvasRegions: typeof source.persistCanvasRegions === "boolean"
       ? source.persistCanvasRegions
       : fallback.persistCanvasRegions ?? true,
     persistStickyNotes: typeof source.persistStickyNotes === "boolean"
       ? source.persistStickyNotes
       : fallback.persistStickyNotes ?? true,
+    persistMaterials: typeof source.persistMaterials === "boolean"
+      ? source.persistMaterials
+      : fallback.persistMaterials ?? true,
     palette,
     homeAccentPreset: HOME_ACCENT_PRESETS.has(source.homeAccentPreset as HomeAccentPresetId)
       ? source.homeAccentPreset as HomeAccentPresetId
@@ -433,15 +613,38 @@ export function normalizeSettings(
     radialLauncherEnabled: typeof source.radialLauncherEnabled === "boolean"
       ? source.radialLauncherEnabled
       : fallback.radialLauncherEnabled ?? false,
+    experimentalBacklogEnabled: source.experimentalBacklogEnabled === true,
+    executionPolicy: normalizeExecutionPolicy(source.executionPolicy),
     agentLifecycleHooksEnabled: typeof source.agentLifecycleHooksEnabled === "boolean"
       ? source.agentLifecycleHooksEnabled
       : fallback.agentLifecycleHooksEnabled,
+    // On unless the person turned it off; an install from before it existed gets it on.
+    baseProtectionEnabled: typeof source.baseProtectionEnabled === "boolean"
+      ? source.baseProtectionEnabled
+      : fallback.baseProtectionEnabled ?? true,
     uiScale: normalizeUiScale(source.uiScale, fallback.uiScale ?? DEFAULT_UI_SCALE),
     canvasColor,
+    canvasBackground,
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)
       ? source.pattern as CanvasPatternId
       : fallback.pattern,
+    terminalBorderSkin: isTerminalBorderSkinId(source.terminalBorderSkin)
+      ? source.terminalBorderSkin as TerminalBorderSkinId
+      : fallback.terminalBorderSkin,
+    terminalSkinDetail: source.terminalSkinDetail === "minimal" || source.terminalSkinDetail === "detailed"
+      ? source.terminalSkinDetail as PixelSkinPreferredDetail
+      : fallback.terminalSkinDetail,
+    terminalSkinAnimationEnabled: typeof source.terminalSkinAnimationEnabled === "boolean"
+      ? source.terminalSkinAnimationEnabled
+      : fallback.terminalSkinAnimationEnabled,
+    appSkin: APP_SKINS.has(source.appSkin as AppSkinId)
+      ? source.appSkin as AppSkinId
+      : fallback.appSkin,
     snapToGrid: typeof source.snapToGrid === "boolean" ? source.snapToGrid : fallback.snapToGrid,
+    copyOnSelect: typeof source.copyOnSelect === "boolean" ? source.copyOnSelect : fallback.copyOnSelect,
+    terminalLinkOpenMode: TERMINAL_LINK_OPEN_MODES.has(source.terminalLinkOpenMode as TerminalLinkOpenMode)
+      ? source.terminalLinkOpenMode as TerminalLinkOpenMode
+      : fallback.terminalLinkOpenMode,
     invertTerminalWheel: typeof source.invertTerminalWheel === "boolean"
       ? source.invertTerminalWheel
       : fallback.invertTerminalWheel,
@@ -486,12 +689,16 @@ export function normalizeSettings(
       fallback.canvasControlsPlacement
     ),
     shortcuts,
+    keyboardPreset: ["macos", "windows", "linux", "custom"].includes(String(source.keyboardPreset))
+      ? source.keyboardPreset as AppSettings["keyboardPreset"]
+      : source.shortcuts ? "custom" : fallback.keyboardPreset,
     mediaPath,
     mediaFit: MEDIA_FITS.has(source.mediaFit as MediaFit) ? source.mediaFit as MediaFit : fallback.mediaFit,
     lastDirectory: typeof source.lastDirectory === "string" && source.lastDirectory.length > 0
       ? source.lastDirectory
       : fallback.lastDirectory,
     acknowledgedDangerousProfiles: [...new Set(acknowledged)],
+  apiProfiles: normalizeApiProfiles(source.apiProfiles, fallback.apiProfiles ?? []),
     homeGridSize,
     homeLayout,
     canvasRegions,
@@ -506,8 +713,71 @@ export function normalizeSettings(
       : fallback.browserShowAgentPresence,
     browserRestoreTabs: typeof source.browserRestoreTabs === "boolean"
       ? source.browserRestoreTabs
-      : fallback.browserRestoreTabs
+      : fallback.browserRestoreTabs,
+    browserPauseHiddenTabs: typeof source.browserPauseHiddenTabs === "boolean"
+      ? source.browserPauseHiddenTabs
+      : fallback.browserPauseHiddenTabs,
+    attentionNotifications: typeof source.attentionNotifications === "boolean"
+      ? source.attentionNotifications
+      : fallback.attentionNotifications,
+    attentionQueueVisible: typeof source.attentionQueueVisible === "boolean"
+      ? source.attentionQueueVisible
+      : fallback.attentionQueueVisible,
+    attentionQueuePlacement: normalizeCanvasOverlayPlacement(
+      source.attentionQueuePlacement,
+      fallback.attentionQueuePlacement
+    ),
+    agentChatHistoryVisible: typeof source.agentChatHistoryVisible === "boolean"
+      ? source.agentChatHistoryVisible
+      : fallback.agentChatHistoryVisible ?? false,
+    agentChatHistoryPlacement: normalizeCanvasOverlayPlacement(
+      source.agentChatHistoryPlacement,
+      fallback.agentChatHistoryPlacement ?? "top-left"
+    ),
+    agentChatHistoryExpandMode: source.agentChatHistoryExpandMode === "hover" || source.agentChatHistoryExpandMode === "click"
+      ? source.agentChatHistoryExpandMode
+      : fallback.agentChatHistoryExpandMode ?? "hover",
+    agentChatHistorySearchAgents: source.agentChatHistorySearchAgents === "current" || source.agentChatHistorySearchAgents === "all"
+      ? source.agentChatHistorySearchAgents
+      : fallback.agentChatHistorySearchAgents ?? "current",
+    agentChatHistorySearchSessions: source.agentChatHistorySearchSessions === "filtered" || source.agentChatHistorySearchSessions === "all"
+      ? source.agentChatHistorySearchSessions
+      : fallback.agentChatHistorySearchSessions ?? "filtered",
+    // Never inferred from anything else: only an explicit boolean turns the endpoint on.
+    agentControlEnabled: typeof source.agentControlEnabled === "boolean"
+      ? source.agentControlEnabled
+      : fallback.agentControlEnabled ?? false,
+    // On unless the person turned it off: only an explicit "off" does.
+    agentIsolation: source.agentIsolation === "off" || source.agentIsolation === "on"
+      ? source.agentIsolation
+      : fallback.agentIsolation ?? "on",
+    orchestrationMaxDepth: boundedInteger(source.orchestrationMaxDepth, 1, MAX_ORCHESTRATION_DEPTH,
+      fallback.orchestrationMaxDepth ?? DEFAULT_ORCHESTRATION_MAX_DEPTH),
+    orchestrationMaxSubagents: boundedInteger(source.orchestrationMaxSubagents, 1, MAX_ORCHESTRATION_SUBAGENTS,
+      fallback.orchestrationMaxSubagents ?? DEFAULT_ORCHESTRATION_MAX_SUBAGENTS),
+    // Bypass (YOLO) is never a default: it is chosen per launch and acknowledged.
+    defaultLaunchProfile: isDefaultLaunchProfile(source.defaultLaunchProfile)
+      ? source.defaultLaunchProfile
+      : isDefaultLaunchProfile(fallback.defaultLaunchProfile) ? fallback.defaultLaunchProfile : "auto",
+    defaultLaunchProfiles
   };
+}
+
+function normalizeDefaultLaunchProfiles(
+  candidate: unknown,
+  fallback: Partial<Record<AgentProviderId, DefaultLaunchProfile>>
+): Partial<Record<AgentProviderId, DefaultLaunchProfile>> {
+  if (candidate === undefined) return { ...fallback };
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return {};
+
+  const source = candidate as Record<string, unknown>;
+  const normalized: Partial<Record<AgentProviderId, DefaultLaunchProfile>> = {};
+  for (const provider of AGENT_PROVIDERS) {
+    if (!Object.hasOwn(source, provider)) continue;
+    const profile = source[provider];
+    if (isDefaultLaunchProfile(profile)) normalized[provider] = profile;
+  }
+  return normalized;
 }
 
 export function normalizeCanvasLauncherItems(
@@ -571,9 +841,9 @@ function normalizeAgentProviderSelection(
 ): AgentProviderId[] {
   if (!Array.isArray(candidate)) return [...fallback];
   const selected = new Set(candidate.filter((provider): provider is AgentProviderId => (
-    typeof provider === "string" && AGENT_PROVIDERS.has(provider as AgentProviderId)
+    typeof provider === "string" && AGENT_PROVIDER_SET.has(provider as AgentProviderId)
   )));
-  return [...AGENT_PROVIDERS].filter((provider) => selected.has(provider));
+  return AGENT_PROVIDERS.filter((provider) => selected.has(provider));
 }
 
 function filterUnavailableProviders(settings: AppSettings, available: ReadonlySet<AgentProviderId>): AppSettings {
@@ -794,7 +1064,7 @@ export function normalizeStickyNotes(
   return notes;
 }
 
-function normalizeBrowserCanvas(candidate: unknown, fallback: BrowserCanvasState | null): BrowserCanvasState | null {
+export function normalizeBrowserCanvas(candidate: unknown, fallback: BrowserCanvasState | null): BrowserCanvasState | null {
   if (candidate === null) return null;
   if (!candidate || typeof candidate !== "object") return fallback ? structuredClone(fallback) : null;
   const source = candidate as Partial<BrowserCanvasState>;
@@ -814,13 +1084,24 @@ function normalizeShortcuts(candidate: unknown, fallback: ShortcutBindings): Sho
   const source = candidate && typeof candidate === "object"
     ? candidate as Partial<ShortcutBindings>
     : {};
-  const shortcuts = {
-    home: isValidShortcut(source.home) ? source.home : fallback.home,
-    renameWindow: isValidShortcut(source.renameWindow) ? source.renameWindow : fallback.renameWindow
-  };
+  const shortcuts = { ...fallback };
+  for (const action of Object.keys(fallback) as Array<keyof ShortcutBindings>) {
+    const binding = source[action];
+    const keyboardOnly = !["home", "renameWindow", "toggleFullscreen"].includes(action);
+    if (isValidShortcut(binding) && !(keyboardOnly && binding.includes("Mouse"))) shortcuts[action] = binding;
+    else if (binding === "" && !["codexSubmit", "codexNewline", "codexSelectAll"].includes(action)) shortcuts[action] = "";
+  }
 
-  if (shortcuts.home.toLowerCase() === shortcuts.renameWindow.toLowerCase()) {
-    return { ...fallback };
+  const accepted: Array<keyof ShortcutBindings> = [];
+  for (const action of Object.keys(shortcuts) as Array<keyof ShortcutBindings>) {
+    if (!shortcuts[action]) continue;
+    const conflict = accepted.some((other) => shortcutsShareContext(action, other)
+      && shortcuts[action].toLowerCase() === shortcuts[other].toLowerCase());
+    if (conflict) {
+      // Preserve old customized actions; newly added defaults can be rebound in Settings.
+      if (source[action] === undefined && !action.startsWith("codex")) shortcuts[action] = "";
+      else return { ...fallback };
+    } else accepted.push(action);
   }
   return shortcuts;
 }
@@ -836,7 +1117,7 @@ function isValidShortcut(value: unknown): value is string {
     || /^Mouse[345]$/.test(key)
     || new Set([
       "Home", "End", "PageUp", "PageDown", "Space", "Enter", "Escape", "Tab",
-      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Insert", "Backspace"
+      "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Delete", "Insert", "Backspace", "Comma"
     ]).has(key);
 }
 

@@ -14,6 +14,7 @@ jobs:
     name: Package ${{ matrix.name }}
     env:
       CANVASTTY_GITHUB_CLIENT_ID: ${{ vars.CANVASTTY_GITHUB_CLIENT_ID }}
+      CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
     strategy:
       fail-fast: false
       matrix:
@@ -32,6 +33,9 @@ jobs:
             artifact: canvastty-macos
     runs-on: ${{ matrix.runner }}
     steps:
+      - name: Note plugin showcase sign-in availability
+        if: ${{ vars.CANVASTTY_GITHUB_CLIENT_ID == '' }}
+        run: echo "::warning::CANVASTTY_GITHUB_CLIENT_ID is not set. The plugin showcase still works anonymously; GitHub sign-in is unavailable in this build."
       - name: Check out repository
         uses: actions/checkout@v7
       - name: Set up Node.js
@@ -39,14 +43,44 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Set up Go (canvastty-helper, standard library only)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
       - name: Install locked dependencies
         run: npm ci
       - name: Audit repository secrets
         run: npm run audit:secrets
+      - name: Build the native helper (the parity tests run it)
+        run: npm run build:helpers -- --host
       - name: Run tests
         run: npm test
       - name: Build installers
+        if: runner.os != 'macOS'
         run: npm run ${{ matrix.script }}
+      - name: Build macOS installers with owner public key
+        if: runner.os == 'macOS'
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+        run: npm run package:mac
+      - name: Generate signed Sparkle appcast
+        if: runner.os == 'macOS' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          SPARKLE_EDDSA_PRIVATE_KEY: ${{ secrets.SPARKLE_EDDSA_PRIVATE_KEY }}
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY }}
+        run: |
+          test -n "$SPARKLE_EDDSA_PRIVATE_KEY"
+          node scripts/verify-sparkle-key.mjs
+          mkdir -p release/appcast-input
+          cp release/*-mac-arm64.zip release/appcast-input/
+          printf '%s' "$SPARKLE_EDDSA_PRIVATE_KEY" | artifacts/sparkle/distribution/bin/generate_appcast \
+            --ed-key-file - \
+            --download-url-prefix "https://github.com/howdeploy/CanvasTTY/releases/download/${GITHUB_REF_NAME}/" \
+            release/appcast-input
+          cp release/appcast-input/appcast.xml release/appcast.xml
+      - name: Audit built bundle secrets
+        run: npm run audit:secrets
       - name: Verify macOS app signature
         if: runner.os == 'macOS'
         run: |
@@ -63,7 +97,11 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 2
         run: xvfb-run -a npm run smoke:appimage
-      - name: Upload installers
+      # electron-updater reads the channel manifests (latest.yml, latest-mac.yml,
+      # latest-linux.yml) next to the installers, and the NSIS differential
+      # download needs the .blockmap files. Without them the packaged
+      # checkForUpdates() path has nothing to check against.
+      - name: Upload installers and update manifests
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
@@ -71,8 +109,12 @@ jobs:
             release/*.AppImage
             release/*.deb
             release/*.exe
+            release/*.exe.blockmap
             release/*.dmg
             release/*.zip
+            release/*.yml
+            release/*.blockmap
+            release/appcast.xml
           if-no-files-found: error
 
   release:
@@ -83,11 +125,22 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
       - name: Download packaged artifacts
         uses: actions/download-artifact@v8
         with:
           path: release-artifacts
           merge-multiple: true
+      - name: Verify release tag and artifact set
+        run: node scripts/verify-release-artifacts.mjs "${GITHUB_REF_NAME}" release-artifacts
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

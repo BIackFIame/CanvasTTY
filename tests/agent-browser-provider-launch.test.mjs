@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { access, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
@@ -16,6 +16,8 @@ import {
   KimiTemporaryConfiguration,
   ProviderLaunchAdapters,
   claudeMcpArgs,
+  probeKimiPerRunMcpConfig,
+  probeKimiPerRunMcpConfigAsync,
   codexMcpArgs,
   qwenMcpArgs,
   recoverKimiConfigurationOnStartup,
@@ -798,4 +800,81 @@ test("ProviderLaunchAdapters fallback adds and removes only temporary Kimi state
   launch.releaseConfiguration();
   assert.equal(await exists(join(home, "mcp.json")), false);
   assert.equal(await exists(join(home, "config.toml")), false);
+});
+
+test("a background Kimi probe answers the first launch, so the main thread never runs kimi --help", async (t) => {
+  const root = await fixture(t, "canvastty-provider-kimi-warm-");
+  const blocking = [];
+  const background = [];
+  const adapters = new ProviderLaunchAdapters({
+    helper,
+    providerClis,
+    kimiHomeDirectory: join(root, "kimi-home"),
+    hermesHomeDirectory: join(root, "hermes-home"),
+    runtimeDirectory: join(root, "runtime"),
+    probeKimiPerRunConfig: (cli) => { blocking.push(cli.executable); return false; },
+    probeKimiPerRunConfigAsync: async (cli) => { background.push(cli.executable); return true; }
+  });
+
+  await Promise.all([adapters.warmKimiProbe(), adapters.warmKimiProbe()]);
+  const launch = adapters.prepare("kimi", "warmed");
+  assert.equal(launch.args[0], "--mcp-config-file", "the background answer (per-run config) is used");
+  launch.releaseConfiguration();
+  await adapters.warmKimiProbe();
+  assert.deepEqual(background, ["/resolved/kimi"], "probed once, in the background");
+  assert.deepEqual(blocking, [], "no blocking probe");
+
+  // A recheck discards the answer: a launch before the next background probe finishes probes as before.
+  adapters.providerClisRefreshed();
+  const fallback = adapters.prepare("kimi", "rechecked");
+  assert.deepEqual(fallback.args, [], "the blocking probe's answer applies");
+  fallback.releaseConfiguration();
+  assert.deepEqual(blocking, ["/resolved/kimi"]);
+});
+
+test("the background Kimi probe gives the same answer as the blocking one", { skip: process.platform === "win32" }, async (t) => {
+  const root = await fixture(t, "canvastty-provider-kimi-probe-");
+  const cli = (body) => {
+    const executable = join(root, `kimi-${Math.random().toString(36).slice(2)}`);
+    writeFileSync(executable, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    return { state: "available", provider: "kimi", executable, launcher: "native", environment: {}, checked: [] };
+  };
+  for (const [body, expected] of [
+    ["echo '  --mcp-config-file PATH  per-run MCP config'", true],
+    ["echo '  --config PATH' >&2", false],
+    ["echo '--mcp-config-file'; exit 2", false]
+  ]) {
+    const kimi = cli(body);
+    // A generous limit: the answers are compared, not the 3 s default, which a loaded machine can hit.
+    assert.equal(probeKimiPerRunMcpConfig(kimi, 30_000), expected, body);
+    assert.equal(await probeKimiPerRunMcpConfigAsync(kimi, 30_000), expected, body);
+  }
+});
+
+test("the Kimi probe runs with the launch environment it was given, never the app's own", { skip: process.platform === "win32" }, async (t) => {
+  const root = await fixture(t, "canvastty-provider-kimi-probe-env-");
+  const executable = join(root, "kimi");
+  // Answers only when it sees the given environment and nothing of the app's.
+  writeFileSync(executable, "#!/bin/sh\n[ \"$PROBE_GIVEN\" = yes ] && [ -z \"$PROBE_APP_ONLY\" ] && echo '--mcp-config-file'\nexit 0\n", { mode: 0o755 });
+  const kimi = { state: "available", provider: "kimi", executable, launcher: "native", environment: {}, checked: [] };
+  process.env.PROBE_APP_ONLY = "leaked";
+  t.after(() => { delete process.env.PROBE_APP_ONLY; });
+  const given = { PATH: "/usr/bin:/bin", PROBE_GIVEN: "yes" };
+  mkdirSync(join(root, "kimi-home"));
+  assert.equal(probeKimiPerRunMcpConfig(kimi, 30_000, given), true);
+  assert.equal(await probeKimiPerRunMcpConfigAsync(kimi, 30_000, given), true);
+  const adapters = new ProviderLaunchAdapters({
+    helper,
+    providerClis: { get: () => kimi },
+    runtimeDirectory: join(root, "runtime"),
+    hermesHomeDirectory: join(root, "hermes"),
+    kimiHomeDirectory: join(root, "kimi-home"),
+    environment: given
+  });
+  const launch = adapters.prepare("kimi", "connection-kimi");
+  try {
+    assert.ok(launch.args.includes("--mcp-config-file"), "the adapter's own probe saw only its environment");
+  } finally {
+    launch.releaseConfiguration();
+  }
 });

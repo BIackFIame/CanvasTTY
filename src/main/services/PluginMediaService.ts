@@ -1,4 +1,3 @@
-import { createReadStream } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -7,11 +6,13 @@ import {
   realpath,
   rename,
   stat,
+  unlink,
   writeFile
 } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
-import { Readable } from "node:stream";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import { randomUUID } from "node:crypto";
+import { streamFile, textResponse } from "./fileResponse.ts";
 import type {
   PluginMediaLibrary,
   PluginMediaTrack,
@@ -37,6 +38,7 @@ const AUDIO_MIME: Record<string, string> = {
 };
 
 const PLAYLIST_EXTENSIONS = new Set([".json", ".m3u", ".m3u8", ".pls"]);
+const STREAM_HEADERS = { "access-control-allow-origin": "*" };
 
 interface StoredLibrary {
   id: string;
@@ -53,6 +55,8 @@ export class PluginMediaService {
   private readonly authorize: AuthorizePlugin;
   private readonly libraries = new Map<string, StoredLibrary>();
   private writeQueue = Promise.resolve();
+  /** Plugins being uninstalled: no grant of theirs may be stored until that ends. */
+  private readonly removing = new Set<string>();
 
   constructor(userDataPath: string, authorize: AuthorizePlugin) {
     this.registryPath = join(userDataPath, REGISTRY_FILE);
@@ -77,6 +81,9 @@ export class PluginMediaService {
     const rootPath = await realpath(selectedPath);
     const metadata = await stat(rootPath);
     if (!metadata.isDirectory()) throw new Error("The selected music library is not a directory.");
+    // The folder checks above take time (and the pick before them far longer): the plugin may have been
+    // uninstalled meanwhile, and its grant must not be stored after its grants were revoked.
+    this.assertGrantable(pluginId);
     const existing = [...this.libraries.values()].find((library) => (
       library.pluginId === pluginId && library.rootPath === rootPath
     ));
@@ -121,6 +128,21 @@ export class PluginMediaService {
     this.requireLibrary(pluginId, libraryId);
     this.libraries.delete(libraryId);
     await this.persist();
+  }
+
+  /** Uninstall starts: from now on the plugin's grant writes are refused, until endRemoval. */
+  beginRemoval(pluginId: string): void {
+    this.removing.add(pluginId);
+  }
+
+  /** Uninstall finished or failed. After a finished one the plugin is unknown, so authorization refuses it anyway. */
+  endRemoval(pluginId: string): void {
+    this.removing.delete(pluginId);
+  }
+
+  private assertGrantable(pluginId: string): void {
+    if (this.removing.has(pluginId)) throw new Error("The plugin is being uninstalled.");
+    this.authorize(pluginId, "media:library");
   }
 
   async revokeAll(pluginId: string): Promise<void> {
@@ -177,14 +199,22 @@ export class PluginMediaService {
       await mkdir(playlistDirectory);
     }
     const canonicalDirectory = await realpath(playlistDirectory);
-    if (!isContainedPath(await realpath(library.rootPath), canonicalDirectory)) {
+    if (!isPathInside(await realpath(library.rootPath), canonicalDirectory)) {
       throw new Error("The library Playlists directory is outside the selected library.");
     }
 
     const path = join(canonicalDirectory, fileName);
-    const temporaryPath = `${path}.tmp`;
-    await writeFile(temporaryPath, content, "utf8");
-    await rename(temporaryPath, path);
+    // A fixed `<name>.tmp` could already be a link pointing outside the
+    // library, and writeFile follows it. A new random name created with O_EXCL
+    // ("wx") fails on any existing entry, link or not.
+    const temporaryPath = `${path}.${randomUUID()}.tmp`;
+    try {
+      await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx" });
+      await rename(temporaryPath, path);
+    } catch (error) {
+      await unlink(temporaryPath).catch(() => undefined);
+      throw error;
+    }
     const metadata = await stat(path);
     return publicPlaylist({ relativePath: `Playlists/${fileName}`, size: metadata.size });
   }
@@ -202,7 +232,7 @@ export class PluginMediaService {
       const relativePath = safeRelativePath(parts.join("/"));
       if (!(extname(relativePath).toLowerCase() in AUDIO_MIME)) return textResponse("Track is unavailable.", 404);
       const path = await containedExistingFile(library.rootPath, relativePath);
-      return streamFile(request, path, AUDIO_MIME[extname(relativePath).toLowerCase()]);
+      return streamFile(request, path, AUDIO_MIME[extname(relativePath).toLowerCase()], STREAM_HEADERS);
     } catch {
       return textResponse("Track is unavailable.", 404);
     }
@@ -263,7 +293,7 @@ async function scanFiles(
 async function containedExistingFile(rootPath: string, relativePath: string): Promise<string> {
   const root = await realpath(rootPath);
   const candidate = await realpath(resolve(root, safeRelativePath(relativePath)));
-  if (!isContainedPath(root, candidate)) throw new Error("Media file is outside the selected library.");
+  if (!isPathInside(root, candidate)) throw new Error("Media file is outside the selected library.");
   const metadata = await stat(candidate);
   if (!metadata.isFile()) throw new Error("Media file is unavailable.");
   return candidate;
@@ -294,10 +324,6 @@ function isReadablePlaylistPath(relativePath: string): boolean {
     && (extension !== ".json" || relativePath.startsWith("Playlists/"));
 }
 
-function isContainedPath(root: string, candidate: string): boolean {
-  return candidate === root || candidate.startsWith(`${root}${sep}`);
-}
-
 function publicLibrary(library: StoredLibrary): PluginMediaLibrary {
   return { id: library.id, name: library.name };
 }
@@ -313,65 +339,6 @@ function publicPlaylist(file: ScannedFile): PluginPlaylistFile {
 
 function mediaUrl(pluginId: string, libraryId: string, relativePath: string): string {
   return `canvastty-media://${encodeURIComponent(pluginId)}/${encodeURIComponent(libraryId)}/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
-}
-
-async function streamFile(request: Request, path: string, mimeType: string): Promise<Response> {
-  const metadata = await stat(path);
-  if (metadata.size === 0) {
-    return new Response(null, {
-      status: 200,
-      headers: {
-        "accept-ranges": "bytes",
-        "access-control-allow-origin": "*",
-        "cache-control": "no-store",
-        "content-length": "0",
-        "content-type": mimeType
-      }
-    });
-  }
-  const range = parseRange(request.headers.get("range"), metadata.size);
-  if (range === "invalid") {
-    return new Response(null, { status: 416, headers: { "content-range": `bytes */${metadata.size}` } });
-  }
-  const start = range?.start ?? 0;
-  const end = range?.end ?? metadata.size - 1;
-  const headers = new Headers({
-    "accept-ranges": "bytes",
-    "access-control-allow-origin": "*",
-    "cache-control": "no-store",
-    "content-length": String(Math.max(0, end - start + 1)),
-    "content-type": mimeType
-  });
-  if (range) headers.set("content-range", `bytes ${start}-${end}/${metadata.size}`);
-  if (request.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
-  const stream = Readable.toWeb(createReadStream(path, { start, end })) as ReadableStream<Uint8Array>;
-  return new Response(stream, { status: range ? 206 : 200, headers });
-}
-
-function parseRange(value: string | null, size: number): { start: number; end: number } | "invalid" | null {
-  if (!value) return null;
-  const match = value.match(/^bytes=(\d*)-(\d*)$/);
-  if (!match || (match[1] === "" && match[2] === "")) return "invalid";
-  let start: number;
-  let end: number;
-  if (match[1] === "") {
-    const suffix = Number(match[2]);
-    if (!Number.isInteger(suffix) || suffix <= 0) return "invalid";
-    start = Math.max(0, size - suffix);
-    end = size - 1;
-  } else {
-    start = Number(match[1]);
-    end = match[2] === "" ? size - 1 : Number(match[2]);
-  }
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start >= size || end < start) return "invalid";
-  return { start, end: Math.min(end, size - 1) };
-}
-
-function textResponse(message: string, status: number): Response {
-  return new Response(message, {
-    status,
-    headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }
-  });
 }
 
 function isStoredLibrary(value: unknown): value is StoredLibrary {

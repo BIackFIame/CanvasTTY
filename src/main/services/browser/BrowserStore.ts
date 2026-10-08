@@ -1,5 +1,5 @@
 import { dirname, join } from "node:path";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { isSafeBrowserUrl, MAX_BROWSER_TABS } from "./BrowserPolicyService.ts";
 
 export const BROWSER_STORE_VERSION = 1;
@@ -64,12 +64,20 @@ export class BrowserStore {
   private persist(): Promise<void> {
     const snapshot = `${JSON.stringify(this.value, null, 2)}\n`;
     const temporaryPath = `${this.filePath}.${process.pid}.tmp`;
-    this.writeQueue = this.writeQueue.then(async () => {
+    // A failed write must not poison the queue: every later save would reject
+    // with the same error. Each save still reports its own failure.
+    const write = this.writeQueue.catch(() => undefined).then(async () => {
       await mkdir(dirname(this.filePath), { recursive: true });
-      await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
-      await rename(temporaryPath, this.filePath);
+      try {
+        await writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
+        await rename(temporaryPath, this.filePath);
+      } catch (error) {
+        await unlink(temporaryPath).catch(() => undefined);
+        throw error;
+      }
     });
-    return this.writeQueue;
+    this.writeQueue = write;
+    return write;
   }
 }
 
@@ -112,4 +120,10 @@ function restorableUrl(value: string): string {
 
 function isMissingFile(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+/** The active tab once tabs were removed: unchanged while it is still open, else the first open tab (or none). */
+export function activeTabAmong(tabs: ReadonlyMap<string, unknown>, activeTabId: string | null): string | null {
+  if (activeTabId === null || tabs.has(activeTabId)) return activeTabId;
+  return tabs.keys().next().value ?? null;
 }

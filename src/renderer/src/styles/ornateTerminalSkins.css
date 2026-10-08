@@ -1,0 +1,286 @@
+/* Dimensional chrome stays at the edges; xterm owns the opaque interior. */
+.terminal-card[data-border-skin="cybercore"],
+.terminal-card[data-border-skin="titanium"],
+.terminal-card[data-border-skin="retro"] {
+  isolation: isolate;
+  border-radius: 8px;
+}
+
+.terminal-card[data-border-skin="cybercore"]::before,
+.terminal-card[data-border-skin="cybercore"]::after,
+.terminal-card[data-border-skin="titanium"]::before,
+.terminal-card[data-border-skin="titanium"]::after,
+.terminal-card[data-border-skin="retro"]::before,
+.terminal-card[data-border-skin="retro"]::after {
+  content: "";
+  position: absolute;
+  z-index: 5;
+  inset: 0;
+  pointer-events: none;
+}
+
+.terminal-card:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+  [data-border-skin="retro"]) .terminal-card__surface {
+  padding: 0 clamp(18px, 4.8%, 26px) clamp(20px, 5%, 28px);
+}
+/* Cybercore: split light rails, machined corners and a lit control deck. */
+.terminal-card[data-border-skin="cybercore"] {
+  border: 2px solid #29c7ed;
+  background: #111923;
+  box-shadow: inset 0 0 0 2px #07121c, 0 0 0 1px #075777,
+    0 0 17px #12bce470, 0 16px 35px #02070db8;
+}
+.terminal-card[data-border-skin="cybercore"] .terminal-card__header {
+  color: #e9f9ff;
+  background: linear-gradient(180deg, #24516a 0, #162c40 8%, #0d1725 46%, #18364a 94%, #2ed0ef 100%);
+  box-shadow: inset 0 2px #8ef5ff8c, inset 0 -3px #07131e;
+}
+.terminal-card[data-border-skin="cybercore"] .terminal-card__actions button {
+  border: 1px solid #49cfea72;
+  background: linear-gradient(145deg, #1c4054, #0c1c2b);
+}
+.terminal-card[data-border-skin="cybercore"]::before {
+  border: 1px solid #8af5ffbd;
+  border-radius: 5px;
+  box-shadow: inset 0 0 0 3px #082436, inset 0 0 0 4px #1d83a078;
+}
+.terminal-card[data-border-skin="cybercore"]::after {
+  background:
+    linear-gradient(135deg, #8af5ff 0 34%, #0d5272 35% 47%, #8af5ff 48% 57%, transparent 58%) top left / clamp(16px, 5%, 22px) clamp(7px, 2.7%, 10px) no-repeat,
+    linear-gradient(225deg, #8af5ff 0 34%, #0d5272 35% 47%, #8af5ff 48% 57%, transparent 58%) top right / clamp(16px, 5%, 22px) clamp(7px, 2.7%, 10px) no-repeat,
+    linear-gradient(45deg, #8af5ff 0 34%, #0d5272 35% 47%, #8af5ff 48% 57%, transparent 58%) bottom left / clamp(14px, 5%, 22px) clamp(12px, 5%, 16px) no-repeat,
+    linear-gradient(315deg, #8af5ff 0 34%, #0d5272 35% 47%, #8af5ff 48% 57%, transparent 58%) bottom right / clamp(14px, 5%, 22px) clamp(12px, 5%, 16px) no-repeat,
+    repeating-linear-gradient(180deg, #8af5ff 0 3px, #0d5272 3px 6px, transparent 6px 10px) left 42% / 6px clamp(18px, 8%, 28px) no-repeat,
+    repeating-linear-gradient(180deg, #8af5ff 0 3px, #0d5272 3px 6px, transparent 6px 10px) right 42% / 6px clamp(18px, 8%, 28px) no-repeat,
+    repeating-linear-gradient(90deg, #45dfff 0 8px, #0d5272 8px 12px, transparent 12px 18px) bottom center / min(42%, 180px) 4px no-repeat,
+    linear-gradient(90deg, transparent, #53e8ff, transparent) top center / 55% 2px no-repeat;
+  opacity: .87;
+}
+.terminal-card[data-border-skin="cybercore"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 3px var(--primary), 0 0 22px #24d9ff9c, 0 16px 35px #02070db8;
+}
+
+/* Titanium: cold pressed steel with riveted corners and brushed rails. */
+.terminal-card[data-border-skin="titanium"] {
+  border: 4px solid #728ba9;
+  background: #202430;
+  box-shadow: inset 0 0 0 2px #182332, 0 0 0 1px #c2d3e3,
+    0 8px 0 #131d2ab0, 0 20px 36px #01050ab8;
+}
+.terminal-card[data-border-skin="titanium"] .terminal-card__header {
+  color: #f4f8fb;
+  background: linear-gradient(180deg, #d1dfeb 0, #879bb2 4%, #526982 13%, #26364c 48%, #384f69 88%, #101a28 100%);
+  box-shadow: inset 0 2px #eff8ffd1, inset 0 -3px #101c2b;
+}
+.terminal-card[data-border-skin="titanium"] .terminal-card__actions button {
+  border: 1px solid #b5c9dc6b;
+  background: linear-gradient(155deg, #53677d, #1d2939 65%);
+}
+.terminal-card[data-border-skin="titanium"]::before {
+  border: 2px solid #a7bcd1;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 2px #233349, inset 0 0 0 4px #617b9880;
+}
+.terminal-card[data-border-skin="titanium"]::after {
+  background:
+    linear-gradient(180deg, #d9e5ee 0 2px, #52677e 2px 4px) top left / clamp(18px, 5%, 24px) 4px no-repeat,
+    linear-gradient(90deg, #d9e5ee 0 2px, #52677e 2px 4px) top left / 4px clamp(18px, 5%, 24px) no-repeat,
+    linear-gradient(180deg, #d9e5ee 0 2px, #52677e 2px 4px) top right / clamp(18px, 5%, 24px) 4px no-repeat,
+    linear-gradient(270deg, #d9e5ee 0 2px, #52677e 2px 4px) top right / 4px clamp(18px, 5%, 24px) no-repeat,
+    linear-gradient(0deg, #d9e5ee 0 2px, #52677e 2px 4px) bottom left / clamp(18px, 5%, 24px) 4px no-repeat,
+    linear-gradient(90deg, #d9e5ee 0 2px, #52677e 2px 4px) bottom left / 4px clamp(18px, 5%, 24px) no-repeat,
+    linear-gradient(0deg, #d9e5ee 0 2px, #52677e 2px 4px) bottom right / clamp(18px, 5%, 24px) 4px no-repeat,
+    linear-gradient(270deg, #d9e5ee 0 2px, #52677e 2px 4px) bottom right / 4px clamp(18px, 5%, 24px) no-repeat,
+    radial-gradient(circle at center, #18283a 0 2px, #d9e5ee 3px 4px, #52677e 5px, transparent 6px) top left / 12px 12px no-repeat,
+    radial-gradient(circle at center, #18283a 0 2px, #d9e5ee 3px 4px, #52677e 5px, transparent 6px) top right / 12px 12px no-repeat,
+    radial-gradient(circle at center, #18283a 0 2px, #d9e5ee 3px 4px, #52677e 5px, transparent 6px) bottom left / 16px 14px no-repeat,
+    radial-gradient(circle at center, #18283a 0 2px, #d9e5ee 3px 4px, #52677e 5px, transparent 6px) bottom right / 16px 14px no-repeat,
+    repeating-linear-gradient(90deg, #90a8bd 0 2px, #324760 2px 6px) bottom center / min(28%, 120px) 5px no-repeat,
+    linear-gradient(90deg, transparent, #e5f2ff91, transparent) top center / 68% 2px no-repeat;
+}
+.terminal-card[data-border-skin="titanium"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 3px var(--primary), 0 8px 0 #131d2ab0, 0 20px 36px #01050ab8;
+}
+
+/* Retro: ivory enamel housing, dark ink edges and square stamped corners. */
+.terminal-card[data-border-skin="retro"] {
+  border: 5px solid #dbc7a4;
+  border-radius: 3px;
+  background: #15191b;
+  box-shadow: inset 0 0 0 2px #3b352e, 0 0 0 1px #fff0d1,
+    0 7px 0 #635542, 0 18px 30px #080706b8;
+}
+.terminal-card[data-border-skin="retro"] .terminal-card__header {
+  color: #25231f;
+  background: linear-gradient(180deg, #fff5de 0, #e9d9b9 12%, #c3ad88 88%, #8b785d 100%);
+  box-shadow: inset 0 2px #fffdf0, inset 0 -3px #7a6b57;
+}
+.terminal-card[data-border-skin="retro"] .terminal-card__actions button {
+  color: #25231f;
+  border: 1px solid #514537;
+  border-radius: 2px;
+  background: linear-gradient(#f3e5c7, #b7a17d);
+  box-shadow: 1px 2px #665641;
+}
+.terminal-card[data-border-skin="retro"]::before {
+  border: 2px solid #211f1b;
+  border-radius: 1px;
+  box-shadow: inset 0 0 0 2px #efdfbd;
+}
+.terminal-card[data-border-skin="retro"]::after {
+  background:
+    linear-gradient(180deg, #211f1b 0 3px, #efdfbd 3px 5px) top left / clamp(16px, 5%, 22px) 5px no-repeat,
+    linear-gradient(90deg, #211f1b 0 3px, #efdfbd 3px 5px) top left / 5px clamp(16px, 5%, 22px) no-repeat,
+    linear-gradient(180deg, #211f1b 0 3px, #efdfbd 3px 5px) top right / clamp(16px, 5%, 22px) 5px no-repeat,
+    linear-gradient(270deg, #211f1b 0 3px, #efdfbd 3px 5px) top right / 5px clamp(16px, 5%, 22px) no-repeat,
+    linear-gradient(0deg, #211f1b 0 3px, #efdfbd 3px 5px) bottom left / clamp(14px, 4%, 18px) 5px no-repeat,
+    linear-gradient(90deg, #211f1b 0 3px, #efdfbd 3px 5px) bottom left / 5px clamp(12px, 5%, 16px) no-repeat,
+    linear-gradient(0deg, #211f1b 0 3px, #efdfbd 3px 5px) bottom right / clamp(14px, 4%, 18px) 5px no-repeat,
+    linear-gradient(270deg, #211f1b 0 3px, #efdfbd 3px 5px) bottom right / 5px clamp(12px, 5%, 16px) no-repeat,
+    linear-gradient(135deg, #fff4d9 0 38%, #211f1b 39% 50%, #fff4d9 51% 62%, transparent 63%) top left / clamp(16px, 5%, 22px) clamp(7px, 2.7%, 10px) no-repeat,
+    linear-gradient(225deg, #fff4d9 0 38%, #211f1b 39% 50%, #fff4d9 51% 62%, transparent 63%) top right / clamp(16px, 5%, 22px) clamp(7px, 2.7%, 10px) no-repeat,
+    linear-gradient(45deg, #fff4d9 0 38%, #211f1b 39% 50%, #fff4d9 51% 62%, transparent 63%) bottom left / clamp(14px, 4%, 18px) clamp(12px, 5%, 16px) no-repeat,
+    linear-gradient(315deg, #fff4d9 0 38%, #211f1b 39% 50%, #fff4d9 51% 62%, transparent 63%) bottom right / clamp(14px, 4%, 18px) clamp(12px, 5%, 16px) no-repeat,
+    repeating-linear-gradient(90deg, #22201b 0 5px, #f2e0bb 5px 9px) bottom center / min(30%, 120px) 4px no-repeat;
+}
+.terminal-card[data-border-skin="retro"]:is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 3px var(--primary), 0 7px 0 #635542, 0 18px 30px #080706b8;
+}
+
+/* Match the shared warning ring with higher skin-scoped specificity. */
+.terminal-card.terminal-card--attention:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+  [data-border-skin="retro"]):is(:focus-within, .terminal-card--selected) {
+  box-shadow: 0 0 0 3px var(--warning, #d8a24a),
+    0 0 0 6px color-mix(in srgb, var(--primary) 42%, transparent), var(--shadow-lg);
+}
+
+/* Slow rail sweeps live in a narrow header track, clear of controls and corner hardware. */
+.terminal-card:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+  [data-border-skin="retro"]) .terminal-card__header {
+  position: relative;
+}
+.terminal-card:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+  [data-border-skin="retro"]) .terminal-card__header::after {
+  content: "";
+  position: absolute;
+  z-index: 8;
+  top: 1px;
+  right: clamp(44px, 10%, 88px);
+  left: clamp(34px, 8%, 68px);
+  height: 2px;
+  background-size: 200% 100%;
+  background-position: 100% 0;
+  background-repeat: no-repeat;
+  pointer-events: none;
+  opacity: 0;
+}
+.terminal-card[data-border-skin="cybercore"] .terminal-card__header::after {
+  background-image: linear-gradient(90deg, transparent 0 38%, #38d7f2 41% 43%, transparent 43% 46%,
+    #d8fbff 47% 49%, transparent 49% 52%, #38d7f2 53% 56%, transparent 60% 100%);
+  animation: terminal-skin-rail-sweep 9s linear 0s infinite;
+}
+.terminal-card[data-border-skin="titanium"] .terminal-card__header::after {
+  background-image: linear-gradient(90deg, transparent 0 43%, #b9cbdc 47%, #f5fbff 50%,
+    #a9bfd2 53%, transparent 58% 100%);
+  animation: terminal-skin-rail-sweep 12s linear 1.8s infinite;
+}
+.terminal-card[data-border-skin="retro"] .terminal-card__header::after {
+  background-image: linear-gradient(90deg, transparent 0 42%, #bf8954 47%, #ffe5b0 50%,
+    #c88c56 53%, transparent 59% 100%);
+  animation: terminal-skin-rail-sweep 16s linear 2.7s infinite;
+}
+@keyframes terminal-skin-rail-sweep {
+  0% { opacity: 0; background-position: 100% 0; }
+  19% { opacity: .48; }
+  50% { opacity: .68; background-position: 50% 0; }
+  81% { opacity: .48; }
+  100% { opacity: 0; background-position: 0 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .terminal-card:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+    [data-border-skin="retro"]) .terminal-card__header::after {
+    animation: none;
+    opacity: 0;
+    background-position: 100% 0;
+  }
+}
+
+.border-skin-preview[data-border-skin="cybercore"] {
+  position: relative;
+  border: 2px solid #29c7ed;
+  border-radius: 4px;
+  box-shadow: inset 0 0 0 2px #07121c, 0 0 8px #12bce45c;
+}
+.border-skin-preview[data-border-skin="cybercore"] .border-skin-preview__header {
+  background: linear-gradient(180deg, #24516a, #0d1725 55%, #18364a 92%, #2ed0ef);
+}
+.border-skin-preview[data-border-skin="titanium"] {
+  position: relative;
+  border: 3px solid #728ba9;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 2px #182332, 0 3px #131d2a;
+}
+.border-skin-preview[data-border-skin="titanium"] .border-skin-preview__header {
+  background: linear-gradient(180deg, #d1dfeb, #526982 18%, #26364c 55%, #384f69 88%, #101a28);
+}
+.border-skin-preview[data-border-skin="retro"] {
+  position: relative;
+  border: 3px solid #dbc7a4;
+  border-radius: 2px;
+  box-shadow: inset 0 0 0 1px #3b352e, 0 2px #635542;
+}
+.border-skin-preview[data-border-skin="retro"] .border-skin-preview__header {
+  background: linear-gradient(180deg, #fff5de, #e9d9b9 16%, #c3ad88 88%, #8b785d);
+}
+.border-skin-preview[data-border-skin="retro"] .border-skin-preview__header i { background: #3a342b; }
+
+.border-skin-preview:is([data-border-skin="cybercore"], [data-border-skin="titanium"],
+  [data-border-skin="retro"])::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.border-skin-preview[data-border-skin="cybercore"]::after {
+  background:
+    linear-gradient(135deg, #a1f5ff 0 35%, #0c5270 36% 48%, #a1f5ff 49% 61%, transparent 62%) top left / min(16%, 13px) 5px no-repeat,
+    linear-gradient(225deg, #a1f5ff 0 35%, #0c5270 36% 48%, #a1f5ff 49% 61%, transparent 62%) top right / min(16%, 13px) 5px no-repeat,
+    linear-gradient(45deg, #a1f5ff 0 35%, #0c5270 36% 48%, #a1f5ff 49% 61%, transparent 62%) bottom left / min(14%, 11px) 7px no-repeat,
+    linear-gradient(315deg, #a1f5ff 0 35%, #0c5270 36% 48%, #a1f5ff 49% 61%, transparent 62%) bottom right / min(14%, 11px) 7px no-repeat,
+    repeating-linear-gradient(180deg, #a1f5ff 0 2px, #0c5270 2px 4px, transparent 4px 7px) left 42% / 3px 12px no-repeat,
+    repeating-linear-gradient(180deg, #a1f5ff 0 2px, #0c5270 2px 4px, transparent 4px 7px) right 42% / 3px 12px no-repeat,
+    repeating-linear-gradient(90deg, #5ce6ff 0 5px, #0c5270 5px 8px) bottom center / 40% 3px no-repeat,
+    linear-gradient(90deg, transparent, #a1f5ff, transparent) top center / 55% 1px no-repeat;
+}
+.border-skin-preview[data-border-skin="titanium"]::after {
+  background:
+    linear-gradient(180deg, #d9e5ee 0 1px, #52677e 1px 2px) top left / 12px 2px no-repeat,
+    linear-gradient(90deg, #d9e5ee 0 1px, #52677e 1px 2px) top left / 2px 12px no-repeat,
+    linear-gradient(180deg, #d9e5ee 0 1px, #52677e 1px 2px) top right / 12px 2px no-repeat,
+    linear-gradient(270deg, #d9e5ee 0 1px, #52677e 1px 2px) top right / 2px 12px no-repeat,
+    linear-gradient(0deg, #d9e5ee 0 1px, #52677e 1px 2px) bottom left / 12px 2px no-repeat,
+    linear-gradient(90deg, #d9e5ee 0 1px, #52677e 1px 2px) bottom left / 2px 12px no-repeat,
+    linear-gradient(0deg, #d9e5ee 0 1px, #52677e 1px 2px) bottom right / 12px 2px no-repeat,
+    linear-gradient(270deg, #d9e5ee 0 1px, #52677e 1px 2px) bottom right / 2px 12px no-repeat,
+    radial-gradient(circle, #172434 0 1px, #e9f5ff 2px 3px, transparent 4px) top left / 6px 6px no-repeat,
+    radial-gradient(circle, #172434 0 1px, #e9f5ff 2px 3px, transparent 4px) top right / 6px 6px no-repeat,
+    radial-gradient(circle, #172434 0 1px, #e9f5ff 2px 3px, transparent 4px) bottom left / 9px 9px no-repeat,
+    radial-gradient(circle, #172434 0 1px, #e9f5ff 2px 3px, transparent 4px) bottom right / 9px 9px no-repeat,
+    repeating-linear-gradient(90deg, #a8bed2 0 2px, #334861 2px 5px) bottom center / 32% 3px no-repeat;
+}
+.border-skin-preview[data-border-skin="retro"]::after {
+  background:
+    linear-gradient(180deg, #211f1b 0 2px, #efdfbd 2px 3px) top left / 12px 3px no-repeat,
+    linear-gradient(90deg, #211f1b 0 2px, #efdfbd 2px 3px) top left / 3px 12px no-repeat,
+    linear-gradient(180deg, #211f1b 0 2px, #efdfbd 2px 3px) top right / 12px 3px no-repeat,
+    linear-gradient(270deg, #211f1b 0 2px, #efdfbd 2px 3px) top right / 3px 12px no-repeat,
+    linear-gradient(0deg, #211f1b 0 2px, #efdfbd 2px 3px) bottom left / 10px 3px no-repeat,
+    linear-gradient(90deg, #211f1b 0 2px, #efdfbd 2px 3px) bottom left / 3px 9px no-repeat,
+    linear-gradient(0deg, #211f1b 0 2px, #efdfbd 2px 3px) bottom right / 10px 3px no-repeat,
+    linear-gradient(270deg, #211f1b 0 2px, #efdfbd 2px 3px) bottom right / 3px 9px no-repeat,
+    linear-gradient(135deg, #fff5db 0 38%, #211f1b 39% 50%, #fff5db 51% 62%, transparent 63%) top left / 12px 5px no-repeat,
+    linear-gradient(225deg, #fff5db 0 38%, #211f1b 39% 50%, #fff5db 51% 62%, transparent 63%) top right / 12px 5px no-repeat,
+    linear-gradient(45deg, #fff5db 0 38%, #211f1b 39% 50%, #fff5db 51% 62%, transparent 63%) bottom left / 10px 8px no-repeat,
+    linear-gradient(315deg, #fff5db 0 38%, #211f1b 39% 50%, #fff5db 51% 62%, transparent 63%) bottom right / 10px 8px no-repeat,
+    repeating-linear-gradient(90deg, #312a21 0 4px, #f6e5c2 4px 7px) bottom center / 30% 3px no-repeat;
+}

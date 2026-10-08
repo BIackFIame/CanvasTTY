@@ -41,7 +41,10 @@ function tool(name, description, properties = {}, required = []) {
 
 export const TOOL_DEFINITIONS = Object.freeze([
   tool("browser_list_tabs", "List visible browser tabs and their stable tab IDs."),
-  tool("browser_new_tab", "Open a new visible tab. Re-observe after navigation before using element refs.", { url }),
+  tool("browser_new_tab", "Open a new tab; use the returned tabId for later commands. engine: auto (default) opens it in the background in a lighter engine when the person installed one (reading, observing, clicking by element), otherwise as a visible Chromium tab; chromium always opens a visible Chromium tab. A background tab moves to Chromium by itself when needed (screenshots, bot checks, unreadable pages, or when shown): same tabId, stale refs, and the result says so.", {
+    url,
+    engine: string({ minLength: 1, maxLength: 64 })
+  }),
   tool("browser_close_tab", "Close a visible tab by stable tab ID.", { tabId }, ["tabId"]),
   tool("browser_activate_tab", "Make a tab active and visible.", { tabId }, ["tabId"]),
   tool("browser_navigate", "Navigate a tab, or the active tab when tabId is omitted, to an HTTP(S) URL.", {
@@ -188,40 +191,59 @@ function validateSchema(schema, value, path) {
   return `${path} uses an unsupported schema.`;
 }
 
-export function canonicalStringify(value) {
+const byCodeUnit = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
+
+/**
+ * The app's one canonical JSON: object keys sorted by UTF-16 code unit (never
+ * by locale), no whitespace, undefined properties left out as JSON.stringify
+ * does. Bridge messages, their digests, provider config hashes and the browser
+ * audit chain all use it.
+ *
+ * Strict by default: a cycle, a non-finite number, a non-plain object or an
+ * undefined array entry throws. `lenient` answers those as JSON.stringify
+ * would (null, the object's own keys, null) for records that must hash
+ * exactly as they were written. `compareKeys` exists only to verify records
+ * hashed under an older key order.
+ */
+export function canonicalStringify(value, options = {}) {
+  const lenient = options.lenient === true;
+  const compare = options.compareKeys ?? byCodeUnit;
   const seen = new Set();
-  return JSON.stringify(canonicalValue(value, seen));
-}
-
-function canonicalValue(value, seen) {
-  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new TypeError("Canonical JSON cannot contain a non-finite number.");
-    return value;
-  }
-  if (Array.isArray(value)) {
-    if (seen.has(value)) throw new TypeError("Canonical JSON cannot contain a cycle.");
-    seen.add(value);
-    const output = value.map((entry) => canonicalValue(entry, seen));
-    seen.delete(value);
-    return output;
-  }
-  if (isPlainObject(value)) {
-    if (seen.has(value)) throw new TypeError("Canonical JSON cannot contain a cycle.");
-    seen.add(value);
-    const output = {};
-    for (const key of Object.keys(value).sort()) {
-      const child = value[key];
-      if (child !== undefined) output[key] = canonicalValue(child, seen);
+  const encode = (item, inArray) => {
+    switch (typeof item) {
+      case "string":
+      case "boolean":
+        return JSON.stringify(item);
+      case "number":
+        if (!Number.isFinite(item) && !lenient) throw new TypeError("Canonical JSON cannot contain a non-finite number.");
+        return JSON.stringify(item);
+      case "object": {
+        if (item === null) return "null";
+        const array = Array.isArray(item);
+        if (!array && !lenient && !isPlainObject(item)) throw new TypeError("Canonical JSON cannot contain object.");
+        if (seen.has(item)) throw new TypeError("Canonical JSON cannot contain a cycle.");
+        seen.add(item);
+        try {
+          if (array) return `[${item.map((entry) => encode(entry, true)).join(",")}]`;
+          const fields = [];
+          for (const key of Object.keys(item).sort(compare)) {
+            const text = encode(item[key], false);
+            if (text !== undefined) fields.push(`${JSON.stringify(key)}:${text}`);
+          }
+          return `{${fields.join(",")}}`;
+        } finally {
+          seen.delete(item);
+        }
+      }
+      default:
+        if (item === undefined && !inArray) return undefined;
+        if (lenient && typeof item !== "bigint") return inArray ? "null" : undefined;
+        throw new TypeError(`Canonical JSON cannot contain ${typeof item}.`);
     }
-    seen.delete(value);
-    return output;
-  }
-  throw new TypeError(`Canonical JSON cannot contain ${typeof value}.`);
-}
-
-export function byteLengthOfCanonicalJson(value) {
-  return Buffer.byteLength(canonicalStringify(value), "utf8");
+  };
+  const text = encode(value, false);
+  if (text === undefined) throw new TypeError("Canonical JSON cannot contain undefined.");
+  return text;
 }
 
 function isPlainObject(value) {

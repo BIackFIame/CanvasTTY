@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
+import type { CameraStore } from "./cameraStore";
 import type { CanvasRegion, Point, SessionBounds } from "../../../../shared/contracts";
-import { constrainCanvasRegionBounds } from "./canvasRegions";
-import { snapMove, snapResize, type ResizeDirection } from "./snap";
+import { constrainCanvasRegionBounds, snapCanvasRegionBounds } from "./canvasRegions";
+import { snapMove, type ResizeDirection } from "./snap";
 
 interface CanvasRegionCardProps {
   region: CanvasRegion;
-  zoom: number;
+  /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
+  camera: CameraStore;
   snapEnabled: boolean;
   snapTargets: readonly SessionBounds[];
   onBoundsChange(id: string, bounds: SessionBounds, interaction: "move" | "resize"): void;
@@ -26,7 +28,7 @@ const RESIZE_DIRECTIONS: ResizeDirection[] = ["n", "ne", "e", "se", "s", "sw", "
 
 export function CanvasRegionCard({
   region,
-  zoom,
+  camera,
   snapEnabled,
   snapTargets,
   onBoundsChange,
@@ -68,8 +70,8 @@ export function CanvasRegionCard({
     // A buttonless move is a hover, not a drag.
     if (event.buttons === 0) return;
     const rawPosition = {
-      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / zoom,
-      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / zoom
+      x: state.startBounds.position.x + (event.clientX - state.startClient.x) / camera.get().zoom,
+      y: state.startBounds.position.y + (event.clientY - state.startClient.y) / camera.get().zoom
     };
     const next = {
       position: snapEnabled ? snapMove(rawPosition, state.startBounds.size, snapTargets) : rawPosition,
@@ -88,11 +90,12 @@ export function CanvasRegionCard({
     onMovePreview(region.id, null);
   };
 
-  // Cancelling drops the local bounds and the shared preview; the committed region props
-  // then re-seed `liveBounds`, so the next gesture starts from the persisted position.
+  // Nothing was committed, so the region props do not change and cannot pull the local bounds back: restore them
+  // from the last persisted bounds explicitly (like cancelResize), and drop the shared preview.
   const cancelDrag = (event: React.PointerEvent<HTMLButtonElement>): void => {
     if (dragState.current?.pointerId !== event.pointerId) return;
     dragState.current = null;
+    applyBounds({ position: region.position, size: region.size });
     onMovePreview(region.id, null);
   };
 
@@ -116,8 +119,8 @@ export function CanvasRegionCard({
     if (event.buttons === 0) return;
     event.preventDefault();
     event.stopPropagation();
-    const deltaX = (event.clientX - state.startClient.x) / zoom;
-    const deltaY = (event.clientY - state.startClient.y) / zoom;
+    const deltaX = (event.clientX - state.startClient.x) / camera.get().zoom;
+    const deltaY = (event.clientY - state.startClient.y) / camera.get().zoom;
     const raw = constrainCanvasRegionBounds({
       position: {
         x: state.startBounds.position.x + (state.direction.includes("w") ? deltaX : 0),
@@ -132,7 +135,7 @@ export function CanvasRegionCard({
           - (state.direction.includes("n") ? deltaY : 0)
       }
     }, state.direction);
-    applyBounds(snapEnabled ? snapResize(raw, state.direction, snapTargets) : raw);
+    applyBounds(snapEnabled ? snapCanvasRegionBounds(raw, state.direction, snapTargets) : raw);
   };
 
   const endResize = (event: React.PointerEvent<HTMLDivElement>): void => {

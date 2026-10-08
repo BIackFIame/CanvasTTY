@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readdir, rm, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,6 +11,7 @@ import {
   AgentGateway,
   supportsAgentGatewayPlatform
 } from "../src/main/services/agent-browser/AgentGateway.ts";
+import { AgentBrowserBridge, AGENT_BROWSER_ENV } from "../src/main/services/agent-browser/AgentBrowserBridge.ts";
 import {
   AGENT_BRIDGE_PROTOCOL_VERSION,
   HEARTBEAT_EXPIRY_MS,
@@ -294,6 +295,20 @@ test("AgentGateway uses a mode-0600 local socket instead of a TCP listener", POS
   assert.equal((await stat(runtimeDirectory)).mode & 0o777, 0o700);
 });
 
+test("AgentGateway closed while it starts leaves nothing listening and can start again", POSIX_GATEWAY_TEST, async (t) => {
+  const runtimeDirectory = await fixture(t, "canvastty-gateway-close-start-");
+  const gateway = new AgentGateway(core(), { runtimeDirectory });
+  t.after(() => gateway.close());
+  const starting = gateway.start();
+  await gateway.close();
+  await assert.rejects(starting, /closed during startup/u);
+  assert.throws(() => gateway.address, /has not started/u);
+  assert.throws(() => gateway.registerAgent({ terminalSessionId: "t", provider: "codex", cwd: "/x" }), /must be started/u);
+  assert.deepEqual((await readdir(runtimeDirectory)).filter((name) => name.endsWith(".sock")), []);
+  const address = await gateway.start();
+  assert.equal((await stat(address)).isSocket(), true);
+});
+
 test("AgentGateway supports Windows only when the secure native pipe host is supplied", async () => {
   assert.equal(supportsAgentGatewayPlatform("win32"), true);
   const gateway = new AgentGateway(core(), { platform: "win32" });
@@ -337,6 +352,43 @@ test("AgentGateway restarts a failed Windows host and cancels recovery when disa
   gateway.setEnabled(false);
   t.mock.timers.tick(10_000);
   assert.equal(transports.length, 2);
+});
+
+test("AgentGateway restarts the Windows host on its published pipe name and gives up on a host that keeps dying at once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const transports = [];
+  const gateway = new AgentGateway(core(), {
+    platform: "win32",
+    windowsHostPath: "/fake/host.exe",
+    windowsPipeHostFactory: (options) => {
+      const transport = new EventEmitter();
+      transport.options = options;
+      transport.isRunning = false;
+      transport.start = async () => {
+        transport.isRunning = true;
+        return options.pipeName ?? "published-pipe";
+      };
+      transport.close = async () => { transport.isRunning = false; };
+      transports.push(transport);
+      return transport;
+    }
+  });
+  t.after(() => gateway.close());
+
+  assert.equal(await gateway.start(), "published-pipe");
+  assert.equal(transports[0].options.pipeName, undefined);
+  // Each replacement dies right after it starts: the attempts must not reset on such a short-lived success.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const live = transports.at(-1);
+    live.isRunning = false;
+    live.emit("fatal", new Error("host exited"));
+    t.mock.timers.tick(30_000);
+    await new Promise(setImmediate);
+  }
+  assert.equal(transports.length, 4, "three replacements, then recovery gives up");
+  assert.deepEqual(transports.slice(1).map((transport) => transport.options.pipeName), [
+    "published-pipe", "published-pipe", "published-pipe"
+  ]);
 });
 
 test("AgentGateway idempotently authenticates live helpers and rotates reconnect capability", POSIX_GATEWAY_TEST, async (t) => {
@@ -421,6 +473,51 @@ test("AgentGateway rejects expired and identity-mismatched capabilities", POSIX_
   const expiredResponse = await expiredClient.next((message) => message.type === "error");
   assert.equal(expiredResponse.error.code, "SESSION_EXPIRED");
   await assert.rejects(expired.authenticated, /expired/i);
+});
+
+test("a live PTY can authenticate after the default pending TTL and cleanup still revokes it", POSIX_GATEWAY_TEST, async (t) => {
+  let now = 1_000;
+  const gateway = await startedGateway(t, core(), { now: () => now });
+  const root = await fixture(t, "canvastty-live-pty-capability-");
+  const bridge = new AgentBrowserBridge(gateway, {
+    helper: { command: process.execPath, args: ["/app/mcp-helper.mjs"] },
+    providerClis: { get: () => ({ state: "available", executable: process.execPath }) },
+    runtimeDirectory: root,
+    hermesHomeDirectory: join(root, "hermes"),
+    kimiHomeDirectory: join(root, "kimi")
+  });
+  const launch = bridge.prepareLaunch({ terminalSessionId: "live-pty", provider: "codex", cwd: root });
+  t.after(() => launch.cleanup());
+  const capability = {
+    address: launch.environment[AGENT_BROWSER_ENV.address],
+    agentId: launch.agentId,
+    connectionId: launch.connectionId,
+    terminalSessionId: "live-pty",
+    provider: "codex",
+    capabilityToken: launch.environment[AGENT_BROWSER_ENV.capabilityToken]
+  };
+  launch.retainUntilExit();
+  const standalone = gateway.registerAgent({ terminalSessionId: "standalone", provider: "codex", cwd: root });
+  now += 60_001;
+  gateway.expireConnections();
+
+  const retainedClient = await connectClient(capability.address);
+  t.after(() => retainedClient.destroy());
+  retainedClient.send(authMessage(capability));
+  await retainedClient.next((message) => message.type === "authenticated");
+
+  const expiredClient = await connectClient(standalone.address);
+  t.after(() => expiredClient.destroy());
+  expiredClient.send(authMessage(standalone));
+  assert.equal((await expiredClient.next((message) => message.type === "error")).error.code, "AUTH_INVALID");
+  await assert.rejects(standalone.authenticated, /expired/i);
+
+  launch.cleanup();
+  await retainedClient.closed;
+  const revokedClient = await connectClient(capability.address);
+  t.after(() => revokedClient.destroy());
+  revokedClient.send(authMessage(capability));
+  assert.equal((await revokedClient.next((message) => message.type === "error")).error.code, "AUTH_INVALID");
 });
 
 test("AgentGateway heartbeat uses server time and expires silent authenticated clients", POSIX_GATEWAY_TEST, async (t) => {

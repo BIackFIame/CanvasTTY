@@ -14,7 +14,8 @@ import {
   stat,
   writeFile
 } from "node:fs/promises";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, join, resolve } from "node:path";
+import { isPathInside } from "../../agent-runtime/path-inside.mjs";
 import type {
   AgentProviderId,
   GithubPluginSearchResult,
@@ -27,6 +28,15 @@ import type {
   PluginModule,
   PluginModuleAsset,
   PluginPermission,
+  PluginEnvironmentKind,
+  PluginLaunchField,
+  PluginService,
+  PluginServiceDecide,
+  PluginServiceLaunch,
+  PluginAgentTool,
+  PluginCardAction,
+  PluginBrowserEngine,
+  PluginCardActionFilter,
   PluginUpdateStatus,
   Size
 } from "../../shared/contracts";
@@ -36,6 +46,17 @@ import {
   PLUGIN_API_VERSION
 } from "../../shared/contracts.ts";
 import { isValidSemver } from "../../shared/hostVersion.ts";
+import { PLUGIN_VISIBILITY_BRIDGE_SOURCE } from "../../shared/pluginVisibility.ts";
+import type { PluginServiceSpec } from "./PluginServiceSupervisor.ts";
+import type { LaunchContributor } from "./LaunchPipeline.ts";
+import type { EnvironmentProvider } from "./EnvironmentRegistry.ts";
+import type { DecisionService } from "./DecisionHooks.ts";
+import { MAX_DECIDE_TIMEOUT_MS, MIN_DECIDE_TIMEOUT_MS } from "../../agent-runtime/runtime-protocol.mjs";
+import type { AgentToolProvider } from "./PluginAgentTools.ts";
+import type { CardActionProvider } from "./PluginCards.ts";
+import type { BrowserEngineProvider } from "./browser/BrowserEngineTabs.ts";
+import { AGENT_PROVIDERS } from "../../shared/contracts.ts";
+import { ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
 
 const MANIFEST_FILE = "canvastty.plugin.json";
 /** Plugins keep their metadata (manifest, icon, etc.) in the metadata/ folder. */
@@ -44,6 +65,10 @@ const METADATA_DIR = "metadata";
 const PLATFORM_ID = "canvastty";
 /** Manifest candidates: metadata/ first, then the legacy root. */
 const MANIFEST_CANDIDATES = [`${METADATA_DIR}/${MANIFEST_FILE}`, MANIFEST_FILE];
+/** How long a showcase manifest preview is reused (the listing and its visible page ask for the same ones). */
+const MANIFEST_PREVIEW_TTL_MS = 5 * 60_000;
+/** The showcase lists at most 1000 repositories. */
+const MANIFEST_PREVIEW_CACHE_LIMIT = 1_024;
 /** Icon candidates: metadata/ first, then the legacy root. */
 const ICON_CANDIDATES = [
   `${METADATA_DIR}/icon.png`,
@@ -61,6 +86,13 @@ const VERSIONS_FILE = "plugin-versions.json";
 const SEARCH_MAX_RESULTS = 10;
 const SEARCH_TIMEOUT_MS = 15_000;
 const PREVIEW_TTL_MS = 10 * 60_000;
+/**
+ * Aggregate cap on install previews held at once. Each preview downloads a repository into its own
+ * staging directory and is only swept lazily (on the next previewInstall/install call) once its TTL
+ * passes; without a cap, previewing many plugins inside one TTL window (e.g. paging through the
+ * showcase) accumulates one staging directory per preview until the oldest ones happen to expire.
+ */
+const MAX_PENDING_PREVIEWS = 20;
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_RETRY_DELAY_MS = 1_500;
@@ -71,10 +103,10 @@ const MAX_STORAGE_BYTES = 64 * 1024;
 const MAX_MANIFEST_BYTES = 128 * 1024;
 const MAX_RUNTIME_HOOK_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
+const MAX_PLUGIN_SERVICES = 8;
+const PLUGIN_DATA_DIR = "plugin-data";
 const PLUGIN_INPUT_BRIDGE_URL = "canvastty-plugin://host/input-bridge.js";
-const AGENT_PROVIDERS = new Set<AgentProviderId>([
-  "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi"
-]);
+const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
 const PLUGIN_HOOK_EVENTS = new Set<PluginAgentHookEvent>([
   "session-start",
   "prompt-submit",
@@ -95,6 +127,7 @@ export function injectPluginInputBridge(html: string): string {
 }
 
 const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
+  "model:route",
   "storage",
   "secrets",
   "sessions:read",
@@ -106,7 +139,17 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "playlists:read",
   "playlists:write",
   "hermes:hud",
-  "network"
+  "network",
+  "launch:contribute",
+  "environment:provide",
+  "decision:provide",
+  "tools:agents",
+  "sessions:events",
+  "sessions:read-screen",
+  "sessions:launch",
+  "sessions:control",
+  "cards:decorate",
+  "browser:engine"
 ]);
 
 interface StoredPluginRecord {
@@ -115,6 +158,10 @@ interface StoredPluginRecord {
   installedAt: number;
   selectedModules?: string[];
   enabledHooks?: string[];
+  /** Service id -> SHA-256 of its entry when the user trusted the plugin's native code. */
+  trustedServices?: Record<string, string>;
+  /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
+  decisionsMayAllow?: boolean;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -156,26 +203,33 @@ type DownloadModuleFiles = (
 ) => Promise<void>;
 
 export class PluginManager {
+  private readonly manifestPreviewCache = new Map<string, { at: number; manifest: PluginManifest }>();
   private readonly pluginRoot: string;
   private readonly stagingRoot: string;
   private readonly storageRoot: string;
   private readonly registryPath: string;
   private readonly versionsPath: string;
   private readonly hookRegistryPath: string;
+  private readonly dataRoot: string;
   private readonly plugins = new Map<string, InstalledPlugin>();
+  /** Plugin id -> service id -> trusted entry SHA-256. Present only while native code is trusted. */
+  private readonly serviceTrust = new Map<string, Record<string, string>>();
+  private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
+  private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
+  /** Plugin id -> tail of the install, module change, update and uninstall chain for that plugin. */
+  private readonly pluginOperations = new Map<string, Promise<void>>();
   private readonly storageWrites = new Map<string, Promise<void>>();
   private readonly downloadRepository: DownloadRepository;
   private readonly downloadFullRepository: DownloadRepository;
   private readonly downloadModuleFiles: DownloadModuleFiles;
-  private tokenProvider: () => Promise<string | null>;
   private registryWrite = Promise.resolve();
+  private versionsWrite = Promise.resolve();
 
   constructor(
     userDataPath: string,
     downloadRepository?: DownloadRepository,
-    downloadModuleFiles: DownloadModuleFiles = downloadGithubModuleFiles,
-    tokenProvider?: () => Promise<string | null>
+    downloadModuleFiles: DownloadModuleFiles = downloadGithubModuleFiles
   ) {
     this.pluginRoot = join(userDataPath, "plugins");
     this.stagingRoot = join(userDataPath, "plugin-staging");
@@ -183,26 +237,14 @@ export class PluginManager {
     this.registryPath = join(userDataPath, REGISTRY_FILE);
     this.versionsPath = join(userDataPath, VERSIONS_FILE);
     this.hookRegistryPath = join(userDataPath, "lifecycle", RUNTIME_HOOK_REGISTRY_FILE);
+    this.dataRoot = join(userDataPath, PLUGIN_DATA_DIR);
     this.downloadRepository = downloadRepository ?? downloadGithubManifest;
     this.downloadFullRepository = downloadRepository ?? downloadGithubRepository;
     this.downloadModuleFiles = downloadModuleFiles;
-    this.tokenProvider = tokenProvider ?? (async () => null);
-  }
-
-  /** Resolves the GitHub token from env, then the OAuth session (if any). */
-  private async githubToken(): Promise<string | null> {
-    const envToken = process.env.GITHUB_TOKEN ?? process.env.CANVASTTY_GITHUB_TOKEN;
-    if (envToken) return envToken;
-    try {
-      return await this.tokenProvider();
-    } catch {
-      return null;
-    }
   }
 
   /** Registers the OAuth-backed token provider used by module-level helpers. */
   registerTokenProvider(provider: () => Promise<string | null>): void {
-    this.tokenProvider = provider;
     registerGithubTokenProvider(provider);
   }
 
@@ -225,6 +267,7 @@ export class PluginManager {
     const persistedRuntimeHooks = await readRuntimeHookRegistry(this.hookRegistryPath);
 
     this.plugins.clear();
+    this.serviceTrust.clear();
     for (const [pluginId, record] of Object.entries(registry)) {
       if (!isStoredRecord(record) || !isPluginId(pluginId)) continue;
       try {
@@ -247,8 +290,20 @@ export class PluginManager {
                 active.hooks?.find((hook) => hook.id === hookId)
               )
             ))
-            : []
+            : [],
+          nativeCodeTrusted: false,
+          decisionsMayAllow: false
         });
+        if (record.enabled && record.trustedServices) {
+          const trust = await this.currentServiceTrust(pluginId, active).catch(() => null);
+          // Any difference from what the user trusted (a changed file, another module set) revokes it.
+          if (trust && sameServiceTrust(trust, record.trustedServices)) {
+            this.serviceTrust.set(pluginId, trust);
+            const plugin = this.plugins.get(pluginId)!;
+            plugin.nativeCodeTrusted = true;
+            plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
+          }
+        }
       } catch (error) {
         console.warn(`CanvasTTY plugin ${pluginId} could not be loaded.`, error);
       }
@@ -256,6 +311,12 @@ export class PluginManager {
 
     await this.persistRegistry();
     return this.list();
+  }
+
+  /** The host's install record for one plugin: where it was installed from and what the person trusted. */
+  installRecord(pluginId: string): { sourceUrl: string; enabled: boolean; nativeCodeTrusted: boolean } | null {
+    const plugin = this.plugins.get(pluginId);
+    return plugin ? { sourceUrl: plugin.sourceUrl, enabled: plugin.enabled, nativeCodeTrusted: plugin.nativeCodeTrusted } : null;
   }
 
   list(): InstalledPlugin[] {
@@ -303,6 +364,7 @@ export class PluginManager {
         manifest,
         expiresAt: Date.now() + PREVIEW_TTL_MS
       };
+      await this.enforcePendingPreviewCap();
       this.pending.set(token, { directory, packageRoot, preview });
       return structuredClone(preview);
     } catch (error) {
@@ -317,7 +379,7 @@ export class PluginManager {
     if (!pending) throw new Error("Plugin installation preview expired. Inspect the GitHub link again.");
     this.pending.delete(token);
 
-    const { preview, packageRoot, directory } = pending;
+    const { preview, directory } = pending;
     const modules = normalizeSelectedModules(
       preview.manifest,
       selectedModules ?? preview.manifest.modules?.filter((module) => module.defaultSelected).map((module) => module.id)
@@ -330,11 +392,23 @@ export class PluginManager {
       throw new Error("Plugin module selection is invalid.");
     }
     const destination = join(this.pluginRoot, preview.manifest.id);
+    // Two previews of the same repository can be installed at once. The existence check and the
+    // directory move run under the plugin's lock, so the second call sees the first one's entry
+    // instead of failing its move and then deleting the directory and entry the first one made.
+    return this.withPluginLock(preview.manifest.id, () => this.installPending(pending, modules, destination));
+  }
+
+  private async installPending(
+    { preview, packageRoot, directory }: PendingInstall,
+    modules: string[],
+    destination: string
+  ): Promise<InstalledPlugin> {
     if (this.plugins.has(preview.manifest.id)) {
       await rm(directory, { recursive: true, force: true });
       throw new Error(`Plugin ${preview.manifest.id} is already installed.`);
     }
 
+    let installed: InstalledPlugin | null = null;
     try {
       if (preview.manifest.modules?.length) {
         await materializeModularPackage(
@@ -348,19 +422,21 @@ export class PluginManager {
       } else {
         await rename(packageRoot, destination);
       }
-      const installed: InstalledPlugin = {
+      installed = {
         manifest: preview.manifest,
         sourceUrl: preview.sourceUrl,
         enabled: true,
         installedAt: Date.now(),
         selectedModules: modules,
-        enabledHooks: []
+        enabledHooks: [],
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(installed.manifest.id, installed);
       await this.persistRegistry();
       return structuredClone(activePlugin(installed));
     } catch (error) {
-      this.plugins.delete(preview.manifest.id);
+      if (installed && this.plugins.get(preview.manifest.id) === installed) this.plugins.delete(preview.manifest.id);
       await rm(destination, { recursive: true, force: true });
       throw error;
     } finally {
@@ -372,14 +448,22 @@ export class PluginManager {
     const plugin = this.requirePlugin(pluginId);
     const wasEnabled = plugin.enabled;
     const previousEnabledHooks = [...plugin.enabledHooks];
+    const previousTrust = this.serviceTrust.get(pluginId);
     plugin.enabled = Boolean(enabled);
-    if (!plugin.enabled || !wasEnabled) plugin.enabledHooks = [];
+    if (!plugin.enabled || !wasEnabled) {
+      plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
+    }
     try {
       await this.persistRegistry();
     } catch (error) {
       if (plugin.enabled) {
         plugin.enabled = wasEnabled;
         plugin.enabledHooks = previousEnabledHooks;
+        if (previousTrust) {
+          this.serviceTrust.set(pluginId, previousTrust);
+          plugin.nativeCodeTrusted = true;
+        }
       }
       await this.persistRegistry().catch(() => undefined);
       throw error;
@@ -409,6 +493,189 @@ export class PluginManager {
     return structuredClone(activePlugin(plugin));
   }
 
+  /**
+   * The separate "Native code" confirmation: lets every service of this plugin run as a process with
+   * the user's OS privileges. It pins each entry's SHA-256; update, module change and disable revoke it.
+   */
+  async setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    const active = activeManifest(plugin.manifest, plugin.selectedModules);
+    if (!active.services?.length) throw new Error("Plugin has no services.");
+    const previous = this.serviceTrust.get(pluginId);
+    if (trusted) {
+      this.serviceTrust.set(pluginId, await this.currentServiceTrust(pluginId, active));
+      plugin.nativeCodeTrusted = true;
+    } else {
+      this.revokeNativeCode(plugin);
+    }
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      if (trusted) {
+        if (previous) this.serviceTrust.set(pluginId, previous);
+        else this.revokeNativeCode(plugin);
+        plugin.nativeCodeTrusted = Boolean(previous);
+      }
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
+  /**
+   * The second confirmation for a decision service: its `allow` answers count (tool calls run without the
+   * agent's own prompt). Needs native code trust; revoked with it (update, module change, disable).
+   */
+  async setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    if (allowed) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!activeManifest(plugin.manifest, plugin.selectedModules).services?.some((service) => service.decide)) {
+        throw new Error("Plugin has no decision service.");
+      }
+    }
+    const previous = plugin.decisionsMayAllow;
+    plugin.decisionsMayAllow = Boolean(allowed);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      plugin.decisionsMayAllow = previous;
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
+  /** Called with the trusted services after every registry change (the supervisor's desired set). */
+  setServiceObserver(observer: ((specs: PluginServiceSpec[]) => Promise<void>) | null): void {
+    this.serviceObserver = observer;
+  }
+
+  trustedServiceSpecs(): PluginServiceSpec[] {
+    const specs: PluginServiceSpec[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      const root = join(this.pluginRoot, plugin.manifest.id);
+      for (const service of manifest.services ?? []) {
+        const sha256 = trust[service.id];
+        if (!sha256) continue;
+        specs.push({
+          pluginId: plugin.manifest.id,
+          serviceId: service.id,
+          root,
+          entryPath: join(root, ...service.entry.split("/")),
+          sha256,
+          dataDir: join(this.dataRoot, plugin.manifest.id),
+          permissions: [...manifest.permissions]
+        });
+      }
+    }
+    return specs;
+  }
+
+  /** Services that may prepare launches now: enabled, native code trusted, `launch:contribute` granted. */
+  launchContributors(): LaunchContributor[] {
+    const contributors: LaunchContributor[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("launch:contribute")) continue;
+      const service = manifest.services?.find((candidate) => candidate.launch && trust[candidate.id]);
+      if (!service?.launch) continue;
+      contributors.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        launch: structuredClone(service.launch),
+        ...(plugin.manifest.id === ACCOUNTS_PLUGIN_ID ? { dataDir: join(this.dataRoot, plugin.manifest.id) } : {}),
+        secrets: manifest.permissions.includes("secrets")
+      });
+    }
+    return contributors;
+  }
+
+  /** Services that may place sessions now: enabled, native code trusted, `environment:provide` granted. */
+  environmentProviders(): EnvironmentProvider[] {
+    return this.trustedServicesWith("environment:provide", (service) => service.environments).map(({ plugin, service, name, secrets }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, kinds: structuredClone(service.environments!), secrets,
+      sourceUrl: this.installRecord(plugin)?.sourceUrl
+    }));
+  }
+
+  /** Services that may decide on agents' tool calls now: enabled, native code trusted, `decision:provide` granted. */
+  decisionServices(): DecisionService[] {
+    const services: DecisionService[] = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("decision:provide")) continue;
+      const service = manifest.services?.find((candidate) => candidate.decide && trust[candidate.id]);
+      if (!service?.decide) continue;
+      services.push({
+        pluginId: plugin.manifest.id,
+        pluginName: manifest.name,
+        serviceId: service.id,
+        ...(service.decide.appliesTo ? { appliesTo: [...service.decide.appliesTo] } : {}),
+        ...(service.decide.timeoutMs !== undefined ? { timeoutMs: service.decide.timeoutMs } : {}),
+        mayAllow: plugin.decisionsMayAllow
+      });
+    }
+    return services;
+  }
+
+  /** Services whose tools agents may call now: enabled, native code trusted, `tools:agents` granted. */
+  agentToolProviders(): AgentToolProvider[] {
+    return this.trustedServicesWith("tools:agents", (service) => service.tools).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, tools: structuredClone(service.tools!)
+    }));
+  }
+  modelRouterProviders(): Array<{pluginId:string;serviceId:string;pluginName:string}> {
+    return this.trustedServicesWith("model:route", (service) => service.modelRouter === true)
+      .map(({plugin,service,name}) => ({pluginId:plugin,serviceId:service.id,pluginName:name}));
+  }
+
+  /** Services whose card actions are shown now: enabled, native code trusted, `cards:decorate` granted. */
+  cardActionProviders(): CardActionProvider[] {
+    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
+      pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    }));
+  }
+
+  /** Services whose browser engine may take agents' background tabs: enabled, native code trusted, `browser:engine`. */
+  browserEngineProviders(): BrowserEngineProvider[] {
+    return this.trustedServicesWith("browser:engine", (service) => service.browserEngine).map(({ plugin, service, name }) => ({
+      pluginId: plugin,
+      pluginName: name,
+      serviceId: service.id,
+      engineId: service.browserEngine!.id,
+      title: service.browserEngine!.title,
+      layout: service.browserEngine!.layout
+    }));
+  }
+
+  private trustedServicesWith(
+    permission: PluginPermission,
+    declares: (service: PluginService) => unknown
+  ): Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> {
+    const found: Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes(permission)) continue;
+      for (const service of manifest.services ?? []) {
+        if (declares(service) && trust[service.id]) {
+          found.push({ plugin: plugin.manifest.id, name: manifest.name, service, secrets: manifest.permissions.includes("secrets") });
+        }
+      }
+    }
+    return found;
+  }
+
   get runtimeHookRegistryPath(): string {
     return this.hookRegistryPath;
   }
@@ -429,13 +696,18 @@ export class PluginManager {
     return registrations;
   }
 
-  async setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+  setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
+    return this.withPluginLock(pluginId, () => this.replaceModules(pluginId, selectedModules));
+  }
+
+  private async replaceModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
     if (!plugin.manifest.modules?.length) throw new Error("Plugin does not declare optional modules.");
     const selected = normalizeSelectedModules(plugin.manifest, selectedModules);
     if (selected.length !== new Set(selectedModules).size) throw new Error("Plugin module selection is invalid.");
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       await this.persistRegistry();
     }
     const directory = await mkdtemp(join(this.stagingRoot, "modules-"));
@@ -481,10 +753,15 @@ export class PluginManager {
     }
   }
 
-  async uninstall(pluginId: string): Promise<void> {
+  uninstall(pluginId: string): Promise<void> {
+    return this.withPluginLock(pluginId, () => this.removePlugin(pluginId));
+  }
+
+  private async removePlugin(pluginId: string): Promise<void> {
     const plugin = this.requirePlugin(pluginId);
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       try {
         await this.persistRegistry();
       } catch (error) {
@@ -502,6 +779,12 @@ export class PluginManager {
     }
     await rm(join(this.pluginRoot, plugin.manifest.id), { recursive: true, force: true });
     await rm(join(this.storageRoot, `${plugin.manifest.id}.json`), { force: true });
+    // Copies of unreadable storage kept aside by storageSet go with the plugin.
+    const kept = `${plugin.manifest.id}.json.unreadable-`;
+    for (const name of await readdir(this.storageRoot).catch(() => [] as string[])) {
+      if (name.startsWith(kept)) await rm(join(this.storageRoot, name), { force: true });
+    }
+    await rm(join(this.dataRoot, plugin.manifest.id), { recursive: true, force: true });
   }
 
   async searchGithubPlugins(query: string): Promise<GithubPluginSearchResult[]> {
@@ -612,9 +895,20 @@ export class PluginManager {
     const manifests = new Map<string, PluginManifest>();
     if (unique.length === 0) return manifests;
 
+    // The showcase listing already fetched every manifest to filter by platform; the page the renderer then
+    // shows asks for the same ones. Found manifests are reused for a few minutes instead of downloaded again.
+    const now = Date.now();
+    const toFetch: string[] = [];
+    for (const sourceUrl of unique) {
+      const cached = this.manifestPreviewCache.get(sourceUrl);
+      if (cached && now - cached.at < MANIFEST_PREVIEW_TTL_MS) manifests.set(sourceUrl, cached.manifest);
+      else toFetch.push(sourceUrl);
+    }
+    if (toFetch.length === 0) return manifests;
+
     // Metadata-first: metadata/canvastty.plugin.json, then legacy root file.
     const parsed = new Map<string, { owner: string; repository: string }>();
-    for (const sourceUrl of unique) {
+    for (const sourceUrl of toFetch) {
       try {
         const source = new URL(sourceUrl);
         const parts = source.pathname.split("/").filter(Boolean);
@@ -637,7 +931,9 @@ export class PluginManager {
       for (const [key, result] of results) {
         if (!result.ok || result.text === undefined) continue;
         try {
-          manifests.set(key, validatePluginManifest(JSON.parse(result.text) as unknown));
+          const manifest = validatePluginManifest(JSON.parse(result.text) as unknown);
+          manifests.set(key, manifest);
+          this.rememberManifestPreview(key, manifest, now);
         } catch {
           // Malformed manifest — skipped; tile falls back to a live preview.
         }
@@ -646,42 +942,67 @@ export class PluginManager {
     return manifests;
   }
 
-  async checkForUpdates(): Promise<PluginUpdateStatus[]> {
-    const installed = [...this.plugins.values()]
-      .filter((plugin) => plugin.enabled && plugin.sourceUrl)
-      .sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
-    const versions = await this.readVersions();
-    const updates: PluginUpdateStatus[] = [];
-    // Batch: one GraphQL metadata round-trip for all manifests, then raw
-    // fetches for present files — far fewer requests than one per plugin.
-    const remoteVersions = await fetchRemoteManifestVersions(installed.map((plugin) => plugin.sourceUrl));
-    for (const plugin of installed) {
-      const latest = remoteVersions.get(plugin.sourceUrl);
-      if (latest === undefined) {
-        console.warn(`CanvasTTY could not check plugin update: ${plugin.manifest.id}.`);
-        continue;
-      }
-      versions[plugin.manifest.id] = {
-        installedVersion: plugin.manifest.version,
-        latestVersion: latest,
-        checkedAt: Date.now()
-      };
-      if (latest !== plugin.manifest.version) {
-        updates.push({
-          pluginId: plugin.manifest.id,
-          installedVersion: plugin.manifest.version,
-          latestVersion: latest
-        });
-      }
+  private rememberManifestPreview(sourceUrl: string, manifest: PluginManifest, at: number): void {
+    this.manifestPreviewCache.delete(sourceUrl);
+    if (this.manifestPreviewCache.size >= MANIFEST_PREVIEW_CACHE_LIMIT) {
+      this.manifestPreviewCache.delete(this.manifestPreviewCache.keys().next().value!);
     }
-    await this.persistVersions(versions);
-    return updates;
+    this.manifestPreviewCache.set(sourceUrl, { at, manifest });
   }
 
-  async updatePlugin(pluginId: string): Promise<InstalledPlugin> {
+  async checkForUpdates(): Promise<PluginUpdateStatus[]> {
+    const sources = [...this.plugins.values()]
+      .filter((plugin) => plugin.enabled && plugin.sourceUrl)
+      .sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
+    // Batch: one GraphQL metadata round-trip for all manifests, then raw
+    // fetches for present files — far fewer requests than one per plugin.
+    const remoteVersions = await fetchRemoteManifestVersions(sources.map((plugin) => plugin.sourceUrl));
+    return this.withVersionsLock((versions) => {
+      const installed = [...this.plugins.values()]
+        .filter((plugin) => plugin.enabled && plugin.sourceUrl)
+        .sort((left, right) => left.manifest.id.localeCompare(right.manifest.id));
+      const updates: PluginUpdateStatus[] = [];
+      for (const plugin of installed) {
+        const latest = remoteVersions.get(plugin.sourceUrl);
+        if (latest === undefined) {
+          console.warn(`CanvasTTY could not check plugin update: ${plugin.manifest.id}.`);
+          continue;
+        }
+        versions[plugin.manifest.id] = {
+          installedVersion: plugin.manifest.version,
+          latestVersion: latest,
+          checkedAt: Date.now()
+        };
+        if (latest !== plugin.manifest.version) {
+          updates.push({
+            pluginId: plugin.manifest.id,
+            installedVersion: plugin.manifest.version,
+            latestVersion: latest
+          });
+        }
+      }
+      return updates;
+    });
+  }
+
+  updatePlugin(pluginId: string): Promise<InstalledPlugin> {
+    const inFlight = this.updatingPlugins.get(pluginId);
+    if (inFlight) return inFlight;
+
+    const update = this.withPluginLock(pluginId, () => this.performPluginUpdate(pluginId));
+    this.updatingPlugins.set(pluginId, update);
+    const clearInFlight = () => {
+      if (this.updatingPlugins.get(pluginId) === update) this.updatingPlugins.delete(pluginId);
+    };
+    void update.then(clearInFlight, clearInFlight);
+    return update;
+  }
+
+  private async performPluginUpdate(pluginId: string): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
-    if (plugin.enabledHooks.length > 0) {
+    if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
       await this.persistRegistry();
     }
     const sourceUrl = plugin.sourceUrl;
@@ -724,18 +1045,20 @@ export class PluginManager {
         enabled: plugin.enabled,
         installedAt: plugin.installedAt,
         selectedModules: selected,
-        // Updated native hook code must be reviewed and trusted again.
-        enabledHooks: []
+        // Updated native hook and service code must be reviewed and trusted again.
+        enabledHooks: [],
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
       };
       this.plugins.set(pluginId, updated);
       await this.persistRegistry();
-      const versions = await this.readVersions();
-      versions[pluginId] = {
-        installedVersion: manifest.version,
-        latestVersion: manifest.version,
-        checkedAt: Date.now()
-      };
-      await this.persistVersions(versions);
+      await this.withVersionsLock((versions) => {
+        versions[pluginId] = {
+          installedVersion: manifest.version,
+          latestVersion: manifest.version,
+          checkedAt: Date.now()
+        };
+      });
       return structuredClone(activePlugin(updated));
     } catch (error) {
       if (currentBackedUp) {
@@ -786,11 +1109,47 @@ export class PluginManager {
     await rename(temporaryPath, this.versionsPath);
   }
 
+  private withVersionsLock<T>(
+    update: (versions: Record<string, StoredVersionRecord>) => T | Promise<T>
+  ): Promise<T> {
+    const operation = this.versionsWrite.catch(() => undefined).then(async () => {
+      const versions = await this.readVersions();
+      const result = await update(versions);
+      await this.persistVersions(versions);
+      return result;
+    });
+    this.versionsWrite = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  /**
+   * Runs one install, module change, update or uninstall of a plugin after the previous one for the
+   * same plugin id settles. Each of them moves the plugin directory aside and puts it back on
+   * failure, so two of them overlapping would restore or delete the other one's files.
+   */
+  private withPluginLock<T>(pluginId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.pluginOperations.get(pluginId) ?? Promise.resolve();
+    const result = previous.then(operation);
+    const tail = result.then(() => undefined, () => undefined);
+    this.pluginOperations.set(pluginId, tail);
+    void tail.then(() => {
+      if (this.pluginOperations.get(pluginId) === tail) this.pluginOperations.delete(pluginId);
+    });
+    return result;
+  }
+
   contribution(pluginId: string, contributionId: string): PluginContribution {
     const plugin = activePlugin(this.requireEnabledPlugin(pluginId));
     const contribution = plugin.manifest.contributions.find((candidate) => candidate.id === contributionId);
     if (!contribution) throw new Error("Plugin contribution does not exist.");
     return structuredClone(contribution);
+  }
+
+  assertService(pluginId: string, serviceId: string): void {
+    const plugin = activePlugin(this.requireEnabledPlugin(pluginId));
+    if (!plugin.manifest.services?.some((service) => service.id === serviceId)) {
+      throw new Error("Plugin service does not exist.");
+    }
   }
 
   hasPermission(pluginId: string, permission: PluginPermission): boolean {
@@ -816,7 +1175,7 @@ export class PluginManager {
     assertStorageKey(key);
     const previous = this.storageWrites.get(pluginId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(async () => {
-      const storage = await this.readStorage(pluginId);
+      const storage = await this.readStorageForWrite(pluginId);
       storage[key] = jsonClone(value);
       const snapshot = JSON.stringify(storage, null, 2);
       if (Buffer.byteLength(snapshot) > MAX_STORAGE_BYTES) {
@@ -912,6 +1271,34 @@ export class PluginManager {
     }
   }
 
+  /**
+   * The storage a write starts from. Reading {} on any failure made the next
+   * write replace every other key with just the new one. A read error
+   * (permissions, a locked file) now refuses the write; a file that is not
+   * valid storage is kept aside under a new name before a fresh one starts.
+   */
+  private async readStorageForWrite(pluginId: string): Promise<Record<string, unknown>> {
+    const path = join(this.storageRoot, `${pluginId}.json`);
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if (isMissingFile(error)) return {};
+      throw new Error("Plugin storage could not be read; nothing was written.", { cause: error });
+    }
+    let parsed: unknown = null;
+    try {
+      parsed = Buffer.byteLength(raw) > MAX_STORAGE_BYTES ? null : JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+    if (isRecord(parsed)) return { ...parsed };
+    const kept = `${path}.unreadable-${Date.now()}`;
+    await rename(path, kept);
+    console.warn(`CanvasTTY plugin storage for ${pluginId} was not valid and was kept as ${kept}.`);
+    return {};
+  }
+
   private cleanupExpiredPreviews(): void {
     const now = Date.now();
     for (const [token, pending] of this.pending) {
@@ -921,13 +1308,33 @@ export class PluginManager {
     }
   }
 
+  /**
+   * Keeps at most MAX_PENDING_PREVIEWS - 1 previews before a new one is added, evicting the oldest
+   * (insertion order) first so the map and its staging directories never grow past the cap even when
+   * every preview is still within its TTL.
+   */
+  private async enforcePendingPreviewCap(): Promise<void> {
+    const evicted: Promise<void>[] = [];
+    while (this.pending.size >= MAX_PENDING_PREVIEWS) {
+      const oldest = this.pending.keys().next();
+      if (oldest.done) break;
+      const pending = this.pending.get(oldest.value);
+      this.pending.delete(oldest.value);
+      if (pending) evicted.push(rm(pending.directory, { recursive: true, force: true }));
+    }
+    if (evicted.length > 0) await Promise.all(evicted);
+  }
+
   private persistRegistry(): Promise<void> {
     const registry = Object.fromEntries([...this.plugins].map(([id, plugin]) => [id, {
       sourceUrl: plugin.sourceUrl,
       enabled: plugin.enabled,
       installedAt: plugin.installedAt,
       selectedModules: plugin.selectedModules,
-      enabledHooks: plugin.enabledHooks
+      enabledHooks: plugin.enabledHooks,
+      ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
+        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
+        : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
     const desiredHookRegistry = this.runtimeHookRegistry();
@@ -936,6 +1343,7 @@ export class PluginManager {
       throw new Error("Enabled plugin hooks exceed the runtime registry limit.");
     }
     const temporaryPath = `${this.registryPath}.tmp`;
+    const services = this.trustedServiceSpecs();
     const write = this.registryWrite.catch(() => undefined).then(async () => {
       const currentHookRegistry = await readRuntimeHookRegistry(this.hookRegistryPath);
       const interimHookRegistry = safeRuntimeHookInterim(currentHookRegistry, desiredHookRegistry);
@@ -951,9 +1359,31 @@ export class PluginManager {
       if (interimHookSnapshot !== hookSnapshot) {
         await writeRuntimeHookRegistry(this.hookRegistryPath, hookSnapshot);
       }
+      // Revocations stop services before the caller replaces or removes their files.
+      await this.serviceObserver?.(services).catch((error: unknown) => {
+        console.warn("CanvasTTY plugin services could not be updated.", error);
+      });
     });
     this.registryWrite = write;
     return write;
+  }
+
+  private revokeNativeCode(plugin: InstalledPlugin): void {
+    plugin.nativeCodeTrusted = false;
+    plugin.decisionsMayAllow = false;
+    this.serviceTrust.delete(plugin.manifest.id);
+  }
+
+  private async currentServiceTrust(pluginId: string, manifest: PluginManifest): Promise<Record<string, string>> {
+    const root = join(this.pluginRoot, pluginId);
+    const trust: Record<string, string> = {};
+    for (const service of manifest.services ?? []) {
+      const path = await containedFile(root, service.entry);
+      const metadata = await stat(path);
+      if (metadata.size > MAX_ASSET_BYTES) throw new Error(`Plugin service entry is too large: ${service.entry}.`);
+      trust[service.id] = createHash("sha256").update(await readFile(path)).digest("hex");
+    }
+    return trust;
   }
 
   private runtimeHookRegistry(): RuntimeHookRegistry {
@@ -1015,10 +1445,14 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   assertOnlyKeys(candidate, [
     "apiVersion", "id", "name", "version", "description", "description.ru", "description.en",
     "icon", "author", "homepage", "settingsContribution", "coreFiles", "modules", "permissions",
-    "contributions", "hooks", "platforms", "minHostVersion"
+    "contributions", "hooks", "services", "platforms", "minHostVersion"
   ], "Plugin manifest");
-  if (candidate.apiVersion !== PLUGIN_API_VERSION) {
-    throw new Error(`Plugin apiVersion must be ${PLUGIN_API_VERSION}.`);
+  if (candidate.apiVersion !== 1 && candidate.apiVersion !== PLUGIN_API_VERSION) {
+    throw new Error(`Plugin apiVersion must be 1 or ${PLUGIN_API_VERSION}.`);
+  }
+  const apiVersion = candidate.apiVersion === 1 ? 1 : PLUGIN_API_VERSION;
+  if (apiVersion === 1 && candidate.services !== undefined) {
+    throw new Error(`Plugin services require apiVersion ${PLUGIN_API_VERSION}.`);
   }
   const id = requiredString(candidate.id, "id", 80);
   if (!isPluginId(id) || id === "host") throw new Error("Plugin id must be a lowercase DNS-style identifier.");
@@ -1070,6 +1504,33 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   const modules = validateModules(candidate.modules);
   const moduleIds = new Set(modules.map((module) => module.id));
   const hooks = validateAgentHooks(candidate.hooks, moduleIds);
+  const services = validateServices(candidate.services, moduleIds);
+  for (const service of services) {
+    const granted = service.module
+      ? modules.find((module) => module.id === service.module)?.permissions
+      : undefined;
+    if (service.modelRouter && !permissions.includes("model:route") && !granted?.includes("model:route")) {
+      throw new Error(`Plugin service ${service.id} routes models and needs the model:route permission.`);
+    }
+    if (service.launch && !permissions.includes("launch:contribute") && !granted?.includes("launch:contribute")) {
+      throw new Error(`Plugin service ${service.id} contributes to launches and needs the launch:contribute permission.`);
+    }
+    if (service.environments && !permissions.includes("environment:provide") && !granted?.includes("environment:provide")) {
+      throw new Error(`Plugin service ${service.id} provides environments and needs the environment:provide permission.`);
+    }
+    if (service.decide && !permissions.includes("decision:provide") && !granted?.includes("decision:provide")) {
+      throw new Error(`Plugin service ${service.id} decides on tool calls and needs the decision:provide permission.`);
+    }
+    if (service.tools && !permissions.includes("tools:agents") && !granted?.includes("tools:agents")) {
+      throw new Error(`Plugin service ${service.id} offers agent tools and needs the tools:agents permission.`);
+    }
+    if (service.cardActions && !permissions.includes("cards:decorate") && !granted?.includes("cards:decorate")) {
+      throw new Error(`Plugin service ${service.id} adds card actions and needs the cards:decorate permission.`);
+    }
+    if (service.browserEngine && !permissions.includes("browser:engine") && !granted?.includes("browser:engine")) {
+      throw new Error(`Plugin service ${service.id} contributes a browser engine and needs the browser:engine permission.`);
+    }
+  }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
     throw new Error("Modular plugins must declare at least one coreFiles asset.");
@@ -1085,8 +1546,8 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   if (!Array.isArray(candidate.contributions) || candidate.contributions.length > 32) {
     throw new Error("Plugin contributions must be an array of at most 32 items.");
   }
-  if (candidate.contributions.length === 0 && hooks.length === 0) {
-    throw new Error("Plugin must declare at least one contribution or agent hook.");
+  if (candidate.contributions.length === 0 && hooks.length === 0 && services.length === 0) {
+    throw new Error("Plugin must declare at least one contribution, agent hook, or service.");
   }
   const contributionIds = new Set<string>();
   const contributions = candidate.contributions.map((value) => {
@@ -1107,7 +1568,7 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   }
 
   return {
-    apiVersion: PLUGIN_API_VERSION,
+    apiVersion,
     id,
     name,
     version,
@@ -1122,6 +1583,7 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     permissions,
     contributions,
     ...(hooks.length ? { hooks } : {}),
+    ...(services.length ? { services } : {}),
     ...(settingsContribution ? { settingsContribution } : {}),
     ...(coreFiles.length ? { coreFiles } : {}),
     ...(modules.length ? { modules } : {})
@@ -1153,7 +1615,7 @@ function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): Plu
     }
     const providers: AgentProviderId[] = [];
     for (const provider of candidate.providers) {
-      if (!AGENT_PROVIDERS.has(provider as AgentProviderId)) {
+      if (!AGENT_PROVIDER_SET.has(provider as AgentProviderId)) {
         throw new Error(`Plugin hook ${id} has an unknown provider: ${String(provider)}.`);
       }
       if (providers.includes(provider as AgentProviderId)) {
@@ -1187,6 +1649,309 @@ function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): Plu
       events,
       ...(module ? { module } : {})
     };
+  });
+}
+
+function validateServices(value: unknown, moduleIds: ReadonlySet<string>): PluginService[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PLUGIN_SERVICES) {
+    throw new Error(`Plugin services must contain between 1 and ${MAX_PLUGIN_SERVICES} items.`);
+  }
+  const ids = new Set<string>();
+  const services = value.map((candidate): PluginService => {
+    if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
+    assertOnlyKeys(candidate, [
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "modelRouter", "browserEngine"
+    ], "Plugin service");
+    const id = requiredString(candidate.id, "service id", 64);
+    if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
+    ids.add(id);
+    const title = requiredString(candidate.title, "service title", 80);
+    const description = optionalString(candidate.description, "service description", 240);
+    const entry = assetPath(requiredString(candidate.entry, "service entry", 180));
+    if (![".js", ".mjs", ".cjs"].includes(extname(entry))) {
+      throw new Error("Plugin service entry must be a bundled JavaScript file.");
+    }
+    const module = optionalString(candidate.module, "service module", 64);
+    if (module && (!isContributionId(module) || !moduleIds.has(module))) {
+      throw new Error(`Plugin service references an unknown module: ${module}.`);
+    }
+    const launch = candidate.launch === undefined ? undefined : validateServiceLaunch(candidate.launch);
+    const environments = candidate.environments === undefined ? undefined : validateServiceEnvironments(candidate.environments);
+    const decide = candidate.decide === undefined ? undefined : validateServiceDecide(candidate.decide);
+    const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
+    const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
+    if (candidate.modelRouter !== undefined && typeof candidate.modelRouter !== "boolean") throw new Error("modelRouter must be boolean.");
+    const browserEngine = candidate.browserEngine === undefined ? undefined : validateBrowserEngine(candidate.browserEngine);
+    return {
+      id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
+      ...(launch ? { launch } : {}),
+      ...(environments ? { environments } : {}),
+      ...(decide ? { decide } : {}),
+      ...(tools ? { tools } : {}),
+      ...(cardActions ? { cardActions } : {}),
+      ...(candidate.modelRouter === true ? {modelRouter:true} : {}),
+      ...(browserEngine ? { browserEngine } : {})
+    };
+  });
+  // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
+  const toolNames = services.flatMap((service) => service.tools ?? []).map((tool) => tool.name);
+  if (new Set(toolNames).size !== toolNames.length) throw new Error("Plugin agent tool names must be unique.");
+  const actionIds = services.flatMap((service) => service.cardActions ?? []).map((action) => action.id);
+  if (new Set(actionIds).size !== actionIds.length) throw new Error("Plugin card action ids must be unique.");
+  // Agents name an engine by its id, so a plugin declares each id once.
+  const engineIds = services.flatMap((service) => service.browserEngine ? [service.browserEngine.id] : []);
+  if (new Set(engineIds).size !== engineIds.length) throw new Error("Plugin browser engine ids must be unique.");
+  // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
+  if (services.filter((service) => service.decide).length > 1) {
+    throw new Error("At most one plugin service may decide on tool calls.");
+  }
+  // Saved environment refs name the plugin and kind, so exactly one service answers for each kind (a plugin
+  // may split its kinds over services, for example one per module).
+  const kinds = services.flatMap((service) => service.environments ?? []).map((environment) => environment.kind);
+  if (new Set(kinds).size !== kinds.length) throw new Error("Plugin environment kinds must be unique across its services.");
+  if (kinds.length > MAX_ENVIRONMENT_KINDS) throw new Error(`A plugin may offer at most ${MAX_ENVIRONMENT_KINDS} environment kinds.`);
+  // Launch options are saved per plugin, so one service per plugin answers for them.
+  if (services.filter((service) => service.launch).length > 1) {
+    throw new Error("At most one plugin service may declare launch options.");
+  }
+  return services;
+}
+
+const MAX_LAUNCH_FIELDS = 8;
+const MAX_LAUNCH_TEXT = 200;
+
+function validateServiceLaunch(value: unknown): PluginServiceLaunch {
+  if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
+  assertOnlyKeys(value, ["appliesTo", "fields", "policy", "delegable"], "Plugin service launch");
+  if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  if (value.delegable !== undefined && typeof value.delegable !== "boolean") throw new Error("Plugin launch delegable must be true or false.");
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
+      throw new Error("Plugin launch appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}),
+    ...(value.delegable === true ? { delegable: true } : {}) };
+}
+
+function validateServiceDecide(value: unknown): PluginServiceDecide {
+  if (!isRecord(value)) throw new Error("Plugin service decide must be an object.");
+  assertOnlyKeys(value, ["events", "appliesTo", "timeoutMs"], "Plugin service decide");
+  if (value.timeoutMs !== undefined && (!Number.isInteger(value.timeoutMs)
+    || (value.timeoutMs as number) < MIN_DECIDE_TIMEOUT_MS || (value.timeoutMs as number) > MAX_DECIDE_TIMEOUT_MS)) {
+    throw new Error(`Plugin decide timeoutMs must be ${MIN_DECIDE_TIMEOUT_MS} to ${MAX_DECIDE_TIMEOUT_MS}.`);
+  }
+  if (!Array.isArray(value.events) || value.events.length === 0 || value.events.some((event) => event !== "pre-tool")) {
+    throw new Error("Plugin decide events must list pre-tool.");
+  }
+  let appliesTo: AgentProviderId[] | undefined;
+  if (value.appliesTo !== undefined) {
+    if (!Array.isArray(value.appliesTo) || value.appliesTo.length === 0
+      || value.appliesTo.some((provider) => !AGENT_PROVIDER_SET.has(provider as AgentProviderId))) {
+      throw new Error("Plugin decide appliesTo must list agent providers.");
+    }
+    appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
+  }
+  return { events: ["pre-tool"], ...(appliesTo ? { appliesTo } : {}), ...(value.timeoutMs !== undefined ? { timeoutMs: value.timeoutMs as number } : {}) };
+}
+
+const MAX_AGENT_TOOLS = 16;
+const MAX_TOOL_SCHEMA_BYTES = 8 * 1024;
+const SESSION_ROLES = new Set<string>(["orchestrator", "agent", "subagent"]);
+
+function validateServiceTools(value: unknown): PluginAgentTool[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_AGENT_TOOLS) {
+    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items.`);
+  }
+  return value.map((candidate): PluginAgentTool => {
+    if (!isRecord(candidate)) throw new Error("Every plugin agent tool must be an object.");
+    assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles"], "Plugin agent tool");
+    const name = requiredString(candidate.name, "tool name", 40);
+    if (!/^[a-z][a-z0-9_]{0,39}$/.test(name)) throw new Error(`Plugin agent tool name is invalid: ${name}.`);
+    const description = requiredString(candidate.description, "tool description", 1_000);
+    const schema = candidate.inputSchema;
+    if (!isRecord(schema) || schema.type !== "object"
+      || Buffer.byteLength(JSON.stringify(schema), "utf8") > MAX_TOOL_SCHEMA_BYTES) {
+      throw new Error(`Plugin agent tool ${name} inputSchema must be a JSON Schema object (type "object") of at most 8 KB.`);
+    }
+    if (schema.properties !== undefined && !isRecord(schema.properties)) throw new Error(`Plugin agent tool ${name} properties must be an object.`);
+    if (schema.required !== undefined && (!Array.isArray(schema.required) || schema.required.some((key) => typeof key !== "string"))) {
+      throw new Error(`Plugin agent tool ${name} required must list property names.`);
+    }
+    if (!Array.isArray(candidate.roles) || candidate.roles.length === 0 || candidate.roles.some((role) => !SESSION_ROLES.has(role as string))) {
+      throw new Error(`Plugin agent tool ${name} roles must list orchestrator, agent or subagent.`);
+    }
+    return { name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])] };
+  });
+}
+
+const BROWSER_ENGINE_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+const RESERVED_BROWSER_ENGINE_IDS = new Set(["auto", "chromium"]);
+
+function validateBrowserEngine(value: unknown): PluginBrowserEngine {
+  if (!isRecord(value)) throw new Error("Plugin service browserEngine must be an object.");
+  assertOnlyKeys(value, ["id", "title", "description", "layout"], "Plugin browser engine");
+  const id = requiredString(value.id, "browser engine id", 64);
+  if (!BROWSER_ENGINE_ID.test(id) || RESERVED_BROWSER_ENGINE_IDS.has(id)) {
+    throw new Error(`Plugin browser engine id is invalid or reserved: ${id}.`);
+  }
+  const title = requiredString(value.title, "browser engine title", 80);
+  const description = optionalString(value.description, "browser engine description", 240);
+  if (value.layout !== undefined && typeof value.layout !== "boolean") throw new Error("Plugin browser engine layout must be true or false.");
+  return { id, title, ...(description ? { description } : {}), layout: value.layout === true };
+}
+
+const MAX_CARD_ACTIONS = 16;
+
+function validateCardActions(value: unknown): PluginCardAction[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CARD_ACTIONS) {
+    throw new Error(`Plugin service cardActions must contain between 1 and ${MAX_CARD_ACTIONS} items.`);
+  }
+  return value.map((candidate): PluginCardAction => {
+    if (!isRecord(candidate)) throw new Error("Every plugin card action must be an object.");
+    assertOnlyKeys(candidate, ["id", "title", "when"], "Plugin card action");
+    const id = requiredString(candidate.id, "card action id", 64);
+    if (!isContributionId(id)) throw new Error(`Plugin card action id is invalid: ${id}.`);
+    const title = requiredString(candidate.title, "card action title", 40);
+    if (candidate.when === undefined) return { id, title };
+    if (!isRecord(candidate.when)) throw new Error(`Plugin card action ${id} when must be an object.`);
+    assertOnlyKeys(candidate.when, ["providers", "environmentKinds", "roles"], "Plugin card action filter");
+    const list = (key: string, valid: (item: unknown) => boolean): string[] | undefined => {
+      const items = (candidate.when as Record<string, unknown>)[key];
+      if (items === undefined) return undefined;
+      if (!Array.isArray(items) || items.length === 0 || items.length > 16 || !items.every(valid)) {
+        throw new Error(`Plugin card action ${id} when.${key} is invalid.`);
+      }
+      return [...new Set(items as string[])];
+    };
+    const providers = list("providers", (item) => PROVIDER_IDS.has(item as string));
+    const environmentKinds = list("environmentKinds", (item) => typeof item === "string" && /^[a-z0-9][a-z0-9-]{0,31}$/.test(item));
+    const roles = list("roles", (item) => SESSION_ROLES.has(item as string));
+    const when: PluginCardActionFilter = {
+      ...(providers ? { providers: providers as PluginCardActionFilter["providers"] } : {}),
+      ...(environmentKinds ? { environmentKinds } : {}),
+      ...(roles ? { roles: roles as PluginCardActionFilter["roles"] } : {})
+    };
+    return { id, title, when };
+  });
+}
+
+const MAX_ENVIRONMENT_KINDS = 8;
+const PROVIDER_IDS = new Set<string>(["terminal", ...AGENT_PROVIDER_SET]);
+
+function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ENVIRONMENT_KINDS) {
+    throw new Error(`Plugin service environments must contain between 1 and ${MAX_ENVIRONMENT_KINDS} kinds.`);
+  }
+  const kinds = new Set<string>();
+  return value.map((candidate): PluginEnvironmentKind => {
+    if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps", "executionLocation"], "Plugin environment");
+    if (candidate.executionLocation !== undefined && candidate.executionLocation !== "local" && candidate.executionLocation !== "remote") {
+      throw new Error("Plugin environment executionLocation must be local or remote.");
+    }
+    const kind = requiredString(candidate.kind, "environment kind", 32);
+    // Same shape the session store accepts for a saved environment's kind.
+    if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
+      throw new Error(`Plugin environment kind is invalid or duplicated: ${kind}.`);
+    }
+    kinds.add(kind);
+    const label = requiredString(candidate.label, "environment label", 80);
+    const description = optionalString(candidate.description, "environment description", 240);
+    let appliesTo: PluginEnvironmentKind["appliesTo"];
+    if (candidate.appliesTo !== undefined) {
+      if (!Array.isArray(candidate.appliesTo) || candidate.appliesTo.length === 0
+        || candidate.appliesTo.some((provider) => !PROVIDER_IDS.has(provider as string))) {
+        throw new Error(`Plugin environment ${kind} appliesTo must list providers.`);
+      }
+      appliesTo = [...new Set(candidate.appliesTo as NonNullable<PluginEnvironmentKind["appliesTo"]>)];
+    }
+    const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields);
+    let keeps: PluginEnvironmentKind["keeps"];
+    if (candidate.keeps !== undefined) {
+      if (!isRecord(candidate.keeps)) throw new Error(`Plugin environment ${kind} keeps must be an object.`);
+      assertOnlyKeys(candidate.keeps, ["launch", "isolated", "confines"], `Plugin environment ${kind} keeps`);
+      keeps = {};
+      for (const key of ["launch", "isolated", "confines"] as const) {
+        const value = candidate.keeps[key];
+        if (value === undefined) continue;
+        if (typeof value !== "boolean") throw new Error(`Plugin environment ${kind} keeps.${key} must be true or false.`);
+        keeps[key] = value;
+      }
+    }
+    return {
+      kind, label, ...(candidate.executionLocation ? { executionLocation: candidate.executionLocation } : {}),
+      ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
+      ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {})
+    };
+  });
+}
+
+function validateLaunchFields(value: unknown): PluginLaunchField[] {
+  if (!Array.isArray(value) || value.length > MAX_LAUNCH_FIELDS) {
+    throw new Error(`Plugin launch fields must be an array of at most ${MAX_LAUNCH_FIELDS} items.`);
+  }
+  const keys = new Set<string>();
+  return value.map((field): PluginLaunchField => {
+    if (!isRecord(field)) throw new Error("Every plugin launch field must be an object.");
+    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
+    const key = requiredString(field.key, "launch field key", 40);
+    if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || keys.has(key)) {
+      throw new Error(`Plugin launch field key is invalid or duplicated: ${key}.`);
+    }
+    keys.add(key);
+    const label = requiredString(field.label, "launch field label", 80);
+    if (field.optionsFrom !== undefined && (field.kind !== "select" || field.optionsFrom !== "service")) {
+      throw new Error(`Plugin launch field ${key} optionsFrom must be "service" on a select.`);
+    }
+    if (field.kind === "boolean") {
+      if (field.options !== undefined || field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin launch field ${key} default must be a boolean.`);
+      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
+    }
+    if (field.kind === "select") {
+      if (field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      if (!Array.isArray(field.options) || field.options.length === 0 || field.options.length > 16) {
+        throw new Error(`Plugin launch field ${key} needs 1 to 16 options.`);
+      }
+      const options = field.options.map((option) => {
+        if (!isRecord(option)) throw new Error(`Plugin launch field ${key} options must be objects.`);
+        assertOnlyKeys(option, ["value", "label"], "Plugin launch option");
+        return {
+          value: requiredString(option.value, "launch option value", MAX_LAUNCH_TEXT),
+          label: requiredString(option.label, "launch option label", 80)
+        };
+      });
+      if (new Set(options.map((option) => option.value)).size !== options.length) throw new Error(`Plugin launch field ${key} repeats an option.`);
+      if (field.default !== undefined && !options.some((option) => option.value === field.default)) {
+        throw new Error(`Plugin launch field ${key} default must be one of its options.`);
+      }
+      return {
+        key, label, kind: "select", options,
+        ...(field.optionsFrom === "service" ? { optionsFrom: "service" as const } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    if (field.kind === "text") {
+      if (field.options !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
+      const maxLength = field.maxLength === undefined ? MAX_LAUNCH_TEXT : field.maxLength;
+      if (!Number.isInteger(maxLength) || (maxLength as number) < 1 || (maxLength as number) > MAX_LAUNCH_TEXT) {
+        throw new Error(`Plugin launch field ${key} maxLength must be 1 to ${MAX_LAUNCH_TEXT}.`);
+      }
+      if (field.default !== undefined && (typeof field.default !== "string" || field.default.length > (maxLength as number))) {
+        throw new Error(`Plugin launch field ${key} default must be text within maxLength.`);
+      }
+      return {
+        key, label, kind: "text",
+        ...(field.maxLength !== undefined ? { maxLength: maxLength as number } : {}),
+        ...(field.default !== undefined ? { default: field.default as string } : {})
+      };
+    }
+    throw new Error(`Plugin launch field ${key} kind must be boolean, select or text.`);
   });
 }
 
@@ -1284,6 +2049,7 @@ async function assertManifestAssets(root: string, manifest: PluginManifest): Pro
     if (contribution.icon) await containedFile(root, contribution.icon);
   }
   for (const hook of manifest.hooks ?? []) await containedFile(root, hook.entry);
+  for (const service of manifest.services ?? []) await containedFile(root, service.entry);
 }
 
 async function containedFile(root: string, relativePath: string): Promise<string> {
@@ -1291,8 +2057,7 @@ async function containedFile(root: string, relativePath: string): Promise<string
   const rootRealPath = await realpath(root);
   const candidate = resolve(rootRealPath, decoded);
   const candidateRealPath = await realpath(candidate);
-  const relation = relative(rootRealPath, candidateRealPath);
-  if (relation.startsWith(`..${sep}`) || relation === ".." || resolve(rootRealPath, relation) !== candidateRealPath) {
+  if (!isPathInside(rootRealPath, candidateRealPath)) {
     throw new Error("Plugin asset escapes its package root.");
   }
   const metadata = await stat(candidateRealPath);
@@ -1393,26 +2158,37 @@ function delay(durationMs: number): Promise<void> {
   });
 }
 
-async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+/**
+ * A response body read whole up to `maximumBytes`. Past that the stream is cancelled, which closes the connection;
+ * only releasing the reader would leave the socket open, still receiving what nobody reads.
+ */
+export async function readBoundedBody(body: ReadableStream<Uint8Array>, maximumBytes: number, tooLarge: string): Promise<Buffer> {
   const reader = body.getReader();
   const chunks: Buffer[] = [];
-  let totalBytes = 0;
+  let total = 0;
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       const chunk = Buffer.from(value);
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_PACKAGE_BYTES) {
-        throw new Error("Plugin archive exceeds the 25 MB download limit.");
+      total += chunk.length;
+      if (total > maximumBytes) {
+        const error = new Error(tooLarge);
+        await reader.cancel(error).catch(() => undefined);
+        throw error;
       }
       chunks.push(chunk);
     }
   } finally {
     reader.releaseLock();
   }
+  return Buffer.concat(chunks, total);
+}
+
+async function readGzipTarball(body: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const archive = await readBoundedBody(body, MAX_PACKAGE_BYTES, "Plugin archive exceeds the 25 MB download limit.");
   try {
-    return gunzipSync(Buffer.concat(chunks, totalBytes), {
+    return gunzipSync(archive, {
       maxOutputLength: MAX_PACKAGE_BYTES + MAX_PACKAGE_ENTRIES * 1_024
     });
   } catch (error) {
@@ -1620,9 +2396,7 @@ async function githubGraphqlSearchPage(
     body: JSON.stringify({ query: gql, variables }),
     signal
   });
-  if (response.status === 403 || response.status === 429) {
-    throw new Error("GitHub search rate limit reached; try again in a minute.");
-  }
+  if (response.status === 403 || response.status === 429) throw new Error(githubRateLimitMessage(response));
   if (!response.ok) {
     throw new Error(`GitHub plugin search failed with HTTP ${response.status}.`);
   }
@@ -1671,9 +2445,7 @@ async function fetchGithubSearchPage(url: URL, signal: AbortSignal): Promise<Git
     if (signal.aborted) throw new Error("GitHub plugin search timed out.");
     throw new Error("GitHub plugin search could not establish a connection.", { cause: error });
   }
-  if (response.status === 403 || response.status === 429) {
-    throw new Error("GitHub search rate limit reached; try again in a minute.");
-  }
+  if (response.status === 403 || response.status === 429) throw new Error(githubRateLimitMessage(response));
   if (!response.ok || !response.body) {
     throw new Error(`GitHub plugin search failed with HTTP ${response.status}.`);
   }
@@ -1684,6 +2456,15 @@ async function fetchGithubSearchPage(url: URL, signal: AbortSignal): Promise<Git
     if (isRecord(item)) items.push(item as GithubSearchItem);
   }
   return items;
+}
+
+/** Names the time GitHub's search quota resets, and that signing in raises the limit. */
+export function githubRateLimitMessage(response: Pick<Response, "headers">): string {
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  const when = Number.isFinite(reset) && reset > 0
+    ? `after ${new Date(reset * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "in a minute";
+  return `GitHub search rate limit reached; try again ${when}. Signing in to GitHub raises the limit.`;
 }
 
 function mapSearchResults(results: GithubSearchItem[]): GithubPluginSearchResult[] {
@@ -1755,13 +2536,6 @@ async function fetchRemoteManifestVersions(sourceUrls: readonly string[]): Promi
     }
   }
   return versions;
-}
-
-async function fetchRemoteManifestVersion(sourceUrl: string): Promise<string> {
-  const versions = await fetchRemoteManifestVersions([sourceUrl]);
-  const version = versions.get(sourceUrl);
-  if (version === undefined) throw new Error("GitHub manifest could not be fetched.");
-  return version;
 }
 
 async function downloadGithubModuleFiles(
@@ -2023,19 +2797,12 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
       throw new Error(message);
     }
     const declared = Number(response.headers.get("content-length"));
-    if (Number.isFinite(declared) && declared > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-    const reader = response.body.getReader();
-    const chunks: Buffer[] = [];
-    let total = 0;
+    if (Number.isFinite(declared) && declared > maximumBytes) {
+      await response.body.cancel().catch(() => undefined);
+      throw new Error("Plugin file exceeds its declared size.");
+    }
     try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = Buffer.from(value);
-        total += chunk.length;
-        if (total > maximumBytes) throw new Error("Plugin file exceeds its declared size.");
-        chunks.push(chunk);
-      }
+      return await readBoundedBody(response.body, maximumBytes, "Plugin file exceeds its declared size.");
     } catch (error) {
       if (controller.signal.aborted) {
         throw new TransientGithubDownloadError("GitHub plugin file download timed out.", { cause: error });
@@ -2044,10 +2811,7 @@ async function fetchBoundedGithubFileOnce(url: string, maximumBytes: number): Pr
         throw new TransientGithubDownloadError("GitHub plugin file download was interrupted.", { cause: error });
       }
       throw error;
-    } finally {
-      reader.releaseLock();
     }
-    return Buffer.concat(chunks, total);
   } finally {
     clearTimeout(timer);
   }
@@ -2069,6 +2833,12 @@ function assertModularContributionFiles(manifest: PluginManifest): void {
     const available = hook.module ? moduleFiles.get(hook.module) : coreFiles;
     if (!available?.has(hook.entry)) {
       throw new Error(`Hook entry must belong to its declared module: ${hook.id}.`);
+    }
+  }
+  for (const service of manifest.services ?? []) {
+    const available = service.module ? moduleFiles.get(service.module) : coreFiles;
+    if (!available?.has(service.entry)) {
+      throw new Error(`Service entry must belong to its declared module: ${service.id}.`);
     }
   }
 }
@@ -2102,8 +2872,9 @@ async function materializeModularPackage(
 function activeManifest(manifest: PluginManifest, selectedModules: readonly string[]): PluginManifest {
   const selected = new Set(selectedModules);
   const contributions = manifest.contributions.filter((contribution) => !contribution.module || selected.has(contribution.module));
-  const { settingsContribution, hooks: declaredHooks = [], ...rest } = manifest;
+  const { settingsContribution, hooks: declaredHooks = [], services: declaredServices = [], ...rest } = manifest;
   const hooks = declaredHooks.filter((hook) => !hook.module || selected.has(hook.module));
+  const services = declaredServices.filter((service) => !service.module || selected.has(service.module));
   const permissions = [
     ...manifest.permissions,
     ...(manifest.modules ?? []).filter((module) => selected.has(module.id)).flatMap((module) => module.permissions)
@@ -2113,6 +2884,7 @@ function activeManifest(manifest: PluginManifest, selectedModules: readonly stri
     permissions: [...new Set(permissions)],
     contributions,
     ...(hooks.length ? { hooks } : {}),
+    ...(services.length ? { services } : {}),
     ...(settingsContribution && contributions.some((item) => item.id === settingsContribution)
       ? { settingsContribution }
       : {})
@@ -2351,7 +3123,17 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
     && (value.enabledHooks === undefined || (
       Array.isArray(value.enabledHooks) && value.enabledHooks.every((item) => typeof item === "string")
     ))
+    && (value.trustedServices === undefined || (
+      isRecord(value.trustedServices)
+      && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
+    ))
+    && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
   );
+}
+
+function sameServiceTrust(current: Record<string, string>, stored: Record<string, string>): boolean {
+  const ids = Object.keys(current);
+  return ids.length === Object.keys(stored).length && ids.every((id) => stored[id] === current[id]);
 }
 
 function runtimeHookKey(pluginId: string, hookId: string): string {
@@ -2444,7 +3226,7 @@ function isRuntimeHookRecord(value: unknown): value is RuntimeHookRecord {
     && !isAbsolute(value.entry)
     && Array.isArray(value.providers)
     && value.providers.length > 0
-    && value.providers.every((provider) => AGENT_PROVIDERS.has(provider as AgentProviderId))
+    && value.providers.every((provider) => AGENT_PROVIDER_SET.has(provider as AgentProviderId))
     && new Set(value.providers).size === value.providers.length
     && Array.isArray(value.events)
     && value.events.length > 0
@@ -2524,6 +3306,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
   const pending = new Map();
   const listeners = new Set();
   const storageListeners = new Set();
+  const serviceListeners = new Set();
   let nextId = 1;
   const post = (message) => parent.postMessage({ source: "canvastty-plugin", ...message }, "*");
   const request = (method, params = {}) => new Promise((resolve, reject) => {
@@ -2545,6 +3328,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
     if (message.type === "storage-change") {
       storageListeners.forEach((listener) => listener(message.key, message.value));
     }
+    if (message.type === "service-event") serviceListeners.forEach((listener) => listener(message.value));
   });
   window.CanvasTTYPlugin = Object.freeze({
     ready: () => post({ type: "ready" }),
@@ -2577,9 +3361,22 @@ const PLUGIN_SDK_SOURCE = `(() => {
       open: () => request("hermesHud.open"),
       close: () => request("hermesHud.close")
     }),
+    service: Object.freeze({
+      request: (serviceId, method, params) => request("service.request", { serviceId, method, params }),
+      onEvent: (listener) => {
+        serviceListeners.add(listener);
+        return () => serviceListeners.delete(listener);
+      }
+    }),
     onContext: (listener) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    visibility: () => (document.visibilityState === "hidden" ? "hidden" : "visible"),
+    onVisibilityChange: (listener) => {
+      const notify = () => listener(document.visibilityState === "hidden" ? "hidden" : "visible");
+      document.addEventListener("visibilitychange", notify);
+      return () => document.removeEventListener("visibilitychange", notify);
     },
     onStorageChange: (listener) => {
       storageListeners.add(listener);
@@ -2591,6 +3388,7 @@ const PLUGIN_SDK_SOURCE = `(() => {
 
 const PLUGIN_INPUT_BRIDGE_SOURCE = `(() => {
   if (parent === window) return;
+${PLUGIN_VISIBILITY_BRIDGE_SOURCE}
   let captureWheel = false;
   addEventListener("message", (event) => {
     const message = event.data;

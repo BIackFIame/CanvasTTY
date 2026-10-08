@@ -64,11 +64,14 @@ export function remapTerminalMouseCoordinates(
 export function attachTerminalMouseCoordinateAdapter(
   screen: HTMLElement,
   getWheelMultiplier: () => 1 | -1 = () => 1,
-  shouldRouteWheelToCanvas: () => boolean = () => false
+  shouldRouteWheelToCanvas: () => boolean = () => false,
+  shouldForceSelectionWithShift: () => boolean = () => false
 ): () => void {
   const ownerDocument = screen.ownerDocument;
   const syntheticEvents = new WeakSet<Event>();
   let dragging = false;
+  // Mounted under the pointer: no mouseenter comes until it leaves.
+  let hovered = screen.matches(":hover");
 
   const handleMouseEvent = (event: MouseEvent): void => {
     if (syntheticEvents.has(event)) return;
@@ -86,17 +89,24 @@ export function attachTerminalMouseCoordinateAdapter(
     );
     const needsRemap = Math.abs(adjusted.x - event.clientX) > 0.01
       || Math.abs(adjusted.y - event.clientY) > 0.01;
-    if (!needsRemap) {
-      if (event.type === "mouseup") dragging = false;
+    // On macOS xterm forces selection with Option, which is the canvas pan key.
+    // Translate Shift only for xterm mouse events; pointer navigation stays intact.
+    const forceSelection = shouldForceSelectionWithShift() && event.shiftKey && event.button === 0;
+    if (!needsRemap && !forceSelection) {
+      if (event.type === "mouseup") endDrag();
       return;
     }
 
     event.preventDefault();
     event.stopImmediatePropagation();
-    const remapped = cloneMouseEvent(event, adjusted);
+    const remapped = cloneMouseEvent(event, adjusted, forceSelection);
     syntheticEvents.add(remapped);
     target.dispatchEvent(remapped);
-    if (event.type === "mouseup") dragging = false;
+    if (event.type === "mouseup") endDrag();
+  };
+  const endDrag = (): void => {
+    dragging = false;
+    updateListening();
   };
 
   const handleWheelEvent = (event: WheelEvent): void => {
@@ -122,16 +132,43 @@ export function attachTerminalMouseCoordinateAdapter(
     target.dispatchEvent(remapped);
   };
 
-  for (const type of MOUSE_EVENT_TYPES) ownerDocument.addEventListener(type, handleMouseEvent, true);
+  // The document-level capture listeners run before xterm's own, but only while the pointer is over this card or
+  // drags from it: with many cards open, a mouse move elsewhere costs nothing here.
+  let listening = false;
+  const updateListening = (): void => {
+    const wanted = hovered || dragging;
+    if (wanted === listening) return;
+    listening = wanted;
+    for (const type of MOUSE_EVENT_TYPES) {
+      if (wanted) ownerDocument.addEventListener(type, handleMouseEvent, true);
+      else ownerDocument.removeEventListener(type, handleMouseEvent, true);
+    }
+  };
+  const handleEnter = (): void => {
+    hovered = true;
+    updateListening();
+  };
+  const handleLeave = (): void => {
+    hovered = false;
+    updateListening();
+  };
+
+  screen.addEventListener("mouseenter", handleEnter);
+  screen.addEventListener("mouseleave", handleLeave);
   screen.addEventListener("wheel", handleWheelEvent, { capture: true, passive: false });
+  updateListening();
 
   return () => {
-    for (const type of MOUSE_EVENT_TYPES) ownerDocument.removeEventListener(type, handleMouseEvent, true);
+    hovered = false;
+    dragging = false;
+    updateListening();
+    screen.removeEventListener("mouseenter", handleEnter);
+    screen.removeEventListener("mouseleave", handleLeave);
     screen.removeEventListener("wheel", handleWheelEvent, true);
   };
 }
 
-function cloneMouseEvent(event: MouseEvent, point: ClientPoint): MouseEvent {
+function cloneMouseEvent(event: MouseEvent, point: ClientPoint, forceSelection = false): MouseEvent {
   return new MouseEvent(event.type, {
     bubbles: true,
     cancelable: true,
@@ -144,7 +181,7 @@ function cloneMouseEvent(event: MouseEvent, point: ClientPoint): MouseEvent {
     clientY: point.y,
     ctrlKey: event.ctrlKey,
     shiftKey: event.shiftKey,
-    altKey: event.altKey,
+    altKey: event.altKey || forceSelection,
     metaKey: event.metaKey,
     button: event.button,
     buttons: event.buttons,

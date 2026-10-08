@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CODEX_SELECT_ALL_SEQUENCE,
   SHIFT_ENTER_SEQUENCE,
+  isMacTerminalClipboardShortcut,
   shouldCopyTerminalSelection,
   shouldPasteTerminalClipboard,
   shouldRestartExitedTerminal,
   shouldScrollTerminalPage,
-  shouldSendTerminalLineBreak
+  shouldSendTerminalLineBreak,
+  shouldSelectCodexDraft,
+  shouldTogglePixelSkinMasterView
 } from "../src/renderer/src/features/terminal/terminalShortcuts.ts";
 
 const keydown = {
@@ -18,6 +22,41 @@ const keydown = {
   metaKey: false,
   altKey: false
 };
+
+test("Command+A selects only a macOS Codex draft with the unmodified physical or layout chord", () => {
+  const select = { ...keydown, key: "a", code: "KeyA", metaKey: true };
+  assert.equal(shouldSelectCodexDraft(select, true, "codex"), true);
+  assert.equal(shouldSelectCodexDraft({ ...select, key: "ф" }, true, "codex"), true);
+  assert.equal(shouldSelectCodexDraft({ ...select, code: "", repeat: true }, true, "codex"), true);
+  assert.equal(CODEX_SELECT_ALL_SEQUENCE, "\u001b[97;9u");
+  assert.equal(shouldSelectCodexDraft(select, false, "codex"), false);
+  for (const provider of ["terminal", "claude", "gemini", "grok"]) {
+    assert.equal(shouldSelectCodexDraft(select, true, provider), false);
+  }
+  for (const event of [
+    { ...select, metaKey: false, ctrlKey: true },
+    { ...select, ctrlKey: true },
+    { ...select, shiftKey: true },
+    { ...select, altKey: true },
+    { ...select, type: "keyup" },
+    { ...select, key: "c", code: "KeyC" },
+    { ...select, key: "ф", code: "KeyF" }
+  ]) assert.equal(shouldSelectCodexDraft(event, true, "codex"), false);
+});
+
+test("macOS terminal adaptation handles only Command copy and paste", () => {
+  assert.equal(isMacTerminalClipboardShortcut({ ...keydown, metaKey: true }), true);
+  assert.equal(isMacTerminalClipboardShortcut({ ...keydown, key: "м", code: "KeyV", metaKey: true }), true);
+  for (const event of [
+    { ...keydown, ctrlKey: true },
+    { ...keydown, key: "F2", code: "F2" },
+    { ...keydown, key: "F4", code: "F4" },
+    { ...keydown, key: "Home", code: "Home" },
+    { ...keydown, key: "f", code: "KeyF", ctrlKey: true, shiftKey: true },
+    { ...keydown, key: "Enter", code: "Enter", shiftKey: true },
+    { ...keydown, key: "k", code: "KeyK", metaKey: true }
+  ]) assert.equal(isMacTerminalClipboardShortcut(event), false);
+});
 
 test("copies a terminal selection with platform copy shortcuts", () => {
   assert.equal(shouldCopyTerminalSelection({ ...keydown, ctrlKey: true }, true), true);
@@ -67,6 +106,28 @@ test("ctrl-d restarts only an exited terminal session", () => {
   assert.equal(shouldRestartExitedTerminal(restart, true), true);
   assert.equal(shouldRestartExitedTerminal(restart, false), false);
   assert.equal(shouldRestartExitedTerminal({ ...restart, shiftKey: true }, true), false);
+});
+
+test("plain F4 toggles master detail and modified or repeated F4 stays with the app", () => {
+  const f4 = { ...keydown, key: "F4", code: "F4" };
+
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, []), true);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, key: "Unidentified", code: "F4" }, true, []), true);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, false, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F4"]), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, type: "keyup" }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, repeat: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, ctrlKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, shiftKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, metaKey: true }, true, []), false);
+  assert.equal(shouldTogglePixelSkinMasterView({ ...f4, altKey: true }, true, []), false);
+});
+
+test("configured Home or rename bindings take precedence over F4", () => {
+  const f4 = { ...keydown, key: "F4", code: "F4" };
+
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F4"]), false);
+  assert.equal(shouldTogglePixelSkinMasterView(f4, true, ["F2", "F4"]), false);
 });
 
 test("plain page-up and page-down page the scrollback viewport", () => {

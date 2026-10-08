@@ -6,7 +6,20 @@ const OSC_BEL = "\u0007";
 const OSC_ST = "\u001b\\";
 const MAX_PENDING_CHARS = 4_096;
 const WORKING_PREFIXES = ["◐\uFE0E ", "◐ "] as const;
-const NEEDS_APPROVAL_PREFIXES = ["✳\uFE0E ", "✳ "] as const;
+const STAR_PREFIXES = ["✳\uFE0E ", "✳ "] as const;
+
+/**
+ * What a title prefix means differs by CLI. Qwen Code: «◐» working, «✳» waiting for an approval, the bare title idle.
+ * Claude Code animates «◐»/«◑» while a turn runs and shows «✳» whenever none runs: at startup, after the turn ended, and
+ * while its own permission prompt waits (measured in a PTY with 2.1.x), so its «✳» says idle; the prompt itself is told
+ * by the PermissionRequest hook, never by the title.
+ */
+interface TitleGrammar {
+  working: readonly string[];
+  star: "idle" | "needs_approval";
+}
+const QWEN_TITLES: TitleGrammar = { working: WORKING_PREFIXES, star: "needs_approval" };
+const CLAUDE_TITLES: TitleGrammar = { working: [...WORKING_PREFIXES, "◑\uFE0E ", "◑ "], star: "idle" };
 
 export interface ProviderLifecycleParser {
   push(data: string): Extract<SessionStatus, "idle" | "working" | "needs_approval"> | null;
@@ -19,15 +32,17 @@ export function initialSessionStatus(provider: ProviderId): SessionStatus {
 export function createProviderLifecycleParser(provider: ProviderId, cwd = ""): ProviderLifecycleParser | null {
   if (provider !== "claude" && provider !== "qwen") return null;
   const project = basename(cwd);
-  return new OscTitleLifecycleParser(provider === "qwen" && project ? `Qwen - ${project}` : null);
+  return new OscTitleLifecycleParser(provider === "qwen" && project ? `Qwen - ${project}` : null, provider === "claude" ? CLAUDE_TITLES : QWEN_TITLES);
 }
 
 class OscTitleLifecycleParser implements ProviderLifecycleParser {
   private pending = "";
   private activeBaseTitle: string | null;
+  private readonly grammar: TitleGrammar;
 
-  constructor(initialBaseTitle: string | null) {
+  constructor(initialBaseTitle: string | null, grammar: TitleGrammar) {
     this.activeBaseTitle = initialBaseTitle;
+    this.grammar = grammar;
   }
 
   push(data: string): Extract<SessionStatus, "idle" | "working" | "needs_approval"> | null {
@@ -66,15 +81,15 @@ class OscTitleLifecycleParser implements ProviderLifecycleParser {
   }
 
   private readTitle(title: string): Extract<SessionStatus, "idle" | "working" | "needs_approval"> | null {
-    const workingPrefix = WORKING_PREFIXES.find((prefix) => title.startsWith(prefix));
+    const workingPrefix = this.grammar.working.find((prefix) => title.startsWith(prefix));
     if (workingPrefix) {
       this.activeBaseTitle = title.slice(workingPrefix.length);
       return "working";
     }
-    const approvalPrefix = NEEDS_APPROVAL_PREFIXES.find((prefix) => title.startsWith(prefix));
-    if (approvalPrefix) {
-      this.activeBaseTitle = title.slice(approvalPrefix.length);
-      return "needs_approval";
+    const starPrefix = STAR_PREFIXES.find((prefix) => title.startsWith(prefix));
+    if (starPrefix) {
+      this.activeBaseTitle = title.slice(starPrefix.length);
+      return this.grammar.star;
     }
     if (this.activeBaseTitle !== null && title === this.activeBaseTitle) return "idle";
     return null;

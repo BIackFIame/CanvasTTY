@@ -1,5 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { chmod, mkdir, rmdir, unlink } from "node:fs/promises";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import type { Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -31,10 +30,21 @@ import {
   type AgentGatewaySocket,
   type WindowsPipeHostTransportOptions
 } from "./WindowsPipeHostTransport.ts";
+import {
+  MAX_UNIX_SOCKET_PATH_BYTES,
+  closeServer,
+  listenOnEndpoint,
+  makePrivateDirectory,
+  removeEndpoint,
+  tokenDigest,
+  tokenMatches
+} from "../gatewaySocket.ts";
 
 const DEFAULT_CAPABILITY_TTL_MS = 60_000;
 const MAX_TRANSPORT_RESTART_ATTEMPTS = 3;
 const TRANSPORT_RESTART_BASE_DELAY_MS = 500;
+/** A host that dies within this long of starting counts toward MAX_TRANSPORT_RESTART_ATTEMPTS; a longer run resets it. */
+const TRANSPORT_FAST_FAILURE_WINDOW_MS = 60_000;
 
 export const WINDOWS_AGENT_GATEWAY_UNAVAILABLE =
   "Agent browser access on Windows requires the packaged current-user-only named-pipe host.";
@@ -101,7 +111,12 @@ export class AgentGateway {
   private ownedRuntimeDirectory: string | null = null;
   private expiryTimer: NodeJS.Timeout | undefined;
   private startPromise: Promise<string> | null = null;
+  /** Bumped by close(): a Unix bring-up still creating or opening its socket then knows it was closed. */
+  private closeGeneration = 0;
   private restartTimer: NodeJS.Timeout | undefined;
+  /** The pipe name the first host published; a replacement listens on it again so helpers can reconnect. */
+  private windowsPipeName: string | null = null;
+  private transportStartedAt: number | null = null;
   private restartAttempts = 0;
   private restartToken = 0;
   private recovering = false;
@@ -156,10 +171,12 @@ export class AgentGateway {
     const settle = () => {
       if (this.startPromise === starting) this.startPromise = null;
     };
+    const recovering = this.recovering;
     void starting.then(() => {
       settle();
       this.recovering = false;
-      this.restartAttempts = 0;
+      // A replacement host counts as recovered only once it outlives the fast-failure window (see the fatal handler).
+      if (!recovering) this.restartAttempts = 0;
     }, settle);
     return starting;
   }
@@ -169,7 +186,8 @@ export class AgentGateway {
     const transport = this.windowsPipeHostFactory({
       hostPath: this.windowsHostPath,
       platform: this.platform,
-      parentPid: process.pid
+      parentPid: process.pid,
+      ...(this.windowsPipeName ? { pipeName: this.windowsPipeName } : {})
     });
     this.windowsTransport = transport;
     transport.on("fatal", () => this.handleTransportFatal(transport));
@@ -182,6 +200,8 @@ export class AgentGateway {
         throw new Error("Windows agent pipe host was superseded during startup.");
       }
       this.endpoint = endpoint;
+      this.windowsPipeName = endpoint;
+      this.transportStartedAt = this.now();
       this.expiryTimer = setInterval(() => this.expireConnections(), 1_000);
       this.expiryTimer.unref();
       return endpoint;
@@ -196,25 +216,35 @@ export class AgentGateway {
   private async startOnce(): Promise<string> {
     if (this.platform === "win32") return await this.startWindowsTransport();
 
+    const generation = this.closeGeneration;
     const { endpoint, ownedRuntimeDirectory } = await createEndpoint(
       this.requestedRuntimeDirectory
     );
+    if (generation !== this.closeGeneration) {
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+      throw new Error("Agent gateway was closed during startup.");
+    }
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
     this.endpoint = endpoint;
     this.ownedRuntimeDirectory = ownedRuntimeDirectory;
 
     try {
-      await listen(server, endpoint, this.platform);
-      await chmod(endpoint, 0o600);
+      await listenOnEndpoint(server, endpoint, this.platform);
     } catch (error) {
       for (const state of [...this.acceptedConnections]) this.disconnect(state, "closed");
       await closeServer(server);
       this.server = null;
       this.endpoint = null;
       this.ownedRuntimeDirectory = null;
-      await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true });
       throw error;
+    }
+    if (this.server !== server) {
+      // close() ran while the socket opened: it found nothing listening yet, so this is the only place to close it.
+      await closeServer(server);
+      await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: true, ignoreErrors: true });
+      throw new Error("Agent gateway was closed during startup.");
     }
 
     this.expiryTimer = setInterval(() => this.expireConnections(), 1_000);
@@ -259,7 +289,7 @@ export class AgentGateway {
     };
     this.leases.set(connectionId, {
       actor,
-      tokenDigest: digest(capabilityToken),
+      tokenDigest: tokenDigest(capabilityToken),
       reconnectToken: null,
       reconnectTokenDigest: null,
       expiresAt: this.now() + this.capabilityTtlMs,
@@ -278,6 +308,12 @@ export class AgentGateway {
     };
   }
 
+  /** A live PTY may wait in the CLI's resume or trust UI before its first MCP handshake. */
+  holdPendingForTerminal(connectionId: string): void {
+    const lease = this.leases.get(connectionId);
+    if (lease && !lease.used) lease.expiresAt = Infinity;
+  }
+
   revokeTerminalSession(terminalSessionId: string): void {
     for (const [connectionId, lease] of this.leases) {
       if (lease.actor.terminalSessionId !== terminalSessionId) continue;
@@ -291,6 +327,7 @@ export class AgentGateway {
   }
 
   async close(): Promise<void> {
+    this.closeGeneration += 1;
     this.cancelTransportRestart();
     clearInterval(this.expiryTimer);
     this.expiryTimer = undefined;
@@ -308,16 +345,21 @@ export class AgentGateway {
     this.server = null;
     this.windowsTransport = null;
     this.endpoint = null;
+    this.windowsPipeName = null;
+    this.transportStartedAt = null;
     this.ownedRuntimeDirectory = null;
     if (server) await closeServer(server);
     if (windowsTransport) await windowsTransport.close();
-    if (endpoint) await cleanupEndpoint(endpoint, ownedRuntimeDirectory, this.platform);
+    if (endpoint) await removeEndpoint(endpoint, ownedRuntimeDirectory, { socketFile: this.platform !== "win32" });
   }
 
   private handleTransportFatal(transport: WindowsPipeHostTransport): void {
     // A transport that was already replaced must not disturb its successor.
     if (this.windowsTransport !== transport) return;
+    const ranFor = this.transportStartedAt === null ? 0 : this.now() - this.transportStartedAt;
+    if (ranFor >= TRANSPORT_FAST_FAILURE_WINDOW_MS) this.restartAttempts = 0;
     this.windowsTransport = null;
+    this.transportStartedAt = null;
     this.endpoint = null;
     clearInterval(this.expiryTimer);
     this.expiryTimer = undefined;
@@ -360,7 +402,6 @@ export class AgentGateway {
         return;
       }
       this.recovering = false;
-      this.restartAttempts = 0;
     } catch {
       if (token === this.restartToken && this.enabled) this.scheduleTransportRestart();
     }
@@ -482,13 +523,8 @@ export class AgentGateway {
       && lease.actor.connectionId === message.connectionId
       && lease.actor.terminalSessionId === message.terminalSessionId
       && lease.actor.provider === message.provider;
-    const suppliedDigest = digest(message.capabilityToken);
-    const initialTokenMatches = suppliedDigest.length === lease.tokenDigest.length
-      && timingSafeEqual(suppliedDigest, lease.tokenDigest);
-    const reconnectTokenMatches = lease.reconnectTokenDigest !== null
-      && suppliedDigest.length === lease.reconnectTokenDigest.length
-      && timingSafeEqual(suppliedDigest, lease.reconnectTokenDigest);
-    suppliedDigest.fill(0);
+    const initialTokenMatches = tokenMatches(message.capabilityToken, lease.tokenDigest);
+    const reconnectTokenMatches = tokenMatches(message.capabilityToken, lease.reconnectTokenDigest);
     if (!identityMatches) {
       throw bridgeError("AUTH_INVALID", "Agent browser capability is invalid.", false);
     }
@@ -499,7 +535,7 @@ export class AgentGateway {
       }
       lease.used = true;
       lease.reconnectToken = randomBytes(32).toString("base64url");
-      lease.reconnectTokenDigest = digest(lease.reconnectToken);
+      lease.reconnectTokenDigest = tokenDigest(lease.reconnectToken);
     } else if (initialTokenMatches) {
       if (!activeConnections || activeConnections.size === 0) {
         throw bridgeError("AUTH_REPLAYED", "Agent browser capability was already used.", false);
@@ -670,10 +706,6 @@ export class AgentGateway {
   }
 }
 
-function digest(value: string): Buffer {
-  return createHash("sha256").update(value, "utf8").digest();
-}
-
 function clearLeaseSecrets(lease: CapabilityLease): void {
   lease.tokenDigest.fill(0);
   lease.reconnectTokenDigest?.fill(0);
@@ -686,10 +718,9 @@ async function createEndpoint(
 ): Promise<{ endpoint: string; ownedRuntimeDirectory: string | null }> {
   const suffix = randomBytes(8).toString("hex");
   if (requestedRuntimeDirectory) {
-    await mkdir(requestedRuntimeDirectory, { recursive: true, mode: 0o700 });
-    await chmod(requestedRuntimeDirectory, 0o700);
+    await makePrivateDirectory(requestedRuntimeDirectory, { recursive: true });
     const endpoint = join(requestedRuntimeDirectory, `g-${randomBytes(2).toString("hex")}.sock`);
-    if (Buffer.byteLength(endpoint, "utf8") > 100) {
+    if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
       throw new Error("Agent browser runtime directory is too long for a Unix domain socket.");
     }
     return { endpoint, ownedRuntimeDirectory: null };
@@ -697,66 +728,10 @@ async function createEndpoint(
 
   let runtimeDirectory = join(tmpdir(), `ctty-${process.getuid?.() ?? "user"}-${suffix}`);
   let endpoint = join(runtimeDirectory, "gateway.sock");
-  if (Buffer.byteLength(endpoint, "utf8") > 100) {
+  if (Buffer.byteLength(endpoint, "utf8") > MAX_UNIX_SOCKET_PATH_BYTES) {
     runtimeDirectory = join("/tmp", `ctty-${process.getuid?.() ?? "user"}-${suffix}`);
     endpoint = join(runtimeDirectory, "gateway.sock");
   }
-  await mkdir(runtimeDirectory, { mode: 0o700 });
-  await chmod(runtimeDirectory, 0o700);
+  await makePrivateDirectory(runtimeDirectory);
   return { endpoint, ownedRuntimeDirectory: runtimeDirectory };
-}
-
-function listen(server: Server, endpoint: string, platform: NodeJS.Platform): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const onError = (error: Error) => {
-      server.off("listening", onListening);
-      reject(error);
-    };
-    const onListening = () => {
-      server.off("error", onError);
-      resolve();
-    };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    if (platform === "win32") {
-      server.listen({ path: endpoint, readableAll: false, writableAll: false });
-    } else {
-      server.listen(endpoint);
-    }
-  });
-}
-
-function closeServer(server: Server): Promise<void> {
-  return new Promise((resolve) => {
-    if (!server.listening) {
-      resolve();
-      return;
-    }
-    server.close(() => resolve());
-  });
-}
-
-async function cleanupEndpoint(
-  endpoint: string,
-  ownedRuntimeDirectory: string | null,
-  platform: NodeJS.Platform
-): Promise<void> {
-  if (platform !== "win32") {
-    try {
-      await unlink(endpoint);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-  }
-  if (ownedRuntimeDirectory) {
-    try {
-      await rmdir(ownedRuntimeDirectory);
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-  }
-}
-
-function isMissing(error: unknown): boolean {
-  return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }

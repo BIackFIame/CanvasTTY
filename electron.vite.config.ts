@@ -14,7 +14,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: resolve("src/main/index.ts")
+        input: {
+          index: resolve("src/main/index.ts"),
+          TerminalOutputHistoryWorker: resolve("src/main/services/TerminalOutputHistoryWorker.ts"),
+          SessionTimelineIndexWorker: resolve("src/main/services/SessionTimelineIndexWorker.ts")
+        }
       }
     }
   },
@@ -36,6 +40,11 @@ export default defineConfig({
   },
   renderer: {
     root: resolve("src/renderer"),
-    plugins: [react()]
+    plugins: [react()],
+    // electron-vite leaves every bundle unminified; the renderer's (React, xterm and the app, about 1.8 MB)
+    // is parsed on every window load, so it is minified. Source maps stay off, as before.
+    build: {
+      minify: "esbuild"
+    }
   }
 });

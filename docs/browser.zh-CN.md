@@ -35,6 +35,8 @@ CanvasTTY `1.0.2` 已从 HOME 提供内置浏览器，它是可信的画布应�
 
 智能体 mutation 在每个标签页内按 FIFO 执行，按 request ID 去重，在产生副作用前检查 document revision，并受 rate limit 与 timeout 限制；若必需的审计 attempt 无法写入，该 mutation 会被阻止。read 可以并行执行，不同标签页使用独立 mutation lane。
 
+agent 的 `browser_new_tab` 可以在插件提供的浏览器引擎中于后台打开标签页（引擎已安装并运行时的默认 `engine: "auto"`；`"chromium"` 强制普通标签页）。这种标签页在列表中带有 `engine`，从不显示，不会得到 cookie 或配置文件；在需要截图、遇到机器人验证墙、文字过少、引擎缺少能力、引擎崩溃或标签页被显示时，它以相同 id 转到 Chromium，并在 agent 的结果中说明。用户打开的标签页始终使用 Chromium。见[插件文档](plugins.zh-CN.md)。 浏览器卡片在屏幕外时，后台标签页（agent 自己的，或从引擎迁移过来的）也可以截图；只有卡片中显示的标签页需要卡片在视野内。
+
 ## 网站与文件边界
 
 - 远程页面运行在 sandbox 中，启用 context isolation，不含 Node.js 或 CanvasTTY preload。
@@ -55,6 +57,6 @@ Settings 中的活动列表是短期运行视图。主进程还会把 JSONL 审�
 
 活动文件达到 100 MB 时轮转。轮转文件继续保持 hash chain；超过 30 天的文件会在 store 初始化或轮转时清理。store 打开时会验证现有链，链无效后将拒绝继续追加。若智能体 mutation 的 pre-action audit 无法保存，智能体会收到 `AUDIT_UNAVAILABLE`，且不会执行 mutation 副作用。
 
-CanvasTTY 没有远程日志收集器或项目自营 telemetry endpoint。**清除浏览器数据**会保留审计证据。如需手动删除，请先完全退出 CanvasTTY，再删除整个 `userData/browser/audit` 目录；这会永久丢弃本地审计历史。
+浏览器审计记录保存在本地，不附加到用户主动发送的可选[应用问题报告](diagnostics.md)。**清除浏览器数据**会保留审计证据。如需手动删除，请先完全退出 CanvasTTY，再删除整个 `userData/browser/audit` 目录；这会永久丢弃本地审计历史。
 
 实现职责见[架构](ARCHITECTURE.zh-CN.md)，画布与交互约束见 [UI 契约](UI_CONTRACT.zh-CN.md)，其他本地数据路径见[安装、发布与本地数据](installing-and-security.zh-CN.md)。

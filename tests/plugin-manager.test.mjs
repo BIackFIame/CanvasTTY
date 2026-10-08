@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,6 +9,7 @@ import {
   PluginManager,
   downloadGithubRepository,
   extractGithubTarball,
+  readBoundedBody,
   injectPluginInputBridge,
   normalizeGithubUrl,
   validatePluginManifest
@@ -166,7 +167,7 @@ test("recognizes the narrow Hermes HUD control permission", () => {
 });
 
 test("rejects executable escapes, unknown permissions, and unsupported API versions", () => {
-  assert.throws(() => validatePluginManifest({ ...manifest, apiVersion: 2 }));
+  assert.throws(() => validatePluginManifest({ ...manifest, apiVersion: 3 }));
   assert.throws(() => validatePluginManifest({ ...manifest, permissions: ["filesystem"] }));
   assert.throws(() => validatePluginManifest({
     ...manifest,
@@ -256,6 +257,40 @@ test("previews, installs, serves, stores, disables, and uninstalls a static pack
     await manager.setEnabled(installed.manifest.id, true);
     await manager.uninstall(installed.manifest.id);
     assert.deepEqual(manager.list(), []);
+  } finally {
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+  }
+});
+
+test("parallel installs of one plugin keep the winner's files and registry entry", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-install-race-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    await manager.load();
+    const first = await manager.previewInstall("https://github.com/example/studio-kit");
+    const second = await manager.previewInstall("https://github.com/example/studio-kit");
+
+    const results = await Promise.allSettled([manager.install(first.token), manager.install(second.token)]);
+
+    assert.deepEqual(results.map((result) => result.status).sort(), ["fulfilled", "rejected"]);
+    const rejected = results.find((result) => result.status === "rejected");
+    assert.match(rejected.reason.message, /already installed/);
+    assert.deepEqual(manager.list().map((plugin) => plugin.manifest.id), ["com.example.studio-kit"]);
+    await stat(join(userData, "plugins", "com.example.studio-kit", "widgets", "status.html"));
+    const asset = await manager.protocolResponse("canvastty-plugin://com.example.studio-kit/widgets/status.html");
+    assert.equal(asset.status, 200);
+
+    const reloaded = new PluginManager(userData, async () => undefined);
+    try {
+      await reloaded.load();
+      assert.deepEqual(reloaded.list().map((plugin) => plugin.manifest.id), ["com.example.studio-kit"]);
+    } finally {
+      await reloaded.dispose();
+    }
   } finally {
     await manager.dispose();
     await rm(userData, { recursive: true, force: true });
@@ -1317,6 +1352,148 @@ test("updatePlugin restores the previous package when metadata persistence fails
   }
 });
 
+test("concurrent updatePlugin calls for one plugin share one in-flight update", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-update-singleflight-"));
+  const fixture = await mkdtemp(join(tmpdir(), "canvastty-plugin-update-singleflight-fixture-"));
+  let version = "1.0.0";
+  let updateDownloads = 0;
+  const writeFixture = async () => {
+    await rm(fixture, { recursive: true, force: true });
+    await mkdir(fixture, { recursive: true });
+    await writeFile(join(fixture, "app.html"), `<h1>${version}</h1>`, "utf8");
+    await writeFile(join(fixture, "canvastty.plugin.json"), JSON.stringify({
+      apiVersion: 1,
+      id: "com.example.update-singleflight",
+      name: "Update Singleflight",
+      version,
+      description: "Concurrent update fixture.",
+      permissions: [],
+      contributions: [{
+        id: "app",
+        kind: "canvas-app",
+        title: "App",
+        entry: "app.html",
+        defaultSize: { width: 480, height: 300 }
+      }]
+    }), "utf8");
+  };
+  await writeFixture();
+  let trackUpdateDownloads = false;
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    if (trackUpdateDownloads) updateDownloads += 1;
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    await manager.load();
+    await manager.install((await manager.previewInstall("https://github.com/example/update-singleflight")).token);
+    version = "2.0.0";
+    await writeFixture();
+    trackUpdateDownloads = true;
+
+    const results = await Promise.allSettled([
+      manager.updatePlugin("com.example.update-singleflight"),
+      manager.updatePlugin("com.example.update-singleflight")
+    ]);
+
+    assert.deepEqual(results.map((result) => result.status), ["fulfilled", "fulfilled"]);
+    const [first, second] = results.map((result) => result.value);
+    assert.equal(updateDownloads, 1);
+    assert.equal(first.manifest.version, "2.0.0");
+    assert.equal(second.manifest.version, "2.0.0");
+    assert.equal(manager.list()[0].manifest.version, "2.0.0");
+    const versions = JSON.parse(await readFile(join(userData, "plugin-versions.json"), "utf8"));
+    assert.equal(versions["com.example.update-singleflight"].installedVersion, "2.0.0");
+  } finally {
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
+test("checkForUpdates keeps installed version current when an update finishes during its fetch", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousToken = process.env.GITHUB_TOKEN;
+  const previousCanvasToken = process.env.CANVASTTY_GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  delete process.env.CANVASTTY_GITHUB_TOKEN;
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-update-check-race-"));
+  const fixture = await mkdtemp(join(tmpdir(), "canvastty-plugin-update-check-race-fixture-"));
+  let version = "1.0.0";
+  let remoteVersion = "1.0.0";
+  let pauseRemoteFetch = false;
+  let signalRemoteStarted;
+  const remoteStarted = new Promise((resolve) => { signalRemoteStarted = resolve; });
+  let releaseRemoteFetch;
+  const remoteGate = new Promise((resolve) => { releaseRemoteFetch = resolve; });
+  const manifestFor = (manifestVersion) => ({
+    apiVersion: 1,
+    id: "com.example.update-check-race",
+    name: "Update Check Race",
+    version: manifestVersion,
+    description: "Version state race fixture.",
+    permissions: [],
+    contributions: [{
+      id: "app",
+      kind: "canvas-app",
+      title: "App",
+      entry: "app.html",
+      defaultSize: { width: 480, height: 300 }
+    }]
+  });
+  const writeFixture = async () => {
+    await rm(fixture, { recursive: true, force: true });
+    await mkdir(fixture, { recursive: true });
+    await writeFile(join(fixture, "app.html"), `<h1>${version}</h1>`, "utf8");
+    await writeFile(join(fixture, "canvastty.plugin.json"), JSON.stringify(manifestFor(version)), "utf8");
+  };
+  await writeFixture();
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    globalThis.fetch = async (url) => {
+      const text = String(url);
+      if (text === "https://api.github.com/repos/example/update-check-race") {
+        return Response.json({ default_branch: "main" });
+      }
+      if (text === "https://raw.githubusercontent.com/example/update-check-race/main/canvastty.plugin.json") {
+        if (pauseRemoteFetch) {
+          signalRemoteStarted();
+          await remoteGate;
+        }
+        return Response.json(manifestFor(remoteVersion));
+      }
+      return new Response("missing", { status: 404 });
+    };
+    await manager.load();
+    await manager.install((await manager.previewInstall("https://github.com/example/update-check-race")).token);
+
+    version = "2.0.0";
+    remoteVersion = "2.0.0";
+    await writeFixture();
+    pauseRemoteFetch = true;
+    const checking = manager.checkForUpdates();
+    await remoteStarted;
+    await manager.updatePlugin("com.example.update-check-race");
+    releaseRemoteFetch();
+
+    assert.deepEqual(await checking, []);
+    const versions = JSON.parse(await readFile(join(userData, "plugin-versions.json"), "utf8"));
+    assert.equal(versions["com.example.update-check-race"].installedVersion, "2.0.0");
+    assert.equal(versions["com.example.update-check-race"].latestVersion, "2.0.0");
+  } finally {
+    releaseRemoteFetch();
+    globalThis.fetch = originalFetch;
+    if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+    if (previousCanvasToken === undefined) delete process.env.CANVASTTY_GITHUB_TOKEN;
+    else process.env.CANVASTTY_GITHUB_TOKEN = previousCanvasToken;
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+    await rm(fixture, { recursive: true, force: true });
+  }
+});
+
 test("validatePluginManifest accepts icon and localized descriptions", () => {
   const valid = validatePluginManifest({
     apiVersion: 1,
@@ -1639,3 +1816,145 @@ function writeOctal(header, offset, length, value) {
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
+
+test("the anonymous showcase search reports when GitHub's rate limit resets", async () => {
+  const { githubRateLimitMessage } = await import("../src/main/services/PluginManager.ts");
+  const reset = Math.floor(Date.UTC(2030, 0, 1, 12, 30) / 1000);
+  const message = githubRateLimitMessage(new Response("", { status: 403, headers: { "x-ratelimit-reset": String(reset) } }));
+  assert.match(message, /try again after \d{1,2}:\d{2}/u);
+  assert.match(message, /Signing in to GitHub raises the limit/u);
+  assert.match(githubRateLimitMessage(new Response("", { status: 429 })), /try again in a minute/u);
+});
+
+test("plugin storage that cannot be read is not replaced by the next write", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-storage-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  const warn = console.warn;
+  console.warn = () => undefined;
+  try {
+    await manager.load();
+    const installed = await manager.install((await manager.previewInstall("https://github.com/example/studio-kit")).token);
+    const id = installed.manifest.id;
+    const path = join(userData, "plugin-storage", `${id}.json`);
+    await manager.storageSet(id, "a", 1);
+    await manager.storageSet(id, "b", 2);
+
+    // A read error (permissions, a locked file) refuses the write instead of saving only the new key.
+    const { chmod, readdir } = await import("node:fs/promises");
+    await chmod(path, 0o000);
+    try {
+      await assert.rejects(manager.storageSet(id, "c", 3), /could not be read/);
+    } finally {
+      await chmod(path, 0o600);
+    }
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { a: 1, b: 2 });
+
+    // A file that is not valid storage is kept aside before a new one is started.
+    await writeFile(path, "{\"a\": 1, \"b\":");
+    await manager.storageSet(id, "c", 3);
+    assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { c: 3 });
+    const kept = (await readdir(join(userData, "plugin-storage"))).filter((name) => name.startsWith(`${id}.json.unreadable-`));
+    assert.equal(kept.length, 1);
+    assert.equal(await readFile(join(userData, "plugin-storage", kept[0]), "utf8"), "{\"a\": 1, \"b\":");
+    await manager.uninstall(id);
+    assert.deepEqual((await readdir(join(userData, "plugin-storage"))).filter((name) => name.startsWith(id)), []);
+  } finally {
+    console.warn = warn;
+    await rm(userData, { recursive: true, force: true });
+  }
+});
+
+test("a plugin download past its size bound is cancelled, which closes the connection, not only released", async () => {
+  let cancelled = null;
+  let pulls = 0;
+  const body = new ReadableStream({
+    pull(controller) {
+      pulls += 1;
+      controller.enqueue(new Uint8Array(1024));
+    },
+    cancel(reason) { cancelled = reason; }
+  });
+  await assert.rejects(readBoundedBody(body, 4_096, "too large"), /too large/u);
+  assert.ok(cancelled instanceof Error && /too large/u.test(cancelled.message), "the stream was cancelled");
+  assert.ok(pulls <= 6, "nothing more was read");
+  const small = new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array([1, 2])); controller.close(); } });
+  assert.deepEqual([...await readBoundedBody(small, 4_096, "too large")], [1, 2]);
+});
+
+test("install previews are capped: previewing past the cap evicts the oldest staging directories", async () => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-preview-cap-"));
+  const fixture = new URL("../examples/plugins/studio-kit/", import.meta.url);
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fixture, destination, { recursive: true });
+  });
+  try {
+    await manager.load();
+    const tokens = [];
+    // One more than the cap: every preview stays well within its 10-minute TTL, so only the
+    // aggregate cap (not expiry) can bound how many staging directories accumulate.
+    for (let i = 0; i < 21; i += 1) {
+      tokens.push((await manager.previewInstall("https://github.com/example/studio-kit")).token);
+    }
+    const staged = (await readdir(join(userData, "plugin-staging"))).filter((name) => name.startsWith("preview-"));
+    assert.ok(staged.length <= 20, `expected at most 20 staged preview directories, found ${staged.length}`);
+
+    // The oldest previews were evicted: their tokens no longer install.
+    await assert.rejects(manager.install(tokens[0]), /expired/);
+    // The newest preview is still installable.
+    const installed = await manager.install(tokens[tokens.length - 1]);
+    assert.equal(installed.manifest.id, "com.example.studio-kit");
+  } finally {
+    await manager.dispose();
+    await rm(userData, { recursive: true, force: true });
+  }
+});
+
+test("the showcase page's manifest preview reuses the manifests the listing already fetched", async () => {
+  const originalFetch = globalThis.fetch;
+  const previousToken = process.env.GITHUB_TOKEN;
+  delete process.env.GITHUB_TOKEN;
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-plugin-manifest-cache-"));
+  const repositories = Array.from({ length: 3 }, (_value, index) => ({
+    full_name: `example/canvastty-plugin-cached-${index + 1}`,
+    description: `Plugin ${index + 1}`,
+    stargazers_count: index,
+    updated_at: "2026-08-01T00:00:00Z"
+  }));
+  const manifestRequests = [];
+  try {
+    globalThis.fetch = async (url) => {
+      const text = String(url);
+      if (text.startsWith("https://api.github.com/search/repositories")) return Response.json({ items: repositories });
+      if (text.startsWith("https://api.github.com/repos/")) return Response.json({ default_branch: "main" });
+      if (text.startsWith("https://raw.githubusercontent.com/") && text.endsWith("canvastty.plugin.json")) {
+        manifestRequests.push(text);
+        const name = text.split("/")[4];
+        return new Response(JSON.stringify({ ...manifest, id: `com.example.${name}` }));
+      }
+      return new Response("missing", { status: 404 });
+    };
+    const manager = new PluginManager(userData);
+    try {
+      await manager.load();
+      const showcase = await manager.listShowcasePlugins();
+      assert.equal(showcase.length, 3);
+      const fetchedByListing = manifestRequests.length;
+      assert.ok(fetchedByListing >= 3);
+
+      // The renderer then asks for the visible page's manifests.
+      const page = await manager.previewManifests(showcase.map((item) => item.url));
+      assert.equal(page.size, 3);
+      assert.equal(manifestRequests.length, fetchedByListing, "no second download of the same manifests");
+    } finally {
+      await manager.dispose();
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (previousToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousToken;
+    await rm(userData, { recursive: true, force: true });
+  }
+});

@@ -1,40 +1,59 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import type { MutableRefObject } from "react";
+import { BUNDLED_CANVAS_BACKGROUND_IDS } from "../../../../shared/contracts";
 import type {
   AgentProviderId,
+  AgentChatHistoryItem,
   AppSettings,
   BrowserCanvasState,
   BrowserSnapshot,
   CameraState,
+  CanvasMaterial,
   CanvasOverlayPlacement,
   CanvasRegion,
   HomeGridSize,
   HomeWidgetPlacement,
   InstalledPlugin,
   LimitsSnapshot,
+  MaterialRemark,
   Point,
   ProviderId,
   RadialLauncherItemId,
+  RemarkAnchor,
+  RemarkDraft,
   SessionBounds,
   SessionSnapshot,
+  Size,
   StickyNote
 } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
-import { displayCanvasNavigationBinding, matchesPhysicalOrLayoutKey } from "../../lib/shortcuts";
-import { BrowserCard } from "../browser/BrowserCard";
+import { displayCanvasNavigationBinding, isRenameInputTarget, isShortcutCaptureTarget, matchesPhysicalOrLayoutKey, matchesShortcut, shouldKeepNativeKeyboardInput } from "../../lib/shortcuts";
+import { attentionQueueRenderedAt, attentionSessions } from "../home/attentionQueue";
 import type { LimitsLoadState } from "../home/homeModel";
 import { homeGridPixelSize, homeLayoutFitsGrid } from "../home/homeLayout";
 import { HomeZone } from "../home/HomeZone";
+import { SessionFailureDetails, sessionFailureDetails } from "../home/SessionFailureDetails";
+import { sessionStatusLabel } from "../../lib/sessionStatus";
+import { sessionStatusTone } from "../../lib/sessionStatusTone";
 import { RadialLauncher } from "../launcher/QuickRadialMenu";
 import { StickyNoteCard } from "../notes/StickyNoteCard";
+const MaterialCard = lazy(() => import("../materials/MaterialCard").then((module) => ({ default: module.MaterialCard })));
+import { remarkDrawable, remarkPickable, type MaterialCommand } from "../materials/materialCardModel";
+import { remarkNeedsWork } from "../materials/materialRemarksModel";
+import { RemarkPopover } from "../materials/RemarkPopover";
+import { useRemarkDraft } from "../materials/useRemarkDraft";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
-import { TerminalCard } from "../terminal/TerminalCard";
-import { CanvasCommandPalette } from "./CanvasCommandPalette";
-import { CanvasContextMenu } from "./CanvasContextMenu";
+import { shouldTogglePixelSkinMasterView } from "../terminal/terminalShortcuts";
+import { createComponentLoader, DeferredTerminalCard, useDeferredComponent } from "../terminal/DeferredTerminalCard";
+import { isPixelSkinThemeId } from "../skins/skinCatalog";
+import { isPixelSkinPackId, usePixelSkinPackAssets } from "../skins/SkinAssets";
 import { CanvasMinimap } from "./CanvasMinimap";
 import { CanvasRegionCard } from "./CanvasRegionCard";
 import { CanvasRegionMenu } from "./CanvasRegionMenu";
+import { cameraFittingContent } from "./canvasCameraGeometry";
+import { fixedCameraStore, sceneTransform, useCameraSelector, type CameraStore } from "./cameraStore";
 import {
   clampCanvasMenuPosition,
   routeCanvasContextMenu,
@@ -54,17 +73,26 @@ import {
   canvasLayerIsOccluded,
   canvasLayerZIndex,
   canvasScreenRect,
-  reconcileCanvasLayerOrder
+  keepLiveIds,
+  pruneToLive,
+  reconcileCanvasLayerOrder,
+  snapTargetGetters
 } from "./canvasStacking";
+import type { SnapLayout } from "./canvasStacking";
 import {
+  acceptsTextInput,
   browserCanvasWidgetId,
+  canvasWidgetInDirection,
   canvasWidgetTarget,
   pluginCanvasWidgetId,
-  terminalCanvasWidgetId
+  terminalCanvasWidgetId,
+  type CanvasFocusCandidate,
+  type CanvasFocusDirection
 } from "./canvasWidgetFocus";
 import { boundsIntersect } from "./minimapGeometry";
 import {
   browserLayerId,
+  materialLayerId,
   noteLayerId,
   parseCanvasLayerId,
   pluginLayerId,
@@ -74,15 +102,100 @@ import { snapMove } from "./snap";
 import { useCanvasPointerNavigation } from "./useCanvasPointerNavigation";
 import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
+import { useRemarkPopoverRect } from "./useRemarkPopoverRect";
+import { webglContextPool } from "../terminal/webglContextPool";
+import { WorkspaceContextPreview } from "./WorkspaceContextPreview";
+import { backlogApi, backlogTerminalApi } from "./backlogRendererApi";
+import { prepareWorkspaceContextPreview, type WorkspaceContextPreview as WorkspaceContextPreviewData, type WorkspaceDropPayload } from "./workspaceContextDrop";
+import { arrangeTaskTree, arrangeWorkspace, taskTreeBounds, type WorkspaceLayoutItem, type WorkspaceLayoutMode } from "./workspaceLayout";
+import { directTaskEdges, type TaskCardState } from "./workspaceTaskGraph";
+import { backlogText } from "./workspaceBacklogText";
+import { AsyncRequestEpoch, PendingOperation } from "./workspaceAsyncState";
 
-const CANVAS_OVERLAY_PLACEMENTS: CanvasOverlayPlacement[] = [
-  "top-left",
-  "top-right",
+const BacklogSessionInspector = lazy(() => import("./BacklogSessionInspector").then((module) => ({ default: module.BacklogSessionInspector })));
+const WorkspaceBacklogTools = lazy(() => import("./WorkspaceBacklogTools").then((module) => ({ default: module.WorkspaceBacklogTools })));
+let canvasCommandPaletteModule: Promise<typeof import("./CanvasCommandPalette")> | undefined;
+let loadedCanvasCommandPalette: typeof import("./CanvasCommandPalette")["CanvasCommandPalette"] | undefined;
+const loadCanvasCommandPalette = (): Promise<typeof import("./CanvasCommandPalette")> => (
+  canvasCommandPaletteModule ??= import("./CanvasCommandPalette").then((module) => {
+    loadedCanvasCommandPalette = module.CanvasCommandPalette;
+    return module;
+  })
+);
+const CanvasCommandPalette = lazy(() => loadCanvasCommandPalette().then((module) => ({ default: module.CanvasCommandPalette })));
+const AgentChatHistoryHud = lazy(() => import("./AgentChatHistoryHud").then((module) => ({ default: module.AgentChatHistoryHud })));
+const BrowserCard = lazy(() => import("../browser/BrowserCard").then((module) => ({ default: module.BrowserCard })));
+const CanvasContextMenu = lazy(() => import("./CanvasContextMenu").then((module) => ({ default: module.CanvasContextMenu })));
+type TerminalCardModule = typeof import("../terminal/TerminalCard");
+type TerminalCardLoadSmokeState = { attempts: number; release: (() => void) | null };
+type TerminalCardLoadSmokeFixture = (load: () => Promise<TerminalCardModule>) => Promise<TerminalCardModule>;
+const terminalCardLoadSmokeState: TerminalCardLoadSmokeState | null = import.meta.env.MODE === "terminal-smoke"
+  ? { attempts: 0, release: null }
+  : null;
+const terminalCardLoadSmokeFixture: TerminalCardLoadSmokeFixture | undefined = terminalCardLoadSmokeState
+  ? (load) => {
+    terminalCardLoadSmokeState.attempts += 1;
+    if (terminalCardLoadSmokeState.attempts === 1) {
+      return Promise.reject(new Error("controlled terminal chunk failure"));
+    }
+    return new Promise((resolve, reject) => {
+      terminalCardLoadSmokeState.release = () => { void Promise.resolve().then(load).then(resolve, reject); };
+    });
+  }
+  : undefined;
+if (terminalCardLoadSmokeState && terminalCardLoadSmokeFixture && typeof window !== "undefined") {
+  const smokeWindow = window as Window & {
+    __canvasttyTerminalCardLoadState?: TerminalCardLoadSmokeState;
+    __canvasttyTerminalCardLoadFixture?: TerminalCardLoadSmokeFixture;
+  };
+  Object.defineProperty(smokeWindow, "__canvasttyTerminalCardLoadState", { value: terminalCardLoadSmokeState });
+  Object.defineProperty(smokeWindow, "__canvasttyTerminalCardLoadFixture", { value: terminalCardLoadSmokeFixture });
+}
+const importTerminalCard = (): Promise<TerminalCardModule> => {
+  // The controlled failure and hold exist only in the smoke build; production
+  // bundles have no fixture state, global hook, or extra import path.
+  return terminalCardLoadSmokeFixture ? terminalCardLoadSmokeFixture(() => import("../terminal/TerminalCard"))
+    : import("../terminal/TerminalCard");
+};
+const terminalCardLoader = createComponentLoader(() => importTerminalCard().then((module) => module.TerminalCard));
+
+const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
+  "top-left",  "top-right",
   "bottom-left",
   "bottom-right"
 ];
 
 const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
+const NO_SNAP_TARGETS = (): readonly SessionBounds[] => [];
+/** The fullscreen layer is outside the scene: its card always draws at scale 1. */
+const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
+
+const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
+  focusUp: "up",
+  focusDown: "down",
+  focusLeft: "left",
+  focusRight: "right"
+};
+
+const EMPTY_TERMINAL_COMPOSITIONS: ReadonlySet<string> = new Set<string>();
+const EMPTY_TASK_CHILDREN: readonly SessionSnapshot[] = [];
+
+/** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
+interface TerminalCardHandlers {
+  activate(selectedSession: SessionSnapshot, fullscreen: boolean): void;
+  select(id: string, fullscreen: boolean): void;
+  toggleFullscreen(id: string): void;
+  rename(id: string, title: string): Promise<void>;
+  renameEnd(): void;
+  boundsChange(id: string, bounds: SessionBounds): void;
+  restart(id: string, resume?: boolean): Promise<void>;
+  dispose(id: string, keepEnvironmentData?: boolean): void;
+  openUrl(url: string): void;
+  openInspector(id: string, initialTab?: "timeline" | "report"): void;
+  gatherTask(id: string): void;
+  dropContext(id: string, payload: WorkspaceDropPayload, point: Point): void;
+  boundsPreview(id: string, bounds: SessionBounds | null): void;
+}
 
 /** A group drag's commit basis, frozen once when the press activates: the pressed layer's start
  * bounds plus every member's, so nothing the gesture itself previews can feed back into it. */
@@ -91,6 +204,13 @@ type GroupDragBasis = {
   anchor: SessionBounds;
   members: ReadonlyMap<string, SessionBounds>;
 };
+
+type TaskBoundsPreviewStore = {
+  getSnapshot(): ReadonlyMap<string, SessionBounds>;
+  subscribe(listener: () => void): () => void;
+  set(sessionId: string, bounds: SessionBounds | null): void;
+};
+
 type CanvasMenuState = {
   kind: CanvasContextMenuKind;
   position: Point;
@@ -118,10 +238,18 @@ type RegionMovePreview = {
   pluginBounds: ReadonlyMap<string, SessionBounds>;
   browserBounds: SessionBounds | null;
   noteBounds: ReadonlyMap<string, SessionBounds>;
+  materialBounds: ReadonlyMap<string, SessionBounds>;
 };
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
+  onPersistSettings(patch: Partial<AppSettings>): Promise<void>;
+  /**
+   * False for the first frame after startup: restored terminals (xterm), plugin canvas iframes and the browser card
+   * mount right after that frame was painted, so HOME and the canvas show without waiting for them. Their layout
+   * (layers, snap targets, the HOME session list) is known from the start. Defaults to true.
+   */
+  surfacesMounted?: boolean;
   mediaData: string | null;
   sessions: SessionSnapshot[];
   limits: LimitsSnapshot | null;
@@ -130,18 +258,23 @@ interface WorkspaceCanvasProps {
   browser: BrowserSnapshot;
   browserViewVisible: boolean;
   homeEditing: boolean;
-  camera: CameraState;
+  /** The canvas camera; the workspace does not render when it moves (see cameraStore). */
+  camera: CameraStore;
   onCameraChange(camera: CameraState): void;
   onGoHome(): void;
   onOpenSettings(): void;
+  onOpenShortcutReference(): void;
   onOpenAgent(provider: AgentProviderId, position?: Point): void;
   onOpenTerminal(position?: Point): void;
   onOpenBrowser(position?: Point): void;
   onOpenTerminalUrl(url: string): void;
   onFocusSession(session: SessionSnapshot): void;
+  onResumeHistory(item: AgentChatHistoryItem, position: Point): Promise<SessionSnapshot>;
   activeSessionId: string | null;
   browserSelected: boolean;
   renamingSessionId: string | null;
+  fullscreenSessionId: string | null;
+  onToggleFullscreen(id: string): void;
   onSelectSession(id: string): void;
   onSelectBrowser(): void;
   onClearCanvasSelection(): void;
@@ -158,8 +291,8 @@ interface WorkspaceCanvasProps {
   onDisposePluginCanvas(id: string): void;
   onFocusPluginCanvas(id: string): void;
   onSessionBoundsChange(id: string, bounds: SessionBounds): void;
-  onRestartSession(id: string): Promise<void>;
-  onDisposeSession(id: string): void;
+  onRestartSession(id: string, resume?: boolean): Promise<void>;
+  onDisposeSession(id: string, keepEnvironmentData?: boolean): void;
   onBrowserBoundsChange(bounds: BrowserCanvasState): void;
   onFocusBrowser(): void;
   onCloseBrowser(): void;
@@ -171,6 +304,17 @@ interface WorkspaceCanvasProps {
   onStickyNoteBoundsChange(id: string, bounds: SessionBounds): void;
   onStickyNoteTextChange(id: string, text: string): void;
   onDeleteStickyNote(id: string): void;
+  materials: readonly CanvasMaterial[];
+  onAddMaterialFiles(files: File[], point: Point): void;
+  onPickMaterials(point: Point): void;
+  onPasteMaterials(point: Point): void;
+  onMaterialBoundsChange(id: string, bounds: SessionBounds): void;
+  onMaterialBoundsChangeBatch(entries: { id: string; bounds: SessionBounds }[]): void;
+  onRemoveMaterial(id: string): void;
+  onMaterialCommand(id: string, command: MaterialCommand): void;
+  remarks: readonly MaterialRemark[];
+  onAddRemark(draft: RemarkDraft): Promise<boolean>;
+  onRemarkAction(remarkId: string, action: "delete"): void;
 }
 
 export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element {
@@ -178,7 +322,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     settings, mediaData, sessions, limits, limitsLoadState, plugins, browser,
     browserViewVisible, homeEditing, camera, onCameraChange, onGoHome,
     onOpenSettings, onOpenAgent, onOpenTerminal, onOpenBrowser, onOpenTerminalUrl, onFocusSession,
-    activeSessionId, browserSelected, renamingSessionId, onSelectSession,
+    activeSessionId, browserSelected, renamingSessionId, fullscreenSessionId, onToggleFullscreen, onSelectSession,
     onSelectBrowser, onClearCanvasSelection, onRenameSession, onRenameEnd,
     onRequestMedia, onRemoveMedia, onHomeLayoutChange, onHomeGridSizeChange,
     onFinishHomeEdit, onResetHomeLayout, onPluginError, onPluginCanvasBoundsChange,
@@ -186,12 +330,65 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     onRestartSession, onDisposeSession, onBrowserBoundsChange, onFocusBrowser,
     onCloseBrowser, onCreateCanvasRegion, onChangeCanvasRegion,
     onCanvasRegionBoundsChange, onDeleteCanvasRegion, onCreateStickyNote,
-    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote
+    onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote,
+    materials, onAddMaterialFiles, onPickMaterials, onPasteMaterials, onMaterialBoundsChange,
+    onMaterialBoundsChangeBatch, onRemoveMaterial, onMaterialCommand, remarks, onAddRemark, onRemarkAction, surfacesMounted = true
   } = props;
+  const terminalCard = useDeferredComponent(terminalCardLoader, surfacesMounted);
+  const [terminalInputHoldSessionIds, setTerminalInputHoldSessionIds] = useState(EMPTY_TERMINAL_COMPOSITIONS);
+  const setTerminalInputHold = useCallback((id: string, active: boolean): void => {
+    setTerminalInputHoldSessionIds((current) => {
+      if (current.has(id) === active) return current;
+      const next = new Set(current);
+      if (active) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    // The command palette stays out of the app's startup graph, but is commonly the
+    // first keyboard action after the canvas has mounted. Warm its existing lazy chunk
+    // during idle time so opening it does not pay the cold import cost.
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const prefetch = (): void => {
+      void loadCanvasCommandPalette().catch(() => {
+        // Leave the module retryable if an idle prefetch fails (for example, a transient
+        // chunk load error) so the next palette open can make a fresh request.
+        canvasCommandPaletteModule = undefined;
+      });
+    };
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(prefetch, { timeout: 250 });
+      return () => idleWindow.cancelIdleCallback?.(handle);
+    }
+    const handle = window.setTimeout(prefetch, 0);
+    return () => window.clearTimeout(handle);
+  }, []);
   const viewport = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<CanvasMenuState | null>(null);
   const [regionEditor, setRegionEditor] = useState<RegionEditorState | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [workspaceToolsOpen, setWorkspaceToolsOpen] = useState(false);
+  const [broadcastEnabled, setBroadcastEnabled] = useState(false);
+  const [broadcastSending, setBroadcastSending] = useState(false);
+  const [inspectedSessionId, setInspectedSessionId] = useState<string | null>(null);
+  const [inspectedTab, setInspectedTab] = useState<"timeline" | "report">("timeline");
+  const [contextPreview, setContextPreview] = useState<WorkspaceContextPreviewData | null>(null);
+  const [contextDropError, setContextDropError] = useState("");
+  const contextPreviewEpoch = useRef(new AsyncRequestEpoch());
+  const contextPreviewToken = useRef<number | null>(null);
+  const contextPasteOperation = useRef(new PendingOperation());
+  const [layoutUndo, setLayoutUndo] = useState<Map<string, SessionBounds> | null>(null);
+  const liveTaskBounds = useMemo(createTaskBoundsPreviewStore, []);
+  const [layoutAnimating, setLayoutAnimating] = useState(false);
+  const [externalSearchRequest, setExternalSearchRequest] = useState<{
+    sessionId: string; query: string; line: number; offset: number; requestId: number
+  } | null>(null);
+  const outputSearchRequestId = useRef(0);
+  const layoutAnimationTimer = useRef<number | null>(null);
   const [radialLauncher, setRadialLauncher] = useState<{
     anchor: Point;
     pointerAnchor: Point;
@@ -201,16 +398,41 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const suppressNextContextMenu = useRef(false);
   const pendingRadialContextMenu = useRef<CanvasMenuState | null>(null);
   const [noteEditRequest, setNoteEditRequest] = useState<{ id: string; version: number } | null>(null);
+  const [materialRemoveRequest, setMaterialRemoveRequest] = useState<{ id: string; version: number } | null>(null);
   const [regionMovePreview, setRegionMovePreview] = useState<RegionMovePreview | null>(null);
   const [marqueeSelection, setMarqueeSelection] = useState<ReadonlySet<string>>(EMPTY_MARQUEE_SELECTION);
+  const [masterPixelSkinSessionIds, setMasterPixelSkinSessionIds] = useState<ReadonlySet<string>>(() => new Set());
   const overlays = useRef<HTMLDivElement>(null);
+  const lastPointerClient = useRef<Point | null>(null);
   const [overlayRects, setOverlayRects] = useState<SessionBounds[]>([]);
-  const cameraRef = useRef(camera);
-  cameraRef.current = camera;
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
+  // The navigation hooks read the camera through a ref; this one always reads the store.
+  const cameraRef = useMemo<MutableRefObject<CameraState>>(() => ({
+    get current() { return camera.get(); },
+    set current(next: CameraState) { camera.set(next); }
+  }), [camera]);
   const commitCamera = useCallback((next: CameraState): void => {
-    cameraRef.current = next;
     onCameraChange(next);
   }, [onCameraChange]);
+  const scene = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // The scene follows the camera without a React render: the transform is written straight to the DOM,
+    // synchronously, before anything that measures the scene (the browser card) renders.
+    const apply = (): void => {
+      if (scene.current) scene.current.style.transform = sceneTransform(camera.get());
+    };
+    apply();
+    return camera.subscribe(() => {
+      apply();
+      // What each terminal card covers on screen decides which ones draw with WebGL. The pool waits for the
+      // camera to settle, so a pan only restarts its timer.
+      webglContextPool().viewportChanged();
+    });
+  }, [camera]);
+  useEffect(() => {
+    webglContextPool().viewportChanged();
+  }, [homeEditing, fullscreenSessionId]);
 
   const updateRegionMovePreview = useCallback((regionId: string, bounds: SessionBounds | null): void => {
     setRegionMovePreview((current) => {
@@ -228,10 +450,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         browserBounds: settings.browserCanvas && boundsInsideRegion(settings.browserCanvas, startRegion)
           ? copyBounds(settings.browserCanvas)
           : null,
-        noteBounds: containedBounds(settings.stickyNotes, startRegion)
+        noteBounds: containedBounds(settings.stickyNotes, startRegion),
+        materialBounds: containedBounds(materials, startRegion)
       };
     });
-  }, [sessions, settings.browserCanvas, settings.canvasRegions, settings.pluginCanvas, settings.stickyNotes]);
+  }, [materials, sessions, settings.browserCanvas, settings.canvasRegions, settings.pluginCanvas, settings.stickyNotes]);
 
   // A press can lose its pointer (window blur, leaving Edit HOME) before it reaches a
   // pointer-up, so the scene drops any live preview instead of leaving it stuck.
@@ -274,6 +497,16 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     const start = regionMovePreview?.noteBounds.get(note.id);
     return start && previewDelta ? { ...note, ...translateBounds(start, previewDelta) } : note;
   }), [previewDelta, regionMovePreview, settings.stickyNotes]);
+  const { remarkDraft, selectedRemarkId, materialNames, remarkActions, remarkingFor } = useRemarkDraft({
+    materials,
+    remarks,
+    onAddRemark,
+    onRemarkAction
+  });
+  const renderedMaterials = useMemo(() => materials.map((material) => {
+    const start = regionMovePreview?.materialBounds.get(material.id);
+    return start && previewDelta ? { ...material, ...translateBounds(start, previewDelta) } : material;
+  }), [materials, previewDelta, regionMovePreview]);
 
   const renderablePluginIds = useMemo(() => new Set(settings.pluginCanvas.filter((instance) => {
     const plugin = plugins.find((candidate) => candidate.manifest.id === instance.pluginId && candidate.enabled);
@@ -281,12 +514,17 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       candidate.id === instance.contributionId && candidate.kind === "canvas-app"
     ));
   }).map((instance) => instance.id)), [plugins, settings.pluginCanvas]);
+  const minimapPluginCanvas = useMemo(
+    () => renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)),
+    [renderedPluginCanvas, renderablePluginIds]
+  );
   const activeLayerIds = useMemo(() => [
     ...renderedSessions.map((session) => terminalLayerId(session.id)),
     ...renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)).map((instance) => pluginLayerId(instance.id)),
     ...(renderedBrowserCanvas ? [browserLayerId] : []),
-    ...renderedStickyNotes.map((note) => noteLayerId(note.id))
-  ], [renderablePluginIds, renderedBrowserCanvas, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
+    ...renderedStickyNotes.map((note) => noteLayerId(note.id)),
+    ...renderedMaterials.map((material) => materialLayerId(material.id))
+  ], [renderablePluginIds, renderedBrowserCanvas, renderedMaterials, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
   const [layerOrder, setLayerOrder] = useState<string[]>(activeLayerIds);
   useEffect(() => {
     setLayerOrder((current) => reconcileCanvasLayerOrder(current, activeLayerIds));
@@ -302,22 +540,42 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     }
     if (renderedBrowserCanvas) result.set(browserLayerId, renderedBrowserCanvas);
     for (const note of renderedStickyNotes) result.set(noteLayerId(note.id), note);
+    for (const material of renderedMaterials) result.set(materialLayerId(material.id), material);
     return result;
-  }, [renderablePluginIds, renderedBrowserCanvas, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
-  const browserOccluded = renderedBrowserCanvas !== null
-    && canvasLayerIsOccluded(browserLayerId, layerOrder, boundsByLayer);
-  // Every window on the canvas, in the order they are rendered: terminals, plugin canvases, browser, notes.
-  const allWindowBounds: SessionBounds[] = [
+  }, [renderablePluginIds, renderedBrowserCanvas, renderedMaterials, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
+  // Every window on the canvas, in the order they are rendered: terminals, plugin canvases, browser, notes, materials.
+  const allWindowBounds = useMemo((): SessionBounds[] => [
     ...renderedSessions,
     ...renderedPluginCanvas.filter((instance) => renderablePluginIds.has(instance.id)),
     ...(renderedBrowserCanvas ? [renderedBrowserCanvas] : []),
-    ...renderedStickyNotes
+    ...renderedStickyNotes,
+    ...renderedMaterials
+  ], [renderablePluginIds, renderedBrowserCanvas, renderedMaterials, renderedPluginCanvas, renderedSessions, renderedStickyNotes]);
+  const focusCandidates: CanvasFocusCandidate[] = [
+    ...renderedSessions.map((session) => ({ id: terminalCanvasWidgetId(session.id), bounds: session })),
+    ...renderedPluginCanvas
+      .filter((instance) => renderablePluginIds.has(instance.id))
+      .map((instance) => ({ id: pluginCanvasWidgetId(instance.id), bounds: instance })),
+    ...(renderedBrowserCanvas ? [{ id: browserCanvasWidgetId, bounds: renderedBrowserCanvas }] : [])
   ];
 
-  const homeBounds: SessionBounds = {
+  const homeBounds = useMemo((): SessionBounds => ({
     position: { x: 0, y: 0 },
     size: homeGridPixelSize(settings.homeGridSize)
+  }), [settings.homeGridSize]);
+  // Snap targets are built only for the card whose drag or resize starts, from the layout of that moment.
+  const snapLayout = useRef<SnapLayout>({ fixed: [], windows: [], byLayer: new Map() });
+  snapLayout.current = {
+    get fixed() {
+      return [homeBounds, ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size }))];
+    },
+    windows: allWindowBounds,
+    byLayer: boundsByLayer
   };
+  const [snapTargets] = useState(() => snapTargetGetters(() => snapLayout.current));
+  useEffect(() => {
+    snapTargets.prune(new Set(boundsByLayer.keys()));
+  }, [boundsByLayer, snapTargets]);
 
   const selectMarquee = useCallback((bounds: SessionBounds | null): void => {
     if (bounds === null) {
@@ -348,6 +606,15 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     groupDragBasis.current = { layerId, anchor, members };
   }, [boundsByLayer, marqueeSelection]);
 
+  const commitLayerBounds = useCallback((id: string, bounds: SessionBounds): void => {
+    const reference = parseCanvasLayerId(id);
+    if (reference?.kind === "terminal" && reference.targetId) onSessionBoundsChange(reference.targetId, bounds);
+    else if (reference?.kind === "plugin" && reference.targetId) onPluginCanvasBoundsChange(reference.targetId, bounds);
+    else if (reference?.kind === "note" && reference.targetId) onStickyNoteBoundsChange(reference.targetId, bounds);
+    else if (reference?.kind === "material" && reference.targetId) onMaterialBoundsChangeBatch([{ id: reference.targetId, bounds }]);
+    else if (reference?.kind === "browser" && settings.browserCanvas) onBrowserBoundsChange({ ...settings.browserCanvas, ...bounds });
+  }, [onBrowserBoundsChange, onMaterialBoundsChangeBatch, onPluginCanvasBoundsChange, onSessionBoundsChange, onStickyNoteBoundsChange, settings.browserCanvas]);
+
   const commitGroupDrag = useCallback((layerId: string, delta: Point): void => {
     const basis = groupDragBasis.current;
     groupDragBasis.current = null;
@@ -371,18 +638,16 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       x: anchorPosition.x - anchor.position.x,
       y: anchorPosition.y - anchor.position.y
     };
+    const materialBatch: { id: string; bounds: SessionBounds }[] = [];
     for (const [memberLayerId, memberBounds] of members) {
       const moved = translateBounds(memberBounds, rigid);
+      // Commit each window by its own identity, including individual Browser cards.
       const ref = parseCanvasLayerId(memberLayerId);
-      if (!ref) continue;
-      // Each card kind owns its commit callback; the browser's takes the whole state.
-      if (ref.kind === "terminal" && ref.targetId !== null) onSessionBoundsChange(ref.targetId, moved);
-      else if (ref.kind === "plugin" && ref.targetId !== null) onPluginCanvasBoundsChange(ref.targetId, moved);
-      else if (ref.kind === "note" && ref.targetId !== null) onStickyNoteBoundsChange(ref.targetId, moved);
-      else if (ref.kind === "browser") onBrowserBoundsChange({ ...settings.browserCanvas, ...moved });
+      if (ref?.kind === "material" && ref.targetId) materialBatch.push({ id: ref.targetId, bounds: moved });
+      else commitLayerBounds(memberLayerId, moved);
     }
-  }, [boundsByLayer, homeBounds, onBrowserBoundsChange, onPluginCanvasBoundsChange,
-    onSessionBoundsChange, onStickyNoteBoundsChange, renderedCanvasRegions, settings.browserCanvas, settings.snapToGrid]);
+    if (materialBatch.length > 0) onMaterialBoundsChangeBatch(materialBatch);
+  }, [boundsByLayer, commitLayerBounds, homeBounds, onMaterialBoundsChangeBatch, renderedCanvasRegions, settings.snapToGrid]);
 
   const focusController = useCanvasWidgetFocus({
     viewport,
@@ -391,7 +656,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     browserSelected,
     widgetTreeVersion: [
       browserViewVisible ? "browser-visible" : "browser-hidden",
-      settings.browserCanvas ? "browser-card" : "no-browser-card",
+      renderedBrowserCanvas ? "browser-card" : "no-browser-card",
       sessions.map((session) => session.id).join(","),
       plugins.map((plugin) => [
         plugin.manifest.id,
@@ -400,9 +665,18 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       ].join(":")).join(";"),
       settings.pluginCanvas.map((instance) => instance.id).join(","),
       settings.stickyNotes.map((note) => note.id).join(","),
+      materials.map((material) => material.id).join(","),
       settings.homeLayout.map((placement) => placement.widgetId).join(",")
     ].join("|")
   });
+  // One owner for "bring this session to the front": HOME rows, attention and chat history
+  // must both raise the card's layer, focus it, and apply the layer raise through onFocusSession.
+  const focusSessionFromHome = useCallback((session: SessionSnapshot): void => {
+    raiseLayer(terminalLayerId(session.id));
+    focusController.focus(terminalCanvasWidgetId(session.id), "explicit");
+    onFocusSession(session);
+  }, [focusController, onFocusSession, raiseLayer]);
+  const attention = useMemo(() => attentionSessions(renderedSessions), [renderedSessions]);
   // The page area is a native child view, so it composites above every DOM layer including this
   // HUD; the page can only yield by hiding. Slot boxes are measured instead of their children:
   // they are content-sized, which keeps this effect keyed to what can move or resize a slot and
@@ -434,19 +708,39 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     for (const slot of slots) observer.observe(slot);
     return () => observer.disconnect();
   }, [
+    attention.length,
+    settings.attentionQueuePlacement,
+    settings.attentionQueueVisible,
+    settings.agentChatHistoryVisible,
+    settings.agentChatHistoryPlacement,
     settings.canvasControlsPlacement,
     settings.minimapPlacement,
     settings.shortcutHintsPlacement,
     settings.showShortcutHints,
-    settings.uiScale
+    settings.uiScale,
+    remarkDraft?.picking
   ]);
-  const browserScreenRect = renderedBrowserCanvas === null
-    ? null
-    : canvasScreenRect(renderedBrowserCanvas, camera);
-  // Both sides are screen-relative to this viewport: the camera translation is measured from the
-  // scene origin, and the overlay rects are measured from the overlay root, which shares it.
-  const browserUnderOverlay = browserScreenRect !== null
-    && overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect));
+  const browserOccluded = renderedBrowserCanvas !== null
+    && canvasLayerIsOccluded(browserLayerId, layerOrder, boundsByLayer);
+  const selectedRemark = selectedRemarkId ? remarks.find((remark) => remark.id === selectedRemarkId) ?? null : null;
+  const popoverMaterial = remarkDraft
+    ? renderedMaterials.find((material) => material.id === remarkDraft.materialId) ?? null
+    : selectedRemark
+      ? renderedMaterials.find((material) => material.id === selectedRemark.target.materialId) ?? null
+      : null;
+  const popoverRect = useRemarkPopoverRect(
+    camera,
+    !homeEditing && !remarkDraft?.picking ? popoverMaterial : null,
+    viewport,
+    settings.uiScale
+  );
+  // A boolean derived from the camera: the workspace renders only when it flips.
+  const browserUnderOverlay = useCameraSelector(camera, (current) => {
+    if (renderedBrowserCanvas === null) return false;
+    const browserScreenRect = canvasScreenRect(renderedBrowserCanvas, current);
+    return overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect))
+      || (popoverRect !== null && boundsOverlap(browserScreenRect, popoverRect));
+  });
   const wheelNavigation = useCanvasWheelNavigation({
     viewport,
     settings,
@@ -473,6 +767,240 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   );
   const widgetFocus = focusController.state;
   const routeWidgetWheelToCanvas = wheelNavigation.routeWidgetWheelToCanvas;
+  const taskChildrenByParent = useMemo(() => {
+    const result = new Map<string, SessionSnapshot[]>();
+    for (const session of sessions) {
+      if (!session.parentSessionId) continue;
+      const children = result.get(session.parentSessionId) ?? [];
+      children.push(session);
+      result.set(session.parentSessionId, children);
+    }
+    return result;
+  }, [sessions]);
+  const taskEdges = useMemo(() => directTaskEdges(renderedSessions), [renderedSessions]);
+  const sessionById = useMemo(() => new Map(renderedSessions.map((session) => [session.id, session])), [renderedSessions]);
+  const broadcastTargets = useMemo(() => sessions.filter((session) => (
+    marqueeSelection.has(terminalLayerId(session.id))
+    && (session.status === "idle" || session.status === "working")
+    && session.exitCode === null
+  )), [marqueeSelection, sessions]);
+  const layoutItems = useMemo<WorkspaceLayoutItem[]>(() => {
+    const bySession = new Map(renderedSessions.map((session) => [session.id, session]));
+    return [...boundsByLayer].map(([id, bounds]) => {
+      const reference = parseCanvasLayerId(id);
+      if (reference?.kind === "terminal" && reference.targetId) {
+        const session = bySession.get(reference.targetId);
+        return {
+          id,
+          bounds,
+          ...(session?.parentSessionId ? { parentId: terminalLayerId(session.parentSessionId) } : {}),
+          status: session?.status,
+          project: session?.cwd
+        };
+      }
+      if (reference?.kind === "plugin" && reference.targetId) {
+        const instance = renderedPluginCanvas.find((candidate) => candidate.id === reference.targetId);
+        return { id, bounds, project: instance?.pluginId ?? "Plugins" };
+      }
+      return { id, bounds, project: reference?.kind === "browser" ? "Browser" : "Notes" };
+    });
+  }, [boundsByLayer, renderedPluginCanvas, renderedSessions]);
+  const sessionLayoutItems = useMemo<WorkspaceLayoutItem[]>(() => renderedSessions.map((session) => ({
+    id: session.id,
+    bounds: { position: session.position, size: session.size },
+    ...(session.parentSessionId ? { parentId: session.parentSessionId } : {}),
+    status: session.status,
+    project: session.cwd
+  })), [renderedSessions]);
+  const handleOpenInspector = useCallback((id: string, initialTab: "timeline" | "report" = "timeline"): void => {
+    setInspectedTab(initialTab);
+    setInspectedSessionId(id);
+  }, []);
+  const previewCardBounds = useCallback((id: string, bounds: SessionBounds | null): void => {
+    liveTaskBounds.set(id, bounds);
+  }, [liveTaskBounds]);
+  const persistTerminalBounds = useCallback((id: string, bounds: SessionBounds): void => {
+    previewCardBounds(id, null);
+    onSessionBoundsChange(id, bounds);
+  }, [onSessionBoundsChange, previewCardBounds]);
+  const handleGatherTask = useCallback((id: string): void => {
+    const parent = sessionLayoutItems.find((item) => item.id === id);
+    if (!parent) return;
+    const gathered = taskTreeBounds(parent, sessionLayoutItems);
+    for (const [sessionId, bounds] of gathered) onSessionBoundsChange(sessionId, bounds);
+  }, [onSessionBoundsChange, sessionLayoutItems]);
+  const handleDropContext = useCallback((id: string, payload: WorkspaceDropPayload): void => {
+    const request = contextPreviewEpoch.current.next();
+    contextPreviewToken.current = null;
+    setContextDropError("");
+    setContextPreview(null);
+    void prepareWorkspaceContextPreview(id, payload, backlogApi(), backlogTerminalApi()).then((preview) => {
+      if (contextPreviewEpoch.current.isCurrent(request)) {
+        contextPreviewToken.current = request;
+        setContextPreview(preview);
+      }
+    }).catch(() => {
+      if (contextPreviewEpoch.current.isCurrent(request)) {
+        setContextDropError(backlogText(settings.locale, "contextFailed"));
+      }
+    });
+  }, [settings.locale]);
+  const closeContextPreview = (): void => {
+    contextPreviewEpoch.current.invalidate();
+    contextPreviewToken.current = null;
+    setContextPreview(null);
+  };
+  const sendBroadcast = useCallback(async (text: string): Promise<void> => {
+    const message = text.trim();
+    if (!broadcastEnabled || !message || broadcastTargets.length === 0) {
+      throw new Error(backlogText(settings.locale,"broadcastFailed"));
+    }
+    setBroadcastSending(true);
+    try {
+      const result=await window.canvasTTY.backlog.broadcast(broadcastTargets.map(session=>session.id),message);
+      const delivered=new Set(result.delivered);
+      const skipped=broadcastTargets.filter(session=>!delivered.has(session.id) || result.skipped.includes(session.id));
+      if(skipped.length || result.skipped.length) {
+        const labels=skipped.map(session=>session.title || session.id);
+        for(const id of result.skipped)if(!skipped.some(session=>session.id===id))labels.push(id);
+        throw new Error(`${backlogText(settings.locale,"broadcastFailed")}: ${labels.join(", ")}`);
+      }
+    } finally {
+      // The dialog owns the visible error and retains its draft on rejection.
+      setBroadcastSending(false);
+    }
+  }, [broadcastEnabled,broadcastTargets,settings.locale]);
+
+  const animateLayout = useCallback((): void => {
+    setLayoutAnimating(true);
+    if (layoutAnimationTimer.current !== null) window.clearTimeout(layoutAnimationTimer.current);
+    layoutAnimationTimer.current = window.setTimeout(() => {
+      layoutAnimationTimer.current = null;
+      setLayoutAnimating(false);
+    }, 280);
+  }, []);
+  useEffect(() => () => {
+    if (layoutAnimationTimer.current !== null) window.clearTimeout(layoutAnimationTimer.current);
+    contextPreviewEpoch.current.invalidate();
+    contextPasteOperation.current.cancel();
+  }, []);
+  const applyWorkspaceLayout = useCallback((mode: WorkspaceLayoutMode): void => {
+    const viewportBounds = viewport.current?.getBoundingClientRect();
+    const currentCamera = camera.get();
+    const origin = {
+      x: ((viewportBounds?.width ?? 1) / 2 - currentCamera.x) / currentCamera.zoom - 380,
+      y: ((viewportBounds?.height ?? 1) / 2 - currentCamera.y) / currentCamera.zoom - 250
+    };
+    setLayoutUndo(new Map([...boundsByLayer].map(([id, bounds]) => [id, copyBounds(bounds)])));
+    const arranged = mode === "tree"
+      ? arrangeTaskTree(layoutItems, origin)
+      : arrangeWorkspace(layoutItems, mode, origin);
+    arranged.forEach((bounds, id) => commitLayerBounds(id, bounds));
+    animateLayout();
+  }, [animateLayout, boundsByLayer, camera, commitLayerBounds, layoutItems]);
+  const undoWorkspaceLayout = useCallback((): void => {
+    if (!layoutUndo) return;
+    layoutUndo.forEach((bounds, id) => commitLayerBounds(id, bounds));
+    setLayoutUndo(null);
+    animateLayout();
+  }, [animateLayout, commitLayerBounds, layoutUndo]);
+  const confirmContextPaste = async (text: string): Promise<void> => {
+    if (!contextPreview) return;
+    const previewRequest = contextPreviewToken.current;
+    if (previewRequest === null || !contextPreviewEpoch.current.isCurrent(previewRequest)) return;
+    const operation = contextPasteOperation.current.begin();
+    if (operation === null) return;
+    const session = sessions.find((candidate) => candidate.id === contextPreview.sessionId);
+    if (!session || session.exitCode !== null || (session.status !== "idle" && session.status !== "working")) {
+      contextPasteOperation.current.finish(operation);
+      return;
+    }
+    try {
+      await backlogTerminalApi().paste(session.id, text);
+      if (!contextPasteOperation.current.isCurrent(operation)) return;
+      raiseLayer(terminalLayerId(session.id));
+      onFocusSession(session);
+      if (contextPreviewToken.current === previewRequest && contextPreviewEpoch.current.isCurrent(previewRequest)) closeContextPreview();
+    } catch {
+      if (contextPasteOperation.current.isCurrent(operation) && contextPreviewToken.current === previewRequest
+        && contextPreviewEpoch.current.isCurrent(previewRequest)) {
+        setContextDropError(backlogText(settings.locale, "contextFailed"));
+      }
+    } finally {
+      contextPasteOperation.current.finish(operation);
+    }
+  };
+  // TerminalCard is memoized: its callbacks are the same functions on every render and call the latest
+  // handlers through this ref, so a pan (a workspace render per pointer move) renders no card.
+  const terminalCardHandlers = useRef<TerminalCardHandlers | null>(null);
+  terminalCardHandlers.current = {
+    activate(selectedSession, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(selectedSession.id));
+      focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
+      onFocusSession(selectedSession);
+    },
+    select(id, fullscreen) {
+      if (!fullscreen) raiseLayer(terminalLayerId(id));
+      focusController.cancelHover();
+      focusController.focus(terminalCanvasWidgetId(id), "explicit");
+      onSelectSession(id);
+    },
+    toggleFullscreen: onToggleFullscreen,
+    rename: onRenameSession,
+    renameEnd: onRenameEnd,
+    boundsChange: persistTerminalBounds,
+    restart: onRestartSession,
+    dispose: onDisposeSession,
+    openUrl: onOpenTerminalUrl,
+    openInspector: handleOpenInspector,
+    gatherTask: handleGatherTask,
+    dropContext: handleDropContext,
+    boundsPreview: previewCardBounds
+  };
+  const terminalCardCallbacks = useMemo(() => {
+    const latest = terminalCardHandlers;
+    const shared = {
+      onRename: (id: string, title: string) => latest.current!.rename(id, title),
+      onRenameEnd: () => latest.current!.renameEnd(),
+      onRestart: (id: string, resume?: boolean) => latest.current!.restart(id, resume),
+      onDispose: (id: string, keepEnvironmentData?: boolean) => latest.current!.dispose(id, keepEnvironmentData),
+      onOpenUrl: (url: string) => latest.current!.openUrl(url),
+      onOpenInspector: (id: string, initialTab?: "timeline" | "report") => latest.current!.openInspector(id, initialTab),
+      onGatherTask: (id: string) => latest.current!.gatherTask(id),
+      onDropContext: (id: string, payload: WorkspaceDropPayload, point: Point) => latest.current!.dropContext(id, payload, point)
+    };
+    return {
+      canvas: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, false),
+        onSelect: (id: string) => latest.current!.select(id, false),
+        onBoundsChange: (id: string, bounds: SessionBounds) => latest.current!.boundsChange(id, bounds),
+        onBoundsPreview: (id: string, bounds: SessionBounds | null) => latest.current!.boundsPreview(id, bounds)
+      },
+      fullscreen: {
+        ...shared,
+        onActivate: (selectedSession: SessionSnapshot) => latest.current!.activate(selectedSession, true),
+        onSelect: (id: string) => latest.current!.select(id, true),
+        onBoundsChange: () => {}
+      }
+    };
+  }, []);
+  const fullscreenToggles = useRef(new Map<string, () => void>());
+  const toggleFullscreenFor = (id: string): (() => void) => {
+    let toggle = fullscreenToggles.current.get(id);
+    if (!toggle) {
+      toggle = () => terminalCardHandlers.current!.toggleFullscreen(id);
+      fullscreenToggles.current.set(id, toggle);
+    }
+    return toggle;
+  };
+  // Closed sessions leave nothing behind in per-session state.
+  const liveSessionIds = useMemo(() => new Set(sessions.map((session) => session.id)), [sessions]);
+  useEffect(() => {
+    pruneToLive(fullscreenToggles.current, liveSessionIds);
+    setMasterPixelSkinSessionIds((current) => keepLiveIds(current, liveSessionIds));
+    setTerminalInputHoldSessionIds((current) => keepLiveIds(current, liveSessionIds));
+  }, [liveSessionIds]);
   const canvasOverrideActive = wheelNavigation.canvasOverrideActive;
   const homeLayoutValid = homeLayoutFitsGrid(settings.homeLayout, settings.homeGridSize);
   const editedRegion = regionEditor?.mode === "edit"
@@ -481,6 +1009,9 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const contextRegion = contextMenu?.kind === "region"
     ? settings.canvasRegions.find((region) => region.id === contextMenu.targetId) ?? null
     : null;
+  const inspectedSession = inspectedSessionId
+    ? sessions.find((session) => session.id === inspectedSessionId)
+    : undefined;
 
   const viewportPoint = useCallback((clientX: number, clientY: number): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
@@ -497,18 +1028,20 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   }, [settings.uiScale, viewportPoint]);
   const worldPoint = useCallback((clientX: number, clientY: number): Point => {
     const point = viewportPoint(clientX, clientY);
+    const current = camera.get();
     return {
-      x: (point.x - camera.x) / camera.zoom,
-      y: (point.y - camera.y) / camera.zoom
+      x: (point.x - current.x) / current.zoom,
+      y: (point.y - current.y) / current.zoom
     };
-  }, [camera.x, camera.y, camera.zoom, viewportPoint]);
+  }, [camera, viewportPoint]);
   const viewportCenterWorldPoint = useCallback((): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
+    const current = camera.get();
     return {
-      x: ((bounds?.width ?? 1) / 2 - camera.x) / camera.zoom,
-      y: ((bounds?.height ?? 1) / 2 - camera.y) / camera.zoom
+      x: ((bounds?.width ?? 1) / 2 - current.x) / current.zoom,
+      y: ((bounds?.height ?? 1) / 2 - current.y) / current.zoom
     };
-  }, [camera.x, camera.y, camera.zoom]);
+  }, [camera]);
   const centerMenuPosition = useCallback((): Point => {
     const bounds = viewport.current?.getBoundingClientRect();
     return {
@@ -523,6 +1056,34 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     setContextMenu(null);
     setCommandPaletteOpen(false);
   }, [onCreateStickyNote]);
+  const pickMaterialsAt = useCallback((point: Point): void => {
+    onPickMaterials(point);
+    setContextMenu(null);
+    setCommandPaletteOpen(false);
+  }, [onPickMaterials]);
+  const pasteMaterialsAt = useCallback((point: Point): void => {
+    onPasteMaterials(point);
+    setContextMenu(null);
+    setCommandPaletteOpen(false);
+  }, [onPasteMaterials]);
+  const pastePoint = useCallback((): Point => {
+    const pointer = lastPointerClient.current;
+    const bounds = viewport.current?.getBoundingClientRect();
+    return pointer && bounds && pointer.x >= bounds.left && pointer.x <= bounds.right
+      && pointer.y >= bounds.top && pointer.y <= bounds.bottom
+      ? worldPoint(pointer.x, pointer.y)
+      : viewportCenterWorldPoint();
+  }, [viewportCenterWorldPoint, worldPoint]);
+  const openMaterialMenu = useCallback((id: string, client: Point): void => {
+    setRegionEditor(null);
+    setCommandPaletteOpen(false);
+    setContextMenu({
+      kind: "material",
+      position: menuPosition(client.x, client.y),
+      worldPoint: worldPoint(client.x, client.y),
+      targetId: id
+    });
+  }, [menuPosition, worldPoint]);
   const launchAt = useCallback((provider: ProviderId, point?: Point): void => {
     if (provider === "terminal") onOpenTerminal(point);
     else onOpenAgent(provider, point);
@@ -576,6 +1137,59 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     if (!settings.radialLauncherEnabled) closeRadialLauncher();
   }, [closeRadialLauncher, settings.radialLauncherEnabled]);
 
+  const canvasViewportSize = useCallback((): Size => {
+    const bounds = viewport.current?.getBoundingClientRect();
+    return { width: bounds?.width ?? 1360, height: bounds?.height ?? 820 };
+  }, []);
+
+  /** Frames the HOME zone and every window; an empty canvas just goes HOME. */
+  const fitCanvas = useCallback((): void => {
+    const fitted = cameraFittingContent([homeBounds, ...allWindowBounds], canvasViewportSize());
+    if (fitted === null) {
+      onGoHome();
+      return;
+    }
+    commitCamera(fitted);
+  }, [allWindowBounds, canvasViewportSize, commitCamera, homeBounds, onGoHome]);
+
+  const focusDirection = useCallback((direction: CanvasFocusDirection): void => {
+    const target = canvasWidgetInDirection(
+      focusCandidates,
+      focusController.state.id,
+      direction,
+      viewportCenterWorldPoint()
+    );
+    if (target === null) return;
+    const session = renderedSessions.find((candidate) => terminalCanvasWidgetId(candidate.id) === target);
+    if (session) {
+      raiseLayer(terminalLayerId(session.id));
+      focusController.focus(target, "explicit");
+      onFocusSession(session);
+      return;
+    }
+    const instance = renderedPluginCanvas.find((candidate) => pluginCanvasWidgetId(candidate.id) === target);
+    if (instance) {
+      raiseLayer(pluginLayerId(instance.id));
+      focusController.focus(target, "explicit");
+      onFocusPluginCanvas(instance.id);
+      return;
+    }
+    if (renderedBrowserCanvas && target === browserCanvasWidgetId) {
+      raiseLayer(browserLayerId);
+      focusController.focus(target, "explicit");
+      onFocusBrowser();
+      return;
+    }
+  }, [focusCandidates, focusController, onFocusBrowser, onFocusPluginCanvas, onFocusSession,
+    renderedBrowserCanvas, renderedPluginCanvas, renderedSessions, raiseLayer, viewportCenterWorldPoint]);
+
+  const fitCanvasRef = useRef(fitCanvas);
+  fitCanvasRef.current = fitCanvas;
+  const pasteMaterialsRef = useRef(() => onPasteMaterials(pastePoint()));
+  pasteMaterialsRef.current = () => onPasteMaterials(pastePoint());
+  const focusDirectionRef = useRef(focusDirection);
+  focusDirectionRef.current = focusDirection;
+
   useEffect(() => {
     if (homeEditing || !browserViewVisible) {
       setContextMenu(null);
@@ -585,36 +1199,88 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       return;
     }
     const handleShortcut = (event: KeyboardEvent): void => {
-      if (!(event.metaKey || event.ctrlKey) || event.altKey) return;
-      // Matched on the physical key: these chords must work on a non-Latin layout, where
-      // the K key reports `key: "л"` and `event.key` alone would never match.
-      if (matchesPhysicalOrLayoutKey(event, "KeyK", "k")) {
+      if (activeSessionId !== null
+        && (isPixelSkinThemeId(settings.terminalBorderSkin) || isPixelSkinPackId(settings.terminalBorderSkin))
+        && shouldTogglePixelSkinMasterView(
+          event,
+          sessionsRef.current.some((session) => session.id === activeSessionId),
+          [settings.shortcuts.home, settings.shortcuts.renameWindow], settings.shortcuts.toggleDetail
+        )
+        && !isShortcutCaptureTarget(event.target)
+        && !isRenameInputTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMasterPixelSkinSessionIds((current) => {
+          const next = new Set(current);
+          if (next.has(activeSessionId)) next.delete(activeSessionId);
+          else next.add(activeSessionId);
+          return next;
+        });
+        return;
+      }
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
+      const focusAction = (Object.keys(CANVAS_FOCUS_ARROWS) as Array<"focusUp" | "focusDown" | "focusLeft" | "focusRight">)
+        .find((action) => matchesShortcut(event, settings.shortcuts[action]));
+      const direction = focusAction ? CANVAS_FOCUS_ARROWS[focusAction] : undefined;
+      if (direction && !event.repeat
+        && !isShortcutCaptureTarget(event.target) && !isRenameInputTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        focusDirectionRef.current(direction);
+        return;
+      }
+      if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target) || event.repeat) return;
+      if (matchesShortcut(event, settings.shortcuts.commandPalette)) {
         event.preventDefault();
         setContextMenu(null);
         setRegionEditor(null);
         setCommandPaletteOpen((current) => !current);
-      } else if (matchesPhysicalOrLayoutKey(event, "Comma", ",")) {
+      } else if (matchesShortcut(event, settings.shortcuts.openSettings)) {
         event.preventDefault();
         setContextMenu(null);
         setRegionEditor(null);
         setCommandPaletteOpen(false);
         onOpenSettings();
+      } else if ((event.ctrlKey || event.metaKey) && !event.altKey && matchesPhysicalOrLayoutKey(event, "KeyV", "v") && !event.shiftKey && !acceptsTextInput(event.target)) {
+        event.preventDefault();
+        pasteMaterialsRef.current();
       }
     };
     window.addEventListener("keydown", handleShortcut, true);
     return () => window.removeEventListener("keydown", handleShortcut, true);
-  }, [browserViewVisible, homeEditing, onOpenSettings]);
+  }, [activeSessionId, browserViewVisible, homeEditing, onOpenSettings,
+    settings.shortcuts, settings.terminalBorderSkin]);
 
+  const themeBackground = (BUNDLED_CANVAS_BACKGROUND_IDS as readonly string[]).includes(settings.canvasBackground)
+    ? settings.canvasBackground : undefined;
+  const packBackground = usePixelSkinPackAssets(
+    isPixelSkinPackId(settings.canvasBackground) ? settings.canvasBackground : null
+  )?.background;
+
+  // A prefetched module can render directly instead of taking React.lazy's first Suspense retry.
+  const CommandPalette = loadedCanvasCommandPalette ?? CanvasCommandPalette;
   return (
     <div
       ref={viewport}
-      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""}`}
+      data-theme-background={themeBackground ?? (packBackground ? "custom" : undefined)}
+      style={packBackground ? { backgroundImage: `url("${packBackground}")` } : undefined}
+      className={`workspace pattern-${settings.pattern} ${pointerNavigation.panning ? "workspace--panning" : ""} ${wheelNavigation.zooming ? "workspace--zooming" : ""} ${wheelNavigation.wheelPanning ? "workspace--wheel-panning" : ""} ${canvasOverrideActive ? "workspace--canvas-override" : ""} ${layoutAnimating ? "workspace--layout-animating" : ""}`}
       onPointerDownCapture={(event) => {
         if (openRadialLauncher(event)) return;
         const element = event.target as HTMLElement;
         if (event.button === 0) {
           const layerId = element.closest<HTMLElement>("[data-canvas-layer-id]")?.dataset.canvasLayerId;
           if (layerId) raiseLayer(layerId);
+        }
+        if (remarkDraft?.picking && event.button === 0) {
+          const materialId = element.closest<HTMLElement>("[data-material-id]")?.dataset.materialId;
+          const material = materialId ? renderedMaterials.find((candidate) => candidate.id === materialId) : null;
+          if (material && remarkPickable(material) && !element.closest(".material-annotator")) {
+            event.preventDefault();
+            event.stopPropagation();
+            remarkActions.draw(material.id, { kind: "whole" });
+            return;
+          }
         }
         if (contextMenu && !element.closest(".canvas-menu")) setContextMenu(null);
         if (regionEditor && !element.closest(".canvas-region-editor")) setRegionEditor(null);
@@ -633,7 +1299,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       onPointerOverCapture={focusController.handlePointerOver}
       onPointerOutCapture={focusController.handlePointerOut}
       onPointerDown={pointerNavigation.handlePointerDown}
-      onPointerMove={pointerNavigation.handlePointerMove}
+      onPointerMove={(event) => {
+        lastPointerClient.current = { x: event.clientX, y: event.clientY };
+        pointerNavigation.handlePointerMove(event);
+      }}
       onPointerMoveCapture={pointerNavigation.handlePointerMoveCapture}
       onPointerUp={pointerNavigation.handlePointerEnd}
       onPointerUpCapture={pointerNavigation.handlePointerEndCapture}
@@ -649,15 +1318,18 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         const element = event.target as HTMLElement;
         const regionId = element.closest<HTMLElement>("[data-canvas-region-id]")?.dataset.canvasRegionId;
         const noteId = element.closest<HTMLElement>("[data-sticky-note-id]")?.dataset.stickyNoteId;
+        const materialId = element.closest<HTMLElement>("[data-material-id]")?.dataset.materialId;
         const hit: CanvasContextHit = element.closest("textarea, input, [contenteditable='true'], .terminal-card, .plugin-canvas-card, .browser-card")
           ? "native"
           : noteId
             ? "note"
-            : regionId
-              ? "region"
-              : element.closest(".home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-interactive='true']")
-                ? "blocked"
-                : "empty";
+            : materialId
+              ? "material"
+              : regionId
+                ? "region"
+                : element.closest(".home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-interactive='true']")
+                  ? "blocked"
+                  : "empty";
         const kind = routeCanvasContextMenu(hit, homeEditing);
         if (!kind) return;
         event.preventDefault();
@@ -667,7 +1339,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           kind,
           position: menuPosition(event.clientX, event.clientY),
           worldPoint: worldPoint(event.clientX, event.clientY),
-          targetId: kind === "region" ? regionId : kind === "note" ? noteId : undefined
+          targetId: kind === "region" ? regionId : kind === "note" ? noteId : kind === "material" ? materialId : undefined
         };
         if (radialLauncher) {
           pendingRadialContextMenu.current = nextContextMenu;
@@ -675,14 +1347,24 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         }
         setContextMenu(nextContextMenu);
       }}
+      onDragOver={(event) => {
+        if (homeEditing || !acceptsMaterialDrop(event)) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "copy";
+      }}
+      onDrop={(event) => {
+        if (homeEditing || !acceptsMaterialDrop(event)) return;
+        event.preventDefault();
+        onAddMaterialFiles(Array.from(event.dataTransfer.files), worldPoint(event.clientX, event.clientY));
+      }}
     >
-      <div className="workspace__scene" style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` }}>
+      <div ref={scene} className="workspace__scene">
         <div className={`workspace__regions ${homeEditing ? "workspace__windows--hidden" : ""}`} aria-hidden={homeEditing}>
           {renderedCanvasRegions.map((region) => (
             <CanvasRegionCard
               key={region.id}
               region={region}
-              zoom={camera.zoom}
+              camera={camera}
               snapEnabled={settings.snapToGrid}
               snapTargets={[
                 homeBounds,
@@ -695,6 +1377,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             />
           ))}
         </div>
+        <TaskEdgeLayer edges={taskEdges} sessions={sessionById} previews={liveTaskBounds}
+          selected={marqueeSelection} groupNudge={pointerNavigation.groupNudge} />
         <HomeZone
           settings={settings}
           mediaData={mediaData}
@@ -706,18 +1390,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           onOpenSettings={onOpenSettings}
           onOpenAgent={onOpenAgent}
           onOpenTerminal={onOpenTerminal}
-          onOpenBrowser={() => {
-            if (settings.browserCanvas) {
-              raiseLayer(browserLayerId);
-              focusController.focusBrowser();
-            }
-            onOpenBrowser();
-          }}
-          onFocusSession={(session) => {
-            raiseLayer(terminalLayerId(session.id));
-            focusController.focus(terminalCanvasWidgetId(session.id), "explicit");
-            onFocusSession(session);
-          }}
+          onOpenBrowser={() => onOpenBrowser()}
+          onFocusSession={focusSessionFromHome}
           onRequestMedia={onRequestMedia}
           onRemoveMedia={onRemoveMedia}
           onLayoutChange={onHomeLayoutChange}
@@ -736,48 +1410,61 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           onPluginCanvasWheel={wheelNavigation.applyCanvasWheel}
         />
         <div className={`workspace__windows ${homeEditing ? "workspace__windows--hidden" : ""}`} aria-hidden={homeEditing}>
-          {renderedSessions.map((session) => (
-            <TerminalCard
+          {surfacesMounted && renderedSessions.filter((session) => fullscreenSessionId !== session.id).map((session) => (
+            <DeferredTerminalCard
               key={session.id}
-              session={withGroupNudge(terminalLayerId(session.id), session)}
-              locale={settings.locale}
-              palette={settings.palette}
-              zoom={camera.zoom}
-              stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
-              snapEnabled={settings.snapToGrid}
-              focusActivation={settings.focusActivation}
-              invertTerminalWheel={settings.invertTerminalWheel}
-              captureCanvasWheelOverWidgets={routeWidgetWheelToCanvas || widgetFocus.id !== terminalCanvasWidgetId(session.id)}
-              focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
-              focusChangeSource={widgetFocus.source}
-              selected={activeSessionId === session.id}
-              groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
-              renaming={renamingSessionId === session.id}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== session)
-              ]}
-              onActivate={(selectedSession) => {
-                raiseLayer(terminalLayerId(selectedSession.id));
-                focusController.focus(terminalCanvasWidgetId(selectedSession.id), "explicit");
-                onFocusSession(selectedSession);
+              card={terminalCard}
+              inputHeld={terminalInputHoldSessionIds.has(session.id)}
+              loading={{
+                session: withGroupNudge(terminalLayerId(session.id), session),
+                locale: settings.locale,
+                borderSkin: settings.terminalBorderSkin,
+                shortcuts: settings.shortcuts,
+                stackIndex: canvasLayerZIndex(layerOrder, terminalLayerId(session.id)),
+                fullscreen: false,
+                selected: activeSessionId === session.id,
+                groupSelected: marqueeSelection.has(terminalLayerId(session.id)),
+                focused: widgetFocus.id === terminalCanvasWidgetId(session.id),
+                focusRevision: widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0,
+                onInputHoldChange: (active) => setTerminalInputHold(session.id, active),
+                onSelect: terminalCardCallbacks.canvas.onSelect
               }}
-              onSelect={(id) => {
-                raiseLayer(terminalLayerId(id));
-                focusController.cancelHover();
-                focusController.focus(terminalCanvasWidgetId(id), "explicit");
-                onSelectSession(id);
-              }}
-              onRename={onRenameSession}
-              onRenameEnd={onRenameEnd}
-              onBoundsChange={onSessionBoundsChange}
-              onRestart={onRestartSession}
-              onDispose={onDisposeSession}
-              onOpenUrl={onOpenTerminalUrl}
+              render={(TerminalCard) => (
+                <TerminalCard
+                  session={withGroupNudge(terminalLayerId(session.id), session)}
+                  shortcuts={settings.shortcuts}
+                  locale={settings.locale}
+                  palette={settings.palette}
+                  borderSkin={settings.terminalBorderSkin}
+                  skinDetail={settings.terminalSkinDetail}
+                  camera={camera}
+                  stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
+                  snapEnabled={settings.snapToGrid}
+                  focusActivation={settings.focusActivation}
+                  invertTerminalWheel={settings.invertTerminalWheel}
+                  copyOnSelect={settings.copyOnSelect}
+                  captureCanvasWheelOverWidgets={routeWidgetWheelToCanvas || widgetFocus.id !== terminalCanvasWidgetId(session.id)}
+                  focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
+                  focusChangeSource={widgetFocus.source}
+                  focusRevision={widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0}
+                  selected={activeSessionId === session.id}
+                  forceMasterDetail={masterPixelSkinSessionIds.has(session.id)}
+                  groupSelected={marqueeSelection.has(terminalLayerId(session.id))}
+                  renaming={renamingSessionId === session.id}
+                  fullscreen={fullscreenSessionId === session.id}
+                  hidden={homeEditing}
+                  taskChildren={taskChildrenByParent.get(session.id) ?? EMPTY_TASK_CHILDREN}
+                  broadcastTarget={broadcastEnabled && broadcastTargets.some((candidate) => candidate.id === session.id)}
+                  externalSearchRequest={externalSearchRequest?.sessionId === session.id ? externalSearchRequest : undefined}
+                  onToggleFullscreen={toggleFullscreenFor(session.id)}
+                  getSnapTargets={snapTargets.forLayer(terminalLayerId(session.id))}
+                  {...terminalCardCallbacks.canvas}
+                  restoreEnabled={settings.sessionRestoreMode !== "off"}
+                />
+              )}
             />
           ))}
-          {renderedPluginCanvas.map((instance) => {
+          {surfacesMounted && renderedPluginCanvas.map((instance) => {
             const plugin = plugins.find((candidate) => candidate.manifest.id === instance.pluginId && candidate.enabled);
             const contribution = plugin?.manifest.contributions.find((candidate) => candidate.id === instance.contributionId);
             if (!plugin || !contribution || contribution.kind !== "canvas-app") return null;
@@ -789,16 +1476,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 contribution={contribution}
                 locale={settings.locale}
                 palette={settings.palette}
-                zoom={camera.zoom}
+                camera={camera}
                 stackIndex={canvasLayerZIndex(layerOrder, pluginLayerId(instance.id))}
                 snapEnabled={settings.snapToGrid}
                 sessions={sessions}
                 limits={limits}
-                snapTargets={[
-                  homeBounds,
-                  ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                  ...allWindowBounds.filter((candidate) => candidate !== instance)
-                ]}
+                getSnapTargets={snapTargets.forLayer(pluginLayerId(instance.id))}
                 onActivate={() => {
                   raiseLayer(pluginLayerId(instance.id));
                   focusController.focus(pluginCanvasWidgetId(instance.id), "explicit");
@@ -820,73 +1503,159 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 }}
                 onCanvasWheel={wheelNavigation.applyCanvasWheel}
                 groupSelected={marqueeSelection.has(pluginLayerId(instance.id))}
+                hidden={homeEditing}
               />
             );
           })}
-          {renderedBrowserCanvas && (
-            <BrowserCard
-              browser={browser}
-              bounds={withGroupNudge(browserLayerId, renderedBrowserCanvas)}
-              locale={settings.locale}
-              zoom={camera.zoom}
-              camera={camera}
-              visible={browserViewVisible && !homeEditing && contextMenu === null
-                && regionEditor === null && !commandPaletteOpen && radialLauncher === null
-                && !browserOccluded && !browserUnderOverlay}
-              stackIndex={canvasLayerZIndex(layerOrder, browserLayerId)}
-              uiScale={settings.uiScale}
-              snapEnabled={settings.snapToGrid}
-              focusActivation={settings.focusActivation}
-              focused={widgetFocus.id === browserCanvasWidgetId}
-              selected={browserSelected}
-              showAgentPresence={settings.browserShowAgentPresence}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== renderedBrowserCanvas)
-              ]}
-              onBoundsChange={onBrowserBoundsChange}
-              onActivate={() => {
-                raiseLayer(browserLayerId);
-                focusController.focusBrowser();
-                onFocusBrowser();
-              }}
-              onSelect={() => {
-                raiseLayer(browserLayerId);
-                onSelectBrowser();
-              }}
-              onWidgetFocus={() => {
-                raiseLayer(browserLayerId);
-                focusController.focusBrowser();
-              }}
-              onWidgetHoverChange={focusController.hoverBrowser}
-              onClose={onCloseBrowser}
-              onError={onPluginError}
-              groupSelected={marqueeSelection.has(browserLayerId)}
-            />
+          {surfacesMounted && renderedBrowserCanvas && (
+            <Suspense fallback={null}>
+              <BrowserCard
+                browser={browser}
+                bounds={withGroupNudge(browserLayerId, renderedBrowserCanvas)}
+                locale={settings.locale}
+                camera={camera}
+                visible={browserViewVisible && !homeEditing && contextMenu === null
+                  && regionEditor === null && !commandPaletteOpen && radialLauncher === null
+                  && !browserOccluded && !browserUnderOverlay}
+                stackIndex={canvasLayerZIndex(layerOrder, browserLayerId)}
+                uiScale={settings.uiScale}
+                snapEnabled={settings.snapToGrid}
+                focusActivation={settings.focusActivation}
+                focused={widgetFocus.id === browserCanvasWidgetId}
+                selected={browserSelected}
+                showAgentPresence={settings.browserShowAgentPresence}
+                getSnapTargets={snapTargets.forLayer(browserLayerId)}
+                onBoundsChange={onBrowserBoundsChange}
+                onActivate={() => {
+                  raiseLayer(browserLayerId);
+                  focusController.focusBrowser();
+                  onFocusBrowser();
+                }}
+                onSelect={() => {
+                  raiseLayer(browserLayerId);
+                  onSelectBrowser();
+                }}
+                onWidgetFocus={() => {
+                  raiseLayer(browserLayerId);
+                  focusController.focusBrowser();
+                }}
+                onWidgetHoverChange={focusController.hoverBrowser}
+                onClose={onCloseBrowser}
+                onError={onPluginError}
+                groupSelected={marqueeSelection.has(browserLayerId)}
+              />
+            </Suspense>
           )}
           {renderedStickyNotes.map((note) => (
             <StickyNoteCard
               key={note.id}
               note={withGroupNudge(noteLayerId(note.id), note)}
               locale={settings.locale}
-              zoom={camera.zoom}
+              camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, noteLayerId(note.id))}
               editRequest={noteEditRequest?.id === note.id ? noteEditRequest.version : 0}
               snapEnabled={settings.snapToGrid}
-              snapTargets={[
-                homeBounds,
-                ...renderedCanvasRegions.map((candidate) => ({ position: candidate.position, size: candidate.size })),
-                ...allWindowBounds.filter((candidate) => candidate !== note)
-              ]}
+              getSnapTargets={snapTargets.forLayer(noteLayerId(note.id))}
               onBoundsChange={onStickyNoteBoundsChange}
               onTextChange={onStickyNoteTextChange}
               onClose={onDeleteStickyNote}
               groupSelected={marqueeSelection.has(noteLayerId(note.id))}
             />
           ))}
+          <Suspense fallback={null}>
+            {renderedMaterials.map((material) => (
+              <MaterialCard
+                key={material.id}
+                material={withGroupNudge(materialLayerId(material.id), material)}
+              locale={settings.locale}
+              camera={camera}
+              stackIndex={canvasLayerZIndex(layerOrder, materialLayerId(material.id))}
+              snapEnabled={settings.snapToGrid}
+              getSnapTargets={snapTargets.forLayer(materialLayerId(material.id))}
+              groupSelected={marqueeSelection.has(materialLayerId(material.id))}
+              removeRequest={materialRemoveRequest?.id === material.id ? materialRemoveRequest.version : 0}
+              remarking={remarkingFor(material)}
+              remarkActions={remarkActions}
+              onBoundsChange={onMaterialBoundsChange}
+              onRemove={onRemoveMaterial}
+              onOpenMenu={openMaterialMenu}
+              onAction={onMaterialCommand}
+            />
+          ))}
+          </Suspense>
         </div>
       </div>
+
+      {/* Fullscreen layer: rendered outside workspace__scene to avoid camera transformation */}
+      <div className="workspace__fullscreen-layer">
+        {surfacesMounted && renderedSessions
+          .filter((session) => fullscreenSessionId === session.id)
+          .map((session) => (
+            <DeferredTerminalCard
+              key={session.id}
+              card={terminalCard}
+              inputHeld={terminalInputHoldSessionIds.has(session.id)}
+              loading={{
+                session: withGroupNudge(terminalLayerId(session.id), session),
+                locale: settings.locale,
+                borderSkin: settings.terminalBorderSkin,
+                shortcuts: settings.shortcuts,
+                stackIndex: 9999,
+                fullscreen: true,
+                selected: activeSessionId === session.id,
+                groupSelected: false,
+                focused: widgetFocus.id === terminalCanvasWidgetId(session.id),
+                focusRevision: widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0,
+                onInputHoldChange: (active) => setTerminalInputHold(session.id, active),
+                onSelect: terminalCardCallbacks.fullscreen.onSelect
+              }}
+              render={(TerminalCard) => (
+                <TerminalCard
+                  session={withGroupNudge(terminalLayerId(session.id), session)}
+                  shortcuts={settings.shortcuts}
+                  locale={settings.locale}
+                  palette={settings.palette}
+                  borderSkin={settings.terminalBorderSkin}
+                  skinDetail={settings.terminalSkinDetail}
+                  camera={FULLSCREEN_CAMERA}
+                  stackIndex={9999}
+                  snapEnabled={false}
+                  focusActivation={settings.focusActivation}
+                  invertTerminalWheel={settings.invertTerminalWheel}
+                  copyOnSelect={settings.copyOnSelect}
+                  captureCanvasWheelOverWidgets={false}
+                  focused={widgetFocus.id === terminalCanvasWidgetId(session.id)}
+                  focusChangeSource={widgetFocus.source}
+                  focusRevision={widgetFocus.id === terminalCanvasWidgetId(session.id) ? widgetFocus.revision : 0}
+                  selected={activeSessionId === session.id}
+                  forceMasterDetail={true}
+                  groupSelected={false}
+                  renaming={renamingSessionId === session.id}
+                  fullscreen={true}
+                  taskChildren={taskChildrenByParent.get(session.id) ?? EMPTY_TASK_CHILDREN}
+                  broadcastTarget={false}
+                  externalSearchRequest={externalSearchRequest?.sessionId === session.id ? externalSearchRequest : undefined}
+                  onToggleFullscreen={toggleFullscreenFor(session.id)}
+                  getSnapTargets={NO_SNAP_TARGETS}
+                  {...terminalCardCallbacks.fullscreen}
+                  restoreEnabled={settings.sessionRestoreMode !== "off"}
+                />
+              )}
+            />
+          ))}
+      </div>
+
+      {popoverMaterial && (popoverRect || remarkDraft?.picking) && (
+        <RemarkPopover
+          locale={settings.locale}
+          material={popoverMaterial}
+          rect={popoverRect}
+          remarkDraft={remarkDraft}
+          selectedRemark={selectedRemark}
+          materialNames={materialNames}
+          remarkActions={remarkActions}
+        />
+      )}
 
       {pointerNavigation.marquee && (
         <div
@@ -912,57 +1681,86 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       )}
 
       {contextMenu && (
-        <CanvasContextMenu
-          kind={contextMenu.kind}
-          position={contextMenu.position}
-          locale={settings.locale}
-          launcherItems={settings.canvasLauncherItems}
-          currentRegionColor={contextRegion?.color ?? null}
-          onCreateRegion={() => {
-            setRegionEditor({ mode: "create", focus: "title", position: contextMenu.position, worldPoint: contextMenu.worldPoint });
-            setContextMenu(null);
-          }}
-          onCreateNote={() => createNote(contextMenu.worldPoint)}
-          onLaunch={(provider) => launchAt(provider, contextMenu.worldPoint)}
-          onOpenBrowser={() => {
-            onOpenBrowser(contextMenu.worldPoint);
-            setContextMenu(null);
-          }}
-          onOpenSettings={() => {
-            onOpenSettings();
-            setContextMenu(null);
-          }}
-          onRenameRegion={() => {
-            if (!contextMenu.targetId) return;
-            setRegionEditor({ mode: "edit", focus: "title", position: contextMenu.position, regionId: contextMenu.targetId });
-            setContextMenu(null);
-          }}
-          onChangeRegionColor={(color) => {
-            if (!contextRegion) return;
-            onChangeCanvasRegion({ ...contextRegion, color });
-            setContextMenu(null);
-          }}
-          onDeleteRegion={() => {
-            if (contextMenu.targetId) onDeleteCanvasRegion(contextMenu.targetId);
-            setContextMenu(null);
-          }}
-          onEditNote={() => {
-            if (contextMenu.targetId) {
-              raiseLayer(noteLayerId(contextMenu.targetId));
-              setNoteEditRequest((current) => ({ id: contextMenu.targetId!, version: (current?.version ?? 0) + 1 }));
-            }
-            setContextMenu(null);
-          }}
-          onBringNoteToFront={() => {
-            if (contextMenu.targetId) raiseLayer(noteLayerId(contextMenu.targetId));
-            setContextMenu(null);
-          }}
-          onDeleteNote={() => {
-            if (contextMenu.targetId) onDeleteStickyNote(contextMenu.targetId);
-            setContextMenu(null);
-          }}
-          onClose={() => setContextMenu(null)}
-        />
+        <Suspense fallback={null}>
+          <CanvasContextMenu
+            kind={contextMenu.kind}
+            position={contextMenu.position}
+            locale={settings.locale}
+            launcherItems={settings.canvasLauncherItems}
+            currentRegionColor={contextRegion?.color ?? null}
+            onCreateRegion={() => {
+              setRegionEditor({ mode: "create", focus: "title", position: contextMenu.position, worldPoint: contextMenu.worldPoint });
+              setContextMenu(null);
+            }}
+            onCreateNote={() => createNote(contextMenu.worldPoint)}
+            onLaunch={(provider) => launchAt(provider, contextMenu.worldPoint)}
+            onOpenBrowser={() => {
+              onOpenBrowser(contextMenu.worldPoint);
+              setContextMenu(null);
+            }}
+            onOpenSettings={() => {
+              onOpenSettings();
+              setContextMenu(null);
+            }}
+            onRenameRegion={() => {
+              if (!contextMenu.targetId) return;
+              setRegionEditor({ mode: "edit", focus: "title", position: contextMenu.position, regionId: contextMenu.targetId });
+              setContextMenu(null);
+            }}
+            onChangeRegionColor={(color) => {
+              if (!contextRegion) return;
+              onChangeCanvasRegion({ ...contextRegion, color });
+              setContextMenu(null);
+            }}
+            onDeleteRegion={() => {
+              if (contextMenu.targetId) onDeleteCanvasRegion(contextMenu.targetId);
+              setContextMenu(null);
+            }}
+            onEditNote={() => {
+              if (contextMenu.targetId) {
+                raiseLayer(noteLayerId(contextMenu.targetId));
+                setNoteEditRequest((current) => ({ id: contextMenu.targetId!, version: (current?.version ?? 0) + 1 }));
+              }
+              setContextMenu(null);
+            }}
+            onBringNoteToFront={() => {
+              if (contextMenu.targetId) raiseLayer(noteLayerId(contextMenu.targetId));
+              setContextMenu(null);
+            }}
+            onDeleteNote={() => {
+              if (contextMenu.targetId) onDeleteStickyNote(contextMenu.targetId);
+              setContextMenu(null);
+            }}
+            materialHasLocation={Boolean(materials.find((material) => material.id === contextMenu.targetId)?.location)}
+            onAddFiles={() => pickMaterialsAt(contextMenu.worldPoint)}
+            onPasteFiles={() => pasteMaterialsAt(contextMenu.worldPoint)}
+            onPinMaterial={() => {
+              if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "pin");
+              setContextMenu(null);
+            }}
+            onRevealMaterial={() => {
+              if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "reveal");
+              setContextMenu(null);
+            }}
+            onCopyMaterialPath={() => {
+              if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "copy-path");
+              setContextMenu(null);
+            }}
+            onBringMaterialToFront={() => {
+              if (contextMenu.targetId) raiseLayer(materialLayerId(contextMenu.targetId));
+              setContextMenu(null);
+            }}
+            onRemoveMaterial={() => {
+              const id = contextMenu.targetId;
+              if (id) {
+                raiseLayer(materialLayerId(id));
+                setMaterialRemoveRequest((current) => ({ id, version: (current?.version ?? 0) + 1 }));
+              }
+              setContextMenu(null);
+            }}
+            onClose={() => setContextMenu(null)}
+          />
+        </Suspense>
       )}
 
       {radialLauncher && (
@@ -999,48 +1797,164 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       )}
 
       {commandPaletteOpen && (
-        <CanvasCommandPalette
-          locale={settings.locale}
-          sessions={sessions}
-          launcherItems={settings.canvasLauncherItems}
-          onFocusSession={(session) => {
-            raiseLayer(terminalLayerId(session.id));
-            focusController.focus(terminalCanvasWidgetId(session.id), "explicit");
-            onFocusSession(session);
-          }}
-          onLaunch={(provider) => launchAt(provider, viewportCenterWorldPoint())}
-          onCreateRegion={() => {
-            setCommandPaletteOpen(false);
-            setRegionEditor({ mode: "create", focus: "title", position: centerMenuPosition(), worldPoint: viewportCenterWorldPoint() });
-          }}
-          onCreateNote={() => createNote(viewportCenterWorldPoint())}
-          onOpenBrowser={() => onOpenBrowser(viewportCenterWorldPoint())}
-          onOpenSettings={onOpenSettings}
-          onClose={() => setCommandPaletteOpen(false)}
-        />
+        <Suspense fallback={null}>
+          <CommandPalette
+            locale={settings.locale}
+            sessions={sessions}
+            launcherItems={settings.canvasLauncherItems}
+            onFocusSession={(session) => {
+              raiseLayer(terminalLayerId(session.id));
+              focusController.focus(terminalCanvasWidgetId(session.id), "explicit");
+              onFocusSession(session);
+            }}
+            onLaunch={(provider) => launchAt(provider, viewportCenterWorldPoint())}
+            onCreateRegion={() => {
+              setCommandPaletteOpen(false);
+              setRegionEditor({ mode: "create", focus: "title", position: centerMenuPosition(), worldPoint: viewportCenterWorldPoint() });
+            }}
+            onCreateNote={() => createNote(viewportCenterWorldPoint())}
+            onAddFiles={() => pickMaterialsAt(viewportCenterWorldPoint())}
+            onPasteFiles={() => pasteMaterialsAt(viewportCenterWorldPoint())}
+            onFitCanvas={fitCanvas}
+            onOpenBrowser={() => onOpenBrowser(viewportCenterWorldPoint())}
+            onOpenSettings={onOpenSettings}
+            onOpenGroupPrompt={() => {
+              setWorkspaceToolsOpen(true);
+              setBroadcastEnabled(true);
+            }}
+            onSearchResult={(result, query) => {
+              const session = sessions.find((candidate) => candidate.id === result.sessionId);
+              if (!session) return;
+              const viewportBounds = viewport.current?.getBoundingClientRect();
+              const zoom = Math.max(camera.get().zoom, 0.72);
+              commitCamera({
+                zoom,
+                x: (viewportBounds?.width ?? 1) / 2 - (session.position.x + session.size.width / 2) * zoom,
+                y: (viewportBounds?.height ?? 1) / 2 - (session.position.y + session.size.height / 2) * zoom
+              });
+              raiseLayer(terminalLayerId(session.id));
+              focusController.focus(terminalCanvasWidgetId(session.id), "explicit");
+              onFocusSession(session);
+              setExternalSearchRequest({ ...result, query, requestId: ++outputSearchRequestId.current });
+            }}
+            onClose={() => setCommandPaletteOpen(false)}
+          />
+        </Suspense>
       )}
 
+      {inspectedSession && (
+        <Suspense fallback={null}>
+          <BacklogSessionInspector
+            key={inspectedSessionId}
+            session={inspectedSession}
+            sessions={sessions}
+            locale={settings.locale}
+            initialTab={inspectedTab}
+            onClose={() => setInspectedSessionId(null)}
+          />
+        </Suspense>
+      )}
+      {contextPreview && <WorkspaceContextPreview preview={contextPreview} locale={settings.locale}
+        onConfirm={confirmContextPaste} onCancel={closeContextPreview} />}
+      {contextDropError && <div className="workspace-context-error" role="alert">
+        <span>{contextDropError}</span><button type="button" onClick={() => setContextDropError("")} aria-label={t(settings.locale, "close")}>×</button>
+      </div>}
+
       <div className="canvas-overlays" ref={overlays}>
+        {remarkDraft?.picking && (
+          <div className="canvas-overlay-slot canvas-overlay-slot--top-center">
+            <div className="material-reference-banner" role="status" data-interactive="true">
+              <UiIcon name="crosshair" size={16} />
+              <span>{t(settings.locale, "remarkPickBanner")}</span>
+              <button type="button" onClick={remarkActions.clearReference}>{t(settings.locale, "cancel")}</button>
+            </div>
+          </div>
+        )}
         {CANVAS_OVERLAY_PLACEMENTS.map((placement) => (
           <div className={`canvas-overlay-slot canvas-overlay-slot--${placement}`} key={placement}>
+            {settings.agentChatHistoryVisible && settings.agentChatHistoryPlacement === placement && (
+              <Suspense fallback={null}>
+                <AgentChatHistoryHud settings={settings} sessions={sessions} onFocusSession={focusSessionFromHome} onResume={async (item) => {
+                  const session = await props.onResumeHistory(item, viewportCenterWorldPoint());
+                  focusSessionFromHome(session);
+                }} />
+              </Suspense>
+            )}
+            {/* The canvas scene is transformed and therefore its own stacking context, so anything
+                inside it paints under this layer and scales with the camera. The queue is a
+                screen-anchored HUD: it belongs here, alongside the other corner overlays. */}
+            {attentionQueueRenderedAt(settings, placement, attention.length) && (
+              <section className="attention-queue" aria-label={t(settings.locale, "needsAttention")}
+                title={t(settings.locale, "needsAttentionHint")}>
+                <span className="attention-queue__title">{t(settings.locale, "needsAttention")}</span>
+                <span className="attention-queue__caption">{t(settings.locale, "needsAttentionCaption")}</span>
+                {attention.map((session) => {
+                  const failureDetails = sessionFailureDetails(session, settings.locale);
+                  return (
+                    <div style={{ position: "relative" }} key={session.id}>
+                      <button
+                        className="attention-queue__item"
+                        data-session-tone={sessionStatusTone(session.status)}
+                        type="button"
+                        title={failureDetails ? undefined : session.title}
+                        onClick={() => focusSessionFromHome(session)}
+                      >
+                        <span>{session.title}</span>
+                        <span>{sessionStatusLabel(settings.locale, session.status, session.provider)}</span>
+                      </button>
+                      {failureDetails && <SessionFailureDetails details={failureDetails} locale={settings.locale} />}
+                    </div>
+                  );
+                })}
+              </section>
+            )}
             {settings.minimapPlacement === placement && (
               <CanvasMinimap viewport={viewport} camera={camera} homeBounds={homeBounds}
                 canvasRegions={renderedCanvasRegions} sessions={renderedSessions} stickyNotes={renderedStickyNotes}
-                pluginCanvas={renderedPluginCanvas} browserCanvas={renderedBrowserCanvas}
+                materials={renderedMaterials}
+                pluginCanvas={minimapPluginCanvas}
+                browserCanvas={renderedBrowserCanvas} layerOrder={layerOrder}
                 locale={settings.locale} interactionMode={settings.minimapInteractionMode}
                 onCameraChange={commitCamera} />
             )}
             {settings.canvasControlsPlacement === placement && (
               <div className="canvas-controls" data-interactive="true">
                 <button type="button" onClick={onGoHome} title={t(settings.locale, "home")}><UiIcon name="home" size={17} /></button>
+                <button type="button" onClick={fitCanvas} title={t(settings.locale, "fitCanvas")} aria-label={t(settings.locale, "fitCanvas")}><UiIcon name="maximize" size={17} /></button>
                 <button type="button" onClick={() => wheelNavigation.zoomBy(0.82)} title={t(settings.locale, "zoomOut")}><UiIcon name="zoom-out" size={17} /></button>
                 <button type="button" onClick={() => wheelNavigation.zoomBy(1.22)} title={t(settings.locale, "zoomIn")}><UiIcon name="zoom-in" size={17} /></button>
+                <button type="button" aria-expanded={workspaceToolsOpen} title={backlogText(settings.locale, "workspaceTools")}
+                  aria-label={backlogText(settings.locale, "workspaceTools")} onClick={() => setWorkspaceToolsOpen((open) => !open)}>
+                  <UiIcon name="blocks" size={17} />
+                </button>
               </div>
+            )}
+            {workspaceToolsOpen && settings.canvasControlsPlacement === placement && (
+              <Suspense fallback={null}>
+                <WorkspaceBacklogTools
+                  onPersistSettings={props.onPersistSettings}
+                  sessions={sessions}
+                  settings={settings}
+                  locale={settings.locale}
+                  undoAvailable={layoutUndo !== null}
+                  broadcastEnabled={broadcastEnabled}
+                  broadcastTargetCount={broadcastTargets.length}
+                  broadcastSending={broadcastSending}
+                  onApplyLayout={applyWorkspaceLayout}
+                  onUndoLayout={undoWorkspaceLayout}
+                  onSetBroadcastEnabled={setBroadcastEnabled}
+                  onSendBroadcast={sendBroadcast}
+                  onClose={() => setWorkspaceToolsOpen(false)}
+                />
+              </Suspense>
             )}
             {settings.showShortcutHints && settings.shortcutHintsPlacement === placement && (
               <aside className="shortcut-hints" aria-label={t(settings.locale, "keyboardShortcuts")}>
                 <div><kbd>{settings.shortcuts.home}</kbd><span>{t(settings.locale, "homeShortcut")}</span></div>
                 <div><kbd>{settings.shortcuts.renameWindow}</kbd><span>{t(settings.locale, "renameWindow")}</span></div>
+                <div><kbd>{settings.shortcuts.toggleFullscreen.replace("Meta", window.canvasTTY.window.isMacOS ? "Command" : "Super")}</kbd><span>{t(settings.locale, "toggleFullscreen")}</span></div>
+                <div><kbd>{settings.shortcuts.focusUp}</kbd><span>{t(settings.locale, "keyboardFocusUp")}</span></div>
+                <div><kbd>Shift + drag</kbd><span>{t(settings.locale, "marqueeSelectionHint")}</span></div>
                 {settings.canvasWheelCaptureMode === "key" && settings.canvasWheelOverride !== null && (
                   <div><kbd>{displayCanvasNavigationBinding(settings.canvasWheelOverride, window.canvasTTY.window.isMacOS)}</kbd>
                     <span>{t(settings.locale, "canvasWheelOverrideHint")}</span></div>
@@ -1049,6 +1963,11 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                   <div><kbd>{displayCanvasNavigationBinding(settings.canvasNavigationOverride, window.canvasTTY.window.isMacOS)}</kbd>
                     <span>{t(settings.locale, "canvasNavigationOverrideHint")}</span></div>
                 )}
+                <button className="shortcut-hints__more" type="button" data-interactive="true"
+                  aria-haspopup="dialog" onClick={props.onOpenShortcutReference}>
+                  {t(settings.locale, "keyboardShortcuts")}
+                  <UiIcon name="app-window" size={14} />
+                </button>
               </aside>
             )}
           </div>
@@ -1065,6 +1984,68 @@ function copyBounds(bounds: SessionBounds): SessionBounds {
   };
 }
 
+function createTaskBoundsPreviewStore(): TaskBoundsPreviewStore {
+  let snapshot: ReadonlyMap<string, SessionBounds> = new Map();
+  const listeners = new Set<() => void>();
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    set(sessionId, bounds) {
+      const previous = snapshot.get(sessionId);
+      if (bounds === null ? previous === undefined : previous !== undefined && boundsEqual(previous, bounds)) return;
+      const next = new Map(snapshot);
+      if (bounds === null) next.delete(sessionId);
+      else next.set(sessionId, copyBounds(bounds));
+      snapshot = next;
+      for (const listener of listeners) listener();
+    }
+  };
+}
+
+/** Bounds previews only affect task arrows; keep their pointer-move updates out of the canvas tree. */
+function TaskEdgeLayer({
+  edges,
+  sessions,
+  previews,
+  selected,
+  groupNudge
+}: {
+  edges: readonly { parentId: string; childId: string; state: TaskCardState }[];
+  sessions: ReadonlyMap<string, SessionSnapshot>;
+  previews: TaskBoundsPreviewStore;
+  selected: ReadonlySet<string>;
+  groupNudge: Point | null | undefined;
+}): React.JSX.Element {
+  const live = useSyncExternalStore(previews.subscribe, previews.getSnapshot, previews.getSnapshot);
+  const boundsFor = (session: SessionSnapshot): SessionBounds => {
+    const bounds = live.get(session.id) ?? { position: session.position, size: session.size };
+    return selected.has(terminalLayerId(session.id)) && groupNudge ? translateBounds(bounds, groupNudge) : bounds;
+  };
+  return <div className="workspace__task-edges" aria-hidden="true">
+    {edges.map((edge) => {
+      const parent = sessions.get(edge.parentId);
+      const child = sessions.get(edge.childId);
+      if (!parent || !child) return null;
+      const parentBounds = boundsFor(parent);
+      const childBounds = boundsFor(child);
+      const parentCenter = parentBounds.position.x + parentBounds.size.width / 2;
+      const childCenter = childBounds.position.x + childBounds.size.width / 2;
+      const forward = childCenter >= parentCenter;
+      const x1 = forward ? parentBounds.position.x + parentBounds.size.width : parentBounds.position.x;
+      const x2 = forward ? childBounds.position.x : childBounds.position.x + childBounds.size.width;
+      const y1 = parentBounds.position.y + parentBounds.size.height / 2;
+      const y2 = childBounds.position.y + childBounds.size.height / 2;
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      return <div key={`${edge.parentId}:${edge.childId}`} className="workspace__task-edge"
+        data-state={edge.state} style={{ left: x1, top: y1, width: Math.hypot(dx, dy), transform: `rotate(${Math.atan2(dy, dx)}rad)` }} />;
+    })}
+  </div>;
+}
+
 function containedBounds<T extends SessionBounds & { id: string }>(
   items: readonly T[],
   region: CanvasRegion
@@ -1076,6 +2057,13 @@ function containedBounds<T extends SessionBounds & { id: string }>(
 
 function shouldKeepCanvasContextMenu(target: EventTarget | null): boolean {
   return target instanceof Element && Boolean(target.closest(
-    "textarea, input, select, [contenteditable='true'], .terminal-card, .plugin-canvas-card, .browser-card, .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-canvas-region-id], [data-sticky-note-id], [data-interactive='true']"
+    "textarea, input, select, [contenteditable='true'], .terminal-card, .plugin-canvas-card, .browser-card, .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, [data-canvas-region-id], [data-sticky-note-id], [data-material-id], [data-interactive='true']"
   ));
+}
+
+function acceptsMaterialDrop(event: React.DragEvent<HTMLElement>): boolean {
+  return event.dataTransfer.types.includes("Files")
+    && !(event.target instanceof Element && event.target.closest(
+      "[data-canvas-layer-id], .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, .home-editor-toolbar"
+    ));
 }

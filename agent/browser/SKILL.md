@@ -24,6 +24,8 @@ Use this skill when the task needs the visible CanvasTTY browser. The browser is
 4. Re-observe after navigation, dialogs, meaningful DOM changes, or any action whose result matters.
 5. If the result contains `STALE_REF`, never retry the old ref. Call `browser_observe`, choose the replacement ref from the new revision, and retry once.
 
+`browser_new_tab` may open your tab in the background, in a lighter engine the user installed (`engine: "auto"`, the default). Pass the returned `tabId` to every later call: commands without one go to the tab you opened last. Such a tab reads, observes, types and clicks by element, but has no screenshots; when a screenshot, a bot check or an unreadable page needs Chromium, the tab moves there by itself with the same tab ID, the result carries a `notice`, and old refs are stale. Use `engine: "chromium"` when the task is visual from the start.
+
 Element refs belong to one tab, frame, and document revision. Do not copy a ref between tabs or reuse it after reload/navigation. The user or another agent may change the shared page between your calls; if the document revision changes, re-observe and continue from the new revision instead of guessing what changed.
 
 ## Reading and artifacts

@@ -12,13 +12,75 @@ files:
   - package.json
   - LICENSE
   - "!**/*.map"
+  # Dead weight inside production node_modules: type declarations, TypeScript and
+  # C sources, docs, changelogs, tests, and native build intermediates. Runtime
+  # code, package.json and LICENSE files stay.
+  - "!**/node_modules/**/*.{d.ts,d.mts,d.cts,ts,mts,cts,tsbuildinfo}"
+  - "!**/node_modules/**/{README,CHANGELOG,HISTORY,AUTHORS,CONTRIBUTING}*"
+  - "!**/node_modules/**/*.md"
+  - "!**/node_modules/**/{test,tests,__tests__,example,examples,docs,.github,coverage,benchmark,benchmarks}/**"
+  - "!**/node_modules/**/*.test.js"
+  # node-pty loads build/Release (rebuilt for Electron by npmRebuild) and falls
+  # back to prebuilds; its C++ and winpty sources, build scripts and header-only
+  # node-addon-api are compile-time only. (A platform-level `files` list would
+  # replace this one, so foreign-OS prebuilds stay.)
+  - "!**/node_modules/node-pty/{src,deps,scripts,node-addon-api}/**"
+  - "!**/node_modules/node-addon-api/**"
+  # Browser builds that Node never resolves (yaml's "node" export is dist/,
+  # bluebird's main is js/release).
+  - "!**/node_modules/yaml/browser/**"
+  - "!**/node_modules/bluebird/js/browser/**"
 
 asar: true
+afterPack: scripts/after-pack-updates.cjs
 asarUnpack:
   - node_modules/node-pty/**/*
+# Close the remaining LoTL vectors in the packaged binary: ignore NODE_OPTIONS /
+# NODE_EXTRA_CA_CERTS and --inspect from the environment, and validate the
+# embedded asar when app.asar is loaded. Dev builds are unaffected (fuses are
+# applied at package time). Electron implements asar integrity validation only on
+# macOS (>= 16) and Windows (>= 30), so the Linux AppImage and deb targets flip
+# the bit without receiving validation from it.
+#
+# runAsNode is deliberately left ENABLED: where the native canvastty-helper is
+# not shipped or not chosen (Windows, CANVASTTY_HELPERS=node), provider CLIs and
+# the agent runtime spawn the bundled helpers as
+# { command: process.execPath, args: [helper], env: { ELECTRON_RUN_AS_NODE: "1" } }
+# (src/main/index.ts for the browser, agent-runtime, and plugin-hook helpers,
+# src/agent-runtime/*.mjs, plus the generated lifecycle hook commands). Setting
+# runAsNode: false would break the agent runtime in packaged builds.
+#
+# onlyLoadAppFromAsar is left at its default (off). It does not govern the helper
+# .mjs files: the fuse only narrows Electron's own application-code search order
+# (app.asar -> app -> default_app.asar) to app.asar alone, and its documented
+# value is that it stops asar-integrity validation from being bypassed through
+# that search path. The helpers are not application code — they are spawned as
+# child processes with ELECTRON_RUN_AS_NODE=1, and in that mode Electron loads no
+# app bundle at all — so enabling the fuse would not break them. It stays off
+# because no packaged build on any target has exercised the flip, and a wrong
+# fuse choice is a release-wide defect rather than a runtime one; verify it with
+# a packaged run before enabling it.
+#
+# enableCookieEncryption is intentionally omitted rather than set to false: the
+# fuse is a one-way transition, so a release that enabled it would make every
+# later build without the key read the encrypted store as plaintext and corrupt
+# the profile's cookies. The upstream reference comment claimed this key kept
+# cookies encrypted, which is the opposite of what false does.
+electronFuses:
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
 extraResources:
+  - from: scripts/canvastty-control.mjs
+    to: agent-control/canvastty-control.mjs
+  - from: agent/orchestrator
+    to: agent/orchestrator
+    filter:
+      - SKILL.md
   - from: integrations/even-g2/dist
     to: even-g2-web
+  - from: integrations/mobile/dist
+    to: mobile-web
   - from: src/main/services/companion/asr_worker.py
     to: companion/asr_worker.py
   - from: src/agent-browser
@@ -33,6 +95,23 @@ extraResources:
     to: agent/browser
     filter:
       - SKILL.md
+  # canvastty-helper for this target (scripts/build-native-helpers.mjs, `npm run build:helpers`). Without it the app
+  # runs the .mjs helpers above under Electron-as-Node (src/main/services/agentHelpers.ts).
+  - from: build/native-helpers/${os}-${arch}
+    to: helpers
+    filter:
+      - canvastty-helper
+      - canvastty-helper.exe
+# UI strings exist in English and Russian (the README ships a Simplified Chinese
+# translation), so keep only those Chromium locales; other system languages fall
+# back to English for native menus and dialogs. macOS uses .lproj names, Linux and
+# Windows .pak names.
+electronLanguages:
+  - en
+  - en-US
+  - ru
+  - zh_CN
+  - zh-CN
 npmRebuild: true
 compression: normal
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
@@ -70,6 +149,13 @@ portable:
   artifactName: ${productName}-${version}-windows-${arch}-portable.${ext}
 
 mac:
+  extraFiles:
+    - from: artifacts/sparkle/Sparkle.framework
+      to: Frameworks/Sparkle.framework
+    - from: artifacts/sparkle/canvastty-update-helper
+      to: MacOS/canvastty-update-helper
+    - from: src/native/updates/mac-update-server.mjs
+      to: Resources/updates/mac-update-server.mjs
   extraResources:
     - from: artifacts/companion-speech/${arch}
       to: companion/speech
@@ -84,6 +170,12 @@ mac:
   target:
     - dmg
     - zip
+
+# bzip2 dmg: 9 MB smaller than the default zlib (UDZO) image; lzfse (ULFO) saves
+# only 2 MB. Set here rather than via `compression: maximum`, which would also
+# move deb/nsis to maximum XZ/LZMA (the zip gains only 0.1 MB from -mx=9).
+dmg:
+  format: UDBZ
 
 publish:
   provider: github

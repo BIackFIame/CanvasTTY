@@ -1,18 +1,23 @@
+import { ExecutionTargetSettings } from "./ExecutionTargetSettings";
 import { EvenG2Controls } from "./EvenG2Controls";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   AppSettings,
+  AppSkinId,
   AgentCliAvailability,
   AgentProviderId,
+  DefaultLaunchProfile,
   BrowserActivityEvent,
   BrowserCommandType,
   BrowserDownloadSnapshot,
   BrowserSnapshot,
   CanvasLauncherItemId,
   CanvasColorId,
+  CanvasBackgroundId,
   CanvasOverlayPlacement,
   CanvasPatternId,
   CanvasWheelCaptureMode,
+  CustomTerminalBorderSkinId,
   EdgePanSpeed,
   FocusActivation,
   GithubPluginSearchResult,
@@ -21,6 +26,8 @@ import type {
   InstalledPlugin,
   LimitProviderId,
   LocaleId,
+  KeyboardPreset,
+  MaterialStorageUsage,
   MinimapInteractionMode,
   PaletteId,
   PluginContribution,
@@ -28,13 +35,25 @@ import type {
   PluginManifest,
   PluginInstallPreview,
   PluginUpdateStatus,
+  PixelSkinPackSummary,
+  PixelSkinPreferredDetail,
+  PixelSkinSlot,
+  PixelTerminalBorderSkinId,
   RadialLauncherItemId,
+  SessionRestoreMode,
   SessionRowColorMode,
+  SessionStatus,
   ShortcutAction,
+  TerminalBorderSkinListItem,
+  TerminalLinkOpenMode,
+  TerminalBorderSkinId,
   ZoomSensitivity
 } from "../../../../shared/contracts";
 import {
   BROWSER_PROVIDER_COLORS,
+  keyboardPresetShortcuts,
+  shortcutsShareContext,
+  BUNDLED_CANVAS_BACKGROUND_IDS,
   CANVAS_LAUNCHER_ITEMS,
   DEFAULT_CANVAS_LAUNCHER_ITEMS,
   DEFAULT_RADIAL_LAUNCHER_ITEMS,
@@ -64,7 +83,13 @@ import {
   setHomeLauncherProviderEnabled
 } from "../../lib/providers";
 import { shortcutFromKeyboardEvent, shortcutFromPointerEvent } from "../../lib/shortcuts";
-import { t } from "../../lib/i18n";
+import { t, type TranslationKey } from "../../lib/i18n";
+import { formatBytes } from "../materials/materialCardModel";
+import {
+  createTerminalBorderSkinPreviewStyleController,
+  isCustomTerminalBorderSkinId,
+  normalizeTerminalBorderSkinList
+} from "../../lib/skinStyles";
 import { PluginSettingsSection } from "../plugins/PluginSettingsSection";
 import { HomeAppearanceSettings } from "../home/HomeAppearanceSettings";
 import {
@@ -74,23 +99,52 @@ import {
 } from "./appearanceSettings";
 import { CanvasNavigationShortcutEditor } from "./CanvasNavigationShortcutEditor";
 import { AgentHooksSettings } from "./AgentHooksSettings";
+import { PluginServicesSettings } from "./PluginServicesSettings";
+import { ProviderSecretsSettings } from "./ProviderSecretsSettings";
+import { ApiProfilesSettings } from "./ApiProfilesSettings";
 import { AboutSettings } from "./AboutSettings";
+import { UpdatesSettings } from "./UpdatesSettings";
 import { setCanvasLauncherItemEnabled } from "../launcher/canvasLauncher";
 import { itemLabel } from "../launcher/QuickRadialMenu";
 import { setRadialLauncherItemEnabled } from "../launcher/radialLauncher";
+import { Canvas2DSkinView } from "../skins/Canvas2DSkinView";
+import { isPixelSkinPackId, PILOT_SKIN_ASSETS } from "../skins/SkinAssets";
+import { isPixelSkinThemeId, pixelSkinAssetFilename } from "../skins/skinCatalog";
+import type { PixelSkinThemeId } from "../skins/skinCatalog";
+import type { SkinDetailLevel } from "../skins/SkinLayout";
+import { PixelSkinPackCreator } from "./PixelSkinPackCreator";
+import {
+  availableProfiles,
+  isDefaultLaunchProfile,
+  isolationAvailable,
+  resolveDefaultLaunchProfile
+} from "../../../../shared/autoMode";
 
-type SettingsSection = "general" | "appearance" | "agents" | "controls" | "browser" | "plugins" | "about";
+type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "browser" | "plugins" | "updates" | "about";
+
+const SHORTCUT_LABELS = {
+  home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
+  commandPalette: "keyboardPalette", openSettings: "settings", toggleDetail: "keyboardDetail",
+  focusUp: "keyboardFocusUp", focusDown: "keyboardFocusDown", focusLeft: "keyboardFocusLeft", focusRight: "keyboardFocusRight",
+  terminalCopy: "shortcutCopySelection", terminalPaste: "shortcutPaste", terminalSearch: "terminalSearch",
+  terminalRestart: "shortcutRestartExited", terminalPageUp: "keyboardPageUp", terminalPageDown: "keyboardPageDown",
+  codexSubmit: "keyboardSubmit", codexSubmitAlternate: "keyboardSubmitAlternate", codexSubmitSuper: "keyboardSubmitSuper",
+  codexNewline: "shortcutLineBreak", codexSelectAll: "keyboardSelectAll"
+} as const;
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
   id: SettingsSection;
   icon: UiIconName;
 }> = [
   { id: "general", icon: "app-window" },
+  { id: "keyboardShortcuts", icon: "sliders-horizontal" },
   { id: "appearance", icon: "palette" },
   { id: "agents", icon: "terminal" },
   { id: "controls", icon: "sliders-horizontal" },
+  { id: "externalIntegrations", icon: "blocks" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
+  { id: "updates", icon: "download" },
   { id: "about", icon: "info" }
 ];
 
@@ -106,13 +160,22 @@ const CANVAS_COLOR_PREVIEWS: Record<CanvasColorId, string> = {
   slate: "#262B36"
 };
 
+const DEFAULT_PROFILE_LABELS: Record<DefaultLaunchProfile, TranslationKey> = {
+  auto: "autoProfile",
+  acceptEdits: "acceptEditsProfile",
+  normal: "manualProfile",
+  plan: "planProfile"
+};
+
 interface SettingsPanelProps {
   open: boolean;
+  openUpdatesRequest: number;
   settings: AppSettings;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
   plugins: InstalledPlugin[];
   browser: BrowserSnapshot;
+  materialStorage: MaterialStorageUsage | null;
   onClose(): void;
   onChange(patch: Partial<AppSettings>): Promise<void>;
   onPreviewPlugin(sourceUrl: string): Promise<PluginInstallPreview>;
@@ -126,6 +189,8 @@ interface SettingsPanelProps {
   onSetPluginModules(pluginId: string, selectedModules: string[]): Promise<void>;
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onSetPluginHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<void>;
+  onSetPluginNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
+  onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
@@ -135,11 +200,13 @@ interface SettingsPanelProps {
 
 export function SettingsPanel({
   open,
+  openUpdatesRequest,
   settings,
   agentAvailability,
   onRecheckAgentClis,
   plugins,
   browser,
+  materialStorage,
   onClose,
   onChange,
   onPreviewPlugin,
@@ -153,6 +220,8 @@ export function SettingsPanel({
   onSetPluginModules,
   onSetPluginEnabled,
   onSetPluginHookEnabled,
+  onSetPluginNativeCodeTrusted,
+  onSetPluginDecisionsMayAllow,
   onUninstallPlugin,
   onOpenPluginContribution,
   onToggleHomeWidget,
@@ -163,7 +232,13 @@ export function SettingsPanel({
   const appearance = resolveAppearanceSettings(settings);
   const homeLauncherProviders = resolveHomeLauncherProviders(settings);
   const homeLimitProviders = resolveHomeLimitProviders(settings);
+  const containmentAvailable = isolationAvailable(settings, window.canvasTTY?.window?.platform ?? "");
   const [section, setSection] = useState<SettingsSection>("general");
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (openUpdatesRequest > 0) setSection("updates");
+  }, [openUpdatesRequest]);
   const [capturing, setCapturing] = useState<ShortcutAction | null>(null);
   const [shortcutError, setShortcutError] = useState<string | null>(null);
   const [activity, setActivity] = useState<BrowserActivityEvent[]>([]);
@@ -171,8 +246,36 @@ export function SettingsPanel({
   const [clearConfirm, setClearConfirm] = useState(false);
   const [clearingBrowserData, setClearingBrowserData] = useState(false);
   const [browserDataMessage, setBrowserDataMessage] = useState<string | null>(null);
+  const [pixelPacks, setPixelPacks] = useState<PixelSkinPackSummary[]>([]);
+  const [pixelPacksState, setPixelPacksState] = useState<"loading" | "ready" | "error">("loading");
+  const [defaultProfilesBusy, setDefaultProfilesBusy] = useState(false);
+  const defaultProfilesBusyRef = useRef(false);
+
+  useEffect(() => {
+    let active = true;
+    let revision = 0;
+    const refresh = async (): Promise<void> => {
+      const request = ++revision;
+      try {
+        const packs = await window.canvasTTY.pixelSkins.list();
+        if (!active || request !== revision) return;
+        setPixelPacks(packs);
+        setPixelPacksState("ready");
+      } catch {
+        if (active && request === revision) setPixelPacksState("error");
+      }
+    };
+    const unsubscribe = window.canvasTTY.pixelSkins.onChanged(() => void refresh());
+    void refresh();
+    return () => { active = false; unsubscribe(); };
+  }, []);
+
   const [checkingAgentClis, setCheckingAgentClis] = useState(false);
   const [agentCliError, setAgentCliError] = useState<string | null>(null);
+
+  useLayoutEffect(() => {
+    if (open && contentRef.current) contentRef.current.scrollTop = 0;
+  }, [open, section]);
 
   const openAgentInstall = (provider: AgentProviderId): void => {
     const url = PROVIDERS[provider].installUrl;
@@ -263,8 +366,14 @@ export function SettingsPanel({
   };
 
   const saveShortcut = async (action: ShortcutAction, shortcut: string): Promise<void> => {
+    if (!["home", "renameWindow", "toggleFullscreen"].includes(action) && shortcut.includes("Mouse")) {
+      setShortcutError(t(locale, "shortcutKeyboardOnly"));
+      return;
+    }
     const conflict = Object.entries(settings.shortcuts).find(
-      ([candidateAction, value]) => candidateAction !== action && value.toLowerCase() === shortcut.toLowerCase()
+      ([candidateAction, value]) => candidateAction !== action
+        && shortcutsShareContext(action, candidateAction as ShortcutAction)
+        && value.toLowerCase() === shortcut.toLowerCase()
     );
     const conflictsWithNavigation = settings.canvasNavigationOverride !== null
       && canvasOverrideBindingConflicts(settings.canvasNavigationOverride, shortcut);
@@ -277,7 +386,7 @@ export function SettingsPanel({
     }
 
     setShortcutError(null);
-    await onChange({ shortcuts: { ...settings.shortcuts, [action]: shortcut } });
+    await onChange({ keyboardPreset: "custom", shortcuts: { ...settings.shortcuts, [action]: shortcut } });
     setCapturing(null);
   };
 
@@ -320,6 +429,19 @@ export function SettingsPanel({
     void onChange({ canvasWheelCaptureMode: mode });
   };
 
+  const changeAgentDefaultProfile = (provider: AgentProviderId, profile: DefaultLaunchProfile | null): void => {
+    if (defaultProfilesBusyRef.current) return;
+    defaultProfilesBusyRef.current = true;
+    setDefaultProfilesBusy(true);
+    const defaultLaunchProfiles = { ...settings.defaultLaunchProfiles };
+    if (profile === null) delete defaultLaunchProfiles[provider];
+    else defaultLaunchProfiles[provider] = profile;
+    void onChange({ defaultLaunchProfiles }).finally(() => {
+      defaultProfilesBusyRef.current = false;
+      setDefaultProfilesBusy(false);
+    });
+  };
+
   const canvasOverrideBindingsMatch = settings.canvasWheelCaptureMode === "key"
     && settings.canvasWheelOverride !== null
     && settings.canvasNavigationOverride !== null
@@ -352,7 +474,11 @@ export function SettingsPanel({
                 aria-controls={`settings-panel-${id}`}
                 aria-selected={section === id}
                 title={t(locale, id)}
-                onClick={() => setSection(id)}
+                onClick={() => {
+                  setCapturing(null);
+                  setShortcutError(null);
+                  setSection(id);
+                }}
               >
                 <span className="settings-tabs__icon"><UiIcon name={icon} size="1.05em" /></span>
                 <span>{t(locale, id)}</span>
@@ -377,6 +503,7 @@ export function SettingsPanel({
 
           <div
             id={`settings-panel-${section}`}
+            ref={contentRef}
             className="settings-panel__content"
             role="tabpanel"
             aria-labelledby={`settings-tab-${section}`}
@@ -391,13 +518,27 @@ export function SettingsPanel({
                 />
               </SettingGroup>
               <SettingGroup
+                label={t(locale, "attentionNotifications")}
+                description={t(locale, "attentionNotificationsDescription")}
+              >
+                <Segmented
+                  value={settings.attentionNotifications ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ attentionNotifications: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup
                 label={t(locale, "terminalSessionRestore")}
                 description={t(locale, "terminalSessionRestoreDescription")}
               >
                 <Segmented
-                  value={settings.restoreTerminalSessions ? "save" : "discard"}
-                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
-                  onChange={(value) => void onChange({ restoreTerminalSessions: value === "save" })}
+                  value={settings.sessionRestoreMode}
+                  options={[
+                    ["off", t(locale, "doNotSave")],
+                    ["reopen", t(locale, "sessionRestoreReopen")],
+                    ["continue", t(locale, "sessionRestoreContinue")]
+                  ]}
+                  onChange={(value) => void onChange({ sessionRestoreMode: value as SessionRestoreMode })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "persistCanvasRegions")}>
@@ -414,6 +555,88 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ persistStickyNotes: value === "save" })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "persistMaterials")}
+                description={materialStorage ? `${t(locale, "materialStorageUsed")} ${formatBytes(materialStorage.usedBytes, locale)} / ${formatBytes(materialStorage.limitBytes, locale)}. ${t(locale, "materialStorageRetention")}` : undefined}
+              >
+                <Segmented
+                  value={settings.persistMaterials ? "save" : "discard"}
+                  options={[["discard", t(locale, "doNotSave")], ["save", t(locale, "saveAndContinue")]]}
+                  onChange={(value) => void onChange({ persistMaterials: value === "save" })}
+                />
+              </SettingGroup>
+            </>
+          )}
+
+          {section === "keyboardShortcuts" && (
+            <>
+              <SettingGroup label={t(locale, "keyboardPreset")} description={t(locale, "keyboardPresetDescription")}>
+                <Segmented
+                  value={settings.keyboardPreset}
+                  options={[["macos", "macOS"], ["windows", "Windows"], ["linux", "Linux"], ["custom", t(locale, "keyboardCustom")]]}
+                  onChange={(value) => {
+                    const keyboardPreset = value as KeyboardPreset;
+                    setCapturing(null);
+                    setShortcutError(null);
+                    void onChange({ keyboardPreset, ...(keyboardPreset === "custom" ? {} : {
+                      shortcuts: keyboardPresetShortcuts(keyboardPreset),
+                      canvasWheelOverride: keyboardPreset === "macos" ? "Meta" : "Ctrl",
+                      canvasNavigationOverride: "Alt"
+                    }) });
+                  }}
+                />
+              </SettingGroup>
+              <div className="keyboard-shortcuts">
+                <p>{t(locale, "keyboardCaptureHint")}</p>
+                {([
+                  ["keyboardCanvas", ["home", "renameWindow", "toggleFullscreen", "commandPalette", "openSettings", "focusUp", "focusDown", "focusLeft", "focusRight", "toggleDetail"]],
+                  ["keyboardTerminal", ["terminalCopy", "terminalPaste", "terminalSearch", "terminalRestart", "terminalPageUp", "terminalPageDown"]],
+                  ["keyboardCodex", ["codexSubmit", "codexSubmitAlternate", "codexSubmitSuper", "codexNewline", "codexSelectAll"]]
+                ] as const).map(([group, actions]) => (
+                  <div key={group}>
+                    <h3>{t(locale, group)}</h3>
+                    {actions.map((action) => (
+                      <ShortcutRow
+                        key={action}
+                        label={t(locale, SHORTCUT_LABELS[action])}
+                        value={settings.shortcuts[action].replace("Meta", window.canvasTTY.window.isMacOS ? "Command" : "Super") || t(locale, "disabled")}
+                        capturing={capturing === action}
+                        onStart={() => { setShortcutError(null); setCapturing(action); }}
+                        onKeyDown={(event) => captureShortcut(action, event)}
+                        onPointerDown={(event) => capturePointerShortcut(action, event)}
+                        disableLabel={t(locale, "disabled")}
+                        onDisable={["codexSubmit", "codexNewline", "codexSelectAll"].includes(action) ? undefined : () => {
+                          setCapturing(null);
+                          setShortcutError(null);
+                          void onChange({ keyboardPreset: "custom", shortcuts: { ...settings.shortcuts, [action]: "" } });
+                        }}
+                      />
+                    ))}
+                  </div>
+                ))}
+                <SettingGroup label={t(locale, "canvasWheelCapture")} description={t(locale, "canvasWheelCaptureDescription")}>
+                  <Segmented value={settings.canvasWheelCaptureMode}
+                    options={[["off", "Off"], ["always", "On"], ["key", "Key"]]}
+                    onChange={(value) => changeCanvasWheelCaptureMode(value as CanvasWheelCaptureMode)} />
+                  {settings.canvasWheelCaptureMode === "key" && (
+                    <CanvasNavigationShortcutEditor open={open} locale={locale}
+                      label={t(locale, "canvasWheelOverride")} binding={settings.canvasWheelOverride}
+                      actionShortcuts={Object.values(settings.shortcuts)} allowDisable={false}
+                      onCaptureStart={() => { setCapturing(null); setShortcutError(null); }}
+                      onChange={(canvasWheelOverride) => onChange({ keyboardPreset: "custom", canvasWheelOverride })} />
+                  )}
+                  {canvasOverrideBindingsMatch && <p className="shortcut-editor__warning">{t(locale, "canvasOverrideBindingsMatch")}</p>}
+                </SettingGroup>
+                <SettingGroup label={t(locale, "canvasNavigationOverride")} description={t(locale, "canvasNavigationOverrideDescription")}>
+                  <CanvasNavigationShortcutEditor open={open} locale={locale}
+                    label={t(locale, "canvasNavigationOverride")} binding={settings.canvasNavigationOverride}
+                    actionShortcuts={Object.values(settings.shortcuts)} allowDisable
+                    onCaptureStart={() => { setCapturing(null); setShortcutError(null); }}
+                    onChange={(canvasNavigationOverride) => onChange({ keyboardPreset: "custom", canvasNavigationOverride })} />
+                </SettingGroup>
+                {shortcutError && <p className="shortcut-editor__error" role="alert">{shortcutError}</p>}
+                <p>{t(locale, "keyboardCodexDescription")}</p>
+              </div>
             </>
           )}
 
@@ -474,9 +697,20 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ sessionRowColorMode: value as SessionRowColorMode })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "canvasPattern")}
+                description={locale === "ru" ? "Если выбран фон-картинка, рисунок канваса не применяется." : "The canvas pattern is not applied when a background image is selected."}
+              >
+                <Segmented
+                  value={settings.pattern}
+                  options={(["dots", "grid", "waves", "diagonal", "rings", "none"] as CanvasPatternId[]).map((value) => [value, t(locale, value)])}
+                  wrap
+                  onChange={(value) => void onChange({ pattern: value as CanvasPatternId })}
+                />
+              </SettingGroup>
               <SettingGroup label={t(locale, "canvasColor")}>
                 <SwatchChoices
-                  value={appearance.canvasColor}
+                  value={settings.canvasBackground === "none" ? appearance.canvasColor : ""}
                   columns={4}
                   options={([
                     ["sage", t(locale, "sage")],
@@ -489,15 +723,45 @@ export function SettingsPanel({
                   ] as [CanvasColorId, string][]).map(([value, label]) => (
                     [value, label, [CANVAS_COLOR_PREVIEWS[value]]]
                   ))}
-                  onChange={(value) => void onChange(canvasColorPatch(value as CanvasColorId))}
+                  onChange={(value) => void onChange({ ...canvasColorPatch(value as CanvasColorId), canvasBackground: "none" })}
                 />
               </SettingGroup>
-              <SettingGroup label={t(locale, "canvasPattern")}>
+              <SettingGroup
+                label={locale === "ru" ? "Пиксельные фоны" : "Pixel backgrounds"}
+                description={locale === "ru" ? "Только фон Canvas. Рамки терминалов выбираются отдельно ниже." : "Canvas background only. Choose terminal borders separately below."}
+                layout="stacked"
+              >
+                <CanvasBackgroundChoices locale={locale} value={settings.canvasBackground} pixelPacks={pixelPacks}
+                  onChange={(canvasBackground) => void onChange({ canvasBackground })} />
+                {pixelPacksState !== "ready" && <small role="status">{pixelPacksState === "loading"
+                  ? (locale === "ru" ? "Загрузка пользовательских фонов…" : "Loading custom backgrounds…")
+                  : (locale === "ru" ? "Не удалось загрузить пользовательские фоны." : "Custom backgrounds could not be loaded.")}</small>}
+              </SettingGroup>
+              <SettingGroup label={t(locale, "terminalBorderSkin")} layout="stacked"
+                description={locale === "ru" ? "Только оформление окон. Выбранный фон Canvas сохранится." : "Window appearance only. Your Canvas background stays selected."}>
+                <BorderSkinChoices
+                  locale={locale}
+                  value={settings.terminalBorderSkin}
+                  pixelPacks={pixelPacks}
+                  onPackCreated={(pack) => setPixelPacks((current) => current.some((item) => item.id === pack.id) ? current : [...current, pack])}
+                  onChange={(terminalBorderSkin) => void onChange({ terminalBorderSkin })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "terminalSkinDetail")}>
                 <Segmented
-                  value={settings.pattern}
-                  options={(["dots", "grid", "waves", "diagonal", "rings", "none"] as CanvasPatternId[]).map((value) => [value, t(locale, value)])}
-                  wrap
-                  onChange={(value) => void onChange({ pattern: value as CanvasPatternId })}
+                  value={settings.terminalSkinDetail}
+                  options={[
+                    ["minimal", t(locale, "terminalSkinDetailMinimal")],
+                    ["detailed", t(locale, "terminalSkinDetailDetailed")]
+                  ]}
+                  onChange={(terminalSkinDetail) => void onChange({ terminalSkinDetail: terminalSkinDetail as PixelSkinPreferredDetail })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "appSkin")} layout="stacked">
+                <AppSkinChoices
+                  locale={locale}
+                  value={settings.appSkin}
+                  onChange={(appSkin) => void onChange({ appSkin })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "uiScale")} description={t(locale, "uiScaleDescription")}>
@@ -543,6 +807,59 @@ export function SettingsPanel({
                   onChange={(canvasControlsPlacement) => void onChange({ canvasControlsPlacement })}
                 />
               </SettingGroup>
+              <SettingGroup
+                label={t(locale, "attentionQueue")}
+                description={t(locale, "attentionQueueDescription")}
+              >
+                <Segmented
+                  value={settings.attentionQueueVisible ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ attentionQueueVisible: value === "on" })}
+                />
+              </SettingGroup>
+              {settings.attentionQueueVisible && (
+                <SettingGroup layout="stacked" label={t(locale, "attentionQueuePlacement")}>
+                  <PlacementChoices
+                    value={settings.attentionQueuePlacement}
+                    locale={locale}
+                    onChange={(attentionQueuePlacement) => void onChange({ attentionQueuePlacement })}
+                  />
+                </SettingGroup>
+              )}
+              <SettingGroup label={t(locale, "agentChatHistory")} description={t(locale, "agentChatHistoryDescription")}>
+                <Segmented
+                  value={settings.agentChatHistoryVisible ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ agentChatHistoryVisible: value === "on" })}
+                />
+              </SettingGroup>
+              {settings.agentChatHistoryVisible && (
+                <SettingGroup label={t(locale, "agentChatHistoryExpandMode")}>
+                  <Segmented value={settings.agentChatHistoryExpandMode}
+                    options={[["hover", t(locale, "agentChatHistoryExpandHover")], ["click", t(locale, "agentChatHistoryExpandClick")]]}
+                    onChange={(agentChatHistoryExpandMode: AppSettings["agentChatHistoryExpandMode"]) => void onChange({ agentChatHistoryExpandMode })} />
+                </SettingGroup>
+              )}
+              {settings.agentChatHistoryVisible && (
+                <SettingGroup label={t(locale, "agentChatHistoryPlacement")} layout="stacked">
+                  <PlacementChoices value={settings.agentChatHistoryPlacement} locale={locale}
+                    onChange={(agentChatHistoryPlacement) => void onChange({ agentChatHistoryPlacement })} />
+                </SettingGroup>
+              )}
+              {settings.agentChatHistoryVisible && (
+                <>
+                  <SettingGroup label={t(locale, "agentChatHistorySearchAgents")} layout="stacked">
+                    <Segmented value={settings.agentChatHistorySearchAgents}
+                      options={[["current", t(locale, "agentChatHistorySearchCurrentAgent")], ["all", t(locale, "agentChatHistorySearchAllAgents")]]}
+                      onChange={(agentChatHistorySearchAgents: AppSettings["agentChatHistorySearchAgents"]) => void onChange({ agentChatHistorySearchAgents })} />
+                  </SettingGroup>
+                  <SettingGroup label={t(locale, "agentChatHistorySearchSessions")} layout="stacked">
+                    <Segmented value={settings.agentChatHistorySearchSessions}
+                      options={[["filtered", t(locale, "agentChatHistorySearchFiltered")], ["all", t(locale, "agentChatHistoryActivityAll")]]}
+                      onChange={(agentChatHistorySearchSessions: AppSettings["agentChatHistorySearchSessions"]) => void onChange({ agentChatHistorySearchSessions })} />
+                  </SettingGroup>
+                </>
+              )}
               <HomeAppearanceSettings
                 settings={settings}
                 plugins={plugins}
@@ -554,18 +871,129 @@ export function SettingsPanel({
 
           {section === "agents" && (
             <>
-              <div className="agent-cli-recheck">
-                <button className="setting-inline-action" type="button" disabled={checkingAgentClis} onClick={() => void recheckAgentClis()}>
-                  {t(locale, checkingAgentClis ? "agentCliRechecking" : "agentCliRecheck")}
-                </button>
-                {agentCliError && <span role="alert">{agentCliError}</span>}
-              </div>
+              <ExecutionTargetSettings settings={settings} locale={locale} onChange={onChange}/>
+              <SettingGroup layout="stacked" label={t(locale, "agentCliDetection")} description={t(locale, "agentCliDetectionDescription")}>
+                <div className="agent-cli-recheck">
+                  <button className="setting-inline-action" type="button" disabled={checkingAgentClis} onClick={() => void recheckAgentClis()}>
+                    {t(locale, checkingAgentClis ? "agentCliRechecking" : "agentCliRecheck")}
+                  </button>
+                  {agentCliError && <span role="alert">{agentCliError}</span>}
+                </div>
+              </SettingGroup>
+              <SettingGroup
+                label={t(locale, "baseProtection")}
+                description={t(locale, "baseProtectionDescription")}
+              >
+                <Segmented
+                  value={settings.baseProtectionEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ baseProtectionEnabled: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "agentIsolation")} description={t(locale, "agentIsolationDescription")}>
+                <Segmented
+                  value={settings.agentIsolation === "off" ? "off" : "on"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ agentIsolation: value === "off" ? "off" : "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "defaultLaunchProfile")} description={t(locale, "defaultLaunchProfileDescription")}>
+                <Segmented
+                  value={settings.defaultLaunchProfile ?? "auto"}
+                  options={[["auto", t(locale, "autoProfile")], ["acceptEdits", t(locale, "acceptEditsProfile")], ["normal", t(locale, "manualProfile")], ["plan", t(locale, "planProfile")]]}
+                  onChange={(value) => void onChange({ defaultLaunchProfile: value as AppSettings["defaultLaunchProfile"] })}
+                />
+              </SettingGroup>
+              <SettingGroup
+                layout="stacked"
+                label={t(locale, "agentDefaultLaunchProfiles")}
+                description={t(locale, "agentDefaultLaunchProfilesDescription")}
+              >
+                <div className="agent-launcher-settings">
+                  {AGENT_PROVIDERS.map((provider) => {
+                    const savedProfile = settings.defaultLaunchProfiles?.[provider];
+                    const available = availableProfiles(provider, containmentAvailable)
+                      .filter(isDefaultLaunchProfile);
+                    const actualProfile = resolveDefaultLaunchProfile(provider, settings, containmentAvailable);
+                    const desiredProfile = isDefaultLaunchProfile(savedProfile)
+                      ? savedProfile
+                      : settings.defaultLaunchProfile;
+                    const fallback = !available.includes(desiredProfile);
+                    const selected = isDefaultLaunchProfile(savedProfile)
+                      ? (available.includes(savedProfile) ? savedProfile : actualProfile)
+                      : "inherit";
+                    return (
+                      <div className="agent-launcher-settings__row" key={provider}>
+                        <span className="agent-launcher-settings__identity">
+                          <ProviderIcon provider={provider} size="small" />
+                          <strong>{PROVIDERS[provider].label}</strong>
+                          {fallback && <small>{t(locale, "defaultLaunchProfileFallback").replace("{profile}", t(locale, DEFAULT_PROFILE_LABELS[actualProfile]))}</small>}
+                        </span>
+                        <Segmented
+                          value={selected}
+                          wrap
+                          disabled={defaultProfilesBusy}
+                          options={[
+                            ["inherit", t(locale, "inheritDefaultLaunchProfile")],
+                            ...available.map((profile) => [profile, t(locale, DEFAULT_PROFILE_LABELS[profile])] as [string, string])
+                          ]}
+                          onChange={(value) => changeAgentDefaultProfile(
+                            provider,
+                            value === "inherit" ? null : value as DefaultLaunchProfile
+                          )}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </SettingGroup>
+              <SettingGroup label={t(locale, "orchestrationMaxDepth")} description={t(locale, "orchestrationMaxDepthDescription")}>
+                <Segmented
+                  value={String(settings.orchestrationMaxDepth ?? 2)}
+                  options={[["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"]]}
+                  onChange={(value) => void onChange({ orchestrationMaxDepth: Number(value) })}
+                />
+              </SettingGroup>
+              <SettingGroup label={t(locale, "orchestrationMaxSubagents")} description={t(locale, "orchestrationMaxSubagentsDescription")}>
+                <Segmented
+                  value={String(settings.orchestrationMaxSubagents ?? 8)}
+                  options={[...new Set([2, 4, 8, 16, 32, settings.orchestrationMaxSubagents ?? 8])].sort((a, b) => a - b).map((count) => [String(count), String(count)] as [string, string])}
+                  onChange={(value) => void onChange({ orchestrationMaxSubagents: Number(value) })}
+                />
+              </SettingGroup>
               <AgentHooksSettings
                 settings={settings}
                 plugins={plugins}
                 onChange={onChange}
                 onSetPluginHookEnabled={onSetPluginHookEnabled}
               />
+              <PluginServicesSettings
+                locale={locale}
+                plugins={plugins}
+                open={open}
+                onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
+                onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
+              />
+              <SettingGroup
+                label={t(locale, "experimentalBacklogEnabled")}
+                description={t(locale, "experimentalBacklogEnabledDescription")}
+              >
+                <Segmented
+                  value={settings.experimentalBacklogEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ experimentalBacklogEnabled: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup
+                label={t(locale, "agentControlEnabled")}
+                description={t(locale, "agentControlEnabledDescription")}
+              >
+                <Segmented
+                  value={settings.agentControlEnabled ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ agentControlEnabled: value === "on" })}
+                />
+              </SettingGroup>
               <SettingGroup
                 layout="stacked"
                 label={t(locale, "canvasLauncherItems")}
@@ -591,7 +1019,7 @@ export function SettingsPanel({
                             !enabled
                           )
                         })}
-                      >{PROVIDERS[item].label}</CanvasMenuRow>
+                      ><span className="canvas-menu__provider"><ProviderIcon provider={item} size="small" />{PROVIDERS[item].label}</span></CanvasMenuRow>
                     );
                   })}
                   <CanvasMenuDivider />
@@ -607,6 +1035,7 @@ export function SettingsPanel({
                 label={t(locale, "quickLauncher")}
                 description={t(locale, "quickLauncherDescription")}
               >
+                <div className="quick-launcher-settings">
                 <Segmented
                   value={settings.radialLauncherEnabled ? "on" : "off"}
                   options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
@@ -634,7 +1063,9 @@ export function SettingsPanel({
                             !enabled
                           )
                         })}
-                      >{itemLabel(locale, item)}</CanvasMenuRow>
+                      >{item === "note" || item === "browser" || item === "settings"
+                        ? itemLabel(locale, item)
+                        : <span className="canvas-menu__provider"><ProviderIcon provider={item} size="small" />{itemLabel(locale, item)}</span>}</CanvasMenuRow>
                     );
                   })}
                   <CanvasMenuDivider />
@@ -643,6 +1074,7 @@ export function SettingsPanel({
                     muted
                     onClick={() => void onChange({ radialLauncherItems: [...DEFAULT_RADIAL_LAUNCHER_ITEMS] })}
                   >{t(locale, "useDefaults")}</CanvasMenuRow>
+                </div>
                 </div>
               </SettingGroup>
               <SettingGroup
@@ -707,12 +1139,29 @@ export function SettingsPanel({
                   })}
                 </div>
               </SettingGroup>
+              <SettingGroup
+                layout="stacked"
+                label={t(locale, "providerApiKeys")}
+                description={t(locale, "providerApiKeysDescription")}
+              >
+                <ProviderSecretsSettings locale={locale} />
+              </SettingGroup>
+              <SettingGroup
+                layout="stacked"
+                label={t(locale, "apiProfiles")}
+                description={t(locale, "apiProfilesDescription")}
+              >
+                <ApiProfilesSettings settings={settings} onChange={onChange} />
+              </SettingGroup>
             </>
+          )}
+
+          {section === "externalIntegrations" && (
+            <EvenG2Controls locale={locale} open={open} />
           )}
 
           {section === "controls" && (
             <>
-              <EvenG2Controls locale={locale} />
               <SettingGroup label={t(locale, "focusActivation")}>
                 <Segmented
                   value={settings.focusActivation}
@@ -789,50 +1238,22 @@ export function SettingsPanel({
                   onChange={(value) => void onChange({ useScrollWheelToZoom: value === "on" })}
                 />
               </SettingGroup>
-              <SettingGroup
-                label={t(locale, "canvasWheelCapture")}
-                description={t(locale, "canvasWheelCaptureDescription")}
-              >
+              <SettingGroup label={t(locale, "copyOnSelect")} description={t(locale, "copyOnSelectDescription")}>
                 <Segmented
-                  value={settings.canvasWheelCaptureMode}
-                  options={[["off", "Off"], ["always", "On"], ["key", "Key"]]}
-                  onChange={(value) => changeCanvasWheelCaptureMode(value as CanvasWheelCaptureMode)}
+                  value={settings.copyOnSelect ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ copyOnSelect: value === "on" })}
                 />
-                {settings.canvasWheelCaptureMode === "key" && (
-                  <CanvasNavigationShortcutEditor
-                    open={open}
-                    locale={locale}
-                    label={t(locale, "canvasWheelOverride")}
-                    binding={settings.canvasWheelOverride}
-                    actionShortcuts={Object.values(settings.shortcuts)}
-                    allowDisable={false}
-                    onCaptureStart={() => {
-                      setCapturing(null);
-                      setShortcutError(null);
-                    }}
-                    onChange={(canvasWheelOverride) => onChange({ canvasWheelOverride })}
-                  />
-                )}
-                {canvasOverrideBindingsMatch && (
-                  <p className="shortcut-editor__warning">{t(locale, "canvasOverrideBindingsMatch")}</p>
-                )}
               </SettingGroup>
-              <SettingGroup
-                label={t(locale, "canvasNavigationOverride")}
-                description={t(locale, "canvasNavigationOverrideDescription")}
-              >
-                <CanvasNavigationShortcutEditor
-                  open={open}
-                  locale={locale}
-                  label={t(locale, "canvasNavigationOverride")}
-                  binding={settings.canvasNavigationOverride}
-                  actionShortcuts={Object.values(settings.shortcuts)}
-                  allowDisable
-                  onCaptureStart={() => {
-                    setCapturing(null);
-                    setShortcutError(null);
-                  }}
-                  onChange={(canvasNavigationOverride) => onChange({ canvasNavigationOverride })}
+              <SettingGroup label={t(locale, "terminalLinkOpenMode")} description={t(locale, "terminalLinkOpenModeDescription")}>
+                <Segmented
+                  value={settings.terminalLinkOpenMode}
+                  options={[
+                    ["canvas", "CanvasTTY"],
+                    ["external", t(locale, "terminalLinkOpenExternal")],
+                    ["ask", t(locale, "terminalLinkOpenAsk")]
+                  ]}
+                  onChange={(value) => void onChange({ terminalLinkOpenMode: value as TerminalLinkOpenMode })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "terminalWheelDirection")}>
@@ -848,38 +1269,6 @@ export function SettingsPanel({
                   options={[["normal", t(locale, "wheelNormal")], ["inverted", t(locale, "wheelInverted")]]}
                   onChange={(value) => void onChange({ invertCanvasWheel: value === "inverted" })}
                 />
-              </SettingGroup>
-              <SettingGroup label={t(locale, "homeShortcut")} description={t(locale, "homeShortcutDescription")}>
-                <ShortcutRow
-                  label={t(locale, "shortcutBinding")}
-                  value={settings.shortcuts.home}
-                  capturing={capturing === "home"}
-                  onStart={() => {
-                    setShortcutError(null);
-                    setCapturing("home");
-                  }}
-                  onKeyDown={(event) => captureShortcut("home", event)}
-                  onPointerDown={(event) => capturePointerShortcut("home", event)}
-                />
-                {shortcutError && capturing === "home" && (
-                  <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
-                )}
-              </SettingGroup>
-              <SettingGroup label={t(locale, "renameWindow")} description={t(locale, "renameWindowDescription")}>
-                <ShortcutRow
-                  label={t(locale, "shortcutBinding")}
-                  value={settings.shortcuts.renameWindow}
-                  capturing={capturing === "renameWindow"}
-                  onStart={() => {
-                    setShortcutError(null);
-                    setCapturing("renameWindow");
-                  }}
-                  onKeyDown={(event) => captureShortcut("renameWindow", event)}
-                  onPointerDown={(event) => capturePointerShortcut("renameWindow", event)}
-                />
-                {shortcutError && capturing === "renameWindow" && (
-                  <p className="shortcut-editor__error" role="alert">{shortcutError}</p>
-                )}
               </SettingGroup>
             </>
           )}
@@ -914,6 +1303,16 @@ export function SettingsPanel({
                   value={settings.browserRestoreTabs ? "on" : "off"}
                   options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
                   onChange={(value) => void onChange({ browserRestoreTabs: value === "on" })}
+                />
+              </SettingGroup>
+              <SettingGroup
+                label={t(locale, "browserPauseHiddenTabs")}
+                description={t(locale, "browserPauseHiddenTabsDescription")}
+              >
+                <Segmented
+                  value={settings.browserPauseHiddenTabs ? "on" : "off"}
+                  options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                  onChange={(value) => void onChange({ browserPauseHiddenTabs: value === "on" })}
                 />
               </SettingGroup>
               <SettingGroup label={t(locale, "browserDownloads")}>
@@ -952,6 +1351,7 @@ export function SettingsPanel({
 
           {section === "plugins" && (
             <PluginSettingsSection
+              open={open}
               settings={settings}
               plugins={plugins}
               onPreviewPlugin={onPreviewPlugin}
@@ -969,6 +1369,10 @@ export function SettingsPanel({
               onOpenPluginContribution={onOpenPluginContribution}
             />
           )}
+
+            {section === "updates" && (
+              <UpdatesSettings locale={locale} />
+            )}
 
             {section === "about" && <AboutSettings locale={locale} />}
           </div>
@@ -1133,7 +1537,9 @@ function ShortcutRow({
   capturing,
   onStart,
   onKeyDown,
-  onPointerDown
+  onPointerDown,
+  onDisable,
+  disableLabel
 }: {
   label: string;
   value: string;
@@ -1141,9 +1547,11 @@ function ShortcutRow({
   onStart(): void;
   onKeyDown(event: React.KeyboardEvent<HTMLButtonElement>): void;
   onPointerDown(event: React.PointerEvent<HTMLButtonElement>): void;
+  onDisable?(): void;
+  disableLabel?: string;
 }): React.JSX.Element {
   return (
-    <div className="shortcut-editor__row">
+    <div className={onDisable ? "shortcut-editor__row shortcut-editor__row--disable" : "shortcut-editor__row"}>
       <span>{label}</span>
       <button
         className={capturing ? "shortcut-editor__key shortcut-editor__key--capturing" : "shortcut-editor__key"}
@@ -1157,6 +1565,10 @@ function ShortcutRow({
           if (capturing) onKeyDown(event);
         }}
       >{capturing ? "…" : value}</button>
+      {onDisable && <button className="shortcut-editor__key shortcut-editor__disable" type="button"
+        aria-label={`${disableLabel}: ${label}`} title={disableLabel} onClick={onDisable}>
+        <UiIcon name="close" size="1em" />
+      </button>}
     </div>
   );
 }
@@ -1216,11 +1628,13 @@ function Segmented({
   value,
   options,
   wrap = false,
+  disabled = false,
   onChange
 }: {
   value: string;
   options: [string, string][];
   wrap?: boolean;
+  disabled?: boolean;
   onChange(value: string): void;
 }): React.JSX.Element {
   return (
@@ -1230,8 +1644,417 @@ function Segmented({
           className={value === optionValue ? "segmented__button segmented__button--active" : "segmented__button"}
           type="button"
           key={optionValue}
+          disabled={disabled}
           onClick={() => onChange(optionValue)}
         >{label}</button>
+      ))}
+    </div>
+  );
+}
+
+const BACKGROUND_ASSETS = import.meta.glob<string>("../../assets/theme-backgrounds/*.avif", {
+  eager: true, query: "?url", import: "default"
+});
+
+function CanvasBackgroundChoices({ locale, value, pixelPacks, onChange }: {
+  locale: LocaleId;
+  value: CanvasBackgroundId;
+  pixelPacks: PixelSkinPackSummary[];
+  onChange(value: CanvasBackgroundId): void;
+}): React.JSX.Element {
+  const labelKeys = {
+    sakura: "borderSkinSakura", matrix: "borderSkinMatrix", "forest-cabin": "borderSkinForestCabin",
+    "gold-black": "borderSkinGoldBlack", cat: "borderSkinCat", "gothic-eclipse": "borderSkinGothicEclipse"
+  } as const;
+  return <div className="border-skin-choices" role="group" aria-label={locale === "ru" ? "Пиксельные фоны" : "Pixel backgrounds"}>
+    <button type="button" className="pixel-pack-create" aria-pressed={value === "none"} onClick={() => onChange("none")}>
+      {locale === "ru" ? "Без картинки — выбранный цвет и узор" : "No image — selected color and pattern"}
+    </button>
+    {BUNDLED_CANVAS_BACKGROUND_IDS.map((id) => <button key={id} type="button" className="border-skin-choice"
+      aria-pressed={value === id} onClick={() => onChange(id)}>
+      <span className="border-skin-preview border-skin-preview--pixel canvas-background-preview" aria-hidden="true">
+        <img src={BACKGROUND_ASSETS[`../../assets/theme-backgrounds/${id}.avif`]} alt="" loading="lazy" />
+      </span>
+      <span className="border-skin-choice__label">{t(locale, labelKeys[id])}</span>
+    </button>)}
+    {pixelPacks.map((pack) => <button key={pack.id} type="button" className="border-skin-choice"
+      aria-pressed={value === pack.id} onClick={() => onChange(pack.id)}>
+      <span className="border-skin-preview border-skin-preview--pixel canvas-background-preview" aria-hidden="true">
+        <PixelSkinPackThumbnail id={pack.id} slot="background" />
+      </span>
+      <span className="border-skin-choice__label">{pack.name}</span>
+    </button>)}
+    {isPixelSkinPackId(value) && !pixelPacks.some((pack) => pack.id === value) && <small role="status">
+      {locale === "ru" ? "Выбранный пользовательский фон недоступен." : "The selected custom background is unavailable."}
+    </small>}
+  </div>;
+}
+
+function BorderSkinChoices({
+  locale,
+  value,
+  pixelPacks,
+  onPackCreated,
+  onChange
+}: {
+  locale: LocaleId;
+  value: TerminalBorderSkinId;
+  pixelPacks: PixelSkinPackSummary[];
+  onPackCreated(pack: PixelSkinPackSummary): void;
+  onChange(value: TerminalBorderSkinId): void;
+}): React.JSX.Element {
+  const [customSkins, setCustomSkins] = useState<TerminalBorderSkinListItem[]>([]);
+  const [customSkinsLoadState, setCustomSkinsLoadState] = useState<"loading" | "ready" | "error">("loading");
+  useEffect(() => {
+    let active = true;
+    let requestRevision = 0;
+    const refresh = async (): Promise<void> => {
+      const revision = ++requestRevision;
+      try {
+        const response: unknown = await window.canvasTTY.skins.list();
+        if (!Array.isArray(response) || response.some((item) => item && typeof item === "object"
+          && (item as Record<string, unknown>).id === "custom:skin-registry"
+          && (item as Record<string, unknown>).status === "error")) throw new Error("Skin registry unavailable.");
+        const items = normalizeTerminalBorderSkinList(response);
+        if (!active || revision !== requestRevision) return;
+        setCustomSkins(items);
+        setCustomSkinsLoadState("ready");
+      } catch {
+        if (!active || revision !== requestRevision) return;
+        setCustomSkins([]);
+        setCustomSkinsLoadState("error");
+      }
+    };
+
+    let unsubscribe = (): void => undefined;
+    try {
+      unsubscribe = window.canvasTTY.skins.onChanged(() => void refresh());
+    } catch {
+      setCustomSkinsLoadState("error");
+    }
+    void refresh();
+    return () => {
+      active = false;
+      requestRevision += 1;
+      unsubscribe();
+    };
+  }, []);
+
+  const choices: readonly [TerminalBorderSkinId, Parameters<typeof t>[1]][] = [
+    ["classic", "borderSkinClassic"],
+    ["minimal", "borderSkinMinimal"],
+    ["glass", "borderSkinGlass"],
+    ["cyber", "borderSkinCyber"],
+    ["nord", "borderSkinNord"],
+    ["gradient", "borderSkinGradient"],
+    ["cybercore", "borderSkinCybercore"],
+    ["titanium", "borderSkinTitanium"],
+    ["retro", "borderSkinRetro"],
+    ["sakura", "borderSkinSakura"],
+    ["matrix", "borderSkinMatrix"],
+    ["forest-cabin", "borderSkinForestCabin"],
+    ["gold-black", "borderSkinGoldBlack"],
+    ["cat", "borderSkinCat"],
+    ["gothic-eclipse", "borderSkinGothicEclipse"]
+  ];
+  const selectedCustomSkinId = isCustomTerminalBorderSkinId(value) ? value : null;
+  const selectedCustomSkin = customSkins.find((skin) => skin.id === selectedCustomSkinId);
+  const previewStyleController = useRef<ReturnType<typeof createTerminalBorderSkinPreviewStyleController> | null>(null);
+  useEffect(() => {
+    const controller = createTerminalBorderSkinPreviewStyleController(window.canvasTTY.skins, document);
+    previewStyleController.current = controller;
+    return () => {
+      controller.dispose();
+      previewStyleController.current = null;
+    };
+  }, []);
+  useEffect(() => {
+    const previewIds = customSkins.map((skin) => skin.id);
+    if (selectedCustomSkinId && !previewIds.includes(selectedCustomSkinId)) previewIds.push(selectedCustomSkinId);
+    previewStyleController.current?.setActive(previewIds);
+  }, [customSkins, selectedCustomSkinId]);
+  const customSkinStatus = (skin: TerminalBorderSkinListItem): string => skin.status === "ready"
+    ? t(locale, "borderSkinReady")
+    : t(locale, "borderSkinError");
+
+  return (
+    <div className="border-skin-choices" role="group" aria-label={t(locale, "terminalBorderSkin")}>
+      {choices.map(([skin, labelKey]) => {
+        const pixelTheme = isPixelSkinThemeId(skin) ? skin : null;
+        return (
+          <button
+            key={skin}
+            type="button"
+            className="border-skin-choice"
+            aria-pressed={value === skin}
+            onClick={() => onChange(skin)}
+          >
+            <span className={`border-skin-preview${pixelTheme ? " border-skin-preview--pixel" : ""}`} data-border-skin={skin} aria-hidden="true">
+              {pixelTheme
+                ? <PixelBorderSkinThumbnail theme={pixelTheme} />
+                : <>
+                    <span className="border-skin-preview__header"><i /><i /><i /></span>
+                    <span className="border-skin-preview__body"><i /><i /></span>
+                  </>}
+            </span>
+            <span className="border-skin-choice__label">{t(locale, labelKey)}</span>
+          </button>
+        );
+      })}
+      {customSkins.map((skin) => {
+        const label = skin.status === "ready" ? skin.name : (skin.name || skin.id.slice("custom:".length));
+        const status = customSkinStatus(skin);
+        return (
+          <button
+            key={skin.id}
+            type="button"
+            className="border-skin-choice border-skin-choice--custom"
+            aria-label={`${label}, ${status}`}
+            aria-pressed={value === skin.id}
+            disabled={skin.status === "error"}
+            onClick={() => skin.status === "ready" && onChange(skin.id)}
+          >
+            <CustomTerminalBorderSkinPreview skinId={skin.id} selected={value === skin.id} />
+            <span className="border-skin-choice__label">{label}</span>
+            <small role="status">{skin.status === "ready" ? status : `${status}: ${skin.error}`}</small>
+          </button>
+        );
+      })}
+      {pixelPacks.map((pack) => (
+        <button
+          key={pack.id}
+          type="button"
+          className="border-skin-choice"
+          aria-pressed={value === pack.id}
+          onClick={() => onChange(pack.id)}
+        >
+          <span className="border-skin-preview border-skin-preview--pixel" aria-hidden="true">
+            <PixelSkinPackThumbnail id={pack.id} />
+          </span>
+          <span className="border-skin-choice__label">{pack.name}</span>
+        </button>
+      ))}
+      <PixelSkinPackCreator locale={locale} onCreated={(pack) => {
+        onPackCreated(pack);
+        onChange(pack.id);
+      }} />
+      {selectedCustomSkinId && !selectedCustomSkin && (
+        <button
+          type="button"
+          className="border-skin-choice border-skin-choice--custom"
+          aria-label={`${selectedCustomSkinId}, ${t(locale, "borderSkinUnavailable")}`}
+          aria-pressed="true"
+          disabled
+        >
+          <CustomTerminalBorderSkinPreview skinId={selectedCustomSkinId} selected />
+          <span className="border-skin-choice__label">{selectedCustomSkinId.slice("custom:".length)}</span>
+          <small role="status">
+            {customSkinsLoadState === "loading"
+              ? t(locale, "borderSkinLoading")
+              : customSkinsLoadState === "error"
+                ? t(locale, "borderSkinListError")
+                : t(locale, "borderSkinUnavailable")}
+          </small>
+        </button>
+      )}
+      {(isPixelSkinThemeId(value) || isPixelSkinPackId(value)) && (
+        <PixelBorderSkinPreview
+          key={value}
+          locale={locale}
+          theme={value}
+        />
+      )}
+    </div>
+  );
+}
+
+function PixelSkinPackThumbnail({ id, slot = "detailed_idle" }: { id: PixelTerminalBorderSkinId; slot?: PixelSkinSlot }): React.JSX.Element {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    let objectUrl: string | null = null;
+    setUrl(null);
+    void window.canvasTTY.pixelSkins.readAsset(id, slot).then((bytes) => {
+      if (!active || !bytes) return;
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+      setUrl(objectUrl);
+    }).catch(() => { if (active) setUrl(null); });
+    return () => {
+      active = false;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [id, slot]);
+  return url ? <img src={url} alt="" /> : <span className="border-skin-preview__fallback" />;
+}
+
+function PixelBorderSkinThumbnail({ theme }: { theme: PixelSkinThemeId }): React.JSX.Element {
+  const filename = pixelSkinAssetFilename(theme, "detailed", "idle");
+  const url = filename ? PILOT_SKIN_ASSETS[filename] : undefined;
+  return url
+    ? <img src={url} alt="" loading="lazy" />
+    : <span className="border-skin-preview__fallback"><i /><i /></span>;
+}
+
+function PixelBorderSkinPreview({
+  locale,
+  theme,
+}: {
+  locale: LocaleId;
+  theme: PixelSkinThemeId | PixelTerminalBorderSkinId;
+}): React.JSX.Element {
+  const previewRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [detail, setDetail] = useState<Exclude<SkinDetailLevel, "overview">>("detailed");
+  const [status, setStatus] = useState<Extract<SessionStatus, "idle" | "working" | "done">>("idle");
+  const isRussian = locale === "ru";
+  const details: readonly [Exclude<SkinDetailLevel, "overview">, string, string][] = [
+    ["minimal", isRussian ? "Минимал" : "Minimal", isRussian ? "Минимал" : "Minimal"],
+    ["detailed", isRussian ? "Детальная" : "Detailed", isRussian ? "Детальная" : "Detailed"],
+    ["master", "Master", isRussian ? "Master — оформление оркестратора" : "Master — orchestrator appearance"]
+  ];
+  const states: readonly [Extract<SessionStatus, "idle" | "working" | "done">, string, string][] = [
+    ["idle", isRussian ? "Ожидание" : "Idle", isRussian ? "Ожидание" : "Idle"],
+    ["working", isRussian ? "Работа" : "Working", isRussian ? "Работа" : "Working"],
+    ["done", isRussian ? "Готово" : "Done", isRussian ? "Готово" : "Done"]
+  ];
+
+  useLayoutEffect(() => {
+    const element = previewRef.current;
+    if (!element) return;
+    const measure = (): void => {
+      const bounds = element.getBoundingClientRect();
+      setSize({ width: Math.round(bounds.width), height: Math.round(bounds.height) });
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    measure();
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div className="pixel-skin-preview-tools">
+      <div className="pixel-skin-preview-tools__heading">
+        <strong>{isRussian ? "Режим предпросмотра" : "Preview mode"}</strong>
+        <p>{isRussian ? "Переключатели ниже меняют только пример. Детализация рабочих окон задаётся в настройке «Детализация терминалов»." : "The controls below change only this example. Set live window detail in “Terminal detail”."}</p>
+        <p>{isRussian ? "Minimal — простая рамка, Detailed — детальная, Master — вариант для оформления оркестратора." : "Minimal is a simple border, Detailed adds decoration, and Master is the variant for an orchestrator window."}</p>
+      </div>
+      <div className="pixel-skin-preview-tools__groups">
+        <div className="pixel-skin-preview-tools__group" role="group" aria-label={isRussian ? "Детализация рамки" : "Border detail"}>
+          {details.map(([value, label, accessibleLabel]) => (
+            <button
+              key={value}
+              type="button"
+              aria-label={accessibleLabel}
+              aria-pressed={detail === value}
+              className={detail === value ? "pixel-skin-preview-tools__button pixel-skin-preview-tools__button--active" : "pixel-skin-preview-tools__button"}
+              onClick={() => setDetail(value)}
+            >{label}</button>
+          ))}
+        </div>
+        <div className="pixel-skin-preview-tools__group" role="group" aria-label={isRussian ? "Состояние предпросмотра" : "Preview state"}>
+          {states.map(([value, label, accessibleLabel]) => (
+            <button
+              key={value}
+              type="button"
+              aria-label={accessibleLabel}
+              aria-pressed={status === value}
+              className={status === value ? "pixel-skin-preview-tools__button pixel-skin-preview-tools__button--active" : "pixel-skin-preview-tools__button"}
+              onClick={() => setStatus(value)}
+            >{label}</button>
+          ))}
+        </div>
+      </div>
+      <div
+        ref={previewRef}
+        className="pixel-skin-preview-stage"
+        data-border-skin={theme}
+        data-detail={detail}
+        data-preview-state={status}
+        aria-label={`${theme}, ${details.find(([value]) => value === detail)?.[2]}, ${states.find(([value]) => value === status)?.[2]}`}
+      >
+        <div className="pixel-skin-preview-stage__screen" aria-hidden="true">
+          <span>user@canvas:~$</span><i />
+          {status === "working" && <span className="pixel-skin-preview-stage__activity">&gt; {isRussian ? "Работает…" : "Working…"}</span>}
+        </div>
+        {size.width > 0 && size.height > 0 && (
+          <Canvas2DSkinView
+            theme={theme}
+            status={status}
+            width={size.width}
+            height={size.height}
+            detail={detail}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CustomTerminalBorderSkinPreview({
+  skinId,
+  selected = false
+}: {
+  skinId: CustomTerminalBorderSkinId;
+  selected?: boolean;
+}): React.JSX.Element {
+  return (
+    <span
+      className={`border-skin-preview border-skin-preview--custom${selected ? " border-skin-preview--selected" : ""}`}
+      data-border-skin="classic"
+      data-custom-border-skin={skinId}
+      aria-hidden="true"
+    >
+      <span className="border-skin-preview__header">
+        <span className="border-skin-preview__controls"><i /><i /><i /></span>
+        <span className="border-skin-preview__actions" style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: ".2em" }}>
+          <i className="border-skin-preview__action" />
+          <i className="border-skin-preview__action" />
+        </span>
+      </span>
+      <span className="border-skin-preview__body border-skin-preview__surface"><i /><i /><i /></span>
+    </span>
+  );
+}
+
+function AppSkinChoices({
+  locale,
+  value,
+  onChange
+}: {
+  locale: LocaleId;
+  value: AppSkinId;
+  onChange(value: AppSkinId): void;
+}): React.JSX.Element {
+  const choices: readonly [AppSkinId, Parameters<typeof t>[1]][] = [
+    ["classic", "appSkinClassic"],
+    ["atelier", "appSkinAtelier"],
+    ["signal", "appSkinSignal"],
+    ["greenhouse", "appSkinGreenhouse"],
+    ["midnight", "appSkinMidnight"]
+  ];
+
+  return (
+    <div className="app-skin-choices">
+      {choices.map(([skin, labelKey]) => (
+        <button
+          key={skin}
+          type="button"
+          className="app-skin-choice"
+          aria-pressed={value === skin}
+          onClick={() => onChange(skin)}
+        >
+          <span className="app-skin-preview" data-preview-skin={skin} aria-hidden="true">
+            <span className="app-skin-preview__chrome"><i className="app-skin-preview__dot" /></span>
+            <span className="app-skin-preview__body">
+              <i className="app-skin-preview__sidebar" />
+              <span className="app-skin-preview__content">
+                <i className="app-skin-preview__line app-skin-preview__line--accent" />
+                <i className="app-skin-preview__line" />
+              </span>
+            </span>
+          </span>
+          <span className="app-skin-choice__label">{t(locale, labelKey)}</span>
+        </button>
       ))}
     </div>
   );

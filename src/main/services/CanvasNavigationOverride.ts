@@ -43,6 +43,7 @@ export interface CanvasNavigationOverrideState {
 
 export interface CanvasNavigationInputAttachmentOptions {
   preventMouseBindings?: boolean;
+  captureMacEditShortcuts?: boolean;
 }
 
 export function shouldPreventCanvasNavigationInput(
@@ -199,6 +200,8 @@ export class CanvasNavigationInputController {
   private readonly attachedContents = new Set<WebContents>();
   private readonly onActiveChange: (state: CanvasNavigationOverrideState) => void;
   private menuShortcutContents: WebContents | null = null;
+  /** Contents whose renderer reported keyboard focus in a terminal surface or shortcut recorder. */
+  private readonly terminalEditFocus = new WeakSet<WebContents>();
 
   constructor(
     bindings: CanvasNavigationBindings,
@@ -220,7 +223,7 @@ export class CanvasNavigationInputController {
   attach(contents: WebContents, options: CanvasNavigationInputAttachmentOptions = {}): void {
     if (this.attachedContents.has(contents)) return;
     this.attachedContents.add(contents);
-    contents.on("before-input-event", (event, input) => this.handleInput(contents, event, input));
+    contents.on("before-input-event", (event, input) => this.handleInput(contents, event, input, options));
     contents.on("before-mouse-event", (event, input) => {
       const transition = this.handleMouseInput(input);
       if (options.preventMouseBindings !== false && transition.reserved) event.preventDefault();
@@ -230,6 +233,19 @@ export class CanvasNavigationInputController {
       if (this.menuShortcutContents === contents) this.menuShortcutContents = null;
       this.resetTrackers();
     });
+  }
+
+  /**
+   * The renderer reports whether a terminal surface or shortcut recorder has keyboard focus. Both consume
+   * Command+C/V/A themselves, so those shortcuts bypass the Edit menu. The terminal-named API covers both;
+   * ordinary fields and plugin pages keep the menu's native Copy, Paste and Select All.
+   */
+  setTerminalEditFocus(contents: WebContents, focused: boolean): void {
+    if (focused) this.terminalEditFocus.add(contents);
+    else {
+      this.terminalEditFocus.delete(contents);
+      if (this.menuShortcutContents === contents) this.releaseMenuShortcuts();
+    }
   }
 
   setBindings(bindings: CanvasNavigationBindings): void {
@@ -278,7 +294,12 @@ export class CanvasNavigationInputController {
     );
   }
 
-  private handleInput(contents: WebContents, event: Event, input: Input): void {
+  private handleInput(
+    contents: WebContents,
+    event: Event,
+    input: Input,
+    options: CanvasNavigationInputAttachmentOptions
+  ): void {
     if (input.type !== "keyDown" && input.type !== "keyUp") return;
     const keyboardInput = {
       type: input.type,
@@ -292,8 +313,14 @@ export class CanvasNavigationInputController {
     const previous = this.state();
     const wheelTransition = this.wheelTracker.update(keyboardInput);
     const navigationTransition = this.navigationTracker.update(keyboardInput);
+    const macEditShortcut = options.captureMacEditShortcuts === true
+      && this.terminalEditFocus.has(contents) && topFrameFocused(contents)
+      && input.type === "keyDown"
+      && input.meta && !input.control && !input.alt && !input.shift
+      && (input.code === "KeyA" || input.code === "KeyC" || input.code === "KeyV");
     const shouldCaptureMenuShortcuts = this.wheelTracker.shouldCaptureMenuShortcuts
-      || this.navigationTracker.shouldCaptureMenuShortcuts;
+      || this.navigationTracker.shouldCaptureMenuShortcuts
+      || macEditShortcut;
     this.setMenuShortcutCapture(contents, shouldCaptureMenuShortcuts);
     const shouldPrevent = shouldPreventCanvasNavigationInput(input, {
       active: wheelTransition.active || navigationTransition.active,
@@ -362,4 +389,11 @@ export class CanvasNavigationInputController {
     }
   }
 
+}
+
+/** An iframe (a plugin page) with focus is never a terminal surface; contents without the property count as top. */
+function topFrameFocused(contents: WebContents): boolean {
+  const focused = (contents as { focusedFrame?: unknown }).focusedFrame;
+  const top = (contents as { mainFrame?: unknown }).mainFrame;
+  return focused === undefined || focused === null || top === undefined || focused === top;
 }

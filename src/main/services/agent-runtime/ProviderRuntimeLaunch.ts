@@ -1,24 +1,37 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
-  chmodSync,
   existsSync,
-  mkdirSync,
-  readFileSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
-  unlinkSync,
-  writeFileSync
+  unlinkSync
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseDocument } from "yaml";
+import { lazyRequire } from "../../lazyRequire.ts";
+import { isOwnLifecycleHookText } from "../agentHelpers.ts";
+import {
+  atomicWrite,
+  ensurePrivateDirectory,
+  hashText,
+  readOptional,
+  restoreFromBackup,
+  unlinkIfExists
+} from "../configOverlay.ts";
+import { DECISION_FAIL_CLOSED_ENV } from "../../../agent-runtime/runtime-protocol.mjs";
 import type { PluginAgentHookEvent, ProviderId } from "../../../shared/contracts.ts";
+import {
+  AGENT_RUNTIME_ENV,
+  CLAUDE_HTTP_HOOK,
+  DECISION_BUDGET_ENV,
+  OPENCODE_DECISIONS_ENV,
+  permissionGateTimings
+} from "../../../agent-runtime/runtime-protocol.mjs";
 
+// YAML is only parsed for Hermes configs; it is loaded then, not with the app.
+const yaml = lazyRequire<typeof import("yaml")>("yaml");
 const FILE_MODE = 0o600;
-const DIRECTORY_MODE = 0o700;
 const HOOK_TIMEOUT_SECONDS = 3;
 const OPENCODE_CONFIG_CONTENT = "OPENCODE_CONFIG_CONTENT";
 const QWEN_SYSTEM_SETTINGS = "QWEN_CODE_SYSTEM_SETTINGS_PATH";
@@ -46,6 +59,8 @@ interface ProviderHookCommand {
   command: string;
   matcher?: string;
   timeout: number;
+  /** Claude Code only: POST the hook input to this URL instead of running `command`. */
+  url?: string;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -76,13 +91,19 @@ export interface ProviderRuntimeLaunchOptions {
   environment?: Readonly<Record<string, string | undefined>>;
   platform?: NodeJS.Platform;
   pluginHooks?: RuntimePluginHookSource;
+  /** The decision hook (permission-gate.mjs); without it decision hooks are never installed. */
+  permissionGate?: RuntimeHookHelperLaunch;
 }
 
 export interface PreparedProviderRuntimeLaunch {
+  /** This prepared configuration installs a per-turn completion event (not merely session end). */
+  turnCompletion?: boolean;
   args: string[];
   environment: Record<string, string>;
   releaseConfiguration(): void;
 }
+
+const HOOK_PROVIDERS: ReadonlySet<string> = new Set(["claude", "codex", "qwen", "opencode", "kimi", "hermes", "grok", "omp", "pi"]);
 
 export class ProviderRuntimeLaunchAdapters {
   private readonly options: ProviderRuntimeLaunchOptions;
@@ -109,6 +130,15 @@ export class ProviderRuntimeLaunchAdapters {
     }
     if (!isAbsolute(options.openCodePluginPath)) {
       throw new Error("OpenCode lifecycle plugin path must be absolute.");
+    }
+    if (options.permissionGate) {
+      validateHelper(options.permissionGate);
+      // Either Electron running one absolute script, or the native helper's permission-gate subcommand.
+      const gate = options.permissionGate;
+      const native = isAbsolute(gate.command) && gate.args.length === 1 && gate.args[0] === "permission-gate";
+      if (!native && (gate.args.length !== 1 || !isAbsolute(gate.args[0]!))) {
+        throw new Error("Permission gate must reference one absolute script path.");
+      }
     }
     if (options.pluginHooks) {
       validateHelper(options.pluginHooks.runner);
@@ -141,17 +171,34 @@ export class ProviderRuntimeLaunchAdapters {
     );
   }
 
+  /**
+   * `decisions` adds the decision hook: PreToolUse for Claude Code, Codex and Qwen Code, the CanvasTTY plugin's
+   * guard for OpenCode. Without it the arguments are exactly what they were before decision hooks existed.
+   * `decisionBudgetMs` (a decision service's `decide.timeoutMs`) lengthens the hook's deadlines to fit it.
+   * `claudeHttpHookBase` (Claude Code only) sends its lifecycle events, except SessionStart, as HTTP hooks to the
+   * gateway's loopback listener instead of running the helper; the decision hook stays a command.
+   */
   prepare(
     provider: AgentProvider,
     terminalSessionId: string,
-    coreHooksEnabled = true
+    coreHooksEnabled = true,
+    decisions = false,
+    decisionBudgetMs?: number,
+    claudeHttpHookBase?: string,
+    captureResult = false
   ): PreparedProviderRuntimeLaunch {
     const pluginRegistrations = this.options.pluginHooks?.list(provider) ?? [];
-    const pluginCommands = this.pluginHookCommands(provider, pluginRegistrations);
-    // omp and pi have no hook adapter. Without this they would fall through to the Grok
-    // overlay at the end of this method and write Grok hook configuration for them.
-    const hasHooks = provider !== "omp" && provider !== "pi"
-      && (coreHooksEnabled || pluginCommands.length > 0 || (provider === "opencode" && pluginRegistrations.length > 0));
+    const gate = decisions && this.decisionsSupported(provider);
+    const pluginCommands = [
+      ...this.pluginHookCommands(provider, pluginRegistrations),
+      ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs) : [])
+    ];
+    const openCodeDecisions = gate && provider === "opencode";
+    // Only providers with a hook adapter get lifecycle configuration. Cursor,
+    // MiniMax, Devin and Antigravity must never reach Grok's shared hook overlay.
+    const resultHooks = captureResult && (provider === "codex" || provider === "opencode");
+    const hasHooks = HOOK_PROVIDERS.has(provider)
+      && (coreHooksEnabled || resultHooks || pluginCommands.length > 0 || (provider === "opencode" && (pluginRegistrations.length > 0 || openCodeDecisions)));
     const environment = hasHooks
       ? {
         ...(pluginRegistrations.length > 0 ? {
@@ -164,10 +211,10 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], environment);
     }
     if (provider === "claude") {
-      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands), environment);
+      return prepared(claudeHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, claudeHttpHookBase), environment, undefined, coreHooksEnabled);
     }
     if (provider === "codex") {
-      return prepared(codexHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands), environment);
+      return prepared(codexHookArgs(this.options.helper, this.platform, coreHooksEnabled, pluginCommands, resultHooks), environment, undefined, coreHooksEnabled);
     }
     if (provider === "qwen") {
       const path = createQwenHookSettings({
@@ -179,7 +226,7 @@ export class ProviderRuntimeLaunchAdapters {
         coreHooksEnabled,
         pluginCommands
       });
-      return prepared([], { ...environment, [QWEN_SYSTEM_SETTINGS]: path }, () => unlinkIfOwned(path));
+      return prepared([], { ...environment, [QWEN_SYSTEM_SETTINGS]: path }, () => unlinkIfExists(path), coreHooksEnabled);
     }
     if (provider === "opencode") {
       const pluginEnvironment = this.openCodePluginEnvironment(
@@ -189,19 +236,26 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], {
         ...environment,
         ...pluginEnvironment,
+        ...(openCodeDecisions ? { [OPENCODE_DECISIONS_ENV]: "1", ...budgetEnvironment(decisionBudgetMs) } : {}),
         [OPENCODE_CONFIG_CONTENT]: openCodeLifecycleConfig(
           this.environment[OPENCODE_CONFIG_CONTENT],
           this.options.openCodePluginPath
         )
-      });
+      }, undefined, coreHooksEnabled);
+    }
+    if (provider === "omp" || provider === "pi") {
+      return prepared(coreHooksEnabled
+        ? ["--extension", join(dirname(this.options.openCodePluginPath), "omp-extension.mjs")]
+        : [], environment, undefined, coreHooksEnabled);
     }
     if (provider === "kimi") {
-      return prepared([], environment, this.acquireKimi(coreHooksEnabled, pluginCommands));
+      return prepared([], environment, this.acquireKimi(coreHooksEnabled, pluginCommands), coreHooksEnabled);
     }
     if (provider === "hermes") {
       return prepared([], environment, this.acquireHermes(coreHooksEnabled, pluginCommands));
     }
-    return prepared([], environment, this.acquireGrok(coreHooksEnabled, pluginCommands));
+    if (provider === "grok") return prepared([], environment, this.acquireGrok(coreHooksEnabled, pluginCommands), coreHooksEnabled);
+    return prepared([], environment);
   }
 
   recoverConfigurations(): void {
@@ -305,6 +359,11 @@ export class ProviderRuntimeLaunchAdapters {
     });
   }
 
+  /** Whether this provider can take the decision hook: Claude Code, Codex, Qwen Code (PreToolUse) and OpenCode. */
+  decisionsSupported(provider: AgentProvider): boolean {
+    return Boolean(this.options.permissionGate) && (provider === "opencode" || Object.hasOwn(DECISION_TOOL_MATCHERS, provider));
+  }
+
   private pluginHookCommands(
     provider: AgentProvider,
     registrations: readonly RuntimePluginHookRegistration[]
@@ -351,6 +410,7 @@ const CLAUDE_HOOKS: readonly HookMapping[] = [
   { event: "UserPromptSubmit", state: "working" },
   { event: "PermissionRequest", state: "needs_approval" },
   { event: "PostToolUse", state: "working" },
+  { event: "PostToolUseFailure", state: "working" },
   { event: "Stop", state: "idle" },
   { event: "StopFailure", state: "idle" },
   { event: "SessionEnd", state: "idle" },
@@ -383,6 +443,8 @@ const KIMI_HOOKS: readonly HookMapping[] = [
   { event: "TurnStarted", state: "working" },
   { event: "PermissionRequest", state: "needs_approval" },
   { event: "PermissionResult", state: "working" },
+  { event: "PostToolUse", state: "working" },
+  { event: "PostToolUseFailure", state: "working" },
   { event: "Stop", state: "idle" },
   { event: "StopFailure", state: "idle" },
   { event: "Interrupt", state: "idle" },
@@ -394,6 +456,7 @@ const HERMES_HOOKS: readonly HookMapping[] = [
   { event: "pre_llm_call", state: "working" },
   { event: "pre_approval_request", state: "needs_approval" },
   { event: "post_approval_response", state: "working" },
+  { event: "post_tool_call", state: "working" },
   { event: "on_session_end", state: "idle" }
 ];
 
@@ -468,8 +531,57 @@ const PLUGIN_HOOK_TRIGGERS: Record<AgentProvider, Partial<Record<PluginAgentHook
   opencode: {},
   // omp and pi expose no lifecycle hooks, so no plugin events map onto them.
   omp: {},
-  pi: {}
+  pi: {},
+  // The Cursor CLI has no measured CanvasTTY hook events yet.
+  cursor: {},
+  // MiniMax Code has plugin hooks, but CanvasTTY does not write its
+  // settings.json yet; plain PTY integration only.
+  minimax: {},
+  // The Devin CLI hook surface is not measured yet.
+  devin: {},
+  // Antigravity hook surface is not measured yet either.
+  antigravity: {}
 };
+
+type DecisionHookProvider = "claude" | "codex" | "qwen";
+
+/**
+ * Tools the decision hook looks at: shells and file writes. Claude and Codex match exact names separated by `|`;
+ * Qwen matches a regular expression on its tool ids.
+ */
+const DECISION_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
+  claude: "Bash|Write|Edit|MultiEdit|NotebookEdit",
+  codex: "Bash|apply_patch|Edit|Write",
+  qwen: "^(run_shell_command|write_file|edit|replace)$"
+};
+
+function decisionHookCommands(
+  provider: DecisionHookProvider,
+  gate: RuntimeHookHelperLaunch,
+  platform: NodeJS.Platform,
+  decisionBudgetMs?: number
+): ProviderHookCommand[] {
+  validateHelper(gate);
+  const { hookSeconds } = permissionGateTimings(decisionBudgetMs);
+  return [{
+    event: "PreToolUse",
+    matcher: DECISION_TOOL_MATCHERS[provider],
+    // The hook is installed only when something decides for this session, so it always fails closed.
+    command: commandWithEnvironment(
+      [gate.command, ...gate.args, "pretool"],
+      { ...(gate.env ?? {}), ...budgetEnvironment(decisionBudgetMs), [DECISION_FAIL_CLOSED_ENV]: "1" },
+      platform
+    ),
+    // Qwen hook timeouts are milliseconds; Claude's and Codex's are seconds.
+    timeout: provider === "qwen" ? hookSeconds * 1_000 : hookSeconds
+  }];
+}
+
+/** The helper learns a longer decision budget from its environment; the default budget adds nothing. */
+function budgetEnvironment(decisionBudgetMs: number | undefined): Record<string, string> {
+  const { budgetMs } = permissionGateTimings(decisionBudgetMs);
+  return decisionBudgetMs === undefined || budgetMs === permissionGateTimings().budgetMs ? {} : { [DECISION_BUDGET_ENV]: String(budgetMs) };
+}
 
 export function claudeLifecycleArgs(
   helper: RuntimeHookHelperLaunch,
@@ -482,16 +594,48 @@ function claudeHookArgs(
   helper: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform,
   coreHooksEnabled: boolean,
-  pluginCommands: readonly ProviderHookCommand[]
+  pluginCommands: readonly ProviderHookCommand[],
+  httpHookBase?: string
 ): string[] {
   validateHelper(helper);
+  const base = httpHookBase === undefined ? null : claudeHttpHookBase(httpHookBase);
   return ["--settings", JSON.stringify({
     ...(coreHooksEnabled ? { showStatusInTerminalTab: true } : {}),
     hooks: groupProviderHookCommands([
-      ...(coreHooksEnabled ? lifecycleCommands(CLAUDE_HOOKS, helper, platform) : []),
+      ...(coreHooksEnabled ? lifecycleCommands(CLAUDE_HOOKS, helper, platform).map((command, index) => (
+        base && CLAUDE_HOOKS[index]!.event !== "SessionStart"
+          ? { ...command, url: `${base}${CLAUDE_HTTP_HOOK.pathPrefix}${CLAUDE_HOOKS[index]!.state}/${CLAUDE_HOOKS[index]!.event}` }
+          : command
+      )) : []),
       ...pluginCommands
     ])
   })];
+}
+
+/** Only this machine's loopback listener: `http://127.0.0.1:<port>`. */
+function claudeHttpHookBase(value: string): string {
+  const match = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/u.exec(value);
+  const port = match ? Number(match[1]) : 0;
+  if (!match || port < 1 || port > 65_535) throw new Error("Claude HTTP hook base must be a loopback URL with a port.");
+  return value;
+}
+
+/**
+ * Claude Code (2.1.281) interpolates header values only from the variables its hook lists in `allowedEnvVars`, and
+ * takes them from the session's environment: the capability reaches the gateway without ever being written into the
+ * `--settings` argument, which any local user can read in the process list.
+ */
+function claudeHttpHook(url: string, timeout: number): Record<string, unknown> {
+  return {
+    type: "http",
+    url,
+    timeout,
+    headers: {
+      [CLAUDE_HTTP_HOOK.sessionHeader]: `\${${AGENT_RUNTIME_ENV.terminalSessionId}}`,
+      [CLAUDE_HTTP_HOOK.capabilityHeader]: `\${${AGENT_RUNTIME_ENV.capabilityToken}}`
+    },
+    allowedEnvVars: [AGENT_RUNTIME_ENV.terminalSessionId, AGENT_RUNTIME_ENV.capabilityToken]
+  };
 }
 
 export function codexLifecycleArgs(
@@ -505,14 +649,17 @@ function codexHookArgs(
   helper: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform,
   coreHooksEnabled: boolean,
-  pluginCommands: readonly ProviderHookCommand[]
+  pluginCommands: readonly ProviderHookCommand[],
+  captureResult = false
 ): string[] {
   validateHelper(helper);
+  const hooks = coreHooksEnabled ? CODEX_HOOKS
+    : captureResult ? CODEX_HOOKS.filter(({ event }) => ["SessionStart", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"].includes(event)) : [];
   const grouped = groupProviderHookMappings([
-    ...(coreHooksEnabled ? lifecycleCommands(CODEX_HOOKS, helper, platform) : []),
+    ...lifecycleCommands(hooks, helper, platform),
     ...pluginCommands
   ]);
-  return Object.entries(grouped).flatMap(([event, mappings]) => {
+  const events = Object.entries(grouped).flatMap(([event, mappings]) => {
     const entries = mappings.map((mapping) => {
       const matcher = mapping.matcher ? `matcher=${tomlString(mapping.matcher)},` : "";
       const hook = `type="command",command=${tomlString(mapping.command)},timeout=${mapping.timeout}`;
@@ -520,6 +667,47 @@ function codexHookArgs(
     }).join(",");
     return ["-c", `hooks.${event}=[${entries}]`];
   });
+  return events.length ? [...events, ...codexHookTrustArgs(grouped)] : events;
+}
+
+/** Where Codex files the hooks it reads from `-c` overrides (0.156: "Hooks need review" names this source). */
+const CODEX_SESSION_FLAGS_SOURCE = "/<session-flags>/config.toml";
+
+/**
+ * Codex (0.156) stops a new session at "Hooks need review" until each hook is trusted, and an unattended subagent then
+ * waits for the person. Codex keys a hook's trust by `<source>:<event>:<group>:<handler>` and stores `trusted_hash`, the
+ * SHA-256 of the handler's normalized JSON. CanvasTTY states that trust for the hooks it adds itself (its lifecycle
+ * helper, the decision gate and the runner of plugin hooks the person trusted in CanvasTTY), only for this run, in the
+ * same `-c` layer. A project's or the person's own hooks have other sources, so they, or a changed hook, still ask the
+ * person. Nothing is written to CODEX_HOME.
+ */
+function codexHookTrustArgs(grouped: Record<string, ProviderHookCommand[]>): string[] {
+  const entries = Object.entries(grouped).flatMap(([event, mappings]) => mappings.map((mapping, group) => {
+    const name = event.replace(/(?<=[a-z0-9])([A-Z])/gu, "_$1").toLowerCase();
+    return `${tomlString(`${CODEX_SESSION_FLAGS_SOURCE}:${name}:${group}:0`)}={trusted_hash=${tomlString(codexHookTrustedHash(name, mapping))}}`;
+  }));
+  return ["-c", `hooks.state={${entries.join(",")}}`];
+}
+
+/** Codex's trusted_hash: sorted-key compact JSON of the event, the handler (as Codex fills it in) and the matcher. */
+export function codexHookTrustedHash(eventName: string, mapping: Pick<ProviderHookCommand, "command" | "timeout" | "matcher">): string {
+  const identity = {
+    event_name: eventName,
+    hooks: [{ async: false, command: mapping.command, timeout: mapping.timeout, type: "command" }],
+    ...(mapping.matcher ? { matcher: mapping.matcher } : {})
+  };
+  return `sha256:${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+}
+
+/**
+ * Codex asks "Trust this folder?" once per folder. `-c projects={"<dir>"={trust_level="trusted"}}` answers it for exactly
+ * these folders and this run (codex 0.156.1: it keeps config.toml's trusted folders and writes nothing; the dotted
+ * `projects."<dir>".trust_level` override does not skip the question).
+ */
+export function codexTrustArguments(folders: readonly string[]): string[] {
+  const unique = [...new Set(folders.filter((folder) => isAbsolute(folder)))];
+  if (unique.length === 0) return [];
+  return ["-c", `projects={${unique.map((folder) => `${tomlString(folder)}={trust_level="trusted"}`).join(",")}}`];
 }
 
 export function createQwenHookSettings(options: {
@@ -532,7 +720,7 @@ export function createQwenHookSettings(options: {
   pluginCommands?: readonly ProviderHookCommand[];
 }): string {
   validateHelper(options.helper);
-  mkdirPrivate(options.runtimeDirectory);
+  ensurePrivateDirectory(options.runtimeDirectory);
   const path = join(options.runtimeDirectory, `qwen-hooks-${safeId(options.terminalSessionId)}.json`);
   const base = readQwenSettings(options.baseSettingsPath ?? null);
   const lifecycleHooks = groupProviderHookCommands([
@@ -552,10 +740,10 @@ export function createQwenHookSettings(options: {
   return path;
 }
 
-export function recoverQwenHookSettings(runtimeDirectory: string): void {
+function recoverQwenHookSettings(runtimeDirectory: string): void {
   if (!existsSync(runtimeDirectory)) return;
   for (const name of readdirSync(runtimeDirectory)) {
-    if (/^qwen-hooks-[a-f0-9]{24}\.json$/u.test(name)) unlinkIfOwned(join(runtimeDirectory, name));
+    if (/^qwen-hooks-[a-f0-9]{24}\.json$/u.test(name)) unlinkIfExists(join(runtimeDirectory, name));
   }
 }
 
@@ -614,7 +802,7 @@ class KimiRuntimeHooks {
     coreHooksEnabled: boolean,
     pluginCommands: readonly ProviderHookCommand[]
   ): KimiRuntimeHooks {
-    mkdirPrivate(home);
+    ensurePrivateDirectory(home);
     const path = join(home, "config.toml");
     const journalPath = join(home, ".canvastty-runtime-kimi.json");
     this.recover(home);
@@ -666,7 +854,7 @@ class HermesRuntimeHooks {
     coreHooksEnabled: boolean,
     pluginCommands: readonly ProviderHookCommand[]
   ): HermesRuntimeHooks {
-    mkdirPrivate(home);
+    ensurePrivateDirectory(home);
     const path = join(home, "config.yaml");
     const journalPath = join(home, ".canvastty-runtime-hermes.json");
     this.recover(home);
@@ -716,7 +904,7 @@ class GrokRuntimeHooks {
     pluginCommands: readonly ProviderHookCommand[]
   ): GrokRuntimeHooks {
     const hooksDirectory = join(home, "hooks");
-    mkdirPrivate(hooksDirectory);
+    ensurePrivateDirectory(hooksDirectory);
     const path = join(hooksDirectory, "canvastty-runtime-hooks.json");
     this.recover(home);
     if (existsSync(path)) throw new Error("Grok CanvasTTY lifecycle hook path is already occupied.");
@@ -735,7 +923,7 @@ class GrokRuntimeHooks {
     const current = readOptional(path);
     if (current === null) return;
     if (
-      (!current.includes("hook-helper.mjs") && !current.includes("plugin-hook-runner.mjs"))
+      (!isOwnLifecycleHookText(current) && !current.includes("plugin-hook-runner.mjs"))
       || !current.includes('"hooks"')
     ) {
       throw new Error("Grok CanvasTTY lifecycle hook path is occupied by an unowned file.");
@@ -771,14 +959,14 @@ function createTextJournal(
   extra: Record<string, unknown>
 ): TextOverlayJournal {
   const backupDirectory = join(home, ".canvastty-runtime-backups");
-  mkdirPrivate(backupDirectory);
+  ensurePrivateDirectory(backupDirectory);
   const backupPath = join(backupDirectory, `${provider}-${randomUUID()}.bak`);
   if (original !== null) atomicWrite(backupPath, original, modeOf(join(home, provider === "kimi" ? "config.toml" : "config.yaml")));
   return {
     version: 1,
     provider,
-    originalHash: original === null ? null : hash(original),
-    mutatedHash: hash(mutated),
+    originalHash: original === null ? null : hashText(original),
+    mutatedHash: hashText(mutated),
     backupPath,
     extra
   };
@@ -787,8 +975,8 @@ function createTextJournal(
 function cleanupTextOverlay(path: string, journal: TextOverlayJournal, block: string): void {
   const current = readOptional(path);
   if (current === null) return;
-  if (hash(current) === journal.mutatedHash) {
-    restoreOriginal(path, journal);
+  if (hashText(current) === journal.mutatedHash) {
+    restoreFromBackup(path, journal.originalHash, journal.backupPath, "CanvasTTY lifecycle backup is missing or invalid.");
     return;
   }
   if (block && current.includes(block)) {
@@ -803,8 +991,8 @@ function cleanupTextOverlay(path: string, journal: TextOverlayJournal, block: st
 function cleanupHermes(path: string, journal: TextOverlayJournal): void {
   const current = readOptional(path);
   if (current === null) return;
-  if (hash(current) === journal.mutatedHash) {
-    restoreOriginal(path, journal);
+  if (hashText(current) === journal.mutatedHash) {
+    restoreFromBackup(path, journal.originalHash, journal.backupPath, "CanvasTTY lifecycle backup is missing or invalid.");
     return;
   }
   const commands = journal.extra.commands;
@@ -813,6 +1001,7 @@ function cleanupHermes(path: string, journal: TextOverlayJournal): void {
 }
 
 function mutateHermesHooks(raw: string, commands: Record<string, string[]>, remove: boolean): string {
+  const { parseDocument } = yaml();
   let document = parseDocument(raw, { strict: true, uniqueKeys: true });
   if (document.errors.length > 0) throw new Error("Hermes YAML lifecycle configuration is invalid.");
   let value = document.toJS({ maxAliasCount: 100 }) as unknown;
@@ -837,7 +1026,7 @@ function mutateHermesHooks(raw: string, commands: Record<string, string[]>, remo
       && entry.timeout === HOOK_TIMEOUT_SECONDS;
     const related = (entry: unknown) => isRecord(entry)
       && typeof entry.command === "string"
-      && entry.command.includes("hook-helper.mjs")
+      && isOwnLifecycleHookText(entry.command)
       && entry.command.includes(event);
     if (remove && entries.some((entry) => related(entry) && !owned(entry))) {
       throw new Error(`CanvasTTY Hermes lifecycle hook ownership changed for ${event}.`);
@@ -895,7 +1084,7 @@ function groupProviderHookCommands(commands: readonly ProviderHookCommand[]): Re
   for (const [event, entries] of Object.entries(mappings)) {
     grouped[event] = entries.map((mapping) => ({
       ...(mapping.matcher ? { matcher: mapping.matcher } : {}),
-      hooks: [{
+      hooks: [mapping.url ? claudeHttpHook(mapping.url, mapping.timeout) : {
         type: "command",
         command: mapping.command,
         timeout: mapping.timeout
@@ -911,7 +1100,7 @@ function groupProviderHookMappings(
   const grouped: Record<string, ProviderHookCommand[]> = {};
   const seen = new Set<string>();
   for (const mapping of commands) {
-    const identity = `${mapping.event}\0${mapping.matcher ?? ""}\0${mapping.command}\0${mapping.timeout}`;
+    const identity = `${mapping.event}\0${mapping.matcher ?? ""}\0${mapping.url ?? mapping.command}\0${mapping.timeout}`;
     if (seen.has(identity)) continue;
     seen.add(identity);
     (grouped[mapping.event] ??= []).push(mapping);
@@ -994,9 +1183,10 @@ function tomlString(value: string): string {
 function prepared(
   args: string[],
   environment: Record<string, string>,
-  cleanup: () => void = () => undefined
+  cleanup: () => void = () => undefined,
+  turnCompletion = false
 ): PreparedProviderRuntimeLaunch {
-  return { args, environment, releaseConfiguration: once(cleanup) };
+  return { args, environment, ...(turnCompletion ? { turnCompletion: true } : {}), releaseConfiguration: once(cleanup) };
 }
 
 function once(action: () => void): () => void {
@@ -1025,29 +1215,6 @@ function absoluteHome(path: string, name: string): string {
   return path;
 }
 
-function mkdirPrivate(path: string): void {
-  const existed = existsSync(path);
-  mkdirSync(path, { recursive: true, mode: DIRECTORY_MODE });
-  if (!existed) chmodSync(path, DIRECTORY_MODE);
-}
-
-function atomicWrite(path: string, value: string, mode = FILE_MODE): void {
-  mkdirPrivate(dirname(path));
-  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, value, { mode });
-  chmodSync(temporary, mode);
-  renameSync(temporary, path);
-}
-
-function readOptional(path: string): string | null {
-  try {
-    return readFileSync(path, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw error;
-  }
-}
-
 function modeOf(path: string): number {
   try {
     return statSync(path).mode & 0o777;
@@ -1056,24 +1223,8 @@ function modeOf(path: string): number {
   }
 }
 
-function hash(value: string): string {
-  return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
 function safeId(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex").slice(0, 24);
-}
-
-function restoreOriginal(path: string, journal: TextOverlayJournal): void {
-  if (journal.originalHash === null) {
-    rmSync(path, { force: true });
-    return;
-  }
-  const original = readOptional(journal.backupPath);
-  if (original === null || hash(original) !== journal.originalHash) {
-    throw new Error("CanvasTTY lifecycle backup is missing or invalid.");
-  }
-  atomicWrite(path, original, modeOf(path));
 }
 
 function readJournal(path: string): TextOverlayJournal | null {
@@ -1093,8 +1244,8 @@ function readJournal(path: string): TextOverlayJournal | null {
 }
 
 function removeJournal(path: string, journal: TextOverlayJournal): void {
-  unlinkIfOwned(path);
-  unlinkIfOwned(journal.backupPath);
+  unlinkIfExists(path);
+  unlinkIfExists(journal.backupPath);
   try {
     const backupDirectory = dirname(journal.backupPath);
     if (existsSync(backupDirectory) && readFileNames(backupDirectory).length === 0) rmSync(backupDirectory);
@@ -1105,14 +1256,6 @@ function removeJournal(path: string, journal: TextOverlayJournal): void {
 
 function readFileNames(path: string): string[] {
   return readdirSync(path);
-}
-
-function unlinkIfOwned(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
 }
 
 function parseJsonObject(raw: string | undefined, name: string): Record<string, unknown> {

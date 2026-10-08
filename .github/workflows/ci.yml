@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Every job with Go builds canvastty-helper; a missing toolchain is an error, not a silent JavaScript fallback.
+  CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -20,10 +24,23 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Set up Go (canvastty-helper, standard library only)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
       - name: Install locked dependencies
         run: npm ci
       - name: Audit repository secrets
         run: npm run audit:secrets
+      - name: Build the native helper (the parity tests run it)
+        run: npm run build:helpers -- --host
+      - name: Vet the native helper for every release target
+        working-directory: native/canvastty-helper
+        run: |
+          for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do
+            GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
       - name: Run tests
         run: npm test
       - name: Test Even G2 companion
@@ -32,6 +49,9 @@ jobs:
         run: npm run typecheck
       - name: Build production bundles
         run: npm run build
+      - name: Verify hidden terminal rendering and state restoration
+        timeout-minutes: 2
+        run: xvfb-run -a npm run smoke:terminal-hidden
       - name: Smoke-test the real Chromium browser core
         timeout-minutes: 2
         run: xvfb-run -a npm run smoke:browser
@@ -49,10 +69,24 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Set up Go (canvastty-helper, standard library only)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
       - name: Install locked dependencies and build native modules
         run: npm ci
+      - name: Build the Windows native helper for parity tests
+        run: npm run build:helpers -- --host
+        env:
+          CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
+      - name: Test the native helper's named-pipe transport
+        working-directory: native/canvastty-helper
+        run: go test ./...
       - name: Build and self-test current-user-only named-pipe host
         run: npm run test:windows-pipe-host
+      - name: Run tests on Windows
+        run: npm test
       - name: Type-check Windows gateway integration
         run: npm run typecheck
       - name: Verify the packaged host resource
@@ -69,9 +103,24 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Set up Go (canvastty-helper, standard library only)
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
       - name: Install locked dependencies
         run: npm ci
       - name: Build the packaged macOS application
+        # Public test key keeps fork PR packaging independent of release-owner configuration.
+        # Only release.yml uses the owner's key to produce publishable artifacts.
+        env:
+          SPARKLE_PUBLIC_ED_KEY: ${{ vars.SPARKLE_PUBLIC_ED_KEY || 'iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=' }}
         run: npm run package:mac
       - name: Smoke-test packaged macOS CLI resolution
         run: npm run smoke:cli-resolution:mac
+      - name: Verify hidden terminal rendering and state restoration on macOS
+        timeout-minutes: 2
+        run: npm run smoke:terminal-hidden
+      - name: Smoke-test browser input on macOS
+        timeout-minutes: 2
+        run: npm run smoke:browser

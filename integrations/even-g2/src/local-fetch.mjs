@@ -101,6 +101,17 @@ export function localFetcher(
       );
       const result = await exchange(origin, packet, options.signal);
       if (
+        url.pathname === "/g2/api/pair" &&
+        result.status === 202 &&
+        validated.bootstrapId &&
+        /^[a-f0-9]{32}$/.test(result.body?.id) &&
+        /^[a-f0-9]{64}$/.test(result.body?.transportKey)
+      ) {
+        validated.deviceId = result.body.id;
+        validated.key = result.body.transportKey;
+        delete validated.bootstrapId;
+      }
+      if (
         url.pathname === "/g2/api/home" &&
         result.status === 200 &&
         Array.isArray(result.body?.localOrigins)
@@ -120,7 +131,7 @@ export function localFetcher(
       preferred = "";
       if (options.signal?.aborted) throw options.signal.reason;
       throw new Error(
-        "Нет локальной связи. Откройте CanvasTTY на Mac и подключите телефон к той же сети.",
+        "Connection unavailable. Open CanvasTTY on the paired computer and check the configured connection.",
         { cause: error },
       );
     }
@@ -128,16 +139,19 @@ export function localFetcher(
   send.connection = () => ({ ...validated, origins: [...validated.origins] });
   return send;
 }
-export function readLocalConnection(value) {
+export function readLocalConnection(value, allowLoopback = false) {
   const saved = JSON.parse(value);
   if (!/^[a-f0-9]{64}$/.test(saved?.token))
     throw new Error("invalid-saved-token");
   return {
     token: saved.token,
-    connection: validateLocalConnection(saved.connection),
+    connection: validateLocalConnection(saved.connection, allowLoopback),
   };
 }
 
+/** @param {string} value
+ * @param {{fetcher?: typeof fetch, signal?: AbortSignal, origins?: string[], allowLoopback?: boolean, onTrace?: (message: string) => void}} [options]
+ */
 export async function connectionFromCode(value, {
   fetcher = fetch, signal, origins = LOCAL_DISCOVERY_ORIGINS, allowLoopback = false, onTrace = () => {},
 } = {}) {

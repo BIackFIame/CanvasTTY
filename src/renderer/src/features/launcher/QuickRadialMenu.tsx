@@ -10,6 +10,7 @@ import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { radialItemAtPointer, radialItemOffset } from "./radialLauncher";
+import { isProviderId } from "../../../../shared/providerCatalog.ts";
 
 interface RadialLauncherProps {
   anchor: Point;
@@ -20,10 +21,6 @@ interface RadialLauncherProps {
   onActivate(item: RadialLauncherItemId, fromPointerRelease?: boolean): void;
   onClose(reason?: "release" | "cancel"): void;
 }
-
-const PROVIDER_IDS = new Set<ProviderId>([
-  "terminal", "codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi"
-]);
 
 export function RadialLauncher({
   anchor,
@@ -133,7 +130,7 @@ export function RadialLauncher({
 }
 
 function renderIcon(item: RadialLauncherItemId): React.JSX.Element {
-  if (PROVIDER_IDS.has(item as ProviderId)) return <ProviderIcon provider={item as ProviderId} size="small" />;
+  if (isProviderId(item)) return <ProviderIcon provider={item} size="small" />;
   if (item === "browser") return <UiIcon name="browser" size={20} />;
   if (item === "settings") return <UiIcon name="settings" size={20} />;
   return <UiIcon name="sticky-note" size={20} />;

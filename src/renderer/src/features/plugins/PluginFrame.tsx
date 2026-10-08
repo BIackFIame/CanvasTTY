@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   InstalledPlugin,
   LimitsSnapshot,
@@ -14,6 +14,9 @@ import {
   pluginCanvasWheelInput,
   type PluginCanvasWheelInput
 } from "./pluginInputBridge";
+import { createFrameReplyGate } from "./frameReplies";
+import { pluginVisibilityMessage } from "../../../../shared/pluginVisibility";
+import { isProviderId } from "../../../../shared/providerCatalog.ts";
 
 const storageListeners = new Map<string, Set<(key: string, value: unknown) => void>>();
 
@@ -32,6 +35,12 @@ interface PluginFrameProps {
   onHoverChange(active: boolean): void;
   onOpenLauncher(provider: ProviderId): void;
   onError(message: string): void;
+  /**
+   * Nobody can see the frame (summary, HOME editing, off-screen, minimized). The document stays loaded;
+   * the host tells it so, and the injected bridge reports `document.visibilityState === "hidden"`,
+   * fires `visibilitychange`, caps its timers at one wake-up a second and holds its animation frames.
+   */
+  suspended?: boolean;
 }
 
 interface PluginMessage {
@@ -56,13 +65,21 @@ export function PluginFrame({
   onFocus,
   onHoverChange,
   onOpenLauncher,
-  onError
+  onError,
+  suspended = false
 }: PluginFrameProps): React.JSX.Element {
   const frame = useRef<HTMLIFrameElement>(null);
+  // Tells which document a finished request belongs to, so a reload never receives an earlier reply.
+  const [replies] = useState(createFrameReplyGate);
   const entryUrl = useMemo(
     () => `canvastty-plugin://${plugin.manifest.id}/${encodeAssetPath(contribution.entry)}`,
     [contribution.entry, plugin.manifest.id]
   );
+  // The plugin the frame serves right now, read when a reply is ready; and a new document the moment the
+  // host points the frame elsewhere (during render, before the frame can load or ask anything).
+  const servedPlugin = useRef(plugin.manifest.id);
+  servedPlugin.current = plugin.manifest.id;
+  replies.showing(plugin.manifest.id, entryUrl);
 
   const context = useMemo(() => ({
     apiVersion: 1,
@@ -125,6 +142,7 @@ export function PluginFrame({
       if (message.type !== "request" || typeof message.requestId !== "string" || message.requestId.length > 80) return;
       if (typeof message.method !== "string" || message.method.length > 80) return;
 
+      const mayReply = replies.received(message.requestId, event.source, plugin.manifest.id);
       void handleRequest({
         plugin,
         method: message.method,
@@ -135,6 +153,7 @@ export function PluginFrame({
         canvasInstanceId,
         onOpenLauncher
       }).then((value) => {
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",
@@ -145,6 +164,7 @@ export function PluginFrame({
       }).catch((error: unknown) => {
         const description = safeError(error);
         onError(description);
+        if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
           source: "canvastty-host",
           type: "response",
@@ -156,7 +176,7 @@ export function PluginFrame({
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onHoverChange, onOpenLauncher, plugin, sessions]);
+  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onHoverChange, onOpenLauncher, plugin, replies, sessions]);
 
   useEffect(() => {
     postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
@@ -166,9 +186,25 @@ export function PluginFrame({
     postCanvasInputPolicy(frame.current, captureCanvasWheelOverWidgets);
   }, [captureCanvasWheelOverWidgets]);
 
+  const suspendedRef = useRef(suspended);
+  suspendedRef.current = suspended;
+  useEffect(() => {
+    postToFrame(frame.current, pluginVisibilityMessage(!suspended));
+  }, [suspended]);
+
   useEffect(() => subscribeStorage(plugin.manifest.id, (key, value) => {
     postToFrame(frame.current, { source: "canvastty-host", type: "storage-change", key, value });
   }), [plugin.manifest.id]);
+
+  const hasServices = Boolean(plugin.manifest.services?.length);
+  useEffect(() => {
+    if (!hasServices) return;
+    const pluginId = plugin.manifest.id;
+    return window.canvasTTY.plugins.onServiceEvent(({ pluginId: owner, serviceId, event, data }) => {
+      if (owner !== pluginId) return;
+      postToFrame(frame.current, { source: "canvastty-host", type: "service-event", value: { serviceId, event, data } });
+    });
+  }, [hasServices, plugin.manifest.id]);
 
   return (
     <iframe
@@ -178,10 +214,15 @@ export function PluginFrame({
       title={`${plugin.manifest.name}: ${contribution.title}`}
       sandbox="allow-scripts"
       referrerPolicy="no-referrer"
+      inert={suspended}
+      data-suspended={suspended ? "true" : undefined}
       onFocus={onFocus}
       onLoad={() => {
+        replies.loaded();
         postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
         postCanvasInputPolicy(frame.current, captureCanvasWheelOverWidgets);
+        // A new document starts visible; tell it at once if it loaded while suspended.
+        if (suspendedRef.current) postToFrame(frame.current, pluginVisibilityMessage(false));
       }}
     />
   );
@@ -266,7 +307,7 @@ async function handleRequest({
   if (method === "launcher.open") {
     requirePermission(plugin, "launcher:open");
     const provider = stringParam(params.provider, "provider");
-    if (!isProvider(provider)) throw new Error("Plugin requested an unknown launcher provider.");
+    if (!isProviderId(provider)) throw new Error("Plugin requested an unknown launcher provider.");
     onOpenLauncher(provider);
     return null;
   }
@@ -316,6 +357,15 @@ async function handleRequest({
       stringParam(params.libraryId, "libraryId"),
       stringParam(params.name, "name"),
       playlistContent(params.content)
+    );
+  }
+  if (method === "service.request") {
+    // Only this frame's own plugin id is ever passed, so a plugin reaches only its own services.
+    return window.canvasTTY.plugins.serviceRequest(
+      pluginId,
+      stringParam(params.serviceId, "serviceId"),
+      stringParam(params.method, "method"),
+      params.params
     );
   }
   if (method === "window.open") {
@@ -409,10 +459,6 @@ function secretValue(value: unknown): string {
   return value;
 }
 
-function isProvider(value: string): value is ProviderId {
-  return value === "terminal" || value === "codex" || value === "claude" || value === "qwen" || value === "kimi" || value === "opencode" || value === "hermes" || value === "grok" || value === "omp" || value === "pi";
-}
-
 function encodeAssetPath(value: string): string {
   return value.split("/").map(encodeURIComponent).join("/");
 }
@@ -423,5 +469,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function safeError(error: unknown): string {
   const value = error instanceof Error ? error.message : "Plugin request failed.";
-  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 240);
+  // Plugins see the host's message, not Electron's IPC wrapper around it.
+  return value
+    .replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .slice(0, 240);
 }

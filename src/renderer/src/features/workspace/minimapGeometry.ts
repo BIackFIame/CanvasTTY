@@ -5,10 +5,11 @@ import type {
   SessionBounds,
   Size
 } from "../../../../shared/contracts";
+import { boundsUnion } from "./canvasCameraGeometry.ts";
 
 export const MINIMAP_SURFACE_SIZE = { width: 172, height: 104 } as const;
-export const MINIMAP_VIEWPORT_MARKER_SIZE = { width: 46, height: 30 } as const;
-export const MINIMAP_HOME_EDGE_MARKER_SIZE = { width: 14, height: 14 } as const;
+export const MINIMAP_CONTENT_PADDING = 8;
+const MINIMAP_EDGE_MARKER_SIZE = { width: 14, height: 14 } as const;
 
 export interface NormalizedMinimapPoint {
   x: number;
@@ -21,20 +22,23 @@ export interface NormalizedMinimapArea extends NormalizedMinimapPoint {
 }
 
 /**
- * A camera-centred world window with one uniform world-units-per-pixel scale.
- * Its scale changes with zoom, but never with pan or with the number/position of
- * canvas objects, so moving away cannot auto-fit or stretch the map contents.
+ * Fit the occupied workspace with one scale for both axes. Camera pan and zoom
+ * never enter this calculation, so only layout changes can rescale the overview.
  */
-export function minimapWorldBounds(worldViewport: SessionBounds): SessionBounds {
+export function minimapWorldBounds(content: readonly SessionBounds[]): SessionBounds {
+  const contentBounds = boundsUnion(content) ?? {
+    position: { x: 0, y: 0 },
+    size: { width: 1, height: 1 }
+  };
   const worldUnitsPerPixel = Math.max(
-    worldViewport.size.width / MINIMAP_VIEWPORT_MARKER_SIZE.width,
-    worldViewport.size.height / MINIMAP_VIEWPORT_MARKER_SIZE.height
+    Math.max(1, contentBounds.size.width) / (MINIMAP_SURFACE_SIZE.width - MINIMAP_CONTENT_PADDING * 2),
+    Math.max(1, contentBounds.size.height) / (MINIMAP_SURFACE_SIZE.height - MINIMAP_CONTENT_PADDING * 2)
   );
   const size = {
     width: MINIMAP_SURFACE_SIZE.width * worldUnitsPerPixel,
     height: MINIMAP_SURFACE_SIZE.height * worldUnitsPerPixel
   };
-  const center = boundsCenter(worldViewport);
+  const center = boundsCenter(contentBounds);
   return {
     position: { x: center.x - size.width / 2, y: center.y - size.height / 2 },
     size
@@ -72,23 +76,15 @@ export function minimapAreaForBounds(
   bounds: SessionBounds,
   worldBounds: SessionBounds
 ): NormalizedMinimapArea | null {
-  const left = Math.max(bounds.position.x, worldBounds.position.x);
-  const top = Math.max(bounds.position.y, worldBounds.position.y);
-  const right = Math.min(
-    bounds.position.x + bounds.size.width,
-    worldBounds.position.x + worldBounds.size.width
-  );
-  const bottom = Math.min(
-    bounds.position.y + bounds.size.height,
-    worldBounds.position.y + worldBounds.size.height
-  );
-  if (right <= left || bottom <= top) return null;
+  if (!boundsIntersect(bounds, worldBounds)) return null;
 
+  // The surface clips the original rectangle; clipping its bounds here would
+  // draw a false viewport border along the map edge.
   return {
-    x: (left - worldBounds.position.x) / worldBounds.size.width,
-    y: (top - worldBounds.position.y) / worldBounds.size.height,
-    width: (right - left) / worldBounds.size.width,
-    height: (bottom - top) / worldBounds.size.height
+    x: (bounds.position.x - worldBounds.position.x) / worldBounds.size.width,
+    y: (bounds.position.y - worldBounds.position.y) / worldBounds.size.height,
+    width: bounds.size.width / worldBounds.size.width,
+    height: bounds.size.height / worldBounds.size.height
   };
 }
 
@@ -102,8 +98,8 @@ export function minimapEdgePointForBounds(
   const delta = { x: target.x - 0.5, y: target.y - 0.5 };
   if (delta.x === 0 && delta.y === 0) return null;
 
-  const radiusX = 0.5 - MINIMAP_HOME_EDGE_MARKER_SIZE.width / 2 / MINIMAP_SURFACE_SIZE.width;
-  const radiusY = 0.5 - MINIMAP_HOME_EDGE_MARKER_SIZE.height / 2 / MINIMAP_SURFACE_SIZE.height;
+  const radiusX = 0.5 - MINIMAP_EDGE_MARKER_SIZE.width / 2 / MINIMAP_SURFACE_SIZE.width;
+  const radiusY = 0.5 - MINIMAP_EDGE_MARKER_SIZE.height / 2 / MINIMAP_SURFACE_SIZE.height;
   const scaleX = delta.x === 0 ? Number.POSITIVE_INFINITY : radiusX / Math.abs(delta.x);
   const scaleY = delta.y === 0 ? Number.POSITIVE_INFINITY : radiusY / Math.abs(delta.y);
   const scale = Math.min(scaleX, scaleY);
@@ -141,7 +137,7 @@ export function minimapCameraForPointerDrag(
   };
 }
 
-export function boundsCenter(bounds: SessionBounds): Point {
+function boundsCenter(bounds: SessionBounds): Point {
   return {
     x: bounds.position.x + bounds.size.width / 2,
     y: bounds.position.y + bounds.size.height / 2

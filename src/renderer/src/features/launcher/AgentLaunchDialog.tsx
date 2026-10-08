@@ -1,21 +1,70 @@
-import { useEffect, useState } from "react";
+import type { ExecutionGoal } from "../../../../shared/executionStrategy";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   AgentProviderId,
   AppSettings,
-  LaunchProfileId
+  LaunchProfileId,
+  LaunchRole,
+  PluginLaunchValues,
+  ProviderId,
+  SessionEnvironmentChoice
 } from "../../../../shared/contracts";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
 import { PROVIDERS } from "../../lib/providers";
 import { directoryPathFromClipboard } from "../../lib/directoryPathFromClipboard";
+import { LaunchOptionsSection } from "./LaunchOptionsSection";
+import {
+  autoKind,
+  availableProfiles,
+  BYPASS_CHANGES_NOTHING,
+  isolationAvailable,
+  resolveDefaultLaunchProfile
+} from "../../../../shared/autoMode";
+import type { TranslationKey } from "../../lib/i18n";
+import { backlogApi } from "../workspace/backlogRendererApi";
+
+/** The mode the launcher starts in for this CLI: the person's default, else the next one the CLI has. */
+export function initialProfile(provider: ProviderId, settings: AppSettings, platform: string): LaunchProfileId {
+  return resolveDefaultLaunchProfile(provider, settings, isolationAvailable(settings, platform));
+}
+
+const PROFILE_LABEL: Record<LaunchProfileId, TranslationKey> = {
+  auto: "autoProfile", normal: "manualProfile", acceptEdits: "acceptEditsProfile", plan: "planProfile", yolo: "bypassProfile"
+};
+
+/** What the chosen mode does for this CLI, honestly per CLI. */
+export function profileNoteKey(provider: ProviderId, profile: LaunchProfileId): TranslationKey | null {
+  if (profile === "auto") {
+    const kind = autoKind(provider);
+    if (provider === "grok") return "autoNoteGrok";
+    return kind === "native" ? "autoNoteNative" : kind === "config" ? "autoNoteOpenCode" : kind === "contained" ? "autoNoteContained" : null;
+  }
+  if (profile === "acceptEdits") return "acceptEditsNote";
+  if (profile === "plan") return provider === "codex" ? "planNoteCodex" : "planNote";
+  if (profile === "normal") return "manualNote";
+  return null;
+}
 
 interface AgentLaunchDialogProps {
-  provider: AgentProviderId | null;
+  /** "terminal" opens it only while a plugin environment applies to terminals (folder and Where). */
+  provider: ProviderId | null;
   settings: AppSettings;
   onClose(): void;
   onAcknowledge(provider: AgentProviderId): Promise<void>;
-  onLaunch(provider: AgentProviderId, profile: LaunchProfileId, cwd: string): Promise<void>;
+  /** Persists `agentControlEnabled: true`; only ever called from the explicit button. */
+  onEnableAgentControl(): Promise<void>;
+  onLaunch(
+    provider: ProviderId,
+    profile: LaunchProfileId,
+    cwd: string,
+    role: LaunchRole,
+    launchOptions?: Record<string, PluginLaunchValues>,
+    environment?: SessionEnvironmentChoice,
+    initialPrompt?: string,
+    execution?: { goal: ExecutionGoal; task?: string }
+  ): Promise<void>;
 }
 
 export function AgentLaunchDialog({
@@ -23,22 +72,87 @@ export function AgentLaunchDialog({
   settings,
   onClose,
   onAcknowledge,
+  onEnableAgentControl,
   onLaunch
 }: AgentLaunchDialogProps): React.JSX.Element | null {
-  const [profile, setProfile] = useState<LaunchProfileId>("normal");
+  const platform = window.canvasTTY?.window?.platform ?? "";
+  const [profile, setProfile] = useState<LaunchProfileId>(provider ? initialProfile(provider, settings, platform) : "normal");
+  const [role, setRole] = useState<LaunchRole>("agent");
+  const [executionGoal, setExecutionGoal] = useState<ExecutionGoal>("auto");
+  const [executionTask, setExecutionTask] = useState("");
   const [cwd, setCwd] = useState(settings.lastDirectory);
   const [confirmDanger, setConfirmDanger] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [launchOptions, setLaunchOptions] = useState<Record<string, PluginLaunchValues>>({});
+  const changeLaunchOptions = useCallback((options: Record<string, PluginLaunchValues>) => setLaunchOptions(options), []);
+  const [environment, setEnvironment] = useState<SessionEnvironmentChoice | null>(null);
+  const [flowId, setFlowId] = useState("");
+  const [flowTask, setFlowTask] = useState("");
+  const [flows, setFlows] = useState<Array<Awaited<ReturnType<ReturnType<typeof backlogApi>["flows"]>>["templates"][number]>>([]);
+  const [flowErrors, setFlowErrors] = useState<Array<{ file: string; line: number; message: string }>>([]);
+  const [flowLoading, setFlowLoading] = useState(false);
+  const [flowRefresh, setFlowRefresh] = useState(0);
+  const [flowPreview, setFlowPreview] = useState<{projectRoot:string;flowId:string;instructions:string;digest:string|null} | null>(null);
+  const backlog = useMemo(() => backlogApi(), []);
+  const changeEnvironment = useCallback((choice: SessionEnvironmentChoice | null) => setEnvironment(choice), []);
   const locale = settings.locale;
 
   useEffect(() => {
     if (!provider) return;
-    setProfile("normal");
+    setProfile(initialProfile(provider, settings, platform));
+    setRole("agent");
+    setExecutionGoal("auto");
+    setExecutionTask("");
+    setFlowId("");
+    setFlowTask("");
+    setFlows([]);
+    setFlowErrors([]);
     setCwd(settings.lastDirectory);
     setConfirmDanger(false);
     setError(null);
   }, [provider, settings.lastDirectory]);
+
+  useEffect(() => {
+    if (!provider || provider === "terminal") return;
+    let alive = true;
+    setFlowLoading(true);
+    void backlog.flows(cwd).then((result) => {
+      if (!alive) return;
+      setFlows(result.templates);
+      setFlowErrors(result.errors);
+      setFlowId((current) => current && !result.templates.some((flow) => flow.id === current) ? "" : current);
+    }).catch((reason: unknown) => {
+      if (!alive) return;
+      setFlows([]);
+      setFlowErrors([{ file: "flows", line: 0, message: reason instanceof Error ? reason.message : String(reason) }]);
+    }).finally(() => { if (alive) setFlowLoading(false); });
+    return () => { alive = false; };
+  }, [backlog, cwd, flowRefresh, provider]);
+
+  const selectedFlow = flows.find(flow => flow.id === flowId);
+  useEffect(() => {
+    setFlowPreview(null);
+    if (!flowId || selectedFlow?.trusted === true) return;
+    let alive = true;
+    void backlog.previewFlow(cwd, flowId).then(preview => {
+      if (alive) setFlowPreview({ ...preview, projectRoot: cwd, flowId });
+    }).catch((reason: unknown) => {
+      if (alive) setError(reason instanceof Error ? reason.message : String(reason));
+    });
+    return () => { alive = false; };
+  }, [backlog, cwd, flowId, selectedFlow?.digest, selectedFlow?.trusted]);
+
+  const approveFlow = async (): Promise<void> => {
+    if (!flowPreview?.digest || flowPreview.projectRoot !== cwd || flowPreview.flowId !== flowId) return;
+    setBusy(true);
+    try {
+      await backlog.approveFlow(cwd, flowId, flowPreview.digest);
+      setFlowRefresh(value => value + 1);
+      setError(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+    finally { setBusy(false); }
+  };
 
   useEffect(() => {
     if (!provider) return;
@@ -51,8 +165,24 @@ export function AgentLaunchDialog({
 
   if (!provider) return null;
 
-  const acknowledged = settings.acknowledgedDangerousProfiles.includes(provider);
-  const dangerKey = PROVIDERS[provider].dangerKey!;
+  const isTerminal = provider === "terminal";
+  const acknowledged = isTerminal || settings.acknowledgedDangerousProfiles.includes(provider);
+  const dangerKey = PROVIDERS[provider].dangerKey ?? "confirmLaunch";
+  // An orchestrator without the endpoint would be a plain session with a
+  // misleading badge, so the launch waits for the explicit enable button.
+  const endpointMissing = (role === "orchestrator" || Boolean(flowId)) && !settings.agentControlEnabled;
+
+  const enableEndpoint = async (): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    try {
+      await onEnableAgentControl();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : t(locale, "settingsFailed"));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const chooseDirectory = async (): Promise<void> => {
     const selected = await window.canvasTTY.dialog.pickDirectory(cwd);
@@ -77,6 +207,11 @@ export function AgentLaunchDialog({
   };
 
   const submit = async (): Promise<void> => {
+    if (endpointMissing) return;
+    if (flowId && !flowTask.trim()) {
+      setError(locale === "ru" ? "Опишите задачу для рабочего процесса." : "Describe the task for this workflow.");
+      return;
+    }
     if (profile === "yolo" && !acknowledged && !confirmDanger) {
       setConfirmDanger(true);
       return;
@@ -85,8 +220,15 @@ export function AgentLaunchDialog({
     setBusy(true);
     setError(null);
     try {
-      if (profile === "yolo" && !acknowledged) await onAcknowledge(provider);
-      await onLaunch(provider, profile, cwd);
+      if (profile === "yolo" && !acknowledged && !isTerminal) await onAcknowledge(provider);
+      const strategyEnabled = settings.experimentalBacklogEnabled && (role === "orchestrator" || Boolean(flowId));
+      const initialPrompt = [
+        strategyEnabled ? `When an overall user task is available, call get_execution_strategy before delegating and follow its concurrency and review instructions. If no overall task has been supplied yet, wait for it; these setup instructions are not the task. The person's requested goal is ${executionGoal}.` : "",
+        strategyEnabled && executionTask.trim() ? await backlog.redactText(executionTask.trim()) : "",
+        flowId ? await backlog.redactText((await backlog.flowInstructions(cwd, flowId)).split("{{TASK}}").join(flowTask)) : ""
+      ].filter(Boolean).join("\n\n") || undefined;
+      await onLaunch(provider, profile, cwd, flowId ? "orchestrator" : role, Object.keys(launchOptions).length > 0 ? launchOptions : undefined,
+        environment ?? undefined, initialPrompt, strategyEnabled ? { goal: executionGoal, ...(executionTask.trim() ? { task: executionTask.trim() } : {}) } : undefined);
       onClose();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t(locale, "launchFailed"));
@@ -99,7 +241,7 @@ export function AgentLaunchDialog({
     <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
       if (event.target === event.currentTarget) onClose();
     }}>
-      <section className="launch-dialog" role="dialog" aria-modal="true" aria-label={`${t(locale, "launchAgent")}: ${PROVIDERS[provider].label}`}>
+      <section className="launch-dialog" role="dialog" aria-modal="true" aria-label={isTerminal ? t(locale, "launchTerminal") : `${t(locale, "launchAgent")}: ${PROVIDERS[provider].label}`}>
         <div className="launch-dialog__toolbar">
           <button className="launch-dialog__close" type="button" onClick={onClose} aria-label={t(locale, "close")}><UiIcon name="close" size={18} /></button>
         </div>
@@ -122,23 +264,100 @@ export function AgentLaunchDialog({
           </div>
         </div>
 
+        {!isTerminal && <div className="role-row" role="group" aria-label={t(locale, "launchRole")}>
+          <button className={role === "agent" && !flowId ? "profile-button profile-button--active" : "profile-button"} type="button"
+            aria-pressed={role === "agent" && !flowId} disabled={Boolean(flowId)} onClick={() => setRole("agent")}>{t(locale, "roleAgent")}</button>
+          <button className={role === "orchestrator" ? "profile-button profile-button--active" : "profile-button"} type="button" aria-pressed={role === "orchestrator"} onClick={() => setRole("orchestrator")}>{t(locale, "roleOrchestrator")}</button>
+        </div>}
+
+        {!isTerminal && settings.experimentalBacklogEnabled && (role === "orchestrator" || Boolean(flowId)) && <section className="launch-flow-picker" aria-label={locale === "ru" ? "Цель работы" : "Execution goal"}>
+          <label htmlFor="execution-goal">{locale === "ru" ? "Цель работы" : "Execution goal"}</label>
+          <select id="execution-goal" value={executionGoal} onChange={event => setExecutionGoal(event.currentTarget.value as ExecutionGoal)}>
+            {(["auto", "balanced", "fast", "economical", "deep"] as const).map(goal => <option key={goal} value={goal}>
+              {locale === "ru" ? ({auto:"Автономно · Jev выбирает",balanced:"Сбалансированно",fast:"Быстро",economical:"Экономно",deep:"Глубоко"})[goal]
+                : ({auto:"Autonomous · Jev chooses",balanced:"Balanced",fast:"Fast",economical:"Economical",deep:"Deep"})[goal]}
+            </option>)}
+          </select>
+          <label htmlFor="execution-task">{locale === "ru" ? "Общая задача (необязательно)" : "Overall task (optional)"}</label>
+          <textarea id="execution-task" maxLength={8000} value={executionTask} onChange={event => setExecutionTask(event.currentTarget.value)} rows={3} />
+          <small>{locale === "ru" ? "Ваш выбор имеет приоритет. Jev выбирает стратегию один раз для общей задачи. Лимиты и бюджет сохраняются; дополнительные агенты могут увеличить расход токенов." : "Your choice takes priority. Jev chooses once for the overall task. Limits and budget still apply; additional agents can increase token usage."}</small>
+        </section>}
+
+        {!isTerminal && <section className="launch-flow-picker" aria-label={locale === "ru" ? "Шаблон рабочего процесса" : "Workflow template"}>
+          <label htmlFor="launch-flow-select">{locale === "ru" ? "Рабочий процесс" : "Workflow"}</label>
+          <div className="launch-flow-picker__row">
+            <select id="launch-flow-select" value={flowId} disabled={flowLoading || flows.length === 0}
+              onChange={(event) => {
+                const next = event.currentTarget.value;
+                setFlowId(next);
+                if (next) setRole("orchestrator");
+              }}>
+              <option value="">{flowLoading ? t(locale, "loading") : locale === "ru" ? "Без шаблона" : "No template"}</option>
+              {flows.map((flow) => <option key={flow.id} value={flow.id}>{flow.name} · {flow.expectedSubagents}</option>)}
+            </select>
+            <button type="button" disabled={flowLoading} onClick={() => setFlowRefresh((value) => value + 1)}
+              aria-label={locale === "ru" ? "Обновить шаблоны" : "Refresh templates"}>↻</button>
+          </div>
+          {flowId && <>
+            <label htmlFor="launch-flow-task">{locale === "ru" ? "Задача" : "Task"}</label>
+            <textarea id="launch-flow-task" className="launch-flow-picker__task" rows={3} required
+              value={flowTask} disabled={busy} onChange={(event) => setFlowTask(event.currentTarget.value)}
+              placeholder={locale === "ru" ? "Что должен сделать этот рабочий процесс?" : "What should this workflow accomplish?"} />
+          </>}
+          {flowId && <small>{locale === "ru" ? "Ожидается подагентов" : "Expected subagents"}: {flows.find((flow) => flow.id === flowId)?.expectedSubagents ?? 0}</small>}
+          {flowId && selectedFlow?.trusted !== true && <div className="launch-flow-picker__approval">
+            <p>{locale === "ru" ? "Просмотрите инструкции из файла проекта перед их использованием. Изменённые инструкции потребуют нового одобрения." : "Review the project file's instructions before using them. Changed instructions require approval again."}</p>
+            {flowPreview && <pre style={{maxHeight:240,overflow:"auto",whiteSpace:"pre-wrap"}}>{flowPreview.instructions}</pre>}
+            <button type="button" disabled={busy || !flowPreview?.digest} onClick={() => void approveFlow()}>
+              {locale === "ru" ? "Одобрить эти инструкции" : "Approve these instructions"}
+            </button>
+          </div>}
+          {flowErrors.length > 0 && <ul className="launch-flow-picker__errors" role="status">
+            {flowErrors.map((issue, index) => <li key={`${issue.file}:${issue.line}:${index}`}>
+              {issue.file}{issue.line > 0 ? `:${issue.line}` : ""}: {issue.message}
+            </li>)}
+          </ul>}
+        </section>}
+
         <div className="profile-row">
-          <button className={profile === "normal" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
-            setProfile("normal");
-            setConfirmDanger(false);
-          }}>{t(locale, "normal")}</button>
-          <button className={profile === "yolo" ? "profile-button profile-button--active" : "profile-button"} type="button" onClick={() => {
-            setProfile("yolo");
-            setConfirmDanger(false);
-          }}>{t(locale, "yolo")}</button>
-          <button className="launch-submit" type="button" disabled={busy} onClick={() => void submit()}>
+          {!isTerminal && availableProfiles(provider, isolationAvailable(settings, platform)).map((mode) => (
+            <button key={mode} className={profile === mode ? "profile-button profile-button--active" : "profile-button"} type="button"
+              aria-pressed={profile === mode} onClick={() => {
+                setProfile(mode);
+                setConfirmDanger(false);
+              }}>{t(locale, PROFILE_LABEL[mode])}</button>
+          ))}
+          <button className="launch-submit" type="button" disabled={busy || endpointMissing || Boolean(flowId && (selectedFlow?.trusted !== true || !flowTask.trim()))} onClick={() => void submit()}>
             {busy ? <span className="launch-submit__busy" /> : <UiIcon name="arrow" size={38} />}
           </button>
         </div>
 
+        {role === "orchestrator" && (
+          <div className={`role-note ${endpointMissing ? "role-note--off" : ""}`}>
+            <span>{t(locale, "orchestratorRoleNote")}</span>
+            {endpointMissing && (
+              <>
+                <strong>{t(locale, "orchestratorEndpointOff")}</strong>
+                <button className="role-note__enable" type="button" disabled={busy} onClick={() => void enableEndpoint()}>
+                  {t(locale, "enableAgentControl")}
+                </button>
+              </>
+            )}
+          </div>
+        )}
+
+        <LaunchOptionsSection provider={provider} locale={locale} onChange={changeLaunchOptions} onEnvironmentChange={changeEnvironment} />
+
+        {!isTerminal && profileNoteKey(provider, profile) && (
+          <div className="role-note">
+            <span>{t(locale, profileNoteKey(provider, profile)!)}</span>
+            {profile !== "normal" && <span>{t(locale, isolationAvailable(settings, platform) ? "isolationNoteOn" : "isolationNoteOff")}</span>}
+          </div>
+        )}
         {profile === "yolo" && (
           <div className={`danger-note ${confirmDanger ? "danger-note--confirm" : ""}`}>
-            <strong>{t(locale, dangerKey)}</strong>
+            <strong>{t(locale, BYPASS_CHANGES_NOTHING.has(provider) ? "bypassChangesNothing" : dangerKey)}</strong>
+            {!BYPASS_CHANGES_NOTHING.has(provider) && <span>{t(locale, isolationAvailable(settings, platform) ? "bypassInsideIsolation" : "bypassWithoutIsolation")}</span>}
             {!acknowledged && <span>{confirmDanger ? t(locale, "dangerousFirstUse") : t(locale, "confirmLaunch")}</span>}
           </div>
         )}

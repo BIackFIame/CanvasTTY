@@ -12,6 +12,7 @@ import {
 export interface CanvasWidgetFocusState {
   id: string | null;
   source: "explicit" | "hover";
+  revision: number;
 }
 
 interface UseCanvasWidgetFocusOptions {
@@ -42,7 +43,7 @@ export function useCanvasWidgetFocus({
   browserSelected,
   widgetTreeVersion
 }: UseCanvasWidgetFocusOptions): CanvasWidgetFocusController {
-  const [state, setState] = useState<CanvasWidgetFocusState>({ id: null, source: "explicit" });
+  const [state, setState] = useState<CanvasWidgetFocusState>({ id: null, source: "explicit", revision: 0 });
   const stateRef = useRef(state);
   stateRef.current = state;
   const settingsRef = useRef(settings);
@@ -50,7 +51,8 @@ export function useCanvasWidgetFocus({
   const hoverTimer = useRef<{ id: string; timer: number } | null>(null);
 
   const focus = useCallback((id: string | null, source: CanvasWidgetFocusState["source"]): void => {
-    setState((current) => current.id === id && current.source === source ? current : { id, source });
+    setState((current) => current.id === id && current.source === source && source === "hover"
+      ? current : { id, source, revision: current.revision + 1 });
   }, []);
 
   const cancelHover = useCallback((id?: string): void => {
@@ -107,7 +109,7 @@ export function useCanvasWidgetFocus({
     const target = canvasWidgetTarget(event.target);
     setState((current) => {
       const nextId = canvasWidgetFocusAfterClick(current.id, target);
-      return nextId === current.id ? current : { id: nextId, source: "explicit" };
+      return nextId === current.id ? current : { id: nextId, source: "explicit", revision: current.revision + 1 };
     });
   }, []);
 

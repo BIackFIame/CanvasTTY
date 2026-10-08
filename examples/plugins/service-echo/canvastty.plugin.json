@@ -1,0 +1,27 @@
+{
+  "apiVersion": 2,
+  "id": "com.example.service-echo",
+  "name": "Service Echo",
+  "version": "1.0.0",
+  "description": "Minimal plugin service: a canvas app button that calls its own service, which echoes the text back. The app can also save a token into the plugin's secrets, and the service reads it with secrets.get (it answers only whether one is set).",
+  "author": "CanvasTTY contributors",
+  "permissions": ["storage", "secrets"],
+  "services": [
+    {
+      "id": "echo",
+      "title": "Echo",
+      "description": "Echoes requests and counts them in plugin storage.",
+      "entry": "services/echo.mjs"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "echo",
+      "kind": "canvas-app",
+      "title": "Service echo",
+      "description": "Sends text to the plugin's own service and shows the reply.",
+      "entry": "apps/echo.html",
+      "defaultSize": { "width": 420, "height": 260 }
+    }
+  ]
+}

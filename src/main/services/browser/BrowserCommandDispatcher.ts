@@ -9,6 +9,10 @@ import type { BrowserAuditInput, BrowserAuditRecord } from "./BrowserAuditStore.
 import { BrowserKernelError, browserError } from "./BrowserErrors.ts";
 
 const MAX_COMPLETED_MUTATIONS_PER_AGENT = 10_000;
+/** How long a completed agent mutation answers a resend of its request id (a helper resends after a reconnect). */
+const RETAINED_MUTATION_TTL_MS = 10 * 60_000;
+/** How long a dropped connection's records wait for the helper to reconnect. */
+const RECONNECT_GRACE_MS = 60_000;
 const MAX_MUTATION_QUEUE_DEPTH = 100;
 const MAX_ACTIVITY_EVENTS = 1_000;
 const MAX_AGENT_INFLIGHT = 8;
@@ -33,6 +37,7 @@ export interface BrowserAuditWriter {
 export interface BrowserDispatchExecution {
   data?: unknown;
   tabId?: string | null;
+  notice?: string;
 }
 
 export interface BrowserCommandDispatcherOptions {
@@ -47,6 +52,15 @@ export interface BrowserCommandDispatcherOptions {
 interface DedupeEntry {
   result: Promise<BrowserResult>;
   retainAfterCompletion: boolean;
+  completedAt?: number;
+}
+
+/** One connection's request ids, oldest first, with a running count of the retained (agent mutation) ones. */
+interface ActorDedupe {
+  entries: Map<string, DedupeEntry>;
+  retained: number;
+  /** Set while a dropped connection may still reconnect. */
+  release?: ReturnType<typeof setTimeout>;
 }
 
 export class BrowserCommandDispatcher {
@@ -56,7 +70,7 @@ export class BrowserCommandDispatcher {
   private readonly getOrigin: BrowserCommandDispatcherOptions["getOrigin"];
   private readonly onActivity?: BrowserCommandDispatcherOptions["onActivity"];
   private readonly now: () => number;
-  private readonly dedupe = new Map<string, Map<string, DedupeEntry>>();
+  private readonly dedupe = new Map<string, ActorDedupe>();
   private readonly queues = new Map<string, Promise<void>>();
   private readonly queueDepth = new Map<string, number>();
   private readonly activity: BrowserActivityEvent[] = [];
@@ -97,18 +111,21 @@ export class BrowserCommandDispatcher {
         }
       });
     }
-    const actorDedupe = this.dedupe.get(actorKey) ?? new Map<string, DedupeEntry>();
+    const actorDedupe = this.dedupe.get(actorKey) ?? { entries: new Map<string, DedupeEntry>(), retained: 0 };
     this.dedupe.set(actorKey, actorDedupe);
-    const existing = actorDedupe.get(requestId);
+    if (actorDedupe.release) {
+      // The connection is back: its records stay.
+      clearTimeout(actorDedupe.release);
+      delete actorDedupe.release;
+    }
+    this.forgetExpired(actorDedupe);
+    const existing = actorDedupe.entries.get(requestId);
     if (existing) return existing.result;
 
     const sequence = ++this.sequence;
     const mutation = isMutation(command?.type);
     const retainAfterCompletion = actor.kind === "agent" && mutation;
-    const retainedMutationCount = retainAfterCompletion
-      ? [...actorDedupe.values()].filter((entry) => entry.retainAfterCompletion).length
-      : 0;
-    if (retainAfterCompletion && retainedMutationCount >= MAX_COMPLETED_MUTATIONS_PER_AGENT) {
+    if (retainAfterCompletion && actorDedupe.retained >= MAX_COMPLETED_MUTATIONS_PER_AGENT) {
       return this.run(
         actor,
         command,
@@ -133,21 +150,50 @@ export class BrowserCommandDispatcher {
     this.activeRuns.add(result);
     void result.finally(() => this.activeRuns.delete(result));
     const entry: DedupeEntry = { result, retainAfterCompletion };
-    actorDedupe.set(requestId, entry);
-    if (!retainAfterCompletion) {
+    actorDedupe.entries.set(requestId, entry);
+    if (retainAfterCompletion) {
+      actorDedupe.retained += 1;
+      void result.finally(() => { entry.completedAt = this.now(); });
+    } else {
       void result.finally(() => {
-        if (actorDedupe.get(requestId) === entry) actorDedupe.delete(requestId);
-        if (actorDedupe.size === 0 && this.dedupe.get(actorKey) === actorDedupe) this.dedupe.delete(actorKey);
+        if (actorDedupe.entries.get(requestId) === entry) actorDedupe.entries.delete(requestId);
+        if (actorDedupe.entries.size === 0 && !actorDedupe.release && this.dedupe.get(actorKey) === actorDedupe) this.dedupe.delete(actorKey);
       });
     }
     return result;
   }
 
-  clearActor(actor: BrowserActor): void {
+  /** Completed mutations older than the TTL, from the oldest; stops at the first one that must stay. */
+  private forgetExpired(actorDedupe: ActorDedupe): void {
+    const cutoff = this.now() - RETAINED_MUTATION_TTL_MS;
+    for (const [requestId, entry] of actorDedupe.entries) {
+      if (!entry.retainAfterCompletion) continue;
+      if (entry.completedAt === undefined || entry.completedAt > cutoff) return;
+      actorDedupe.entries.delete(requestId);
+      actorDedupe.retained -= 1;
+    }
+  }
+
+  /**
+   * A connection ended. When its socket only dropped (`reconnecting`), the helper reconnects with the same connection
+   * and resends what had no answer yet: a mutation that already ran then answers from its record instead of running
+   * twice (a second click, a second form submit). The records go when it does not come back in time.
+   */
+  clearActor(actor: BrowserActor, options: { reconnecting?: boolean } = {}): void {
     const actorKey = browserActorKey(actor);
-    this.dedupe.delete(actorKey);
     this.rateWindows.delete(actorKey);
     this.inflight.delete(actorKey);
+    const actorDedupe = this.dedupe.get(actorKey);
+    if (!actorDedupe) return;
+    if (actorDedupe.release) clearTimeout(actorDedupe.release);
+    if (!options.reconnecting) {
+      this.dedupe.delete(actorKey);
+      return;
+    }
+    actorDedupe.release = setTimeout(() => {
+      if (this.dedupe.get(actorKey) === actorDedupe) this.dedupe.delete(actorKey);
+    }, RECONNECT_GRACE_MS);
+    actorDedupe.release.unref?.();
   }
 
   async closeAndDrain(): Promise<void> {
@@ -232,7 +278,8 @@ export class BrowserCommandDispatcher {
         commandSequence,
         revisionBefore,
         revisionAfter,
-        ...(execution.data === undefined ? {} : { data: execution.data })
+        ...(execution.data === undefined ? {} : { data: execution.data }),
+        ...(execution.notice ? { notice: execution.notice } : {})
       };
     } catch (error) {
       const normalized = timed.timedOut

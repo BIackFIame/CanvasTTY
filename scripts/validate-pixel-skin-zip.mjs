@@ -1,0 +1,42 @@
+import { createRequire } from "node:module";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
+import { tmpdir } from "node:os";
+import { PixelSkinPackRegistry, PIXEL_SKIN_SLOTS } from "../src/main/services/PixelSkinPackRegistry.ts";
+
+const require = createRequire(import.meta.url);
+const unzipper = require("unzipper");
+
+async function main() {
+  const archivePath = process.argv[2];
+  if (!archivePath || process.argv.length !== 3) {
+    throw new Error("Usage: node scripts/validate-pixel-skin-zip.mjs /absolute/path/theme-install.zip");
+  }
+  const archive = await readFile(archivePath);
+  const directory = await unzipper.Open.buffer(archive);
+  const actual = directory.files.filter((entry) => entry.type === "File")
+    .map((entry) => basename(entry.path.replace(/\\/g, "/"))).sort();
+  const expected = PIXEL_SKIN_SLOTS.map((slot) => `${slot}.png`).sort();
+  if (actual.length !== expected.length || actual.some((filename, index) => filename !== expected[index])) {
+    throw new Error(`Install ZIP must contain exactly: ${expected.join(", ")}`);
+  }
+
+  const profile = await mkdtemp(join(tmpdir(), "canvastty-skin-validate-"));
+  try {
+    const registry = new PixelSkinPackRegistry(profile);
+    await registry.initialize();
+    const pack = await registry.installZip(archive, "ZIP validation");
+    const manifest = JSON.parse(await readFile(join(profile, "pixel-skins", pack.id.slice("pixel:".length), "manifest.json"), "utf8"));
+    if (manifest.width !== 1536 || manifest.height !== 1024) {
+      throw new Error(`New theme frames must be 1536x1024; found ${manifest.width}x${manifest.height}.`);
+    }
+    process.stdout.write("Valid CanvasTTY install ZIP: ten PNGs, 1536x1024 frames, importer accepted.\n");
+  } finally {
+    await rm(profile, { recursive: true, force: true });
+  }
+}
+
+main().catch((error) => {
+  process.stderr.write(`Invalid CanvasTTY install ZIP: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.exitCode = 1;
+});
