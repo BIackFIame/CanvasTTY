@@ -1539,8 +1539,8 @@ export function App(): React.JSX.Element {
       <main className="app__content">
         {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
         {ready && <WorkspaceCanvas
-          onPersistSettings={persistSettings}
           surfacesMounted={surfacesMounted}
+          onPersistSettings={persistSettings}
           settings={workspaceSettings}
           mediaData={mediaData}
           sessions={sessions}
