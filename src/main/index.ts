@@ -1176,6 +1176,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     descriptors: () => terminalSessionStore.get(),
     create: request => managedTerminals.create(request), setBounds: (id,bounds) => managedTerminals.setBounds(id,bounds),
     available: provider => provider === "terminal" || providerCliAvailability(providerClis!)[provider as AgentProviderId] === true,
+    bypassAcknowledged: provider => settings.get().acknowledgedDangerousProfiles.includes(provider as AgentProviderId),
     redact: text => redaction.redact(text)
   });
   registerBacklogIpc(ipc,{outputHistory,reports,secretGrants,usagePrices,board:taskBoard,budgets,flows:templates,taskRoot:id=>agentControlService.taskRoot(id),attention,terminals:managedTerminals,timeline,checkpoints,workspace,getMainWindow:()=>mainWindow});

@@ -155,3 +155,32 @@ test('export supports a complete 100-card round trip and refuses 101 without tru
   records=[...records,descriptor(directory,'card-100')];
   assert.throws(()=>archive.export(),/at most 100 cards/);assert.equal(records.length,101);
 });
+
+test('portable exports and fresh presets omit opaque host/plugin state but retain inert reconnect markers',async t=>{
+  const directory=await mkdtemp(join(tmpdir(),'ctty-portable-boundary-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+  const privateState={options:{'fixture.plugin':{accountId:'private-account-marker',config:{opaque:'private-options-marker'}}},
+    environmentChoice:{pluginId:'fixture.plugin',kind:'remote',options:{account:'private-choice-marker'}},
+    isolatedEnvironmentScopes:{roots:[join(directory,'private-scope-marker')],ambiguous:true},
+    taskScope:{id:'private-task-id-marker',cwd:join(directory,'private-task-cwd-marker'),startedAt:123},
+    ownerPluginId:'private.owner.marker',gitAuditSince:98234123,reviewRequested:true,arbitraryRuntime:'private-runtime-marker'};
+  const thread='11111111-1111-4111-8111-111111111111';
+  const local={...descriptor(directory,'local'),...privateState,threadId:thread,model:'fixture-model',effort:'high',lastState:'failed',exitCode:42,restore:false};
+  const remote={...descriptor(directory,'remote'),...privateState,environment:{pluginId:'fixture.plugin',kind:'remote',label:'private-label-marker',ref:{opaque:'private-ref-marker'}}};
+  const created=[],deps={descriptors:()=>[local,remote],create:request=>{created.push(request);return{...request,id:`new-${created.length}`};},setBounds(){},available:()=>true,redact:text=>text};
+  const archive=new WorkspaceArchive(directory,deps);
+  const exported=archive.export(),wire=JSON.parse(exported);
+  assert.doesNotMatch(exported,/private-|98234123|gitAuditSince|taskScope|reviewRequested|ownerPluginId|environmentChoice|"options"|exitCode/);
+  assert.deepEqual(wire.sessions[1].environment,{pluginId:'fixture.plugin',kind:'remote',ref:null,label:'Reconnect environment'});
+  assert.equal(wire.sessions[0].threadId,thread);assert.equal(wire.sessions[0].lastState,'running');assert.equal(wire.sessions[0].restore,true);
+  const imported=await archive.import(exported,false);assert.equal(imported.sessions.length,1);assert.equal(created[0].resumeThreadId,thread);
+  assert.match(imported.warnings.join(' '),/environment needs to be reconnected.*skipped/);
+  assert.equal(created.some(row=>row.title==='remote'),false,'connected card must not silently become a local launch');
+  const raw=JSON.stringify({format:'canvastty-workspace',version:1,sessions:[local,remote]});
+  await archive.savePreset({id:'portable',name:'Portable',snapshot:raw,internalAccount:'private-preset-extra-marker'});
+  const reloaded=new WorkspaceArchive(directory,deps),preset=(await reloaded.presets())[0];
+  assert.doesNotMatch(preset.snapshot,/private-|98234123|threadId|gitAuditSince|taskScope|reviewRequested|ownerPluginId|environmentChoice|"options"|exitCode/);
+  assert.doesNotMatch(await readFile(join(directory,'workspace-presets.json'),'utf8'),/private-/);
+  await reloaded.savePreset({...preset,id:'resaved'});const resaved=(await reloaded.presets()).find(row=>row.id==='resaved');
+  const fresh=await reloaded.import(resaved.snapshot,false);assert.equal(fresh.sessions.length,1);assert.equal(created[1].resumeThreadId,undefined);
+  assert.deepEqual(JSON.parse(resaved.snapshot).sessions[1].environment,wire.sessions[1].environment);
+});

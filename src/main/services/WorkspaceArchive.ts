@@ -15,6 +15,8 @@ export interface WorkspaceArchiveDependencies {
   create(request: CreateSessionRequest): SessionSnapshot;
   setBounds(id: string, bounds: {position: {x:number;y:number};size:{width:number;height:number}}): void;
   available(provider: string): boolean;
+  /** Host-owned launcher acknowledgement, never authority from the imported snapshot. */
+  bypassAcknowledged?(provider: string): boolean;
   redact(text: string): string;
 }
 
@@ -31,7 +33,22 @@ export class WorkspaceArchive {
     const sessions=this.deps.descriptors();
     if(sessions.length>100)throw new Error("Workspace export supports at most 100 cards; close cards before exporting.");
     return JSON.stringify({format: "canvastty-workspace", version: 1, exportedAt: Date.now(),
-      sessions: sessions.map((record) => this.sanitize(record))}, null, 2);
+      sessions: sessions.map((record) => this.sanitize(this.portableRecord(record)))}, null, 2);
+  }
+  private portableRecord(record: PersistedTerminalSession, fresh = false): PersistedTerminalSession {
+    return {
+      id: record.id, provider: record.provider, profile: record.profile, role: record.role,
+      title: record.title, titleCustomized: record.titleCustomized, cwd: record.cwd,
+      position: {x: record.position.x, y: record.position.y}, size: {width: record.size.width, height: record.size.height},
+      lastState: "running", restore: true,
+      ...(record.parentSessionId !== undefined ? {parentSessionId: record.parentSessionId} : {}),
+      ...(!fresh && record.threadId !== undefined ? {threadId: record.threadId} : {}),
+      ...(record.model !== undefined ? {model: record.model} : {}),
+      ...(record.effort !== undefined ? {effort: record.effort} : {}),
+      // Keep placed cards inert on import without disclosing the plugin's private connection payload.
+      ...(record.environment ? {environment: {pluginId: record.environment.pluginId, kind: record.environment.kind,
+        ref: null, label: "Reconnect environment"}} : {})
+    };
   }
   private sanitize(value: unknown): unknown {
     if (typeof value === "string") return this.deps.redact(value);
@@ -83,14 +100,29 @@ export class WorkspaceArchive {
     const records = this.parse(text);
     if (records.some((record) => record.profile === "yolo") && confirmBypass !== true) throw new Error("Confirm Bypass profiles before opening this workspace.");
     const warnings = await this.warnings(records);
+    const candidates = new Set<string>();
+    for (const record of records) {
+      if (this.deps.available(record.provider) && !record.environment
+        && await stat(record.cwd).then(entry => entry.isDirectory()).catch(() => false)) candidates.add(record.id);
+    }
+    const byId = new Map(records.map(record => [record.id, record]));
+    for (const record of records) {
+      if (record.profile !== "yolo" || record.provider === "terminal") continue;
+      let ancestor: PersistedTerminalSession | undefined = record;
+      while (ancestor && candidates.has(ancestor.id)) ancestor = ancestor.parentSessionId ? byId.get(ancestor.parentSessionId) : undefined;
+      if (ancestor) continue; // This card or an ancestor will be skipped, not launched locally.
+      if (record.role === "subagent") throw new Error("Bypass is never permitted for subagents; change this workspace card's profile before importing.");
+      if (this.deps.bypassAcknowledged?.(record.provider) !== true) {
+        throw new Error(`Acknowledge Bypass for ${record.provider} in CanvasTTY's launcher, then retry this import. No cards were created.`);
+      }
+    }
     const pending = [...records], sessions: SessionSnapshot[] = [], idMap = new Map<string,string>();
     while (pending.length) {
       const index = pending.findIndex((record) => !record.parentSessionId || idMap.has(record.parentSessionId)
         || !pending.some((candidate) => candidate.id === record.parentSessionId));
       if (index < 0) break;
       const record = pending.splice(index,1)[0];
-      if (!this.deps.available(record.provider) || record.environment
-        || !await stat(record.cwd).then((entry) => entry.isDirectory()).catch(() => false)) continue;
+      if (!candidates.has(record.id)) continue;
       if (record.parentSessionId && !idMap.has(record.parentSessionId)) { warnings.push(`${record.title}: parent could not be opened.`); continue; }
       try {
         const created = this.deps.create({provider: record.provider, cwd: record.cwd, profile: record.profile,
@@ -111,7 +143,7 @@ export class WorkspaceArchive {
   savePreset(preset: WorkspacePreset): Promise<WorkspacePreset> {
     if (!preset || !/^[\w-]{1,100}$/.test(preset.id) || !validPresetName(preset.name)) return Promise.reject(new Error("Invalid workspace preset."));
     this.parse(preset.snapshot);
-    const row = this.sanitize({...preset,snapshot:this.freshSnapshot(preset.snapshot)}) as WorkspacePreset;
+    const row: WorkspacePreset = {id:preset.id,name:this.deps.redact(preset.name),snapshot:this.freshSnapshot(preset.snapshot)};
     const work = this.queue.then(async () => {
       const rows = await this.readPresets();
       const next = [...rows.filter((entry) => entry.id !== row.id), row];
@@ -153,7 +185,7 @@ export class WorkspaceArchive {
     await writeFile(`${this.file}.tmp`,JSON.stringify(rows),{mode:0o600}); await rename(`${this.file}.tmp`,this.file);
   }
   private freshSnapshot(text:string):string {
-    const sessions=this.parse(text).map(({threadId:_threadId,environmentChoice:_choice,options:_options,...record})=>record);
+    const sessions=this.parse(text).map(record=>this.portableRecord(record,true));
     const source=JSON.parse(text) as Record<string,unknown>;
     const sessionIds=Object.fromEntries(sessions.map(row=>[row.id,row.id]));
     let tasks;

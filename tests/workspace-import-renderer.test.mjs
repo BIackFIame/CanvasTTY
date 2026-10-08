@@ -39,15 +39,16 @@ for(const failure of [false,true])test(`actual workspace import applies confirme
 });
 
 function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
-async function importFixture(t,importWorkspace,onPersistSettings){
+async function importFixture(t,importWorkspace,onPersistSettings,options={}){
+ let previewWork;
  const oldWindow=globalThis.window,oldDocument=globalThis.document;globalThis.document={body:{nodeType:1}};
- globalThis.window={setTimeout,clearTimeout,canvasTTY:{backlog:{workspacePresets:async()=>[],previewImport:async()=>({warnings:[],count:1}),importWorkspace}}};
+ globalThis.window={setTimeout,clearTimeout,canvasTTY:{backlog:{workspacePresets:async()=>[],previewImport:value=>{previewWork=Promise.resolve(options.previewImport?options.previewImport(value):{warnings:[],count:1});return previewWork;},importWorkspace}}};
  tools.__reset();t.after(()=>{tools.__unmount();globalThis.window=oldWindow;globalThis.document=oldDocument;});
  const props={sessions:[],settings:{},locale:'en',broadcastEnabled:false,broadcastSending:false,broadcastTargetCount:0,onClose(){},onPersistSettings};
  let tree;const render=()=>{tools.__flush();tree=tools.__render(tools.WorkspaceBacklogTools,props);};
  const confirmation=()=>findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot')[0];
- render();await tick();render();findAll(tree,node=>node.type==='input'&&node.props.type==='file')[0].props.onChange({currentTarget:{files:[{text:async()=>JSON.stringify({canvas:importedCanvas})}],value:'file'}});
- await tick();render();return{render,confirmation,tree:()=>tree};
+ render();await tick();render();findAll(tree,node=>node.type==='input'&&node.props.type==='file')[0].props.onChange({currentTarget:{files:[{text:async()=>options.text??JSON.stringify({canvas:importedCanvas})}],value:'file'}});
+ await tick();assert.ok(previewWork,"file import reached preview");await previewWork;await tick();render();return{render,confirmation,tree:()=>tree};
 }
 test('committed import cannot repeat during or after failed canvas persistence, even through a stale handler',async t=>{
  const host=deferred(),settings=deferred();let imports=0,updates=0;
@@ -68,4 +69,24 @@ test('host import rejection remains retryable and only successful host completio
  f.confirmation().props.onClick();first.reject(new Error('host rejected before commit'));await tick();f.render();
  assert.match(JSON.stringify(f.tree()),/host rejected before commit/);assert.ok(f.confirmation());assert.equal(updates,0);
  f.confirmation().props.onClick();await tick();f.render();assert.equal(imports,2);assert.equal(updates,1);assert.equal(f.confirmation(),undefined);
+});
+
+test('first-time Bypass host refusal preserves confirmation for retry after explicit launcher acknowledgement',async t=>{
+ const directory=await mkdtemp(join(tmpdir(),'ctty-bypass-confirm-'));t.after(()=>rm(directory,{recursive:true,force:true}));
+ const acknowledged=new Set(),created=[];let persisted=0,lastImport;
+ const archive=new WorkspaceArchive(directory,{descriptors:()=>[],available:()=>true,bypassAcknowledged:provider=>acknowledged.has(provider),
+  create:request=>{created.push(request);return{...request,id:`new-${created.length}`};},setBounds(){},redact:text=>text});
+ const card=(id,extra={})=>({id,provider:'codex',profile:'normal',role:'orchestrator',title:id,titleCustomized:true,cwd:directory,position:{x:0,y:0},size:{width:600,height:400},lastState:'running',restore:true,...extra});
+ const text=JSON.stringify({format:'canvastty-workspace',version:1,sessions:[card('normal'),card('bypass',{profile:'yolo'}),card('child',{role:'subagent',parentSessionId:'bypass'})],canvas:importedCanvas});
+ const f=await importFixture(t,(value,options)=>{lastImport=archive.import(value,options.confirmBypass);return lastImport;},async()=>{persisted++;},
+  {text,previewImport:value=>archive.preview(value)});
+ assert.equal(f.confirmation().props.disabled,true);f.confirmation().props.onClick();assert.equal(lastImport,undefined);
+ const consent=findAll(f.tree(),node=>node.type==='label'&&JSON.stringify(node.props.children).includes('I confirm launching Bypass profiles.'))[0];
+ findAll(consent,node=>node.type==='input')[0].props.onChange({target:{checked:true}});f.render();
+ f.confirmation().props.onClick();await lastImport.catch(()=>{});await tick();f.render();
+ assert.equal(created.length,0);assert.equal(acknowledged.size,0);assert.equal(persisted,0);assert.ok(f.confirmation());
+ assert.match(JSON.stringify(f.tree()),/Acknowledge Bypass for codex.*launcher/);
+ acknowledged.add('codex'); // The independent launcher action, never the import checkbox.
+ f.confirmation().props.onClick();await lastImport;await tick();f.render();
+ assert.equal(created.length,3);assert.equal(persisted,1);assert.equal(f.confirmation(),undefined);assert.equal(created[2].parentSessionId,'new-2');
 });
