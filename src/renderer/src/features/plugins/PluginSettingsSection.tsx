@@ -1098,6 +1098,7 @@ function HookManifestWarning({
 
 function permissionKey(permission: PluginPermission): TranslationKey {
   return ({
+    "model:route": "permissionModelRoute",
     storage: "permissionStorage",
     secrets: "permissionSecrets",
     "sessions:read": "permissionSessionsRead",

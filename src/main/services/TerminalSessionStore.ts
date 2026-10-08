@@ -14,6 +14,9 @@ import { isLaunchProfile } from "../../shared/autoMode.ts";
 import { isProviderId } from "../../shared/providerCatalog.ts";
 import { launchEffortProblem, launchModelProblem, type ReasoningEffort } from "../../shared/launchModel.ts";
 
+import { normalizeExecutionAuthorization, isDataClass, type ExecutionAuthorization, type ExecutionDataClass } from "../../shared/executionPolicy.ts";
+import { isExecutionGoal, normalizeExecutionStrategy } from "../../shared/executionStrategy.ts";
+
 const TERMINAL_SESSION_STORE_VERSION = 2;
 /**
  * A bound against a damaged or hostile file, far above what a canvas holds: every open card is saved (a cap that cut
@@ -25,6 +28,11 @@ export const MAX_PLUGIN_SLOT_BYTES = 4_096;
 const MAX_OPTION_PLUGINS = 16;
 
 export interface PersistedTerminalSession {
+  executionClass?: ExecutionDataClass;
+  executionAuthorization?: ExecutionAuthorization;
+  executionGoal?: SessionMetadata["executionGoal"];
+  executionTask?: string;
+  executionStrategy?: SessionMetadata["executionStrategy"];
   /** Host-only launch history; missing evidence on a legacy placed card is conservatively unknown. */
   isolatedEnvironmentScopes?: {roots:string[];ambiguous:boolean};
   taskScope?:{id:string;cwd:string;startedAt:number};
@@ -48,6 +56,10 @@ export interface PersistedTerminalSession {
   restore: boolean;
   /** Plugin launch options keyed by plugin id, each opaque and at most 4 KB. */
   options?: Record<string, unknown>;
+  /** Host-only root privacy selections; no task, account identifiers, or plugin secrets. */
+  executionPrivacy?: Record<string, string>;
+  /** Host-owned per-plugin person tasks, retained across account-only continuation launches. */
+  reviewTasks?: Record<string, string>;
   /** Where the session runs when a plugin placed it; opaque to core, at most 4 KB. */
   environment?: PersistedEnvironmentRef;
   /**
@@ -60,12 +72,21 @@ export interface PersistedTerminalSession {
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
+  modelRoute?: SessionMetadata["modelRoute"];
   reviewRequested?: boolean;
   /** An isolated session ran since then and its repositories were not audited yet, or a report is still open. */
   gitAuditSince?: number;
 }
 
 export type PersistedLastState = "running" | "exited" | "failed";
+
+function validModelRoute(value:unknown):value is NonNullable<SessionMetadata["modelRoute"]> {
+  if (!value || typeof value !== "object") return false;
+  const route=value as NonNullable<SessionMetadata["modelRoute"]>;
+  return ["explicit","router","default"].includes(route.source) && typeof route.reason==="string" && route.reason.length<=500
+    && (route.candidateId===undefined || typeof route.candidateId==="string" && route.candidateId.length<=500)
+    && (route.escalated===undefined || typeof route.escalated==="boolean");
+}
 
 export interface PersistedEnvironmentRef {
   pluginId: string;
@@ -221,8 +242,8 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
   return typeof candidate === "string" ? normalizeThreadId(provider, candidate.trim()) : undefined;
 }
 
-/** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince" | "isolatedEnvironmentScopes"> & {
+/** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "executionClass" | "executionAuthorization" | "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince" | "isolatedEnvironmentScopes"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -247,10 +268,15 @@ export function persistedTerminalSession(
     size: { ...metadata.size },
     ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
     ...(metadata.taskScope ? {taskScope:{...metadata.taskScope}} : {}),
+    ...(metadata.executionGoal ? { executionGoal: metadata.executionGoal, executionTask: metadata.executionTask, executionStrategy: metadata.executionStrategy } : {}),
     ...(normalizedThreadId !== undefined ? { threadId: normalizedThreadId } : {}),
     lastState,
     ...(lastState !== "running" ? { exitCode: metadata.exitCode } : {}),
     restore: metadata.skipRestore !== true,
+    ...(extras.executionClass ? {executionClass:extras.executionClass} : {}),
+    ...(extras.executionAuthorization ? {executionAuthorization:structuredClone(extras.executionAuthorization)} : {}),
+    ...(extras.reviewTasks ? { reviewTasks: { ...extras.reviewTasks } } : {}),
+    ...(extras.executionPrivacy ? { executionPrivacy: { ...extras.executionPrivacy } } : {}),
     ...(extras.isolatedEnvironmentScopes ? {isolatedEnvironmentScopes:structuredClone(extras.isolatedEnvironmentScopes)} : {}),
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
@@ -259,6 +285,7 @@ export function persistedTerminalSession(
     ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}),
+    ...(metadata.modelRoute ? { modelRoute: { ...metadata.modelRoute } } : {}),
     ...(metadata.reviewRequested !== undefined ? { reviewRequested: metadata.reviewRequested } : {})
   };
 }
@@ -320,12 +347,19 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       : "running";
     const exitCode = Number.isInteger(session.exitCode) ? session.exitCode as number : null;
     const options = normalizeOptions(session.options);
+    const reviewTasks = session.reviewTasks;
+    if (reviewTasks !== undefined && (!isRecord(reviewTasks) || Object.keys(reviewTasks).length > 16 || Object.entries(reviewTasks).some(([id, value]) => !isPluginId(id) || typeof value !== "string" || value.length > 2000))) continue;
+    const executionPrivacy = session.executionPrivacy;
+    // An unreadable privacy selection must never restore as a weaker default.
+    if (executionPrivacy !== undefined && (!isRecord(executionPrivacy) || Object.entries(executionPrivacy).some(([id, value]) => !isPluginId(id) || typeof value !== "string" || !["default", "D0", "D1", "D2", "D3", "unresolved"].includes(value)))) continue;
     const environment = normalizeEnvironment(session.environment);
     // A placed session whose ref is unreadable must not come back as a local one.
     if (session.environment !== undefined && !environment) continue;
     // Likewise a launch whose environment was chosen but not prepared yet.
     const environmentChoice = environment ? undefined : normalizeEnvironmentChoice(session.environmentChoice);
     if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
+    const strategy = normalizeExecutionStrategy(session.executionStrategy);
+    const executionAuthorization = normalizeExecutionAuthorization(session.executionAuthorization);
     const isolation=normalizeIsolationEvidence(session.isolatedEnvironmentScopes,Boolean(environment));
     sessions.push({
       id: session.id,
@@ -342,11 +376,18 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       },
       ...(parentSessionId !== undefined ? { parentSessionId } : {}),
       ...(isTaskScope(session.taskScope) ? {taskScope:{...session.taskScope}} : {}),
+      ...(isExecutionGoal(session.executionGoal) ? { executionGoal: session.executionGoal,
+        ...(typeof session.executionTask === "string" ? { executionTask: session.executionTask.slice(0,8000) } : {}),
+        ...(strategy?.requested === session.executionGoal ? { executionStrategy: strategy } : {}) } : {}),
       ...(threadId !== undefined ? { threadId } : {}),
       lastState,
       ...(lastState !== "running" ? { exitCode } : {}),
       restore: session.restore !== false,
       ...(options ? { options } : {}),
+      ...(session.executionClass !== undefined ? {executionClass:isDataClass(session.executionClass)?session.executionClass:"D3" as const} : {}),
+      ...(executionAuthorization ? { executionAuthorization } : {}),
+      ...(reviewTasks ? { reviewTasks: { ...reviewTasks } as Record<string, string> } : {}),
+      ...(executionPrivacy ? { executionPrivacy: { ...executionPrivacy } as Record<string, string> } : {}),
       ...(environment ? { environment } : {}),
       ...(isolation ? {isolatedEnvironmentScopes:isolation} : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
@@ -358,6 +399,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
         ? { model: session.model } : {}),
       ...(session.provider !== "terminal" && session.effort !== undefined && launchEffortProblem(session.provider as ProviderId, session.effort) === null
         ? { effort: session.effort } : {}),
+      ...(validModelRoute(session.modelRoute) ? { modelRoute: { ...session.modelRoute } } : {}),
       ...(typeof session.reviewRequested === "boolean" ? { reviewRequested: session.reviewRequested } : {})
     });
     ids.add(session.id);
@@ -452,4 +494,18 @@ function isMissingFile(error: unknown): boolean {
 
 function isTaskScope(value:unknown):value is {id:string;cwd:string;startedAt:number} {
   return isRecord(value) && typeof value.id==="string" && /^[\w-]{1,160}$/.test(value.id) && typeof value.cwd==="string" && value.cwd.length>0 && value.cwd.length<=4096 && typeof value.startedAt==="number" && Number.isFinite(value.startedAt) && value.startedAt>0;
+}
+
+/** Snapshot only privacy selections from trusted launch options; unrecognized selections fail closed at the router. */
+export function executionPrivacyFromOptions(options?: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => isRecord(value) && Object.hasOwn(value, "dataClass")).map(([id, value]) => {
+    const selected = isRecord(value) ? value.dataClass : undefined;
+    return [id, selected === undefined ? "default" : typeof selected === "string" && ["default", "D0", "D1", "D2", "D3"].includes(selected) ? selected : "unresolved"];
+  }));
+}
+
+/** Snapshot task text only; never copy account values or unrelated plugin settings into review context. */
+export function reviewTasksFromOptions(options?: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(options ?? {}).slice(0, 16).flatMap(([id, value]) =>
+    isRecord(value) && typeof value.task === "string" ? [[id, value.task.slice(0, 2000)]] : []));
 }

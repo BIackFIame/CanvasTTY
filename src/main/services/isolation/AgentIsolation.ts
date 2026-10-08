@@ -229,6 +229,8 @@ export interface IsolationLaunch {
 }
 
 export interface WrappedLaunch {
+  /** Immutable evidence for this generated wrapper; no credentials, domains or paths. */
+  executionProtection?: import("../../../shared/executionProtection.ts").ExecutionProtection;
   command: string;
   args: string[];
   env: Record<string, string>;
@@ -408,6 +410,8 @@ export class AgentIsolation {
         : [];
       networkLaunch = this.options.networkPolicy?.prepareLaunch(launch.networkProjectRoot ?? cwd, launch.provider, launch.apiDomains) ?? null;
       const networkMode = networkLaunch?.mode ?? "open";
+      const executionProtection = Object.freeze({ state: "applied", location: "local", layer: available.layer,
+        filesystem: launch.profile === "plan" ? "read-only-project" : "project-and-runtime", network: networkMode } as const);
       if (networkMode !== "open" && this.platform === "linux") {
         const failure = this.networkIsolationFailure();
         if (failure) throw new LaunchRefusal(`${networkMode} network mode cannot be enforced: ${failure} The agent was not started.`);
@@ -457,7 +461,7 @@ export class AgentIsolation {
           loopbackPorts: claudeHookPorts(launch.provider, launch.args)
         } as const : undefined;
         writeFileSync(profilePath, seatbeltProfile(paths, network), { mode: 0o600, flag: "wx" });
-        return { command: this.options.sandboxExecPath ?? SANDBOX_EXEC, args: ["-f", profilePath, launchCommand, ...launch.args], env,
+        return { executionProtection, command: this.options.sandboxExecPath ?? SANDBOX_EXEC, args: ["-f", profilePath, launchCommand, ...launch.args], env,
           ...(worktreeGitMetadataReadOnly ? { isolationReason: WORKTREE_GIT_NOTE } : {}), cleanup };
       }
       // bubblewrap mounts only what exists: the CLI's own missing folders are created and a missing protected file
@@ -488,6 +492,7 @@ export class AgentIsolation {
       const hooks = projectHooks(cwd);
       const mountPoint = kind(dirname(hooks)) === null && args.includes(hooks);
       return {
+        executionProtection,
         command: this.bubblewrap!,
         args,
         env,

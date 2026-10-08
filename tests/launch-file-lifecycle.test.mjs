@@ -74,7 +74,7 @@ for(const outcome of ['success','refusal','throw'])test(`close while environment
  const wrapping=deferred(),release=f.gate();let plannedCleanups=0;
  const plan=f.terminals.planSpawn.bind(f.terminals);
  f.terminals.planSpawn=(...args)=>{const result=plan(...args);assert.ok(!('failure' in result));const cleanup=result.cleanup;result.cleanup=()=>{plannedCleanups++;cleanup();};return result;};
- const registry=new EnvironmentRegistry({providers:()=>[{pluginId:'fixture.env',pluginName:'Environment',serviceId:'env',secrets:false,kinds:[{kind:'test',label:'Test',fields:[]}]}],
+ const registry=new EnvironmentRegistry({providers:()=>[{pluginId:'fixture.env',pluginName:'Environment',serviceId:'env',secrets:false,kinds:[{kind:'test',label:'Test',executionLocation:'local',fields:[]}]}],
   call:async(_p,_s,method)=>method.endsWith('.prepare')?{ref:{id:'one'},label:'Test'}:{},secret:async()=>null});
  registry.wrap=async(_environment,input)=>{
   wrapping.resolve();await release.promise;
@@ -111,7 +111,7 @@ test('spawn refusal releases unadopted files and capabilities before eventual pa
  await assert.rejects(stat(join(f.runs,session.id)),{code:'ENOENT'});
 });
 
-for(const failure of ['none','prepare','cleanup'])test(`unadopted reviewer account retains its originating pipeline through reconfiguration (${failure})`,{timeout:5000},async t=>{
+for(const failure of ['none','prepare','cleanup','closed'])test(`unadopted reviewer account retains its originating pipeline through reconfiguration (${failure})`,{timeout:5000},async t=>{
  const f=await fixture(t),started=deferred(),release=f.gate(),events=[];
  const parent=f.terminals.create({provider:'codex',profile:'normal',cwd:f.root,role:'orchestrator',position:{x:0,y:0}});
  const workspace=createDiffOnlyReviewWorkspace('+fixture');t.after(()=>workspace.cleanup());
@@ -131,9 +131,10 @@ for(const failure of ['none','prepare','cleanup'])test(`unadopted reviewer accou
  f.terminals.configureLaunchPipeline(pipeline);
  const preparing=f.terminals.prepareReviewerAccount({taskRootSessionId:parent.id,provider:'codex',workspace,launchOptions:{'canvastty-accounts':{account:'fixture'}}});
  await started.promise;
- const other=f.pipeline();f.terminals.configureLaunchPipeline(other.value);f.terminals.dispose(parent.id);
+ const other=f.pipeline();f.terminals.configureLaunchPipeline(other.value);if(failure==='closed')f.terminals.dispose(parent.id);
  release.resolve();
  if(failure==='prepare')await assert.rejects(preparing,/fixture failed/u);
+ else if(failure==='closed')await assert.rejects(preparing,/task ended/u);
  else {
   const prepared=await preparing;await stat(prepared.contribution.env.FIXTURE_FILE);
   const first=prepared.contribution.cleanup(),second=prepared.contribution.cleanup();assert.equal(first,second,'one cleanup ownership handle');

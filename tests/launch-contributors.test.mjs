@@ -478,3 +478,22 @@ test("end to end: the example service prepares a launch over JSON-RPC", async (t
   const empty = await pipeline.prepare(context({ greeting: "" }));
   assert.match(empty.reason, /Launch Env: Value is empty/u);
 });
+
+test('only requested selected Accounts evidence survives the strict launch pipeline', async t => {
+  const route = { model: 'approved', endpoint: 'api.fixture.invalid:8443', kind: 'api-key' };
+  const context = { sessionId: 'proof', provider: 'codex', profile: 'normal', role: 'agent', cwd,
+    restoring: false, resume: false, accountRouteEvidence: true, options: { 'canvastty-accounts': { account: 'fixture' } } };
+  const { pipeline, requests } = await pipelineFixture(t, { contributors: [contributor('canvastty-accounts')],
+    answers: { 'canvastty-accounts': { accountId: 'fixture', accountRoute: route } } });
+  const good = await pipeline.prepare(context);
+  assert.equal(good.ok, true); assert.deepEqual(good.accountRoute, route); assert.equal(requests[0].params.accountRouteEvidence, true); await good.cleanup();
+  const unsolicited = await pipeline.prepare({ ...context, accountRouteEvidence: undefined });
+  assert.equal(unsolicited.ok, false);
+  for (const bad of [{ ...route, model: '' }, { ...route, endpoint: 'user@host' }, { ...route, kind: 'anything' }, { ...route, secret: 'forbidden' }]) {
+    const { pipeline: malformed } = await pipelineFixture(t, { contributors: [contributor('canvastty-accounts')], answers: { 'canvastty-accounts': { accountId: 'fixture', accountRoute: bad } } });
+    assert.equal((await malformed.prepare(context)).ok, false);
+  }
+  const { pipeline: forged, requests: foreignRequests } = await pipelineFixture(t, { contributors: [contributor('other')], answers: { other: { accountId: 'fixture', accountRoute: route } } });
+  assert.equal((await forged.prepare({ ...context, options: { other: {} } })).ok, false);
+  assert.equal(foreignRequests[0].params.accountRouteEvidence, undefined);
+});

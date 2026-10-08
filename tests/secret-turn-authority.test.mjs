@@ -49,7 +49,7 @@ test("accepted production idle keeps asynchronous human approval available only 
   let reads=0;
   const f=await setup(t,{getSecret:async()=>{reads+=1;return "fake-grant-value";}});
   f.working();const pending=f.request();assert.equal(pending.turnAvailable,true);
-  const sandbox={result:null,console,terminalManager:f.terminals,secretGrants:f.service,checkpointTurns:new Map(),
+  const sandbox={result:null,console,terminalManager:f.terminals,humanQuestions:null,secretGrants:f.service,checkpointTurns:new Map(),
    timeline:{append:async()=>{}},agentControl:null};
   runInNewContext(signalCode,sandbox);
   sandbox.result.onSignal(f.row.id,{state:"idle",event:"Stop"});
@@ -122,7 +122,7 @@ test("secret grants panel disables unavailable turn approval while keeping expli
  const oldWindow=globalThis.window,oldDocument=globalThis.document;
  const requests=[{id:"request",sessionId:"s",secretId:"OPENAI_API_KEY",reason:"check",createdAt:1,expiresAt:99999,turnAvailable:false}];
  globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
- globalThis.window={setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){},canvasTTY:{backlog:{secretRequests:async()=>requests,secretGrants:async()=>[]}}};
+ globalThis.window={setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){},canvasTTY:{backlog:{secretRequests:async()=>requests,humanQuestions:null,secretGrants:async()=>[]}}};
  t.after(()=>{panel.__unmount();globalThis.window=oldWindow;globalThis.document=oldDocument;});panel.__reset();
  const props={sessionId:"s",sessions:[],locale:"en",onError:()=>{}};const render=()=>{panel.__flush();const child=panel.SecretGrantsPanel(props);return panel.__render(child.type,child.props);};
  render();await tick();let tree=render();const button=label=>findAll(tree,node=>node.type==="button"&&node.props.children===label)[0];

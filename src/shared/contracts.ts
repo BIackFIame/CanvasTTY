@@ -396,6 +396,7 @@ export interface CameraState extends Point {
 }
 
 export interface AppSettings {
+  executionPolicy?: import("./executionPolicy.ts").ExecutionPolicy;
   locale: LocaleId;
   sessionRestoreMode: SessionRestoreMode;
   persistCanvasRegions: boolean;
@@ -411,6 +412,8 @@ export interface AppSettings {
   radialLauncherEnabled: boolean;
   radialLauncherItems: RadialLauncherItemId[];
   agentLifecycleHooksEnabled: boolean;
+  /** F06/F08/F28/F30 integrations: opt-in, not verified live. */
+  experimentalBacklogEnabled: boolean;
   /** Base protection: deny-only hard rules for agents' tool calls (writes outside the folder, sudo, …). */
   baseProtectionEnabled: boolean;
   uiScale: number;
@@ -513,6 +516,9 @@ export interface SessionIsolation {
 }
 
 export interface CreateSessionRequest {
+  executionTargetId?: string;
+  executionGoal?: import("./executionStrategy.ts").ExecutionGoal;
+  executionTask?: string;
   provider: ProviderId;
   cwd: string;
   profile: LaunchProfileId;
@@ -559,16 +565,19 @@ export type AgentChatHistoryResumeResult =
   | { error: { code: "invalid-id" | "cli-unavailable" | "conversation-missing" | "cwd-unknown" | "cwd-unavailable" | "resume-failed"; message: string } };
 
 export interface SessionMetadata {
+  executionGoal?: import("./executionStrategy.ts").ExecutionGoal;
+  executionTask?: string;
+  executionStrategy?: import("./executionStrategy.ts").ExecutionStrategy;
   /** Observed provider counters; missing fields are unknown, never inferred from limits. */
   usage?: import("./backlog.ts").UsageSummary;
   reviewUsage?: import("./backlog.ts").UsageSummary;
   sessionReport?: {readyAt:number};
-  /** Host-owned logical task identity for budgets and read-only reviewers. */
+  /** Host-owned logical task identity, retained across an approved account handoff. */
   taskScope?: {id:string;cwd:string;startedAt:number};
+  modelRoute?: {source:"explicit"|"router"|"default";candidateId?:string;reason:string;escalated?:boolean};
   reviewRequested?: boolean;
   /** `processesKeepRunning`: the pause blocks input and launches only, because the platform cannot suspend processes. */
   taskBudget?: {tokens:number|null;costUsd:number|null;durationMs:number|null;paused:boolean;warning:boolean;processesKeepRunning?:boolean};
-
   id: string;
   revision: number;
   provider: ProviderId;
@@ -692,6 +701,7 @@ export const PLUGIN_API_VERSION = 2;
 export type PluginApiVersion = 1 | typeof PLUGIN_API_VERSION;
 
 export type PluginPermission =
+  | "model:route"
   | "storage"
   | "secrets"
   | "sessions:read"
@@ -774,6 +784,8 @@ export interface PluginAgentHook {
  * separate supervised process after the user trusts the plugin's native code (apiVersion 2).
  */
 export interface PluginService {
+  /** Selects only an offered model/effort; never permissions or folders (`model:route`). */
+  modelRouter?: boolean;
   id: string;
   title: string;
   description?: string;
@@ -906,6 +918,8 @@ export interface PluginServiceDecide {
 
 /** One place a session can run (a worktree, a container, a remote host), provided by a plugin service. */
 export interface PluginEnvironmentKind {
+  /** Trusted manifest declaration; omitted means unknown, not local. */
+  executionLocation?: "local" | "remote";
   kind: string;
   label: string;
   description?: string;
@@ -1828,6 +1842,7 @@ export interface CanvasTTYApi {
     onCardDecorations(listener: (decorations: PluginCardDecorations) => void): () => void;
     invokeCardAction(pluginId: string, actionId: string, sessionId: string, input?: Record<string, unknown>): Promise<PluginCardActionResult>;
     /** The service-provided choices of a plugin's `optionsFrom: "service"` launch fields for this agent; empty on any failure. */
+    executionAccountRoutes(provider: ProviderId): Promise<Array<{accountId:string;model:string;endpoint:string;kind:string;state:string}>>;
     launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
     uninstall(pluginId: string): Promise<void>;
     openCanvas(pluginId: string, contributionId: string, sourceCanvasInstanceId?: string): Promise<void>;
@@ -2001,6 +2016,7 @@ export const IPC = {
   pluginsCardDecorations: "plugins:card-decorations",
   pluginsCardDecorationsChanged: "plugins:card-decorations-changed",
   pluginsInvokeCardAction: "plugins:invoke-card-action",
+  executionAccountRoutes: "execution:account-routes",
   pluginsLaunchFieldOptions: "plugins:launch-field-options",
   pluginsUninstall: "plugins:uninstall",
   pluginsOpenCanvas: "plugins:open-canvas",

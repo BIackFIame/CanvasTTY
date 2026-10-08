@@ -16,6 +16,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { ASSISTANT_PLUGIN_ID, ASSISTANT_SERVICE_ID, isInstalledAssistant, type PluginInstallRecord } from "./AssistantLoopSignal.ts";
 import { IPC } from "../../shared/contracts.ts";
 import type { PersistedEnvironmentRef } from "./TerminalSessionStore.ts";
+import { ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
 
 /** A card as plugin services see it (EP-4): metadata and where it runs, never screen text. */
 export interface PluginSessionSummary {
@@ -48,7 +49,7 @@ export interface PluginSessionEvent {
 }
 
 interface TerminalPort {
-  create(request: CreateSessionRequest, control?: { origin?: "plugin"; ownerPluginId?: string }): SessionSnapshot;
+  create(request: CreateSessionRequest, control?: { origin?: "plugin"; ownerPluginId?: string; continueTaskFrom?:string; reuseTaskEnvironmentFrom?:string }): SessionSnapshot;
   listMetadata(): SessionMetadata[];
   pluginContext(id: string): {
     metadata: SessionMetadata;
@@ -58,6 +59,8 @@ interface TerminalPort {
     owner: string | null;
   } | null;
   setPluginOwner(id: string, pluginId: string): void;
+  inheritTaskScope?(sourceId:string,replacementId:string):void;
+  completeTaskContinuation?(sourceId:string,replacementId:string):void;
   readBuffer(id: string): TerminalBufferSnapshot;
   deliverInput(id: string, text: string): Promise<{ delivered: boolean }>;
   dispose(id: string, options?: { keepEnvironmentData?: boolean }): void;
@@ -67,6 +70,8 @@ interface TerminalPort {
 
 export interface PluginSessionsDependencies {
   terminals: TerminalPort;
+  experimentalEnabled?: () => boolean;
+  handoffTaskOwner?(sourceId:string,replacementId:string):Promise<void | (() => Promise<void>)>;
   /** Live host install provenance; absent or untrusted records never receive activity. */
   installRecord?(pluginId:string):PluginInstallRecord|null;
   /** Sends a notification to a running service; false when it is not running. */
@@ -115,6 +120,7 @@ function validTurnId(value: unknown): string | undefined {
 export class PluginSessions {
   private readonly deps: PluginSessionsDependencies;
   private readonly subscribers = new Map<string, Subscriber>();
+  private readonly handoffConsents = new Map<string, number>();
   private readonly known = new Map<string, { status: SessionStatus; exited: boolean; summary: PluginSessionSummary; owner: string | null }>();
   private readonly fingerprintKey = randomBytes(32);
   private readonly loopEvidence = new Map<string, LoopEvidence>();
@@ -151,6 +157,9 @@ export class PluginSessions {
       case "sessions.stop":
         need("sessions:control");
         return this.stop(pluginId, values);
+      case "sessions.handoff":
+        need("sessions:launch");
+        return this.handoff(pluginId, values);
       default:
         return undefined;
     }
@@ -160,9 +169,73 @@ export class PluginSessions {
   serviceStopped(pluginId: string, serviceId: string): void {
     this.subscribers.delete(`${pluginId}:${serviceId}`);
   }
+  /** Only a click on the host-owned Handoff card action authorizes replacing another plugin's agent. */
+  async withCardConsent<T>(pluginId: string, actionId: string, sessionId: string, action: () => Promise<T>): Promise<T> {
+    if (pluginId !== ACCOUNTS_PLUGIN_ID || actionId !== "handoff") return action();
+    this.requireExperimental();
+    const key=`${pluginId}:${sessionId}`;
+    if (this.handoffConsents.has(key)) throw new Error("A handoff is already pending.");
+    this.handoffConsents.set(key,Date.now()+15_000);
+    try { return await action(); } finally { this.handoffConsents.delete(key); }
+  }
+  private requireExperimental(): void {
+    if (this.deps.experimentalEnabled?.() !== true) throw new Error("Experimental account handoff is disabled; not verified live.");
+  }
+  private async handoff(pluginId: string, values: Record<string,unknown>): Promise<PluginSessionSummary | null> {
+    this.requireExperimental();
+    if (pluginId !== ACCOUNTS_PLUGIN_ID) throw new Error("Only the trusted Accounts plugin can request handoff.");
+    if (typeof values.sessionId !== "string") throw new Error("Handoff session id is required.");
+    const key=`${pluginId}:${values.sessionId}`, expiry=this.handoffConsents.get(key);
+    if (!expiry || expiry < Date.now()) throw new Error("Handoff requires the person's Handoff card action.");
+    this.handoffConsents.delete(key);
+    const source=this.deps.terminals.pluginContext(values.sessionId);
+    if (!source || source.metadata.provider === "terminal") throw new Error("Source agent is unavailable.");
+    if (source.environment && source.environment.kind !== "worktree") throw new Error("Handoff is available for local agents and worktrees only.");
+    if (typeof values.summary !== "string" || Buffer.byteLength(values.summary) > 8192) throw new Error("Handoff summary must be at most 8 KiB.");
+    const metadata=source.metadata;
+    const created=this.deps.terminals.create({provider:(values.provider ?? metadata.provider) as ProviderId,
+      cwd:source.workingDirectory, profile:metadata.profile, position:{x:metadata.position.x+40,y:metadata.position.y+40},
+      title:`${metadata.title} · handoff`,role:metadata.role,
+      ...(metadata.parentSessionId ? {parentSessionId:metadata.parentSessionId} : {}),
+      ...(values.model !== undefined ? {model:values.model as string} : metadata.model ? {model:metadata.model} : {}),
+      ...(values.effort !== undefined ? {effort:values.effort as CreateSessionRequest["effort"]} : metadata.effort ? {effort:metadata.effort} : {}),
+      ...(values.launchOptions ? {launchOptions:values.launchOptions as CreateSessionRequest["launchOptions"]} : {})},
+      {origin:"plugin",ownerPluginId:pluginId,continueTaskFrom:metadata.id,...(source.environment ? {reuseTaskEnvironmentFrom:metadata.id} : {})});
+    let rollback: void | (() => Promise<void>) = undefined;
+    try {
+      this.deps.terminals.inheritTaskScope?.(metadata.id,created.id);
+      const delivered=await this.deps.terminals.deliverInput(created.id,`${this.deps.terminals.redactSecrets(values.summary)}\r`);
+      this.requireExperimental();
+      if (!delivered.delivered) throw new Error("Replacement did not accept the handoff; the original agent is still running.");
+      rollback = await this.deps.handoffTaskOwner?.(metadata.id,created.id);
+      this.requireExperimental();
+      this.deps.terminals.completeTaskContinuation?.(metadata.id,created.id);
+      this.deps.terminals.dispose(metadata.id,{keepEnvironmentData:true});
+      return this.summary(created.id);
+    } catch (error) {
+      if (rollback) {
+        try { await rollback(); }
+        catch (rollbackError) {
+          // Keep an available replacement: it may still own tasks whose compensation could not be persisted.
+          throw new AggregateError([error, rollbackError], `Handoff failed and task ownership could not be restored. Replacement ${created.id} was retained if still available; inspect the task board before retrying.`);
+        }
+      }
+      this.deps.terminals.dispose(created.id,{keepEnvironmentData:true}); throw error;
+    }
+  }
   activity(event: PluginActivity): void {
-    try { if(!isInstalledAssistant(this.deps.installRecord?.(ASSISTANT_PLUGIN_ID) ?? null))return; }
-    catch { return; }
+    const quotaEvent = event.type === "limit.exhausted" || event.type === "route.outcome";
+    if (quotaEvent && this.deps.experimentalEnabled?.() !== true) return;
+    let assistantTrusted = false, accountsTrusted = false;
+    try { assistantTrusted = isInstalledAssistant(this.deps.installRecord?.(ASSISTANT_PLUGIN_ID) ?? null); } catch { /* fail closed */ }
+    if (quotaEvent) {
+      try {
+        const record = this.deps.installRecord?.(ACCOUNTS_PLUGIN_ID);
+        accountsTrusted = Boolean(record?.enabled && record.nativeCodeTrusted
+          && record.sourceUrl.toLowerCase() === "https://github.com/biackfiame/canvastty-plugin-accounts.git");
+      } catch { /* fail closed independently of the Assistant installation */ }
+    }
+    if (!assistantTrusted && !accountsTrusted) return;
     let safeEvent = event.type === "tool-outcome" ? this.safeToolOutcome(event)
       : event.type === "activity" || event.type === "pretool" ? this.safePretool(event) : event;
     if (!safeEvent) return;
@@ -175,9 +248,20 @@ export class PluginSessions {
       safeEvent = { ...safeEvent, evidenceId };
     }
     for (const subscriber of this.subscribers.values()) {
-      if(subscriber.pluginId!==ASSISTANT_PLUGIN_ID || subscriber.serviceId!==ASSISTANT_SERVICE_ID)continue;
+      const assistant = assistantTrusted && subscriber.pluginId === ASSISTANT_PLUGIN_ID && subscriber.serviceId === ASSISTANT_SERVICE_ID;
+      const accounts = quotaEvent && accountsTrusted && subscriber.pluginId === ACCOUNTS_PLUGIN_ID && subscriber.serviceId === "accounts";
+      if (!assistant && !accounts) continue;
       if (subscriber.ownedOnly && context.owner !== subscriber.pluginId) continue;
-      this.deps.notify(subscriber.pluginId,subscriber.serviceId,"canvastty.activity",safeEvent);
+      const payload: PluginActivity = accounts ? {
+        type: safeEvent.type, sessionId: safeEvent.sessionId, at: safeEvent.at,
+        ...(safeEvent.provider !== undefined ? { provider: safeEvent.provider } : {}),
+        ...(safeEvent.accountId !== undefined ? { accountId: safeEvent.accountId } : {}),
+        ...(safeEvent.resetAt !== undefined ? { resetAt: safeEvent.resetAt } : {}),
+        ...(safeEvent.task !== undefined ? { task: safeEvent.task } : {}),
+        ...(safeEvent.parentSessionId !== undefined ? { parentSessionId: safeEvent.parentSessionId } : {}),
+        ...(safeEvent.status !== undefined ? { status: safeEvent.status } : {})
+      } : safeEvent;
+      this.deps.notify(subscriber.pluginId,subscriber.serviceId,"canvastty.activity",payload);
     }
   }
 

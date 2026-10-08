@@ -46,6 +46,12 @@ export class ProviderModelCatalog {
     return LISTING_COMMANDS[provider] !== undefined || provider==="codex" && this.codexHome!==undefined;
   }
 
+  /** Read existing metadata only; discovery must never start a listing command. */
+  cached(provider: AgentProviderId): ProviderModelListing | null {
+    const listing = this.listings.get(provider);
+    return listing ? { models: [...listing.models], checkedAt: listing.checkedAt } : null;
+  }
+
   /** The last listing, however old; refreshes it in the background when it is missing or old. */
   peek(provider: AgentProviderId): ProviderModelListing | null {
     const listing = this.listings.get(provider) ?? null;

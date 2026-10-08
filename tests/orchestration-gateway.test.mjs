@@ -404,6 +404,7 @@ test("a spawn_agent canceled while it was starting closes the agent it created",
   const controller = new AbortController();
   const canceled = [];
   const control = {
+    executionTargets: () => null,
     isReadOnlyReviewer: () => false,
     assertInputAllowed: () => undefined,
     taskBudget: () => null,

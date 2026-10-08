@@ -443,6 +443,39 @@ test("forgetting a review worker aborts its active watcher", async (t) => {
   assert.equal(signals[0].aborted, true);
 });
 
+test("orchestration cleanup cancels its route watcher and drops route outcome state", async (t) => {
+  const root = await temp(t, "ctty-route-cleanup-");
+  const { terminals } = manager(t);
+  const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator" });
+  const control = new AgentControlService(terminals);
+  const waits = [];
+  const waitFor = control.waitFor.bind(control);
+  control.waitFor = (sessionId, request) => {
+    waits.push({ sessionId, signal: request.signal });
+    return waitFor(sessionId, request);
+  };
+  const outcomes = [];
+  const handler = new ScopedOrchestrationHandler(control, null, {
+    cli: () => "available", limits: () => null,
+    models: (provider) => provider === "opencode" ? { models: ["zai-coding-plan/glm-5.3-flash"], checkedAt: Date.now() } : null,
+    checkModel: async () => null
+  }, {
+    router: { async route(request) { return { candidateId: request.candidates.find((item) => item.model).id, reason: "listed model" }; } },
+    onRouteOutcome: (_id, outcome) => outcomes.push(outcome)
+  });
+
+  const worker = await handler.execute(orchestrator.id, {
+    id: "route-cleanup", tool: "spawn_agent",
+    arguments: { provider: "opencode", cwd: root, model: "auto", prompt: "Complete a short task." }
+  });
+  const watch = waits.find((item) => item.sessionId === worker.sessionId);
+  assert.ok(watch?.signal);
+  handler.forgetSession(worker.sessionId);
+  assert.equal(watch.signal.aborted, true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(outcomes, []);
+});
+
 test("project orchestration flows hot reload and reject permission-bearing or malformed files", async (t) => {
   const root = await temp(t, "ctty-flows-");
   const service = new OrchestrationTemplateService();
@@ -499,6 +532,91 @@ test("project orchestration flows reject symlinked directories outside the proje
   assert.match(flowLinkList.errors[0]?.message ?? "", /inside the project/u);
   await assert.rejects(service.save(flowLinkProject, flow), /inside the project/u);
   assert.deepEqual(await readdir(join(outside, "flows")), ["external.yaml"]);
+});
+
+test("model routing keeps effort as a constraint, excludes unlisted observations, and falls back from invalid answers", async (t) => {
+  const root = await temp(t, "ctty-router-");
+  const { terminals, calls } = manager(t);
+  const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator", model: "unlisted-observed" });
+  const models = (provider) => ({ models: provider === "codex" ? ["gpt-6-luna"] : ["zai-coding-plan/glm-5.3-flash"], checkedAt: Date.now() });
+  const sources = { cli: () => "available", limits: () => null, models, checkModel: async () => null };
+  const routeRequests = [];
+  const handler = new ScopedOrchestrationHandler(new AgentControlService(terminals), null, sources, {
+    router: { async route(request) { routeRequests.push(request); return { candidateId: request.candidates.find((item) => item.model)?.id, reason: "listed model" }; } }
+  });
+  const child = await handler.execute(orchestrator.id, { id: "route-1", tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, model: "auto", prompt: "Do a small task" } });
+  assert.equal(child.model, "zai-coding-plan/glm-5.3-flash");
+  assert.equal(calls.at(-1).args.includes("--model"), true);
+  assert.equal(routeRequests[0].task, "Do a small task");
+
+  const effortChild = await handler.execute(orchestrator.id, { id: "route-effort", tool: "spawn_agent", arguments: { provider: "codex", cwd: root, model: "auto", effort: "high", prompt: "Route this task while preserving effort" } });
+  assert.equal(effortChild.model, "gpt-6-luna");
+  assert.equal(effortChild.effort, "high");
+  assert.equal(routeRequests[1].humanChoice, null, "effort alone does not pin the provider default or bypass Jev/rules");
+  assert.equal(routeRequests[1].requested.reasoningEffort, "high");
+  assert.ok(routeRequests[1].candidates.every(candidate => candidate.model === undefined || candidate.model === "gpt-6-luna"), "a previously observed but unlisted model is not an automatic route candidate");
+
+  const badHandler = new ScopedOrchestrationHandler(new AgentControlService(terminals), null, sources, {
+    router: { async route() { return { candidateId: "invented", reason: "unlisted" }; } }
+  });
+  const fallback = await badHandler.execute(orchestrator.id, { id: "route-2", tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, model: "auto" } });
+  assert.equal(fallback.model, undefined, "an invalid router answer cannot become a launch model");
+  assert.equal(fallback.routing.source, "default", "a bad router does not prevent a safe default launch");
+});
+
+test('account continuation preserves task budgets and children; task usage ledger retains closed agents',async(t)=>{
+  const project=await temp(t,'ctty-continuation-'),{terminals}=manager(t);
+  const source=terminals.create({provider:'codex',profile:'normal',cwd:project,position:at,role:'orchestrator'});
+  const budgets=new OrchestrationBudgetService(join(project,'budgets.json'));await budgets.load();
+  const control=new AgentControlService(terminals,{budget:budgets});
+  const child=await control.spawn({parentSessionId:source.id,provider:'codex',cwd:project});
+  const replacement=terminals.create({provider:'codex',profile:'normal',cwd:project,position:at,role:'orchestrator'});
+  await budgets.setLimits(source.id,{tokens:1,costUsd:null,durationMs:null},source.startedAt);
+  budgets.recordUsage(source.id,{tokens:1,costUsd:null},source.startedAt);
+  terminals.inheritTaskScope(source.id,replacement.id);
+  assert.equal(control.taskRoot(replacement.id).id,source.id);
+  const snapshot=terminals.listMetadata();
+  snapshot.find(row=>row.id===child.id).taskScope={id:'wrong-root',cwd:'/wrong-root',startedAt:0};
+  const roots=control.taskRoots(snapshot);
+  assert.deepEqual(roots.get(source.id),control.taskRoot(source.id));
+  assert.deepEqual(roots.get(replacement.id),control.taskRoot(replacement.id));
+  assert.deepEqual(roots.get(child.id),control.taskRoot(child.id));
+  assert.throws(()=>control.assertInputAllowed(replacement.id),/Budget/);
+  terminals.completeTaskContinuation(source.id,replacement.id);terminals.dispose(source.id,{keepEnvironmentData:true});
+  assert.ok(terminals.getMetadata(child.id));assert.equal(terminals.getMetadata(child.id).parentSessionId,replacement.id);
+  assert.equal(control.taskRoot(child.id).id,source.id);assert.throws(()=>control.assertInputAllowed(child.id),/Budget/);
+  await budgets.clearLimits(source.id,source.startedAt);assert.doesNotThrow(()=>control.assertInputAllowed(replacement.id));
+  const ledgerRoot='ledger-root';
+  await budgets.setLimits(ledgerRoot,{tokens:10,costUsd:null,durationMs:null},Date.now());
+  budgets.recordSessionUsage(ledgerRoot,'old-agent',{tokens:8,costUsd:null});
+  budgets.recordSessionUsage(ledgerRoot,'replacement',{tokens:null,costUsd:null});
+  assert.equal(budgets.snapshot(ledgerRoot).usage.tokens,8);
+  budgets.recordSessionUsage(ledgerRoot,'replacement',{tokens:3,costUsd:null});
+  assert.equal(budgets.snapshot(ledgerRoot).usage.tokens,11);assert.equal(budgets.snapshot(ledgerRoot).paused,true);
+  budgets.recordSessionUsage(ledgerRoot,'replacement',{tokens:1,costUsd:null});
+  assert.equal(budgets.snapshot(ledgerRoot).usage.tokens,11);assert.equal(budgets.snapshot(ledgerRoot).paused,true);
+  await budgets.flush();
+});
+
+test('a nonresponding model router falls back at its two-second deadline and still launches the worker',async t=>{
+  const root=await temp(t,'ctty-route-timeout-'),{terminals,calls}=manager(t);
+  const parent=terminals.create({provider:'codex',profile:'normal',cwd:root,position:at,role:'orchestrator'});
+  const sources={cli:()=> 'available',limits:()=>null,models:()=>({models:['zai-coding-plan/glm-5.3-flash'],checkedAt:Date.now()}),checkModel:async()=>null};
+  const routes=[];
+  const handler=new ScopedOrchestrationHandler(new AgentControlService(terminals),null,sources,{
+    router:{route:()=>new Promise(()=>{})},onRouting:(id,info)=>routes.push({id,info})
+  });
+  // The real app keeps PTYs/sockets alive; the fake PTY needs a referenced handle for the unref'ed deadline.
+  const keepAlive=setInterval(()=>{},1000);t.after(()=>clearInterval(keepAlive));
+  const start=performance.now();
+  const worker=await handler.execute(parent.id,{id:'timeout',tool:'spawn_agent',arguments:{provider:'opencode',cwd:root,model:'auto',prompt:'Complete a short task'}});
+  const elapsed=performance.now()-start;
+  assert.ok(elapsed>=1900 && elapsed<2500,`the 2s routing deadline completed in ${elapsed.toFixed(1)}ms`);
+  assert.equal(worker.routing.source,'default');assert.match(worker.routing.reason,/timed out/);
+  assert.equal(worker.model,undefined);assert.equal(calls.length,2);
+  assert.equal(routes.at(-1).id,worker.sessionId);assert.match(routes.at(-1).info.reason,/timed out/);
+  handler.forgetSession(worker.sessionId);
+  t.diagnostic(`actual nonresponding router fallback: ${elapsed.toFixed(1)} ms (2,000 ms configured deadline)`);
 });
 
 test('duration budgets retain original task start across reload and task imports remap dependency graphs atomically',async(t)=>{
@@ -576,3 +694,52 @@ test("a cost limit does not freeze a task that spawns new agents; real overspend
   await budget.flush();
 });
 
+test("a subagent on a model account is not routed to a second model (the account decides it)", async (t) => {
+  const { LaunchPipeline } = await import("../src/main/services/LaunchPipeline.ts");
+  const root = await temp(t, "ctty-router-account-");
+  const { terminals, calls } = manager(t);
+  terminals.configureLaunchPipeline(new LaunchPipeline({
+    contributors: () => [{ pluginId: "canvastty-accounts", pluginName: "Accounts", serviceId: "accounts", secrets: false,
+      launch: { fields: [{ key: "account", label: "Model account", kind: "text" }], delegable: true } }],
+    call: async () => ({ env: {}, secretEnv: {}, args: ["--model", "canvastty_abc/glm-5.3-flash"], files: [] }),
+    secret: async () => null, runsRoot: join(root, "runs"), timeoutMs: 2000
+  }));
+  const orchestrator = terminals.create({ provider: "opencode", profile: "normal", cwd: root, position: at, role: "orchestrator" });
+  const sources = { cli: () => "available", limits: () => null, models: () => ({ models: ["zai-coding-plan/glm-5.3"], checkedAt: Date.now() }), checkModel: async () => null };
+  let routed = 0;
+  const handler = new ScopedOrchestrationHandler(new AgentControlService(terminals), null, sources, {
+    router: { async route(request) { routed += 1; return { candidateId: request.candidates.find((item) => item.model)?.id, reason: "listed" }; } }
+  });
+  const child = await handler.execute(orchestrator.id, { id: "acct-1", tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, prompt: "Small task",
+    launchOptions: { "canvastty-accounts": { account: "glm-flash" } } } });
+  assert.equal(routed, 0, "the router is not asked for an account launch");
+  assert.equal(child.model, undefined);
+  assert.match(child.routing.reason, /Model account glm-flash decides the model/u);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const launched = calls.at(-1).args;
+  assert.equal(launched.filter((arg) => arg === "--model").length, 1, launched.join(" "));
+});
+
+test("a cancelled or closed routed subagent is not reported as failed work (no routing escalation)", async (t) => {
+  const root = await temp(t, "ctty-route-closed-");
+  const { terminals } = manager(t);
+  const orchestrator = terminals.create({ provider: "codex", profile: "normal", cwd: root, position: at, role: "orchestrator" });
+  const control = new AgentControlService(terminals, { waitTiming: { checkMs: 5, settleMs: 5, quietMs: 60_000 } });
+  const outcomes = [];
+  const handler = new ScopedOrchestrationHandler(control, null, {
+    cli: () => "available", limits: () => null,
+    models: (provider) => provider === "opencode" ? { models: ["zai-coding-plan/glm-5.3-flash"], checkedAt: Date.now() } : null,
+    checkModel: async () => null
+  }, {
+    router: { async route(request) { return { candidateId: request.candidates.find((item) => item.model).id, reason: "listed model" }; } },
+    onRouteOutcome: (_id, outcome) => outcomes.push(outcome)
+  });
+  const spawn = (id) => handler.execute(orchestrator.id, { id, tool: "spawn_agent", arguments: { provider: "opencode", cwd: root, model: "auto", prompt: "Complete a short task." } });
+  const cancelled = await spawn("route-cancel");
+  const closed = await spawn("route-close");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await handler.execute(orchestrator.id, { id: "cancel", tool: "cancel_agent", arguments: { sessionId: cancelled.sessionId } });
+  terminals.dispose(closed.sessionId);   // the person closes the card
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.deepEqual(outcomes, [], "closing or cancelling a card says nothing about the routed model");
+});

@@ -84,7 +84,7 @@ test('shutdown drains a protected transaction before disposing sessions',async t
  });
 
 async function environmentFixture(t,{isolated=true,relocate=false,kind='box',flipDuringWrap=false,removeProjectDuringWrap=false,persist=false}={}) {
- const f=await fixture(t),provider={pluginId:'fixture.environment',pluginName:'Environment',serviceId:'environment',secrets:false,kinds:[{kind,label:'Fixture',keeps:{launch:true,...(isolated===null?{}:{isolated})}}]};
+ const f=await fixture(t),provider={pluginId:'fixture.environment',pluginName:'Environment',serviceId:'environment',secrets:false,kinds:[{kind,label:'Fixture',executionLocation:'local',keeps:{launch:true,...(isolated===null?{}:{isolated})}}]};
  let providers=[provider],resumeFailure=false;
  if(persist)f.terminal.configureSessionPersistence(new TerminalSessionStore(f.root),"continue");
  const registry=new EnvironmentRegistry({providers:()=>providers,secret:async()=>null,call:async(_plugin,_service,method,params)=>{

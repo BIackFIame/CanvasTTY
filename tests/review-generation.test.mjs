@@ -33,7 +33,7 @@ async function fixture(t, {account=false,worktree=false} = {}) {
   decide:({profile})=>profile==='plan'?{apply:true,profile,isolation:{state:'on',layer:'seatbelt'}}:{apply:false,profile},
   wrap:launch=>({command:launch.command,args:[...launch.args],env:launch.env,cleanup(){}})});
  if(worktree)terminals.configureEnvironments(new EnvironmentRegistry({
-  providers:()=>[{pluginId:'fixture.worktree',pluginName:'Worktree',serviceId:'env',secrets:false,kinds:[{kind:'worktree',label:'Worktree',fields:[]}]}],
+  providers:()=>[{pluginId:'fixture.worktree',pluginName:'Worktree',serviceId:'env',secrets:false,kinds:[{kind:'worktree',label:'Worktree',executionLocation:'local',fields:[]}]}],
   call:async(_p,_s,method,params)=>{
    if(method.endsWith('.prepare'))return {ref:{id:'one'},label:'Worktree'};
    if(method.endsWith('.wrap'))return {command:process.execPath,args:params.args,cwd:root};

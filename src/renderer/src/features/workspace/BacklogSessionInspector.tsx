@@ -464,12 +464,12 @@ export function BacklogSessionInspector({ session, sessions, locale, initialTab 
           {tab === "notifications" && notifications && (
             <div className="backlog-notifications">
               <h3>{bt("notificationChannels")}</h3>
-              {(["desktop", "glasses"] as const).map((channel) => (
+              {(["desktop", "phone", "glasses"] as const).map((channel) => (
                 <label key={channel}>
                   <input type="checkbox" disabled={notificationBusy} checked={notifications.channels[channel]}
                     onChange={(event) => void updateNotifications({ ...notifications,
                       channels: { ...notifications.channels, [channel]: event.currentTarget.checked } })} />
-                  {bt(channel === "desktop" ? "notificationDesktop" : "notificationGlasses")}
+                  {bt(channel === "desktop" ? "notificationDesktop" : channel === "phone" ? "notificationPhone" : "notificationGlasses")}
                 </label>
               ))}
               <h3>{bt("notificationDnd")}</h3>

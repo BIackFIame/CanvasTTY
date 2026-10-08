@@ -1,43 +1,37 @@
-import { WorkspaceArchive } from "./services/WorkspaceArchive";
-import { configuredApiDomains, apiProfileDomains } from "./services/isolation/configuredApiDomains";
-import { registerNetworkPolicyIpc } from "./ipc/registerNetworkPolicyIpc";
-import { NetworkPolicyManager } from "./services/isolation/networkPolicy";
-import { SecretGrantService } from "./services/SecretGrantService";
-import { secretApiRequestExecutor } from "./services/SecretCommandExecutor";
-import { runShutdownSteps } from "./services/shutdownSteps";
-import { BACKLOG_TERMINAL_IPC } from "../shared/backlog";
-import { AttentionService } from "./services/AttentionService";
-import { SessionReports } from "./services/SessionReports";
-import { collectTerminalHistoryRecoverySnapshots, TerminalOutputHistory } from "./services/TerminalOutputHistory";
-import { actionFromHook } from "./services/safety/baseProtection";
-import { normalizedActionHashFromHook } from "../agent-runtime/runtime-protocol.mjs";
-import { acceptLoopSignal } from "./services/AssistantLoopSignal";
-import { UsagePrices } from "./services/UsagePrices";
-import { ProviderUsageSource } from "./services/ProviderUsageSource";
-import { SessionTimelineService } from "./services/SessionTimelineService";
-import { configuredModel } from "./services/configuredModel";
-import { subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
-import { GitCheckpoints } from "./services/GitCheckpoints";
-import { OrchestrationBudgetService } from "./services/OrchestrationBudgetService";
-import { OrchestrationTaskBoard } from "./services/OrchestrationTaskBoard";
-import { OrchestrationTemplateService } from "./services/OrchestrationTemplateService";
-import { resolveAgentHistoryPaths } from "./services/agent-history/historyPaths";
-import { refreshOrchestrationUsageBatch, type OrchestrationUsageScope } from "./services/OrchestrationUsageSync";
-import { registerBacklogIpc } from "./ipc/registerBacklogIpc";
 import "./stdio";
+import { AGENT_PROVIDERS } from "../shared/contracts";
+import { readyAccountCandidates } from "./services/readyAccountCandidates.ts";
 import appIcon from "../../build/icon.png?asset";
 import appManifest from "../../package.json";
 import { ipcMain } from "electron";
 import { createHash, randomUUID } from "node:crypto";
+import { BACKLOG_TERMINAL_IPC } from "../shared/backlog";
+import { UsagePrices } from "./services/UsagePrices";
+import { ProviderUsageSource } from "./services/ProviderUsageSource";
+import { resolveAgentHistoryPaths } from "./services/agent-history/historyPaths";
+import { AttentionService } from "./services/AttentionService";
+import { SessionTimelineService } from "./services/SessionTimelineService";
+import { SessionReports } from "./services/SessionReports";
+import { collectTerminalHistoryRecoverySnapshots, TerminalOutputHistory } from "./services/TerminalOutputHistory";
+import { runShutdownSteps } from "./services/shutdownSteps";
+import { configuredModel } from "./services/configuredModel";
+import {configuredApiDomains,apiProfileDomains} from "./services/isolation/configuredApiDomains";
+import { GitCheckpoints } from "./services/GitCheckpoints";
+import { WorkspaceArchive } from "./services/WorkspaceArchive";
+import { registerBacklogIpc } from "./ipc/registerBacklogIpc";
+import { registerNetworkPolicyIpc } from "./ipc/registerNetworkPolicyIpc";
+import { actionFromHook } from "./services/safety/baseProtection";
+import { normalizedActionHashFromHook } from "../agent-runtime/runtime-protocol.mjs";
 import { dirname, isAbsolute } from "node:path";
 import { EvenG2Controller } from "./services/companion/EvenG2Controller";
 import { join } from "node:path";
 import { app, BrowserWindow, dialog, Menu, net, Notification, protocol, safeStorage, session } from "electron";
 import {
   IPC,
-  type LocaleId,
   type PluginCanvasRequest,
   type PluginServiceEvent,
+  type ProviderLimitsSnapshot,
+  type LimitProviderId,
   type SessionStatus
 } from "../shared/contracts";
 import { registerCriticalIpc, registerIpc } from "./ipc/registerIpc";
@@ -58,6 +52,7 @@ import { AgentControlGateway } from "./services/agent-control/AgentControlGatewa
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { AgentChatHistoryService } from "./services/AgentChatHistoryService";
 import { LimitsService } from "./services/LimitsService";
+import { AccountLimitsService } from "./services/AccountLimitsService";
 import {
   createProviderCliRegistry,
   providerCliAvailability,
@@ -67,6 +62,8 @@ import { PluginManager } from "./services/PluginManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
+import { experimentalModelRouter } from "./services/ModelRouter";
+import { ACCOUNTS_PLUGIN_ID } from "./services/accountHomeIsolation";
 import { DecisionHooks } from "./services/DecisionHooks";
 import { SecretRedactionRegistry } from "./services/safety/SecretRedaction";
 import { canvasTtyPrivateData } from "./services/safety/baseProtection";
@@ -81,9 +78,20 @@ import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
+import { acceptDiscoverySignal, ModelDiscoveryObserver } from "./services/ModelDiscoveryObserver";
+import { OrchestrationBudgetService } from "./services/OrchestrationBudgetService";
+import { refreshOrchestrationUsageBatch, type OrchestrationUsageScope } from "./services/OrchestrationUsageSync";
+import { acceptLoopSignal } from "./services/AssistantLoopSignal";
+import { OrchestrationTaskBoard } from "./services/OrchestrationTaskBoard";
+import { OrchestrationTemplateService } from "./services/OrchestrationTemplateService";
 import { AgentControlService } from "./services/AgentControlService";
+import { subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
 import { AgentIsolation } from "./services/isolation/AgentIsolation";
-import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
+import { NetworkPolicyManager } from "./services/isolation/networkPolicy";
+import { SecretGrantService } from "./services/SecretGrantService";
+import { HumanQuestionService } from "./services/HumanQuestionService";
+import { secretApiRequestExecutor } from "./services/SecretCommandExecutor";
+import type { AgentProviderId, LaunchProfileId, LocaleId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
 import { BrowserService, type BrowserServiceOptions } from "./services/BrowserService";
 import { CanvasNavigationInputController } from "./services/CanvasNavigationOverride";
@@ -191,16 +199,19 @@ async function showCompanionBrowser():Promise<{title:string;url:string}> {
   const state=browserService.getState(), tab=state.tabs.find(tab=>tab.id===state.activeTabId);
   return {title:tab?.title||"Browser",url:tab?.url||""};
 }
-let disposeBudgetObservers:(()=>void)|null=null;
-let flushBudgets:(()=>Promise<void>)|null=null;
-let sessionTimeline:SessionTimelineService|null=null;
-let networkPolicies: NetworkPolicyManager | null = null;
-let secretGrants: SecretGrantService | null = null;
+let terminalManager: TerminalManager | null = null;
+let sessionTimeline: SessionTimelineService | null = null;
 let sessionReports:SessionReports|null=null;
 let terminalOutputHistory:TerminalOutputHistory|null=null;
-let terminalManager: TerminalManager | null = null;
+let disposeBudgetObservers:(()=>void)|null=null;
+let disposeModelDiscovery: (() => void) | null = null;
+let flushBudgets:(()=>Promise<void>)|null=null;
+let networkPolicies: NetworkPolicyManager | null = null;
+let secretGrants: SecretGrantService | null = null;
+let humanQuestions: HumanQuestionService | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
+let accountLimitsService: AccountLimitsService | null = null;
 let pluginManager: PluginManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
@@ -471,6 +482,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     sessions: terminalManager?.list().map(({ provider, status, exitCode }) => ({ provider, status, exitCode })) ?? [],
     plugins: pluginManager?.list().map(({ manifest, enabled }) => ({ id: manifest.id, version: manifest.version, enabled })) ?? []
   });
+  let refreshModelDiscovery = (): Promise<void> => Promise.resolve();
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
@@ -486,6 +498,15 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       },
       emit: (pluginId, serviceId, event, data) => {
         let broadcastData = data;
+        if (event === "model.discovery") {
+          const accepted = acceptDiscoverySignal({
+            enabled: () => settings.get().experimentalBacklogEnabled === true,
+            providers: () => pluginManager?.modelRouterProviders() ?? [],
+            running: (id, service) => pluginServices?.running(id, service) === true
+          }, pluginId, serviceId, data);
+          if (!accepted) return;
+          broadcastData = accepted;
+        }
         if (event === "loop.detected") {
           // Verified by the install record (source repository, enabled, trusted services), not the manifest id.
           const accepted = acceptLoopSignal({
@@ -522,12 +543,35 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     services: () => pluginManager!.decisionServices(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => terminalManager?.decisionContext(sessionId) ?? null,
+    executionProtection: sessionId => terminalManager?.decisionExecutionProtection(sessionId) ?? { state: "unverified" },
+    launchOptions: (sessionId, pluginId) => terminalManager?.decisionLaunchOptions(sessionId, pluginId),
+    humanApprovalEnabled: () => evenG2?.enabled() ?? false,
+    resolveHumanAsk: async (id, request, decision, signal) => {
+      if (!humanQuestions || !evenG2?.canReply(id) || request.truncated ||
+          runtimeGateway?.currentTurnEpoch(id) !== request.turnEpoch) return null;
+      const action = actionFromHook(request.toolName, request.toolInput, request.toolInputPreview);
+      const details = action.command ?? action.paths.join(", ");
+      // A phone approval must show the entire command/path summary; larger or opaque requests stay on desktop.
+      if (!details || details.length > 650) return null;
+      try {
+        const question = redaction.redact(`Approve ${request.toolName} once?\n${details}\n${decision.message ?? ""}`);
+        if (question.length > 1000) return null;
+        const result = await humanQuestions.request(id, {
+          question,
+          options: ["Approve once", "Deny"], timeoutSeconds: 50,
+        }, signal);
+        if (signal.aborted || runtimeGateway?.currentTurnEpoch(id) !== request.turnEpoch || !evenG2?.canReply(id)) return null;
+        try { budgetInputGate(id); } catch { return "deny"; }
+        return result.selectedIndex === 0 ? "allow" : "deny";
+      } catch { return null; }
+    },
     privateData: canvasTtyPrivateData(userDataPath)
   });
   pluginManager.setServiceObserver(async (specs) => {
     await pluginServices!.sync(specs);
     // Trust changes add or remove card actions and badges.
     pluginCards?.refresh();
+    void refreshModelDiscovery().catch(() => undefined);
   });
   const pluginServicesStarted = pluginServices.sync(pluginManager.trustedServiceSpecs());
   // Created before sessions are restored: launch services may resolve the plugin's own secrets.
@@ -676,7 +720,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
           void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
         }
         if(signal.state !== "working" && signal.state !== "needs_approval")checkpointTurns.delete(terminalSessionId);
-        if (signal.state === "idle") secretGrants?.turnEnded(terminalSessionId);
+        if (signal.state === "idle") {
+          secretGrants?.turnEnded(terminalSessionId);
+          humanQuestions?.forgetSession(terminalSessionId);
+        }
         else secretGrants?.revalidateTurn(terminalSessionId);
         // The answer belongs to the accepted provider turn and its host-submitted input generation.
         if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
@@ -805,7 +852,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         const snapshot=terminalManager?.readBuffer(id);
         if(!shutdownRunning && snapshot?.buffer)void outputHistory.append(id,snapshot.buffer,snapshot.outputOffset).catch(outputHistoryError);
       }
-      if (payload.session.exitCode !== null) secretGrants?.sessionEnded(id);
+      if (payload.session.exitCode !== null) {
+        secretGrants?.sessionEnded(id);
+        humanQuestions?.forgetSession(id);
+      }
       const oldSafety=reportedSafety.get(id) ?? {};
       const nextSafety={isolation:payload.session.isolation ? JSON.stringify(payload.session.isolation) : undefined,gitRisk:payload.session.gitRisk ? JSON.stringify(payload.session.gitRisk) : undefined};
       if(nextSafety.isolation && nextSafety.isolation!==oldSafety.isolation)void timeline.append(id,"isolation","Effective session protection",nextSafety.isolation,"core").catch(console.warn);
@@ -840,6 +890,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       reportedSafety.delete(payload.id);
       checkpointTurns.delete(payload.id);
       secretGrants?.sessionEnded(payload.id);
+      humanQuestions?.forgetSession(payload.id);
       forgetOrchestrationSession(payload.id);
     }
   }, providerClis, agentBrowserBridge ?? undefined, agentRuntimeBridge ?? undefined, settings.get().agentLifecycleHooksEnabled);
@@ -867,8 +918,15 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   agentChatHistory = new AgentChatHistoryService(settings, providerClis, terminalManager, hermesHomeDirectory);
 
   // Plugin services see card events and control only the cards they start (EP-4).
+  const experimentalEnabled = (): boolean => settings.get().experimentalBacklogEnabled === true;
   const sessionsForPlugins = new PluginSessions({
+    experimentalEnabled,
     terminals: terminalManager,
+    handoffTaskOwner:async(sourceId,replacementId)=>{
+      const root=agentControlService.taskRoot(sourceId);
+      const transferred = await taskBoard.transferOwnerWithRollback(root.cwd,root.id,sourceId,replacementId,managedTerminals.getMetadata(replacementId)?.title);
+      return transferred.rollback;
+    },
     installRecord:id=>pluginManager?.installRecord(id) ?? null,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
   });
@@ -883,6 +941,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   // Card badges and actions (EP-7).
   pluginCards = new PluginCards({
+    invokeWithConsent: (pluginId,actionId,sessionId,action) => sessionsForPlugins.withCardConsent(pluginId,actionId,sessionId,action),
     providers: () => pluginManager!.cardActionProviders(),
     trustedPlugins: () => new Set(pluginManager!.trustedServiceSpecs().map((spec) => spec.pluginId)),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
@@ -903,12 +962,35 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   terminalManager.configureModelCheck((provider, model) => provider === "terminal" ? null : providerModels.unknownModelCached(provider, model));
   const providerDirectorySources: ProviderDirectorySources = {
     cli: (provider) => providerClis?.get(provider).state ?? null,
-    models: (provider) => providerModels.peek(provider),
+    models: (provider) => {
+      const listing=providerModels.peek(provider);
+      const models=listing?.models ?? [];
+      return models.length ? {models,checkedAt:listing?.checkedAt ?? Date.now()} : null;
+    },
     checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
     limits: () => limitsService?.peek() ?? null,
     launchContributors: () => pluginManager?.launchContributors() ?? [],
     containment: () => terminalManager?.containment() === true
   };
+  const modelDiscovery = new ModelDiscoveryObserver({
+    enabled: experimentalEnabled,
+    providers: () => pluginManager?.modelRouterProviders() ?? [],
+    running: (id, service) => pluginServices?.running(id, service) === true,
+    directory: () => listProviderDirectory({
+      ...providerDirectorySources,
+      // Discovery observes existing metadata; it must not warm a cache or launch a CLI.
+      models: provider => {
+        const cached = providerModels.cached(provider);
+        return cached ? { models: cached.models, checkedAt: cached.checkedAt } : null;
+      },
+      launchContributors: () => []
+    }),
+    call: (id, service, method, params) => pluginServices!.hostCall(id, service, method, params, 2_000)
+  });
+  refreshModelDiscovery = () => modelDiscovery.refresh();
+  const discoveryTimer = setInterval(() => { void refreshModelDiscovery().catch(() => undefined); }, 60_000);
+  discoveryTimer.unref();
+  disposeModelDiscovery = () => { clearInterval(discoveryTimer); modelDiscovery.dispose(); };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.
@@ -916,6 +998,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // person's limits, profile ceilings, project folder and isolation rules apply the same way to each.
   const managedTerminals = terminalManager;
   const agentControlService = new AgentControlService(managedTerminals, {
+    executionEnabled: experimentalEnabled,
     limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
     containment: () => managedTerminals.containment(),
     currentTurnEpoch: id => runtimeGateway?.currentTurnEpoch(id) ?? null,
@@ -995,8 +1078,35 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const offUsage=timeline.subscribeUsage(scheduleUsageRefresh),offPrices=usagePrices.subscribe(scheduleUsageRefresh),offBudgets=budgets.subscribe(scheduleUsageRefresh);
   disposeBudgetObservers=()=>{offUsage();offPrices();offBudgets();budgets.dispose();scheduleUsageRefresh=()=>undefined;};
   scheduleUsageRefresh();
-  const orchestrationHandler=new ScopedOrchestrationHandler(agentControlService, pluginTools, providerDirectorySources,{budget:budgets,taskBoard,templates,secretGrants});
-  forgetOrchestrationSession=id=>agentControlService.forgetSession(id);
+  humanQuestions = new HumanQuestionService({
+    getSession: id => {
+      if (!evenG2?.canReply(id)) return null;
+      const row = managedTerminals.getMetadata(id);
+      return row ? { provider: row.provider, startedAt: row.startedAt, exitCode: row.exitCode,
+        turnEpoch: runtimeGateway?.currentTurnEpoch(id) ?? null } : null;
+    },
+    redact: text => redaction.redact(text),
+    onRequest: question => notifyAttention(question.sessionId, "response"),
+  });
+  const orchestrationHandler=new ScopedOrchestrationHandler(agentControlService, pluginTools, providerDirectorySources,{
+    budget:budgets,taskBoard,templates,secretGrants,humanQuestions,
+    router:experimentalModelRouter({strategy:async request=>{
+      const provider=pluginManager!.modelRouterProviders().find(row=>pluginServices!.running(row.pluginId,row.serviceId));
+      if(!provider)throw new Error("No trusted model router is running.");
+      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.strategy",{...request,launchOptions:managedTerminals.strategyLaunchOptions(request.sessionId,provider.pluginId)},2000) as import("./services/ModelRouter.ts").ExecutionStrategyResponse;
+    },route:async request=>{
+      const provider=pluginManager!.modelRouterProviders().find(row=>pluginServices!.running(row.pluginId,row.serviceId));
+      if(!provider)throw new Error("No trusted model router is running.");
+      return await pluginServices!.hostCall(provider.pluginId,provider.serviceId,"canvastty.model.route",{...request,launchOptions:managedTerminals.strategyLaunchOptions(request.sessionId,provider.pluginId)},2000) as {candidateId:string;reason:string;escalated?:boolean};
+    }}, experimentalEnabled),
+    // F-06: with the opt-in on, an inherited subagent may be routed to another delegable model account.
+    accountCandidates:async (provider,sessionId)=>experimentalEnabled() && launchPipeline.delegable(ACCOUNTS_PLUGIN_ID)
+      ? await readyAccountCandidates(pluginTools,sessionId,provider)
+      : [],
+    onRouting:(id,route)=>{managedTerminals.setTaskMetadata(id,{modelRoute:route});void timeline.append(id,"model-route",route.source,route.reason,"core").catch(console.warn);},
+    onRouteOutcome:(id,outcome)=>sessionsForPlugins.activity({type:"route.outcome",sessionId:id,at:Date.now(),...outcome})
+  });
+  forgetOrchestrationSession=id=>{agentControlService.forgetSession(id);orchestrationHandler.forgetSession(id);};
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
     windowsHostPath: process.platform === "win32"
@@ -1004,11 +1114,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         ? join(process.resourcesPath, "agent-browser", WINDOWS_PIPE_HOST_FILENAME)
         : join(app.getAppPath(), "build", "windows-agent-pipe-host", WINDOWS_PIPE_HOST_FILENAME)
       : undefined,
-    handler: orchestrationHandler
+    handler:orchestrationHandler
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
-  terminalManager.configureAgentTools((role, provider) => [...(provider!=="terminal" ? ["list_tasks","claim_task","update_task","complete_task","get_task_budget", "request_secret", "run_secret_request"] : []),...pluginTools.names(role, provider)]);
+  terminalManager.configureAgentTools((role, provider) => [...(provider!=="terminal" ? ["list_tasks","claim_task","update_task","complete_task","get_task_budget", "request_secret", "run_secret_request", "ask_user"] : []),...pluginTools.names(role, provider)]);
 
   const launchPipeline = new LaunchPipeline({
     contributors: () => pluginManager!.launchContributors(),
@@ -1017,8 +1127,17 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     runsRoot: join(userDataPath, "launch-runs")
   });
   await launchPipeline.clearRuns().catch(() => undefined);
+  terminalManager.configureExecutionPolicy(()=>settings.executionPolicy(),async (id,provider,accountId)=>{
+    const answer=await pluginTools.call(id,"orchestrator","canvastty-accounts__list_routes",{provider});
+    if(answer.isError)return null;
+    const parsed:unknown=JSON.parse(answer.content);
+    if(!parsed||typeof parsed!=="object"||!("routes" in parsed)||!Array.isArray(parsed.routes))return null;
+    const row=parsed.routes.find(r=>r?.provider===provider&&r.accountId===accountId);
+    return row && [row.model,row.endpoint,row.kind,row.state].every(v=>typeof v==="string") ? {model:row.model,endpoint:row.endpoint,kind:row.kind,state:row.state}:null;
+  });
   terminalManager.configureLaunchPipeline(launchPipeline);
   terminalManager.configureEnvironments(new EnvironmentRegistry({
+    experimentalEnabled,
     providers: () => pluginManager!.environmentProviders(),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     secret: (pluginId, key) => pluginSecretsService!.get(pluginId, key),
@@ -1033,6 +1152,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // launch options or an environment ask their plugin's service, so start services first.
   pluginServices.hostReady();
   await pluginServicesStarted.catch(() => undefined);
+  void refreshModelDiscovery().catch(() => undefined);
   for(const budget of budgets.snapshots())if(budget.paused)applyBudgetEnforcement(budget);
   await terminalManager.restorePersistedSessions();
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
@@ -1060,7 +1180,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       providers: () => listProviderDirectory({ cli: providerDirectorySources.cli, limits: providerDirectorySources.limits,
         models: providerDirectorySources.models }),
       checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
+      executionTargets: (sessionId) => agentControlService.executionTargets(sessionId),
       spawnSubagent: (request) => agentControlService.spawn({ parentSessionId: request.parentSessionId, provider: request.provider,
+        ...(request.executionTargetId !== undefined ? { executionTargetId: request.executionTargetId } : {}),
         cwd: request.cwd, ...(request.title !== undefined ? { title: request.title } : {}),
         ...(request.profile !== undefined ? { profile: request.profile as LaunchProfileId } : {}),
         ...(request.model !== undefined ? { model: request.model } : {}), ...(request.effort !== undefined ? { effort: request.effort } : {}) }),
@@ -1093,7 +1215,57 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     return agentControlTransition;
   };
   await applyAgentControlSetting(settings.get().agentControlEnabled);
-  limitsService = new LimitsService(providerClis, app.getVersion());
+  const exhaustedLimits = new Set<string>();
+  const unavailableAccountLimits=new Map<string,string>();
+  accountLimitsService=new AccountLimitsService(providerClis,{clientVersion:app.getVersion()});
+  const publishAccountQuota=(provider:ProviderLimitsSnapshot,accountId:string):void=>{
+    if (!experimentalEnabled()) { exhaustedLimits.clear(); return; }
+    if(provider.state!=="available")return;
+    const exhaustedWindow=provider.windows.find(window=>window.isDefaultBucket && window.usedPercent!==null && window.usedPercent>=100);
+    for(const row of managedTerminals.listMetadata()){
+      if(row.provider!==provider.provider || row.exitCode!==null || accountId==="default" && row.autoDowngraded || managedTerminals.usageAccount(row.id).id!==accountId)continue;
+      const key=JSON.stringify([row.id,provider.provider,accountId]);
+      if(!exhaustedWindow){exhaustedLimits.delete(key);continue;}
+      if(exhaustedLimits.has(key))continue;
+      exhaustedLimits.add(key);
+      pluginSessions?.activity({type:"limit.exhausted",sessionId:row.id,at:Date.now(),provider:provider.provider,accountId,
+        ...(exhaustedWindow.resetsAt ? {resetAt:exhaustedWindow.resetsAt} : {})});
+      void timeline.append(row.id,"limit","Provider quota exhausted",undefined,provider.source).catch(console.warn);
+    }
+  };
+  let accountQuotaRefresh:Promise<void>|null=null;
+  const refreshAccountQuotas=():void=>{
+    if (!experimentalEnabled()) return;
+    if(accountQuotaRefresh)return;
+    accountQuotaRefresh=(async()=>{
+      const profiles=new Map<string,{provider:LimitProviderId;accountId:string;home?:string}>();
+      for(const row of managedTerminals.listMetadata()){
+        if(row.provider==="terminal" || row.exitCode!==null)continue;
+        const account=managedTerminals.usageAccount(row.id);
+        if(account.id==="default")continue;
+        profiles.set(JSON.stringify([row.provider,account.id]),{provider:row.provider as LimitProviderId,accountId:account.id,home:account.home});
+      }
+      await Promise.all([...profiles].map(async([key,profile])=>{
+        const result=await accountLimitsService!.read(profile);
+        if(result.state==="available"){
+          unavailableAccountLimits.delete(key);publishAccountQuota(result,profile.accountId);return;
+        }
+        if(unavailableAccountLimits.get(key)===result.reason)return;
+        unavailableAccountLimits.set(key,result.reason);
+        for(const row of managedTerminals.listMetadata()){
+          if(row.provider===profile.provider && row.exitCode===null && managedTerminals.usageAccount(row.id).id===profile.accountId){
+            void timeline.append(row.id,"limit","Selected account quota unavailable",`Automatic handoff has no quota signal (${result.reason}). Use the Accounts handoff action.`,result.source).catch(console.warn);
+          }
+        }
+      }));
+      const activeKeys=new Set(profiles.keys());
+      for(const key of unavailableAccountLimits.keys())if(!activeKeys.has(key))unavailableAccountLimits.delete(key);
+    })().catch(console.warn).finally(()=>{accountQuotaRefresh=null;});
+  };
+  limitsService = new LimitsService(providerClis, app.getVersion(),{onSnapshot: snapshot => {
+    for(const provider of snapshot.providers)publishAccountQuota(provider,"default");
+    refreshAccountQuotas();
+  }});
   await Promise.all([browserReady, storesLoaded]);
   pluginManager.registerTokenProvider(() => githubAuth!.getToken());
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
@@ -1114,6 +1286,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();
       void agentBrowserBridge?.warmProviderProbes().catch(() => undefined);
+      await accountLimitsService!.providerClisRefreshed();
       await limitsService!.providerClisRefreshed();
       const availability = providerCliAvailability(providerClis!);
       const updatedSettings = await settings.setAvailableProviders(availability);
@@ -1131,6 +1304,16 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     browser: browserService,
     githubAuth: githubAuth!,
     hermesHud: hermesHudService,
+    executionAccountRoutes: async provider=>{
+      if(!(AGENT_PROVIDERS as readonly string[]).includes(provider))throw new Error("Invalid provider.");
+      const service=pluginManager!.agentToolProviders().find(p=>p.pluginId===ACCOUNTS_PLUGIN_ID&&p.tools.some(t=>t.name==="list_routes"));
+      if(!service)throw new Error("Accounts route information is unavailable.");
+      const answer=await pluginServices!.hostCall(service.pluginId,service.serviceId,"canvastty.tools.call",{tool:"list_routes",input:{provider}},15000) as {content?:unknown;isError?:boolean};
+      if(answer.isError)throw new Error("Accounts route information is unavailable.");
+      const content=typeof answer.content==="string"?JSON.parse(answer.content):answer.content;
+      if(!content||typeof content!=="object"||!Array.isArray(content.routes))throw new Error("Invalid Accounts route information.");
+      return content.routes.slice(0,256).filter((v:Record<string,unknown>)=>v?.provider===provider&&[v.accountId,v.model,v.endpoint,v.kind,v.state].every(x=>typeof x==="string"&&x.length<=300)).map((v:Record<string,string>)=>({accountId:v.accountId!,model:v.model!,endpoint:v.endpoint!,kind:v.kind!,state:v.state!}));
+    },
     launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
     getMainWindow: () => mainWindow,
     applyBrowserSettings: async (next) => {
@@ -1187,6 +1370,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   // The Even G2 companion is the last group: nothing on the first frame needs it.
   evenG2 = new EvenG2Controller({
+    experimentalEnabled,
+    humanQuestions,
     notifications:(channel,id)=>attention.list(channel,id),
     loopWarningActive:id=>agentControlService.hasCurrentLoopWarning(id),
     userDataPath, terminals: terminalManager,
@@ -1549,9 +1734,12 @@ app.on("child-process-gone", (_event, details) => {
 void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
+  disposeModelDiscovery?.(); disposeModelDiscovery = null;
   disposeBudgetObservers?.();disposeBudgetObservers=null;
   diagnostics.record("info", "application", "shutdown.started");
   agentChatHistory?.dispose();
+  humanQuestions?.close();
+  humanQuestions = null;
   if (agentControl) await Promise.allSettled([agentControl.close()]);
   if (updateTimer) clearTimeout(updateTimer);
   if (updateInterval) clearInterval(updateInterval);
@@ -1568,6 +1756,7 @@ async function shutdownServices(): Promise<void> {
     if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
   });
   limitsService?.dispose();
+  accountLimitsService?.dispose();
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if(terminalOutputHistory)await terminalOutputHistory.close().catch(console.warn);

@@ -1,3 +1,4 @@
+import { normalizeExecutionPolicy, highestDataClass, sameTarget, targetAllows, environmentKey, publicEndpoint, type ExecutionPolicy, type ExecutionTarget, type ExecutionAuthorization, type ExecutionDataClass } from "../../shared/executionPolicy.ts";
 import { TerminalPasteMode } from "./TerminalPasteMode.ts";
 import { ReviewDiffTracker } from "./ReviewDiffTracker.ts";
 import { GitCheckpoints } from "./GitCheckpoints.ts";
@@ -39,6 +40,7 @@ import type {
 } from "./agent-browser/AgentBrowserBridge.ts";
 import { AGENT_BROWSER_ENV } from "./agent-browser/AgentBrowserBridge.ts";
 import { ORCHESTRATION_TOOL_NAMES } from "../../agent-browser/orchestration-catalog.mjs";
+import { isExecutionGoal, normalizeExecutionStrategy } from "../../shared/executionStrategy.ts";
 import type { OrchestrationLaunchCoordinator, PreparedOrchestrationPtyLaunch } from "./agent-browser/OrchestrationBridge.ts";
 import type {
   AgentRuntimeLaunchCoordinator,
@@ -68,6 +70,7 @@ import { tryPtyOperation } from "./ptySafety.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
+import { UNVERIFIED_EXECUTION_PROTECTION, type ExecutionProtection } from "../../shared/executionProtection.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
 import type { AgentNetworkMode } from "./isolation/networkPolicy.ts";
 import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
@@ -79,6 +82,8 @@ import { ACCOUNTS_PLUGIN_ID, selectedAccountId } from "./accountHomeIsolation.ts
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
+  executionPrivacyFromOptions,
+  reviewTasksFromOptions,
   type PersistedEnvironmentRef,
   type PersistedSessionExtras,
   type PersistedTerminalSession,
@@ -165,6 +170,10 @@ interface ManagedSession {
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
+  /** Host launch choice, retained after prepare for exact continuation authorization. */
+  environmentLaunchChoice?: SessionEnvironmentChoice;
+  /** Until completion, source owns release; failed replacement must not release its worktree. */
+  borrowedEnvironment?: { sourceId: string; startedAt: number; environment: PersistedEnvironmentRef };
   /** Bumped by every launch the person or the app asks for (create, restart, restore); input waits for one. */
   launchEpoch: number;
   /** Initial measured-grid launch was requested while its task budget was paused. */
@@ -321,6 +330,7 @@ export class TerminalManager {
   private isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> & Partial<Pick<AgentIsolation, "networkPolicyFor">> | null = null;
   // Removes a launch's isolation folder (profile, TMPDIR) once its process ended or the card closed.
   private readonly isolationCleanups = new Map<string, () => void>();
+  private readonly executionProtections = new Map<string, ExecutionProtection>();
   /** Open git risk reports by id: the card it belongs to (none once closed) and what neutralize removes. */
   private readonly gitRisks = new Map<string, { sessionId: string | null; repositories: GitRiskRepository[] }>();
   /** When isolated launches started whose card did not exist yet (see wrapIsolated). */
@@ -360,6 +370,90 @@ export class TerminalManager {
   }
 
   /** The operating-system isolation layer around delegated and non-manual agents (isolation/AgentIsolation.ts). */
+  private executionPolicy: () => ExecutionPolicy = () => normalizeExecutionPolicy(undefined);
+  private startingAuthorizations = new Map<string, ExecutionAuthorization>();
+  private accountRoute: ((id:string, provider:ProviderId, accountId:string)=>Promise<{model:string;endpoint:string;kind:string;state:string}|null>) | undefined;
+  configureExecutionPolicy(get: () => unknown, accountRoute?: TerminalManager["accountRoute"]): void {
+    this.executionPolicy = () => normalizeExecutionPolicy(get());
+    this.accountRoute = accountRoute;
+  }
+  executionDataClass(id: string): ExecutionDataClass {
+    let s = this.sessions.get(id);
+    const seen = new Set<string>();
+    const classes: ExecutionDataClass[] = [];
+    while (s) {
+      if (seen.has(s.metadata.id)) {
+        return "D3";
+      }
+      seen.add(s.metadata.id);
+      classes.push(s.extras.executionClass ?? "D3");
+      if (!s.metadata.parentSessionId) {
+        return highestDataClass(...classes);
+      }
+      s = this.sessions.get(s.metadata.parentSessionId);
+    }
+    return "D3";
+  }
+  allowedExecutionTargets(id: string): ExecutionTarget[] | null {
+    const policy = this.executionPolicy();
+    if (!policy.enabled) {
+      return null;
+    }
+    const dataClass = this.executionTargetDataClass(id);
+    return structuredClone(policy.targets.filter(t => targetAllows(t, dataClass)));
+  }
+  /** Plugin defaults cannot be resolved in core; target authorization remains conservative. */
+  private executionTargetDataClass(id: string): ExecutionDataClass {
+    let session = this.sessions.get(id);
+    const seen = new Set<string>();
+    while (session?.metadata.parentSessionId) {
+      if (seen.has(session.metadata.id)) return "D3";
+      seen.add(session.metadata.id);
+      session = this.sessions.get(session.metadata.parentSessionId);
+    }
+    if (!session) return "D3";
+    const privacy = session.extras.executionPrivacy ?? executionPrivacyFromOptions(session.extras.options);
+    return highestDataClass(this.executionDataClass(id), ...Object.values(privacy));
+  }
+  private assertExecutionAuthorization(auth: ExecutionAuthorization | undefined, provider: ProviderId, contribution?: LaunchContribution | null): void {
+    const policy = this.executionPolicy();
+    if (!policy.enabled || provider === "terminal") {
+      return;
+    }
+    const current = auth && policy.targets.find(t => sameTarget(t, auth.target));
+    if (!auth || !current || !targetAllows(current, auth.dataClass)) {
+      throw new LaunchRefusal("No approved execution target permits this launch or input. Check Agents settings and the task data class.");
+    }
+    if (contribution !== undefined && current.accountId !== "default") {
+      const host = new URL(`https://${current.endpoint!}`).hostname;
+      const route = contribution?.accountRoute;
+      // The sandbox's DNS allowlist intentionally excludes HTTP loopback Ollama. Its public snapshot still
+      // binds model, port and local account kind; external accounts must also supply matching API domains.
+      const localOllama = route?.kind === "ollama" && ["127.0.0.1", "localhost", "[::1]"].includes(host);
+      if (!route || contribution?.accountId !== current.accountId || route.model !== current.inferenceModel
+        || publicEndpoint(route.endpoint) !== current.endpoint || route.kind !== current.accountKind
+        || (!localOllama && !contribution.apiDomains?.length) || contribution.apiDomains?.some(d => d !== host)) {
+        throw new LaunchRefusal("The prepared account route is missing or differs from its approved destination. Update Accounts and reapprove the target if its model or address changed.");
+      }
+    }
+  }
+  private authorizeExecution(request: CreateSessionRequest, source: string | undefined, options: CreateSessionRequest["launchOptions"], nativeAccount?: string): {
+    dataClass: ExecutionDataClass;
+    authorization?: ExecutionAuthorization;
+  } {
+    const policy = this.executionPolicy();
+    const privacy = Object.values(executionPrivacyFromOptions(options)).filter(v => v !== "default");
+    const dataClass = highestDataClass(source ? this.executionDataClass(source) : policy.defaultDataClass, ...privacy);
+    if (!policy.enabled || request.provider === "terminal") {
+      return { dataClass };
+    }
+    const accountId = nativeAccount ?? selectedAccountId(options);
+    const targetClass = highestDataClass(dataClass, ...(source ? [this.executionTargetDataClass(source)] : Object.values(executionPrivacyFromOptions(options))));
+    const target = policy.targets.find(t => (!request.executionTargetId || t.id === request.executionTargetId) && t.provider === request.provider && t.accountId === accountId && t.model === request.model && environmentKey(t.environment) === environmentKey(request.environment) && targetAllows(t, targetClass));
+    const authorization = target ? { dataClass: targetClass, target: structuredClone(target) } : undefined;
+    this.assertExecutionAuthorization(authorization, request.provider);
+    return { dataClass, authorization };
+  }
   configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> & Partial<Pick<AgentIsolation, "networkPolicyFor">> | null): void {
     this.isolation = isolation;
   }
@@ -430,13 +524,29 @@ export class TerminalManager {
     workspace: DiffOnlyReviewWorkspace;
     launchOptions: NonNullable<CreateSessionRequest["launchOptions"]>;
   }): Promise<{ id: string; contribution: LaunchContribution }> {
+    if (!isHostOwnedDiffOnlyReviewWorkspace(input.workspace) || !this.sessions.has(input.taskRootSessionId)) {
+      throw new LaunchRefusal("The review task or its diff-only workspace is no longer available.");
+    }
     const pipeline = this.launchPipeline;
     if (!pipeline) throw new LaunchRefusal("The model account of the worker is not available for its reviewer.");
     const accountOnly = Object.fromEntries(Object.entries(input.launchOptions).filter(([pluginId]) => pluginId === ACCOUNTS_PLUGIN_ID));
     const options = pipeline.normalizeOptions(input.provider, accountOnly, { delegated: true });
     if (!options) throw new LaunchRefusal("The worker has no model account for its reviewer.");
+    const execution = this.authorizeExecution({ provider: input.provider, profile: "plan", cwd: input.workspace.directory, position: { x: 0, y: 0 } }, input.taskRootSessionId, options);
     const id = randomUUID();
+    let parentReleased: Promise<void> | undefined;
+    const releaseParent = (): Promise<void> => parentReleased ??= pipeline.forgetSession(id);
     try {
+      const approved = execution.authorization?.target;
+      if (this.executionPolicy().enabled && approved && approved.accountId !== "default") {
+        // PluginAgentTools requires an existing caller. The temporary id belongs only to preparation/cleanup.
+        const route = await this.accountRoute?.(input.taskRootSessionId, input.provider, approved.accountId);
+        if (!this.sessions.has(input.taskRootSessionId)) throw new LaunchRefusal("The review task ended before its account was prepared.");
+        this.assertExecutionAuthorization(execution.authorization, input.provider);
+        if (!route || route.state !== "ready" || route.model !== approved.inferenceModel || publicEndpoint(route.endpoint) !== approved.endpoint || route.kind !== approved.accountKind) {
+          throw new LaunchRefusal("The reviewer account route is unavailable or changed since approval.");
+        }
+      }
       const prepared = await pipeline.prepare({
         sessionId: id,
         provider: input.provider,
@@ -448,7 +558,8 @@ export class TerminalManager {
         restoring: false,
         resume: false,
         options: structuredClone(options) as Record<string, Record<string, boolean | string>>,
-        environment: null
+        environment: null,
+        ...(this.executionPolicy().enabled ? { accountRouteEvidence: true as const } : {})
       });
       if (!prepared.ok) throw new LaunchRefusal(prepared.reason);
       // A reviewer id has one run and cannot be restarted. Its account contribution therefore owns both the run
@@ -457,11 +568,18 @@ export class TerminalManager {
       let released: Promise<void> | undefined;
       prepared.cleanup = () => released ??= (async () => {
         try { await cleanup(); }
-        finally { await pipeline.forgetSession(id); }
+        finally { await releaseParent(); }
       })();
+      try {
+        if (!this.sessions.has(input.taskRootSessionId)) throw new LaunchRefusal("The review task ended before its account was prepared.");
+        this.assertExecutionAuthorization(execution.authorization, input.provider, prepared);
+      } catch (error) {
+        await prepared.cleanup().catch(() => undefined);
+        throw error;
+      }
       return { id, contribution: prepared };
     } catch (error) {
-      await pipeline.forgetSession(id).catch(() => undefined);
+      await releaseParent().catch(() => undefined);
       throw error;
     }
   }
@@ -500,7 +618,8 @@ export class TerminalManager {
     const taskRoot = this.taskScopeFor(input.taskRootSessionId);
     addDirectory(taskRoot.cwd);
     for (const session of this.sessions.values()) {
-      addDirectory(session.metadata.cwd);
+      // A completed host reviewer has already removed its disposable diff workspace.
+      if (!(session.reviewWorkspace && session.metadata.exitCode !== null)) addDirectory(session.metadata.cwd);
       addDirectory(session.metadata.taskScope?.cwd ?? this.taskScopeFor(session.metadata.id).cwd);
     }
     if (denied.size === 0) throw new LaunchRefusal("No project roots were available to isolate the diff-only reviewer.");
@@ -539,8 +658,26 @@ export class TerminalManager {
     return account === "default" ? undefined : account;
   }
 
-  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"reviewRequested">): void {
+  /** Host-only strategy context, scoped to the selected router; never returns other launch values. */
+  strategyLaunchOptions(id: string, pluginId: string): { dataClass: string; privacy?: { version: 1; selected: string; floor: ExecutionDataClass } } | undefined {
+    const context = this.decisionLaunchOptions(id, pluginId);
+    if (!context) {
+      return undefined;
+    }
+    return { dataClass: context.dataClass ?? "unresolved", ...(context.privacy ? { privacy: context.privacy } : {}) };
+  }
+
+  setTaskMetadata(id: string, patch: Pick<SessionMetadata,"modelRoute"|"reviewRequested"|"executionStrategy">): void {
     const session=this.sessions.get(id);if (!session) return;
+    if (patch.modelRoute) session.metadata.modelRoute={...patch.modelRoute,reason:this.redactSecrets(patch.modelRoute.reason).slice(0,500)};
+    if (patch.executionStrategy) {
+      const strategy = normalizeExecutionStrategy(patch.executionStrategy);
+      if (strategy) {
+        const redacted = { ...strategy, reason: this.redactSecrets(strategy.reason) };
+        if (!patch.modelRoute && patch.reviewRequested === undefined && JSON.stringify(session.metadata.executionStrategy) === JSON.stringify(redacted)) return;
+        session.metadata.executionStrategy = redacted;
+      }
+    }
     if (patch.reviewRequested !== undefined) session.metadata.reviewRequested=patch.reviewRequested;
     this.schedulePersistence();
     this.emitSession(session.metadata);
@@ -718,6 +855,25 @@ export class TerminalManager {
     this.emitSession(session.metadata);
   }
 
+  /** Host-only: the replacement retains the old task's budget/board identity before it receives input. */
+  inheritTaskScope(sourceId:string,replacementId:string):void {
+    const replacement=this.sessions.get(replacementId);if(!replacement)throw new Error("Handoff card is unavailable.");
+    const sourceSession = this.sessions.get(sourceId);
+    const source = sourceSession?.metadata;
+    if (sourceSession) replacement.extras.reviewTasks = { ...(this.personReviewTasks(sourceSession)) };
+    if (sourceSession) {
+      replacement.extras.executionClass = highestDataClass(sourceSession.extras.executionClass ?? "D3", replacement.extras.executionClass ?? "D3");
+      const authorization = replacement.extras.executionAuthorization;
+      if (authorization) authorization.dataClass = highestDataClass(authorization.dataClass, replacement.extras.executionClass, this.executionTargetDataClass(sourceId));
+    }
+    if (sourceSession) replacement.extras.executionPrivacy = { ...(sourceSession.extras.executionPrivacy ?? executionPrivacyFromOptions(sourceSession.extras.options)) };
+    if (source) {
+      replacement.metadata.executionGoal = source.executionGoal;
+      replacement.metadata.executionTask = source.executionTask;
+      replacement.metadata.executionStrategy = source.executionStrategy ? { ...source.executionStrategy } : undefined;
+    }
+    replacement.metadata.taskScope=this.taskScopeFor(sourceId);this.emitSession(replacement.metadata);this.schedulePersistence();
+  }
   taskScopeFor(sourceId:string):NonNullable<SessionMetadata["taskScope"]> {
     const source=this.sessions.get(sourceId);if(!source)throw new Error("Handoff card is unavailable.");
     let root=source;
@@ -751,6 +907,25 @@ export class TerminalManager {
     }
     return this.sessions.get(session.metadata.id)===session && session.metadata.exitCode===null;
   }
+  /** Move live children before disposing the old orchestrator; closing it must not terminate the task. */
+  completeTaskContinuation(sourceId:string,replacementId:string):void {
+    if(!this.sessions.has(sourceId) || !this.sessions.has(replacementId))throw new Error("Handoff card is unavailable.");
+    const source=this.sessions.get(sourceId)!,replacement=this.sessions.get(replacementId)!;
+    const borrowed = replacement.borrowedEnvironment;
+    if (borrowed && (borrowed.sourceId !== sourceId || borrowed.startedAt !== source.metadata.startedAt || borrowed.environment !== source.extras.environment)) {
+      throw new Error("The source worktree changed during handoff.");
+    }
+    if(source.extras.environment?.kind==="worktree") {
+      replacement.extras.environment=source.extras.environment;replacement.environmentReady=source.environmentReady;
+      if(source.metadata.environment)replacement.metadata.environment={...source.metadata.environment};
+      delete source.extras.environment;
+      delete replacement.borrowedEnvironment;
+      this.emitSession(replacement.metadata);
+    }
+    for(const row of this.sessions.values())if(row.metadata.parentSessionId===sourceId){row.metadata.parentSessionId=replacementId;this.emitSession(row.metadata);}
+    this.schedulePersistence();
+  }
+
   /** Masks known secrets and key shapes in text another agent reads (observe, result, control screen, failures). */
   redactSecrets<T extends string | null>(text: T): T {
     return (text === null ? text : this.redaction.redact(text)) as T;
@@ -759,6 +934,43 @@ export class TerminalManager {
   /** `redactSecrets(text)` cut to its last `maxChars` characters, masking only a window around that tail. */
   redactSecretsTail(text: string, maxChars: number): string {
     return this.redaction.redactTail(text, maxChars);
+  }
+
+  private personReviewTasks(session: ManagedSession | undefined): Record<string, string> {
+    // A plugin may create a parentless card, but its task text is not a person's authorization.
+    if (!session) return {};
+    // A host-copied snapshot remains person-authored when a plugin performs a consented account handoff.
+    if (session.extras.reviewTasks !== undefined) return session.extras.reviewTasks;
+    return session.extras.ownerPluginId ? {} : reviewTasksFromOptions(session.extras.options);
+  }
+
+  /** Current process only: never restored from disk or inherited from a parent/remote card. */
+  decisionExecutionProtection(id: string): ExecutionProtection {
+    const session = this.sessions.get(id);
+    return session?.process && !session.extras.environment && !session.extras.environmentChoice && session.metadata.exitCode === null
+      ? this.executionProtections.get(id) ?? UNVERIFIED_EXECUTION_PROTECTION : UNVERIFIED_EXECUTION_PROTECTION;
+  }
+
+  /** Only the root person's review fields for this plugin; never subagent-authored launch values. */
+  decisionLaunchOptions(id: string, pluginId: string): { task?: string; dataClass?: string; privacy?: { version: 1; selected: string; floor: ExecutionDataClass } } | undefined {
+    let session = this.sessions.get(id);
+    if (!session) return undefined;
+    const seen = new Set<string>();
+    while (session.metadata.parentSessionId) {
+      if (seen.has(session.metadata.id)) return {};
+      seen.add(session.metadata.id);
+      const parent = this.sessions.get(session.metadata.parentSessionId);
+      if (!parent) return {};
+      session = parent;
+    }
+    const task = this.personReviewTasks(session)[pluginId];
+    const privacy = session.extras.executionPrivacy ?? executionPrivacyFromOptions(session.extras.options);
+    const selected = privacy[pluginId] ?? "unresolved";
+    const floor = this.executionDataClass(id);
+    return {
+      ...(typeof task === "string" ? { task: this.redactSecrets(task).slice(0, 2000) } : {}),
+      ...(this.executionPolicy().enabled ? { dataClass: highestDataClass(floor, selected), privacy: { version: 1 as const, selected, floor } } : Object.hasOwn(privacy, pluginId) ? { dataClass: privacy[pluginId]! } : {})
+    };
   }
 
   /** What decision hooks need to know about a running agent card; null for terminals and unknown ids. */
@@ -839,6 +1051,21 @@ export class TerminalManager {
   }
 
   private async restoreSessionRecords(persisted: PersistedTerminalSession[], mode: SessionRestoreMode): Promise<void> {
+    // Older records stored the core floor as authorization, even when a plugin default was unresolved.
+    // Recompose the entire persisted parent chain before any environment resumes or process starts.
+    const records = new Map(persisted.map(record => [record.id, record]));
+    const restoredClass = (record: PersistedTerminalSession, seen = new Set<string>()): ExecutionDataClass => {
+      if (seen.has(record.id)) return "D3";
+      seen.add(record.id);
+      const own = highestDataClass(record.executionClass ?? "D3", record.executionAuthorization?.dataClass ?? "D3",
+        ...Object.values(record.executionPrivacy ?? executionPrivacyFromOptions(record.options)));
+      if (!record.parentSessionId) return own;
+      const parent = records.get(record.parentSessionId);
+      return highestDataClass(own, parent ? restoredClass(parent, seen) : this.executionTargetDataClass(record.parentSessionId));
+    };
+    for (const record of persisted) {
+      if (record.executionAuthorization) record.executionAuthorization = { ...record.executionAuthorization, dataClass: restoredClass(record) };
+    }
     // Environments resume first, only for cards that come back at all; a card whose environment stopped comes
     // back stopped with the plugin's reason and never runs locally instead. A card that does not come back (not
     // restored, or a subagent whose parent is gone) leaves the saved state now: its environment is released.
@@ -853,6 +1080,7 @@ export class TerminalManager {
           return;
         }
         if (record.lastState !== "running") return;
+        try {this.assertExecutionAuthorization(record.executionAuthorization,record.provider);}catch(error){resumed.set(record.id,{ok:false,reason:error instanceof Error?error.message:"Execution target unavailable."});return;}
         resumed.set(record.id, await environments.resume(record.environment, record.id));
       }));
     }
@@ -945,6 +1173,12 @@ export class TerminalManager {
       await this.allProcessesExited(killWaitMs);
     }
     return this.liveProcesses.size;
+  }
+
+  /** Retain the completed review card so delayed provider usage remains attributable to the shared task. */
+  async finishReadOnlyReviewer(id: string): Promise<void> {
+    if (!this.sessions.get(id)?.reviewWorkspace) throw new Error("Only a host-owned read-only reviewer can be completed this way.");
+    await this.stopSubagentPtyForRetry(id);
   }
 
   /** Stops only this card's owned PTY and waits for its existing exit watcher before it can reuse a workspace. */
@@ -1061,7 +1295,7 @@ export class TerminalManager {
 
   create(
     request: CreateSessionRequest,
-    control: { captureReviewDiff?: boolean; captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string } = {}
+    control: { captureReviewDiff?: boolean; captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string; continueTaskFrom?:string; reuseTaskEnvironmentFrom?:string } = {}
   ): SessionSnapshot {
     const reviewerControl = this.readOnlyReviewerRequests.get(request);
     if (reviewerControl) this.readOnlyReviewerRequests.delete(request);
@@ -1115,6 +1349,7 @@ export class TerminalManager {
     // The isolation layer decides before anything starts: a subagent without it runs in normal, a launch that
     // needs it and cannot have it is refused.
     // Host consent supplies continuation identity before any process or capability is launched.
+    const executionSource = control.continueTaskFrom ? this.sessions.get(control.continueTaskFrom)?.metadata : undefined;
     const continuationScope=control.continueTaskFrom ? this.taskScopeFor(control.continueTaskFrom) : undefined;
     const inheritedTaskRootId=continuationScope?.id ?? (request.parentSessionId ? this.taskScopeFor(request.parentSessionId).id : undefined);
     if(inheritedTaskRootId && this.budgetPausedTaskRoots.has(inheritedTaskRootId)) {
@@ -1127,9 +1362,20 @@ export class TerminalManager {
       throw new LaunchRefusal("A diff-only reviewer requires the operating-system isolation layer and a read-only Plan profile. The reviewer was not started.");
     }
     if (decision.profile !== request.profile) request = { ...request, profile: decision.profile };
+    const continuation = control.reuseTaskEnvironmentFrom ? this.sessions.get(control.reuseTaskEnvironmentFrom) : undefined;
+    if (control.reuseTaskEnvironmentFrom && (!continuation || control.continueTaskFrom !== control.reuseTaskEnvironmentFrom
+      || request.environment || continuation.extras.environment?.kind !== "worktree" || !continuation.environmentReady
+      || request.cwd !== (this.launchContexts.get(continuation.metadata.id)?.cwd ?? continuation.metadata.cwd))) {
+      throw new LaunchRefusal("The source worktree is unavailable or changed; handoff was not launched locally.");
+    }
+    const borrowedEnvironment = continuation?.extras.environment;
+    const continuationChoice = borrowedEnvironment ? continuation!.environmentLaunchChoice
+      ?? continuation!.extras.executionAuthorization?.target.environment
+      ?? { pluginId: borrowedEnvironment.pluginId, kind: borrowedEnvironment.kind } : undefined;
     const environmentChoice = reviewerControl ? null : this.environments
-      ? this.environments.normalizeChoice(request.provider, request.environment) ?? null
-      : request.environment === undefined ? null : failWith("Plugin environments are not available.");
+      ? this.environments.normalizeChoice(request.provider, continuationChoice ?? request.environment) ?? null
+      : request.environment === undefined && !borrowedEnvironment ? null : failWith("Plugin environments are not available.");
+    const execution = this.authorizeExecution({...request,environment:environmentChoice??undefined}, control.continueTaskFrom ?? request.parentSessionId, launchOptions, reviewerControl?.account?.contribution.accountId);
 
     const id = reviewerControl?.account?.id ?? randomUUID();
     const startedAt=Date.now();
@@ -1148,6 +1394,8 @@ export class TerminalManager {
       ...(request.parentSessionId !== undefined ? { parentSessionId: request.parentSessionId } : {}),
       status: initialSessionStatus(request.provider),
       startedAt,
+      ...(executionSource ? { executionGoal: executionSource.executionGoal, executionTask: executionSource.executionTask, executionStrategy: executionSource.executionStrategy }
+        : !request.parentSessionId && request.executionGoal ? { executionGoal: request.executionGoal, ...(request.executionTask ? { executionTask: this.redactSecrets(request.executionTask).slice(0, 8000) } : {}) } : {}),
       ...(continuationScope ? {taskScope:continuationScope} : environmentChoice && !request.parentSessionId ? {taskScope:{id,cwd:request.cwd,startedAt}} : {}),
       exitCode: null,
       failureDetails: null,
@@ -1158,6 +1406,7 @@ export class TerminalManager {
       && this.providerClis.get(request.provider).state === "available";
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = !reviewerControl && (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
+    if(execution.authorization)this.startingAuthorizations.set(id,execution.authorization);
     this.startingModels.set(id, modelChoice);
     if (control.ownerPluginId !== undefined) this.startingOwners.set(id, control.ownerPluginId);
     let launched: ReturnType<TerminalManager["spawnProcess"]> | { process: null; agentBrowser: null; agentRuntime: null; agentOrchestration: null; failure: null };
@@ -1168,6 +1417,7 @@ export class TerminalManager {
           INITIAL_TERMINAL_COLS, INITIAL_TERMINAL_ROWS, resume, captureResult, role,
           control.answerCaptureGrantExpiresAt, reviewerControl?.account?.contribution ?? null, request.parentSessionId, networkProjectRoot, reviewerControl, control.captureReviewDiff === true);
     } finally {
+      this.startingAuthorizations.delete(id);
       this.startingModels.delete(id);
       this.startingOwners.delete(id);
     }
@@ -1200,17 +1450,28 @@ export class TerminalManager {
       captureReviewDiff: control.captureReviewDiff === true,
       ...(reviewerControl ? { reviewWorkspace: reviewerControl.workspace } : {}),
       extras: {
+        executionClass:execution.dataClass,
+        ...(execution.authorization?{executionAuthorization:execution.authorization}:{}),
+        reviewTasks: control.continueTaskFrom
+          ? { ...(this.personReviewTasks(this.sessions.get(control.continueTaskFrom))) }
+          : control.ownerPluginId ? {} : reviewTasksFromOptions(launchOptions),
+        executionPrivacy: control.continueTaskFrom
+          ? { ...(this.sessions.get(control.continueTaskFrom)?.extras.executionPrivacy ?? executionPrivacyFromOptions(this.sessions.get(control.continueTaskFrom)?.extras.options)) }
+          : executionPrivacyFromOptions(launchOptions),
         ...(launchOptions ? { options: launchOptions } : {}),
-        ...(environmentChoice ? { environmentChoice } : {}),
+        ...(borrowedEnvironment ? { environment: borrowedEnvironment } : environmentChoice ? { environmentChoice } : {}),
         ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
       },
       launchToken: 0,
       launchCleanup: null,
       restoringLaunch: false,
-      environmentReady: false,
+      environmentReady: Boolean(borrowedEnvironment),
+      ...(environmentChoice ? { environmentLaunchChoice: structuredClone(environmentChoice) } : {}),
+      ...(borrowedEnvironment ? { borrowedEnvironment: { sourceId: continuation!.metadata.id, startedAt: continuation!.metadata.startedAt, environment: borrowedEnvironment } } : {}),
       launchEpoch: 0,
       launchWaiters: new Set()
     };
+    if (borrowedEnvironment) metadata.environment = environmentBadge(borrowedEnvironment);
     this.sessions.set(id, session);
     const reviewerAccount = reviewerControl?.account?.contribution;
     if (reviewerAccount) {
@@ -1331,6 +1592,7 @@ export class TerminalManager {
   }
 
   private validateRestart(session: ManagedSession): void {
+    this.assertExecutionAuthorization(session.extras.executionAuthorization,session.metadata.provider);
     if (session.reviewWorkspace) throw new LaunchRefusal("A diff-only reviewer session cannot be restarted; request a new isolated review instead.");
     if (this.isSessionBudgetPaused(session)) throw new LaunchRefusal("This task's usage budget is paused. Clear or raise the task budget before restarting it.");
     if(this.isCheckpointRestoreActive(session.metadata.id))throw new LaunchRefusal("Workspace checkpoint restoration is in progress.");
@@ -1609,6 +1871,7 @@ export class TerminalManager {
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process
       || (internal.expectedStartedAt !== undefined && session.metadata.startedAt !== internal.expectedStartedAt)) return false;
+    if(data!=="\x03") {try {this.assertExecutionAuthorization(session.extras.executionAuthorization,session.metadata.provider);}catch{return false;}}
     if(data!=="\x03" && this.isSessionBudgetPaused(session))return false;
     const process = session.process;
     const mark = session.turnStarts ?? 0;
@@ -1961,9 +2224,9 @@ export class TerminalManager {
       }
     }
     const environment = session.extras.environment;
-    if (environment && this.environments) {
+    if (environment && this.environments && !session.borrowedEnvironment) {
       if (!this.quitting) {
-        void this.environments.release(environment, id, { keepData: options.keepEnvironmentData ?? environment.kind!=="worktree", reason: "closed" });
+        void this.environments.release(environment, id, { keepData: [...this.sessions.values()].some(row => row.borrowedEnvironment?.environment === environment) || (options.keepEnvironmentData ?? environment.kind!=="worktree"), reason: "closed" });
       } else if (this.sessionRestoreMode === "off") {
         // Nothing is saved, so the environment will not come back: stop its compute, keep its data.
         this.quitReleases.push(this.environments.release(environment, id, {
@@ -2003,6 +2266,7 @@ export class TerminalManager {
       role: descriptor.role,
       ...(descriptor.parentSessionId !== undefined ? { parentSessionId: descriptor.parentSessionId } : {}),
       ...(descriptor.taskScope ? {taskScope:{...descriptor.taskScope}} : {}),
+      ...(descriptor.executionGoal ? { executionGoal: descriptor.executionGoal, executionTask: descriptor.executionTask, executionStrategy: descriptor.executionStrategy } : {}),
       status: initialSessionStatus(descriptor.provider),
       startedAt: Date.now(),
       exitCode: null,
@@ -2011,9 +2275,14 @@ export class TerminalManager {
       ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
       ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
       ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {}),
+      ...(descriptor.modelRoute ? {modelRoute:{...descriptor.modelRoute}} : {}),
       ...(descriptor.reviewRequested !== undefined ? {reviewRequested:descriptor.reviewRequested} : {})
     };
     const extras: PersistedSessionExtras = {
+      reviewTasks: { ...(descriptor.reviewTasks ?? (descriptor.ownerPluginId ? {} : reviewTasksFromOptions(descriptor.options))) },
+      executionClass:descriptor.executionClass,
+      executionAuthorization:descriptor.executionAuthorization,
+      executionPrivacy: { ...(descriptor.executionPrivacy ?? executionPrivacyFromOptions(descriptor.options)) },
       ...(descriptor.isolatedEnvironmentScopes ? {isolatedEnvironmentScopes:structuredClone(descriptor.isolatedEnvironmentScopes)} : {}),
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
@@ -2084,6 +2353,7 @@ export class TerminalManager {
       && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
     if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
+        if(descriptor.executionAuthorization)this.startingAuthorizations.set(descriptor.id,descriptor.executionAuthorization);
         this.startingModels.set(descriptor.id, { ...(metadata.model !== undefined ? { model: metadata.model } : {}),
           ...(metadata.effort !== undefined ? { effort: metadata.effort } : {}) });
         let launched: ReturnType<TerminalManager["spawnProcess"]>;
@@ -2103,6 +2373,7 @@ export class TerminalManager {
           descriptor.parentSessionId
           );
         } finally {
+          this.startingAuthorizations.delete(descriptor.id);
           this.startingModels.delete(descriptor.id);
         }
         process = launched.process;
@@ -2368,6 +2639,7 @@ export class TerminalManager {
     failure: LaunchFailure | null;
   } {
     const none = { process: null, agentBrowser: null, agentRuntime: null, agentOrchestration: null };
+    this.assertExecutionAuthorization(this.sessions.get(id)?.extras.executionAuthorization ?? this.startingAuthorizations.get(id),provider,contribution);
     const projectRoot = networkProjectRoot ?? this.networkProjectRoot(cwd, parentSessionId);
     const decision = this.launchIsolation(id, provider, profile, role, null, projectRoot);
     if (decision.refuse) return { ...none, failure: { diagnostic: `Launch refused: ${decision.refuse}`, exitCode: 1 } };
@@ -2391,6 +2663,7 @@ export class TerminalManager {
       }
     }
     try {
+      this.assertExecutionAuthorization(this.sessions.get(id)?.extras.executionAuthorization ?? this.startingAuthorizations.get(id),provider,contribution);
       this.assertCheckpointLaunchAllowed(planned.cwd);
       this.reviewDiffTracker.beforeSpawn(id, planned.cwd, captureReviewDiff, this.reviewParentDirectory(parentSessionId));
       const process = this.spawnPty(spawn.command, spawn.args, {
@@ -2527,6 +2800,7 @@ export class TerminalManager {
     });
     this.releaseIsolation(id);
     this.isolationCleanups.set(id, wrapped.cleanup);
+    if (wrapped.executionProtection) this.executionProtections.set(id, Object.freeze({ ...wrapped.executionProtection }));
     if (wrapped.isolationReason) {
       const session = this.sessions.get(id);
       if (session) {
@@ -2552,6 +2826,7 @@ export class TerminalManager {
   }
 
   private releaseIsolation(id: string): void {
+    this.executionProtections.delete(id);
     const cleanup = this.isolationCleanups.get(id);
     if (!cleanup) return;
     this.isolationCleanups.delete(id);
@@ -2807,11 +3082,30 @@ export class TerminalManager {
       return "failed";
     };
     const environments = this.environments;
+    const check=():void=>{
+      const borrowed = session.borrowedEnvironment;
+      if (borrowed) {
+        const source = this.sessions.get(borrowed.sourceId);
+        if (!source || source.metadata.startedAt !== borrowed.startedAt || source.extras.environment !== borrowed.environment) {
+          throw new LaunchRefusal("The source worktree changed or closed during handoff.");
+        }
+      }
+      this.assertExecutionAuthorization(session.extras.executionAuthorization,metadata.provider);
+    };
+    check();
+    const approved=session.extras.executionAuthorization?.target;
+    if(this.executionPolicy().enabled && approved && approved.accountId!=="default") {
+      const route=await this.accountRoute?.(id,metadata.provider,approved.accountId);
+      if(!live())return "superseded";
+      check();
+      if(!route||route.state!=="ready"||route.model!==approved.inferenceModel||publicEndpoint(route.endpoint)!==approved.endpoint||route.kind!==approved.accountKind)return refuse("The account route is unavailable or changed since its execution target was approved.");
+    }
     const requestedCwd=metadata.cwd;
 
     if(this.isSessionBudgetPaused(session) && !await waitIfBudgetPaused())return "superseded";
     if(!live())return "superseded";
 
+    check();
     // 1. Place a new session where the person chose. The choice stays saved with the card until the plugin has
     // prepared it, so a card whose preparation was cut short (quit, crash) or failed never restores locally.
     const choice = session.extras.environmentChoice;
@@ -2834,6 +3128,7 @@ export class TerminalManager {
         return "superseded";
       }
       if (!placed.ok) return refuse(placed.reason);
+      try {check();}catch(error){void environments.release(placed.environment,id,{keepData:false,reason:"closed"});throw error;}
       delete session.extras.environmentChoice;
       session.environmentReady = true;
       session.extras.environment = placed.environment;
@@ -2847,6 +3142,7 @@ export class TerminalManager {
       this.schedulePersistence();
     }
 
+    check();
     // 2. A saved environment resumes before its first launch in this run.
     const environment = session.extras.environment;
     if (environment && !session.environmentReady) {
@@ -2861,6 +3157,7 @@ export class TerminalManager {
       session.environmentReady = true;
     }
 
+    check();
     // 3. Chosen launch contributors, and the launch policies that apply.
     let contribution: LaunchContribution | null = null;
     let adopted = false;
@@ -2881,6 +3178,7 @@ export class TerminalManager {
           projectRoot: metadata.taskScope?.cwd ?? this.networkProjectRoot(metadata.cwd,metadata.parentSessionId),
           ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
           restoring,
+          ...(this.executionPolicy().enabled ? { accountRouteEvidence: true as const } : {}),
           resume: resume !== null,
           options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
           environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
@@ -2895,6 +3193,8 @@ export class TerminalManager {
         session.accountHome=prepared.accountHome;
         this.addLaunchSecrets(session, prepared.secrets);
       }
+
+      this.assertExecutionAuthorization(session.extras.executionAuthorization, metadata.provider, contribution);
 
       // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
       const keeps = environment ? environments?.keeps?.(environment) ?? {} : {};
@@ -2939,6 +3239,7 @@ export class TerminalManager {
         // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
         const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
           .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
+        check();
         const wrapped = await environments.wrap(environment, {
           sessionId: id,
           provider: metadata.provider,
@@ -2959,6 +3260,7 @@ export class TerminalManager {
         if (!wrapped.ok) {
           return refuse(wrapped.reason);
         }
+        check();
         this.addLaunchSecrets(session, wrapped.secrets);
         spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
           env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
@@ -2978,6 +3280,7 @@ export class TerminalManager {
       }
       let process: IPty;
       try {
+        this.assertExecutionAuthorization(session.extras.executionAuthorization, metadata.provider, contribution);
         this.assertCheckpointLaunchAllowed(spawn.cwd);
         this.retryLaunchValidators.get(id)?.();
         this.reviewDiffTracker.beforeSpawn(id, spawn.cwd, session.captureReviewDiff === true, this.reviewParentDirectory(metadata.parentSessionId));
@@ -3350,6 +3653,8 @@ function launchModelChoice(provider: ProviderId, model: unknown, effort: unknown
 
 function assertCreateRequest(request: CreateSessionRequest, containment: boolean): void {
   if (!request || !SESSION_PROVIDERS.has(request.provider)) throw new Error("Unknown terminal provider.");
+  if (request.executionGoal !== undefined && (!isExecutionGoal(request.executionGoal) || request.provider === "terminal" || request.parentSessionId !== undefined || request.role !== "orchestrator")) throw new Error("An execution goal requires a root orchestrator.");
+  if (request.executionTask !== undefined && (typeof request.executionTask !== "string" || request.executionTask.length > 8000)) throw new Error("The overall execution task must be at most 8000 characters.");
   if (!isLaunchProfile(request.profile)) throw new Error("Unknown launch profile.");
   if (!profileAvailable(request.provider, request.profile, containment) && !(request.provider === "terminal" && request.profile === "yolo")) {
     throw new LaunchRefusal(request.profile === "auto"

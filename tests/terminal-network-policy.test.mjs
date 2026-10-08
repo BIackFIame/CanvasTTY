@@ -125,7 +125,7 @@ test("worktree placement and approved handoff retain the original network-policy
   const environment = new EnvironmentRegistry({
     providers: () => [{
       pluginId: "test.worktree", pluginName: "Test worktree", serviceId: "environment",
-      kinds: [{ kind: "worktree", label: "Worktree", keeps: { launch: true } }], secrets: false
+      kinds: [{ kind: "worktree", label: "Worktree", executionLocation: "local", keeps: { launch: true } }], secrets: false
     }],
     call: async (_pluginId, _serviceId, method, params) => {
       environmentCalls.push({ method, params });

@@ -186,6 +186,7 @@ const api: CanvasTTYApi = {
     invokeCardAction: (pluginId: string, actionId: string, sessionId: string, input?: Record<string, unknown>) => (
       ipcRenderer.invoke(IPC.pluginsInvokeCardAction, pluginId, actionId, sessionId, input)
     ),
+    executionAccountRoutes: (provider: ProviderId) => ipcRenderer.invoke(IPC.executionAccountRoutes,provider),
     launchFieldOptions: (pluginId: string, provider: ProviderId) => (
       ipcRenderer.invoke(IPC.pluginsLaunchFieldOptions, pluginId, provider)
     ),

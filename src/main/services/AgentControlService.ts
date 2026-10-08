@@ -1,3 +1,4 @@
+import { executionStrategy, normalizeExecutionStrategy, type ExecutionStrategy } from "../../shared/executionStrategy.ts";
 import type {
   AgentProviderId,
   CreateSessionRequest,
@@ -45,6 +46,7 @@ const REVIEW_TIMEOUT_MS = 180_000;
 const REVIEW_STARTUP_QUIET_MS = 90_000;
 
 export interface SpawnAgentRequest {
+  executionTargetId?: string;
   parentSessionId: string;
   provider: AgentProviderId;
   cwd: string;
@@ -107,6 +109,8 @@ export interface AgentWaitTiming {
 }
 
 export interface AgentControlOptions {
+  /** Dynamic application opt-in, also checked for restored sessions. */
+  executionEnabled?: () => boolean;
   /** waitFor timing; tests shorten it. */
   waitTiming?: AgentWaitTiming;
   /** The person's delegation limits (Settings → Agents), read at every spawn. */
@@ -187,6 +191,7 @@ export class PromptNotDeliveredError extends Error {
 }
 
 export class AgentControlService {
+  private readonly reviewRoots = new Map<string, symbol>();
   private readonly loopWarnings = new Map<string,{at:number;turnEpoch:number}>();
   private readonly terminals: TerminalManager;
   private readonly options: AgentControlOptions;
@@ -196,6 +201,8 @@ export class AgentControlService {
   private readonly pendingRetries = new Map<string, number>();
   private readonly retryableQuiet = new Set<string>();
   private readonly reviewRequested = new Set<string>();
+  /** Deep-policy provenance survives opt-out, retries, and the lifetime of an admitted reviewer. */
+  private readonly strategyReviews = new Set<string>();
   private readonly readOnlyReviewers = new Set<string>();
   private readonly reviews = new Map<string, AgentReviewResult>();
   private readonly reviewGenerations = new Map<string, object>();
@@ -215,6 +222,7 @@ export class AgentControlService {
    * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
    * start; the card stays, so the caller can inspect or cancel it.
    */
+  executionTargets(id:string) { this.requireSession(id); return this.terminals.allowedExecutionTargets(id); }
   spawn(request: SpawnAgentRequest, signal?: AbortSignal): Promise<SessionMetadata> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
@@ -223,8 +231,29 @@ export class AgentControlService {
     const capabilities = PROVIDER_CAPABILITIES[request.provider];
     if (!capabilities) throw new Error("Unknown agent provider.");
     if (!capabilities.send) throw new Error(`${request.provider} cannot receive prompts.`);
+    const targets=this.terminals.allowedExecutionTargets(parent.id);
+    if(targets!==null&&!request.executionTargetId)throw new DelegationRefusal("Choose an approved execution target id for this task before preparing a subagent.");
+    const target=request.executionTargetId ? targets?.find(t=>t.id===request.executionTargetId) : undefined;
+    if(request.executionTargetId && (!target||target.provider!==request.provider))throw new DelegationRefusal("The execution target is unavailable for this task/provider.");
+    if (target) {
+      const requestedAccount = request.launchOptions?.[ACCOUNTS_PLUGIN_ID]?.account;
+      if (request.model !== undefined && request.model !== target.model || requestedAccount !== undefined && selectedAccountId(request.launchOptions) !== target.accountId || request.isolate !== undefined) {
+        throw new DelegationRefusal("Execution target conflicts with the requested model, account or environment.");
+      }
+      request = { ...request, ...(target.model ? { model: target.model } : {}), launchOptions: { ...request.launchOptions, [ACCOUNTS_PLUGIN_ID]: { account: target.accountId === "default" ? "none" : target.accountId } } };
+      // With native sign-in and no account contributor do not add an artificial plugin requirement.
+      if (target.accountId === "default" && !this.terminals.modelAccountOf(parent.id) && requestedAccount === undefined) {
+        const options = { ...request.launchOptions };
+        delete options[ACCOUNTS_PLUGIN_ID];
+        request = { ...request, launchOptions: Object.keys(options).length ? options : undefined };
+      }
+    }
     const account = this.subagentAccount(parent.id, request.provider, request.launchOptions);
     if (account.launchOptions !== request.launchOptions) request = { ...request, launchOptions: account.launchOptions };
+
+    const execution = this.executionContext(parent.id);
+    if (execution.goal) this.rememberExecutionStrategy(parent.id, execution.strategy
+      ?? executionStrategy("auto", "balanced", "fallback", "No overall strategy was resolved before this direct launch; balanced host defaults apply."));
 
     const taskScope = this.taskRoot(parent.id);
     // What the request asks for first (its folder, its profile), then the person's limits.
@@ -234,6 +263,9 @@ export class AgentControlService {
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
     const { live } = this.assertSpawnCapacity(parent.id);
+    if (target) {
+      return this.createSubagent(parent, request, cwd.cwd, profile.profile, target.environment ?? null, signal);
+    }
     const resolveEnvironment = this.options.resolveSubagentEnvironment;
     if (!resolveEnvironment) {
       if (request.isolate === "worktree") throw new DelegationRefusal("The environments plugin does not provide a worktree for this launch.");
@@ -280,8 +312,10 @@ export class AgentControlService {
     this.requireBudgetActive(parent.id);
     const { childrenCount } = this.assertSpawnCapacity(parent.id);
     const cascade = childrenCount;
+    const strategyReview = this.executionContext(parent.id).strategy?.review === "required";
     const created = this.terminals.create({
       provider: request.provider,
+      ...(request.executionTargetId?{executionTargetId:request.executionTargetId}:{}),
       cwd,
       profile,
       position: {
@@ -295,10 +329,11 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
+    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true || strategyReview });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
-    if (request.review === true) this.trackReview(created.id);
+    if (strategyReview) this.strategyReviews.add(created.id);
+    if (request.review === true || strategyReview) this.trackReview(created.id);
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
@@ -386,6 +421,33 @@ export class AgentControlService {
     return taskScope ? { ...taskScope } : { id: root.id, cwd: root.cwd, startedAt: root.startedAt };
   }
 
+  /** Strategy belongs to the logical root, including its handoff replacements. */
+  executionContext(sessionId: string): { rootId: string; goal?: SessionMetadata["executionGoal"]; task?: string; strategy?: ExecutionStrategy } {
+    const root = this.lineage(sessionId).at(-1)!;
+    const rootId = this.taskRoot(sessionId).id;
+    if (this.options.executionEnabled && !this.options.executionEnabled()) return { rootId };
+    const related = this.terminals.listMetadata().filter(row => !row.parentSessionId && (row.id === rootId || row.taskScope?.id === rootId));
+    const owner = related.find(row => row.executionStrategy) ?? related.find(row => row.executionGoal) ?? root;
+    const goal = owner.executionGoal;
+    const stored = normalizeExecutionStrategy(owner.executionStrategy);
+    const strategy = (stored?.requested === goal ? stored : undefined)
+      ?? (goal && goal !== "auto" ? executionStrategy(goal, goal, "person", "The person selected this execution goal.") : undefined);
+    return { rootId, goal, task: owner.executionTask, strategy };
+  }
+
+  rememberExecutionStrategy(sessionId: string, strategy: ExecutionStrategy): ExecutionStrategy {
+    const context = this.executionContext(sessionId);
+    const normalized = normalizeExecutionStrategy(context.strategy ?? strategy);
+    if (!normalized || normalized.requested !== context.goal) throw new Error("Execution strategy does not match the person's goal.");
+    this.requireBudgetActive(sessionId);
+    for (const row of this.terminals.listMetadata()) {
+      if (!row.parentSessionId && (row.id === context.rootId || row.taskScope?.id === context.rootId)) {
+        this.terminals.setTaskMetadata(row.id, { executionStrategy: normalized });
+      }
+    }
+    return normalized;
+  }
+
   /** Resolve every card against one host snapshot, sharing parent traversal and preserving continuation scopes. */
   taskRoots(sessions: readonly SessionMetadata[]): Map<string, { id: string; cwd: string; startedAt: number }> {
     const byId = new Map(sessions.map((session) => [session.id, session]));
@@ -418,6 +480,7 @@ export class AgentControlService {
     this.launchRequests.delete(sessionId);
     this.retryableQuiet.delete(sessionId);
     this.reviewRequested.delete(sessionId);
+    this.strategyReviews.delete(sessionId);
     this.readOnlyReviewers.delete(sessionId);
     this.reviews.delete(sessionId);
 
@@ -462,7 +525,7 @@ export class AgentControlService {
     return DEFAULT_DELEGATION_LIMITS;
   }
 
-  private assertSpawnCapacity(parentSessionId: string, replacingSessionId?: string): { live: number; childrenCount: number } {
+  private assertSpawnCapacity(parentSessionId: string, replacingSessionId?: string, reviewer = false): { live: number; childrenCount: number } {
     const childrenCount = this.children(parentSessionId).filter(session => session.id !== replacingSessionId).length;
     if (childrenCount >= MAX_CHILDREN_PER_PARENT) {
       throw new DelegationRefusal(`Session ${parentSessionId} already has ${MAX_CHILDREN_PER_PARENT} subagent cards; cancel_agent the finished ones first.`);
@@ -472,9 +535,16 @@ export class AgentControlService {
     if (lineage.length > limits.maxDepth) {
       throw new DelegationRefusal(`Subagents may nest at most ${limits.maxDepth} level${limits.maxDepth === 1 ? "" : "s"} deep below the agent the person started; this one would be level ${lineage.length}. The person sets this limit in Settings → Agents.`);
     }
-    const live = this.descendants(lineage.at(-1)!.id)
-      .filter(session => session.id !== replacingSessionId && session.exitCode === null).length;
-    if (live >= limits.maxSubagents) {
+    const sessions = this.terminals.listMetadata();
+    const roots = this.taskRoots(sessions);
+    const context = this.executionContext(parentSessionId);
+    const live = sessions.filter(session => session.parentSessionId && roots.get(session.id)?.id === context.rootId
+      && session.id !== replacingSessionId && session.exitCode === null).length;
+    const strategy = context.strategy;
+    const cap = Math.min(limits.maxSubagents, strategy?.maxConcurrent ?? limits.maxSubagents);
+    const workerCap = cap - (!reviewer && strategy?.review === "required" ? 1 : 0);
+    if (live >= workerCap) {
+      if (strategy) throw new DelegationRefusal(`Execution strategy ${strategy.resolved} allows ${cap} live subagents within the person's limit${strategy.review === "required" && !reviewer ? "; one slot is reserved for required review" : ""}. Cancel finished idle cards before spawning more.`);
       throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
     }
     return { live, childrenCount };
@@ -813,7 +883,7 @@ export class AgentControlService {
     const controller = new AbortController();
     this.reviewControllers.set(sessionId, controller);
     // Store the guarded promise, so every concurrent caller observes invalidation, not the raw verdict.
-    const pending = this.performReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
+    const pending = this.queuedReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
       status: "unavailable",
       reason: this.redactTail(error instanceof Error ? error.message : "The reviewer failed.", 500),
       costUsd: null
@@ -834,7 +904,42 @@ export class AgentControlService {
     return this.reviewGenerations.get(sessionId) === generation ? result : supersededReview();
   }
 
+  private requireReviewEnabled(sessionId: string): void {
+    if (this.strategyReviews.has(sessionId) && this.launchRequests.get(sessionId)?.review !== true
+      && this.executionContext(sessionId).strategy?.review !== "required") {
+      throw new Error("Experimental strategy-only review is disabled.");
+    }
+  }
+
+  private async queuedReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
+    this.requireReviewEnabled(sessionId);
+    const rootId = this.taskRoot(sessionId).id;
+    const deadline = Date.now() + (this.options.reviewTimeoutMs ?? REVIEW_TIMEOUT_MS);
+    while (this.reviewRoots.has(rootId)) {
+      this.requireReviewEnabled(sessionId);
+      signal.throwIfAborted();
+      this.requireSession(sessionId);
+      this.requireBudgetActive(sessionId);
+      if (Date.now() >= deadline) throw new Error("Required review could not obtain its reserved slot before the deadline.");
+      await pause(100, signal);
+    }
+    signal.throwIfAborted();
+    this.requireBudgetActive(sessionId);
+    this.requireReviewEnabled(sessionId);
+    const lease = Symbol(rootId);
+    this.reviewRoots.set(rootId, lease);
+    const release = (): void => {
+      if (this.reviewRoots.get(rootId) === lease) this.reviewRoots.delete(rootId);
+    };
+    // Cancellation disposes the obsolete reviewer; a delayed old verdict must not hold the next turn's slot.
+    signal.addEventListener("abort", release, { once: true });
+    try { return await this.performReview(sessionId, signal); }
+    finally { signal.removeEventListener("abort", release); release(); }
+  }
+
   private async performReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
+    this.requireReviewEnabled(sessionId);
+    const strategyReview = this.strategyReviews.has(sessionId);
     const worker = this.requireSession(sessionId);
     const request = this.launchRequests.get(sessionId);
     if (!request) return { status: "unavailable", reason: "CanvasTTY no longer has the worker launch details.", costUsd: null };
@@ -887,6 +992,10 @@ export class AgentControlService {
             launchOptions: { [MODEL_ACCOUNTS_PLUGIN_ID]: { account } } })
           : undefined;
         if (signal.aborted) throw new Error("The worker session was removed before review.");
+        this.requireReviewEnabled(sessionId);
+        this.requireSession(root.id);
+        this.requireBudgetActive(sessionId);
+        this.assertSpawnCapacity(root.id, undefined, true);
         reviewer = this.terminals.createReadOnlyReviewer({
           taskRootSessionId: root.id,
           provider: worker.provider as AgentProviderId,
@@ -942,10 +1051,15 @@ export class AgentControlService {
         return { status: "unavailable", reason: "The reviewer did not return a valid accept, revise, or reject verdict.", reviewerSessionId: reviewerSession.id, model, costUsd: null };
       }
       keepReviewer = true;
+      let releaseNote = "";
+      if (strategyReview) {
+        try { await this.terminals.finishReadOnlyReviewer(reviewerSession.id); }
+        catch { releaseNote = "The review completed, but its PTY could not be stopped; it still occupies a live slot until closed."; }
+      }
       return {
         status: parsed.verdict === "accept" ? "accepted" : parsed.verdict === "revise" ? "revise" : "rejected",
         verdict: parsed.verdict,
-        notes: [account ? "Reviewed on the worker's model account (the same model; name reviewModel for another)." : "", parsed.findings ? this.redactTail(parsed.findings, 8_000) : ""].filter(Boolean).join("\n") || undefined,
+        notes: [releaseNote, account ? "Reviewed on the worker's model account (the same model; name reviewModel for another)." : "", parsed.findings ? this.redactTail(parsed.findings, 8_000) : ""].filter(Boolean).join("\n") || undefined,
         reviewerSessionId: reviewerSession.id,
         model,
         costUsd: null

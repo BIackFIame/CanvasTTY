@@ -1362,6 +1362,11 @@ function TerminalCardView({
               {t(locale, "configuredModeBadge")}: {session.configuredMode.mode}
             </span>
           )}
+          {session.modelRoute && (
+            <span className="terminal-card__model-route" title={`${session.modelRoute.source}${session.modelRoute.candidateId ? ` · ${session.modelRoute.candidateId}` : ""}`}>
+              {backlogText(locale, "modelRoute")}: {session.modelRoute.reason}
+            </span>
+          )}
           {session.isolation?.network && <span className="terminal-card__role" title={session.isolation.network.domains.join(", ")}>
             {locale==="ru" ? "Сеть" : "Network"}: {session.isolation.network.mode==="open" ? (locale==="ru" ? "открыта" : "open") : session.isolation.network.mode==="offline" ? (locale==="ru" ? "отключена" : "offline") : (locale==="ru" ? "разрешённые домены" : "allowed domains")}
           </span>}
