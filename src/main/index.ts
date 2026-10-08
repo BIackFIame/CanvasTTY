@@ -401,16 +401,20 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   await budgets.load();
   flushBudgets=()=>budgets.flush();
   const checkpoints = new GitCheckpoints(text => redaction.redact(text),50,join(userDataPath,"checkpoints.json"));
-  const checkpointTurns = new Map<string,Promise<void>>();
-  const checkpointBeforeTurn = (id: string): Promise<void> => {
+  const checkpointTurns = new Map<string,{pending:Promise<void>;signal?:AbortSignal;current:()=>boolean}>();
+  const checkpointBeforeTurn = (id: string, signal?: AbortSignal): Promise<void> => {
     const row=terminalManager?.getMetadata(id);
-    if (!row || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
-    let pending=checkpointTurns.get(id);
-    if (!pending) {
-      pending=checkpoints.capture(id,row.cwd).catch(error => Promise.resolve(console.warn("Rollback point unavailable",redaction.redact(String(error)))));
-      checkpointTurns.set(id,pending);
+    if (!row || row.exitCode !== null || row.profile !== "auto" && row.profile !== "yolo") return Promise.resolve();
+    let entry=checkpointTurns.get(id);
+    if (!entry || entry.signal?.aborted || !entry.current()) {
+      const created={pending:Promise.resolve(),signal,current:terminalManager!.providerSignalGuard(id,{kind:"lifecycle",state:"working"})};
+      created.pending=checkpoints.capture(id,row.cwd,signal).catch(error => {
+        if(checkpointTurns.get(id)===created)checkpointTurns.delete(id);
+        console.warn("Rollback point unavailable",redaction.redact(String(error)));
+      });
+      checkpointTurns.set(id,created);entry=created;
     }
-    return pending;
+    return entry.pending;
   };
   diagnostics.configureRedaction(text => redaction.redact(text));
   diagnosticContext = () => ({
@@ -572,6 +576,25 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     runtimeGateway = new RuntimeGateway({
       runtimeDirectory: lifecycleRuntimeDirectory,
       windowsHostPath,
+      lifecycleGuard: (terminalSessionId, signal) => terminalManager?.providerSignalGuard(terminalSessionId, {
+        kind:"lifecycle",state:signal.state,event:signal.event,...(signal.turnId ? {requestId:signal.turnId} : {})
+      }) ?? (()=>false),
+      beforeLifecycle: async (terminalSessionId, signal, cancellation) => {
+        const manager=terminalManager;
+        if (!manager) return false;
+        const current=manager.providerSignalGuard(terminalSessionId, {
+          kind: "lifecycle", state: signal.state, event: signal.event,
+          ...(signal.turnId ? {requestId:signal.turnId} : {})
+        });
+        if (!current()) return false;
+        const controller=new AbortController(), abort=():void=>controller.abort();
+        cancellation.addEventListener("abort",abort,{once:true});
+        if(cancellation.aborted)abort();
+        // After-write callback: rejected/queued input leaves the existing turn's checkpoint intact.
+        const unobserve=manager.observeInputWrites(terminalSessionId,()=>abort);
+        try { await checkpointBeforeTurn(terminalSessionId,controller.signal);return current(); }
+        finally {unobserve();cancellation.removeEventListener("abort",abort);}
+      },
       onSignal: (terminalSessionId, signal) => {
         const usageRow=terminalManager?.getMetadata(terminalSessionId);
         if(usageRow?.provider==="codex" && signal.threadId && (!terminalManager?.pluginContext(terminalSessionId)?.environment || terminalManager.pluginContext(terminalSessionId)?.environment?.kind==="worktree")) {
@@ -588,8 +611,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
         if (!accepted) return;
-        if (signal.state !== "working") checkpointTurns.delete(terminalSessionId);
-        else void checkpointBeforeTurn(terminalSessionId);
+        if(signal.state !== "working" && signal.state !== "needs_approval")checkpointTurns.delete(terminalSessionId);
         // The answer belongs to the accepted provider turn and its host-submitted input generation.
         if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
         agentControl?.onSignal(terminalSessionId, signal);
@@ -606,7 +628,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       onPermissionRequest: async (terminalSessionId, request, signal) => {
         try { budgetInputGate(terminalSessionId); }
         catch(error) { return {behavior:"deny",message:redaction.redact(error instanceof Error ? error.message : "Task budget is paused.")}; }
-        await checkpointBeforeTurn(terminalSessionId);
+        await checkpointBeforeTurn(terminalSessionId, signal);
         return decisionHooks.decide(terminalSessionId, request, signal);
       },
       // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.

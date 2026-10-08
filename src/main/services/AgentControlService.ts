@@ -116,6 +116,7 @@ export interface AgentControlOptions {
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
   /** Resolves an explicit or automatic subagent environment using the already trusted environments plugin. */
   resolveSubagentEnvironment?: (request: {
+    provider: AgentProviderId;
     parentSessionId: string;
     projectRoot: string;
     cwd: string;
@@ -237,6 +238,7 @@ export class AgentControlService {
     let environment: SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
     try {
       environment = resolveEnvironment({
+          provider: request.provider,
           parentSessionId: parent.id,
           projectRoot: taskScope.cwd,
           cwd: cwd.cwd,

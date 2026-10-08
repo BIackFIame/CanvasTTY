@@ -1465,10 +1465,29 @@ export class TerminalManager {
     return publicSessionMetadata(session);
   }
 
+  /** A host-only freshness token for a bounded pre-ack hook barrier; no renderer authority is granted. */
+  providerSignalGuard(id: string, signal: ProviderLifecycleSignal): () => boolean {
+    const session = this.sessions.get(id), generation = session?.inputGeneration ?? 0;
+    return () => Boolean(session && this.sessions.get(id) === session && (session.inputGeneration ?? 0) === generation
+      && this.canApplyProviderSignal(id, signal));
+  }
+
+  /** Read-only host check before a lifecycle hook is acknowledged; applying the signal still happens once later. */
+  canApplyProviderSignal(id: string, signal: ProviderLifecycleSignal): boolean {
+    const session = this.sessions.get(id);
+    if (!session || session.metadata.status === "done" || session.metadata.status === "failed") return false;
+    if (session.metadata.provider !== "opencode" || !signal.requestId) return true;
+    const known = session.providerTurnGenerations?.get(signal.requestId);
+    return known === undefined
+      ? signal.event === "session.status:busy" || signal.event === "session.status:retry"
+      : known === (session.inputGeneration ?? 0) && session.providerTurnId === signal.requestId;
+  }
+
   /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
   applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): boolean {
     const session = this.sessions.get(id);
     if (!session || session.metadata.status === "done" || session.metadata.status === "failed") return false;
+    if (source === "hook" && !this.canApplyProviderSignal(id, signal)) return false;
     let startsProviderTurn = false;
     if (source === "hook" && session.metadata.provider === "opencode" && signal.requestId) {
       const turns = session.providerTurnGenerations ??= new Map();
