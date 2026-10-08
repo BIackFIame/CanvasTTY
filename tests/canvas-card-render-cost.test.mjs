@@ -60,7 +60,7 @@ test("dragging one terminal card does not render the other cards", async (t) => 
   let workspaceRenders = 0;
   const props = () => ({
     ...Object.fromEntries(workspaceCallbackNames.map((name) => [name, () => undefined])),
-    settings, surfacesMounted: true, mediaData: null, materials: [], sessions, limits: null, limitsLoadState: "idle", plugins: [],
+    settings, surfacesMounted: true, mediaData: null, materials: [], remarks: [], sessions, limits: null, limitsLoadState: "idle", plugins: [],
     browser: { open: false, tabs: [] }, browserViewVisible: false, homeEditing: false, camera, activeSessionId: "a",
     browserSelected: false, renamingSessionId: null, fullscreenSessionId: null,
     onSessionBoundsChange: (id, bounds) => { sessions = sessions.map((session) => session.id === id ? { ...session, ...bounds } : session); }

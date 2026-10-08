@@ -8,10 +8,12 @@ import {
 import {
   addResultNeedsNotice,
   formatBytes,
+  latestVersionNumber,
   materialFailureKey,
   materialFolder,
   materialRejectionKey,
-  materialRemovalLosesData
+  materialRemovalLosesData,
+  materialSubtitle
 } from "../src/renderer/src/features/materials/materialCardModel.ts";
 
 const bounds = (x, y, width = 300, height = 200) => ({ position: { x, y }, size: { width, height } });
@@ -43,6 +45,19 @@ test("pending bounds of a removed card are dropped", () => {
   assert.equal(pending.size, 0);
 });
 
+test("an accepted snapshot keeps the bounds objects of unmoved cards", () => {
+  const current = { ...EMPTY_MATERIALS_SNAPSHOT, revision: 1, materials: [material("a", 10, 10), material("b", 20, 20)] };
+  const moved = material("b", 30, 30);
+  const accepted = acceptMaterialsSnapshot(current, {
+    ...EMPTY_MATERIALS_SNAPSHOT,
+    revision: 2,
+    materials: [material("a", 10, 10), moved]
+  });
+  assert.equal(accepted.materials[0].position, current.materials[0].position);
+  assert.equal(accepted.materials[0].size, current.materials[0].size);
+  assert.equal(accepted.materials[1].position, moved.position);
+});
+
 test("byte sizes and folders are formatted for the card", () => {
   assert.equal(formatBytes(512, "en"), "512 B");
   assert.equal(formatBytes(1536, "en"), "1.5 KB");
@@ -69,4 +84,18 @@ test("failures and rejections map to explained messages; cancelling says nothing
   assert.equal(addResultNeedsNotice({ added: ["a"], existing: [], rejected: [] }), false);
   assert.equal(addResultNeedsNotice({ added: [], existing: ["a"], rejected: [] }), true);
   assert.equal(addResultNeedsNotice({ added: ["a"], existing: [], rejected: [{ name: "x", reason: "limit" }] }), true);
+});
+
+test("the latest version number is shown on the card badge", () => {
+  assert.equal(latestVersionNumber(material("a", 0, 0)), null);
+  assert.equal(latestVersionNumber(material("a", 0, 0, { versions: [{ id: "v1", number: 1, current: true }] })), 1);
+  assert.equal(latestVersionNumber(material("a", 0, 0, { versions: [{ id: "v1", number: 1, current: true }, { id: "v2", number: 2, current: false }] })), 2);
+});
+
+test("the card subtitle names the origin or falls back to the folder", () => {
+  const base = { id: "m", position: { x: 0, y: 0 }, size: { width: 1, height: 1 }, versions: [], location: "/work/site/hero.png" };
+  assert.equal(materialSubtitle({ ...base, origin: null }, "en"), "/work/site");
+  assert.equal(materialSubtitle({ ...base, location: null, origin: null }, "en"), "");
+  assert.equal(materialSubtitle({ ...base, origin: { kind: "clipboard" } }, "ru"), "Из буфера обмена");
+  assert.equal(materialSubtitle({ ...base, origin: { kind: "browser", url: "example.com/page" } }, "en"), "example.com/page");
 });

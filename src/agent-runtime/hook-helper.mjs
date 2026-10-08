@@ -36,11 +36,13 @@ try {
 } catch {
   input = null;
 }
+const provider = process.env[AGENT_RUNTIME_ENV.provider];
 const turnId = firstString(
   input?.turn_id,
   input?.turnId,
   input?.prompt_id,
-  input?.promptId
+  input?.promptId,
+  provider === "hermes" ? input?.extra?.turn_id : undefined
 );
 // The provider's own conversation id; runtime-client keeps it only in a shape that provider issues.
 const threadId = firstString(
@@ -62,7 +64,7 @@ if (captureResult && finalAnswer !== null) {
 const lastAssistantMessage = captureAnswer && finalAnswer !== null
   ? boundedText(finalAnswer, MAX_ANSWER_CHARS)
   : undefined;
-const toolOutcome = toolOutcomeFromHook(process.env[AGENT_RUNTIME_ENV.provider], event, input);
+const toolOutcome = toolOutcomeFromHook(provider, event, input);
 await reportLifecycle({
   state,
   event,

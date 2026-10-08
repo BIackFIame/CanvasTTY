@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { LocaleId, ProviderSecretId, SessionSnapshot } from "../../../../shared/contracts";
 import type { SecretGrant, SecretGrantDuration, SecretGrantRequest } from "../../../../shared/backlog";
 import { backlogApi } from "./backlogRendererApi";
@@ -11,72 +11,112 @@ interface SecretGrantsPanelProps {
   onError(message: string): void;
 }
 
-export function SecretGrantsPanel({ sessionId, sessions, locale, onError }: SecretGrantsPanelProps): React.JSX.Element {
+interface PanelScope {
+  generation: number;
+  active: boolean;
+  refresh: Promise<void> | null;
+  action: symbol | null;
+}
+interface PanelState {
+  generation: number;
+  requests: SecretGrantRequest[];
+  grants: SecretGrant[];
+  loading: boolean;
+  busyId: string;
+  error: string;
+}
+const EMPTY_PANEL: PanelState = { generation: 0, requests: [], grants: [], loading: false, busyId: "", error: "" };
+
+export function SecretGrantsPanel(props: SecretGrantsPanelProps): React.JSX.Element {
+  return <SecretGrantsPanelContent key={props.sessionId} {...props} />;
+}
+
+function SecretGrantsPanelContent({ sessionId, sessions, locale, onError }: SecretGrantsPanelProps): React.JSX.Element {
   const api = useMemo(() => backlogApi(), []);
-  const [requests, setRequests] = useState<SecretGrantRequest[]>([]);
-  const [grants, setGrants] = useState<SecretGrant[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [busyId, setBusyId] = useState("");
-  const [error, setError] = useState("");
-  const mounted = useRef(true);
-  const refreshInFlight = useRef(false);
+  const [state, setState] = useState<PanelState>(EMPTY_PANEL);
+  const { current: scope } = useRef<PanelScope>({ generation: 0, active: false, refresh: null, action: null });
+  const errorHandler = useRef(onError);
+  useEffect(() => { errorHandler.current = onError; }, [onError]);
+  // The keyed parent remounts on task changes; effect generations also reject StrictMode's obsolete work.
+  const { requests, grants, loading, busyId, error } = state.generation === scope.generation ? state : EMPTY_PANEL;
+  const current = (generation: number): boolean => scope.active && scope.generation === generation;
+  const update = (generation: number, patch: Partial<PanelState>): void => {
+    if (!current(generation)) return;
+    setState(previous => current(generation)
+      ? { ...(previous.generation === generation ? previous : EMPTY_PANEL), ...patch, generation }
+      : previous);
+  };
   const text = locale === "ru" ? {
     title: "Доступ к ключам провайдеров", note: "Ключи используются только для изолированных запросов к API выбранного профиля. Они не показываются и не вставляются в сообщения.",
     pending: "Ожидают решения", grants: "Разрешения", noRequests: "Запросов на доступ нет.", noGrants: "Активных разрешений нет.",
-    reason: "Причина", session: "Карточка", approve10m: "10 минут", approveTurn: "До конца хода", approveSession: "До закрытия карточки",
+    reason: "Причина", session: "Карточка", approve10m: "10 минут", approveTurn: "До конца хода", turnUnavailable: "Этот запуск не отслеживает завершение текущего хода или ход уже сменился.", approveSession: "До закрытия карточки",
     deny: "Отклонить", revoke: "Отозвать", approved: "Доступ разрешён", expires: "Истекает", turn: "до конца хода", sessionGrant: "до закрытия карточки",
     expired: "истёк", loading: "Загрузка…", refresh: "Обновить"
   } : {
     title: "Provider secret access", note: "Keys are used only for isolated API requests to a selected profile. Values are never shown or pasted into messages.",
     pending: "Pending requests", grants: "Active grants", noRequests: "No access requests.", noGrants: "No active grants.",
-    reason: "Reason", session: "Card", approve10m: "10 minutes", approveTurn: "Until this turn ends", approveSession: "Until card closes",
+    reason: "Reason", session: "Card", approve10m: "10 minutes", approveTurn: "Until this turn ends", turnUnavailable: "This launch cannot track the current turn ending, or the turn has changed.", approveSession: "Until card closes",
     deny: "Deny", revoke: "Revoke", approved: "Access approved", expires: "Expires", turn: "until turn ends", sessionGrant: "until card closes",
     expired: "expired", loading: "Loading…", refresh: "Refresh"
   };
 
-  const refresh = useCallback(async (): Promise<void> => {
-    if (refreshInFlight.current) return;
-    refreshInFlight.current = true;
-    try {
-      const [nextRequests, nextGrants] = await Promise.all([api.secretRequests(sessionId), api.secretGrants(sessionId)]);
-      if (mounted.current) { setRequests(nextRequests); setGrants(nextGrants); }
-    } finally {
-      refreshInFlight.current = false;
-    }
-  }, [api, sessionId]);
+  const refresh = (generation: number): Promise<void> => {
+    if (!current(generation)) return Promise.resolve();
+    if (scope.refresh) return scope.refresh;
+    const pending = Promise.all([api.secretRequests(sessionId), api.secretGrants(sessionId)])
+      .then(([nextRequests, nextGrants]) => { update(generation, { requests: nextRequests, grants: nextGrants }); })
+      .finally(() => { if (scope.refresh === pending) scope.refresh = null; });
+    scope.refresh = pending;
+    return pending;
+  };
 
-  const refreshSafely = useCallback(async (): Promise<void> => {
-    if (!mounted.current || document.hidden || refreshInFlight.current) return;
-    setLoading(true);
+  const refreshSafely = async (): Promise<void> => {
+    const generation = scope.generation;
+    if (!current(generation) || document.hidden || scope.refresh) return;
+    update(generation, { loading: true });
     try {
-      await refresh();
-      if (mounted.current) setError("");
+      await refresh(generation);
+      update(generation, { error: "" });
     } catch (reason) {
-      if (!mounted.current) return;
+      if (!current(generation)) return;
       const message = reason instanceof Error ? reason.message : String(reason);
-      setError(message);
-      onError(message);
+      update(generation, { error: message });
+      errorHandler.current(message);
     } finally {
-      if (mounted.current) setLoading(false);
+      update(generation, { loading: false });
     }
-  }, [onError, refresh]);
+  };
 
   useEffect(() => {
-    mounted.current = true;
+    scope.active = true;
+    scope.generation += 1;
+    scope.refresh = null;
+    scope.action = null;
+    update(scope.generation, EMPTY_PANEL);
     void refreshSafely();
-    return () => { mounted.current = false; };
-  }, [refreshSafely]);
+    return () => { scope.active = false; scope.generation += 1; scope.refresh = null; };
+  }, [scope]);
   useVisibleRefresh(() => { void refreshSafely(); }, 5_000);
 
   const runGrantChange = async (key: string, action: () => Promise<unknown>): Promise<void> => {
-    setBusyId(key); setError("");
+    const generation = scope.generation;
+    if (!current(generation)) return;
+    const actionToken = Symbol();
+    scope.action = actionToken;
+    update(generation, { busyId: key, error: "" });
     try {
       await action();
-      await refresh();
+      if (current(generation)) await refresh(generation);
     } catch (reason) {
+      if (!current(generation)) return;
       const message = reason instanceof Error ? reason.message : String(reason);
-      setError(message); onError(message);
-    } finally { setBusyId(""); }
+      update(generation, { error: message }); errorHandler.current(message);
+    } finally {
+      if (current(generation) && scope.action === actionToken) {
+        scope.action = null;
+        update(generation, { busyId: "" });
+      }
+    }
   };
 
   const decide = (request: SecretGrantRequest, duration: SecretGrantDuration | null): Promise<void> =>
@@ -103,7 +143,7 @@ export function SecretGrantsPanel({ sessionId, sessions, locale, onError }: Secr
             <p>{text.reason}: {request.reason}</p><time>{new Date(request.createdAt).toLocaleString(locale)}</time></div>
           <div className="backlog-secret-grants__actions">
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "10m")}>{text.approve10m}</button>
-            <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "turn")}>{text.approveTurn}</button>
+            <button type="button" disabled={busyId === request.id || !request.turnAvailable} title={request.turnAvailable ? undefined : text.turnUnavailable} onClick={() => void decide(request, "turn")}>{text.approveTurn}</button>
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, "session")}>{text.approveSession}</button>
             <button type="button" disabled={busyId === request.id} onClick={() => void decide(request, null)}>{text.deny}</button>
           </div>

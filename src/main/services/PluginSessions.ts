@@ -12,7 +12,8 @@ import type {
   TerminalBufferSnapshot,
   TerminalDataEvent
 } from "../../shared/contracts.ts";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
+import { ASSISTANT_PLUGIN_ID, ASSISTANT_SERVICE_ID, isInstalledAssistant, type PluginInstallRecord } from "./AssistantLoopSignal.ts";
 import { IPC } from "../../shared/contracts.ts";
 import type { PersistedEnvironmentRef } from "./TerminalSessionStore.ts";
 import { ACCOUNTS_PLUGIN_ID } from "./accountHomeIsolation.ts";
@@ -71,6 +72,8 @@ export interface PluginSessionsDependencies {
   terminals: TerminalPort;
   experimentalEnabled?: () => boolean;
   handoffTaskOwner?(sourceId:string,replacementId:string):Promise<void>;
+  /** Live host install provenance; absent or untrusted records never receive activity. */
+  installRecord?(pluginId:string):PluginInstallRecord|null;
   /** Sends a notification to a running service; false when it is not running. */
   notify(pluginId: string, serviceId: string, method: "canvastty.sessions.event" | "canvastty.activity", params: PluginSessionEvent | PluginActivity): boolean;
 }
@@ -119,6 +122,7 @@ export class PluginSessions {
   private readonly subscribers = new Map<string, Subscriber>();
   private readonly handoffConsents = new Map<string, number>();
   private readonly known = new Map<string, { status: SessionStatus; exited: boolean; summary: PluginSessionSummary; owner: string | null }>();
+  private readonly fingerprintKey = randomBytes(32);
   private readonly loopEvidence = new Map<string, LoopEvidence>();
 
   constructor(deps: PluginSessionsDependencies) {
@@ -210,6 +214,8 @@ export class PluginSessions {
   }
   activity(event: PluginActivity): void {
     if ((event.type === "limit.exhausted" || event.type === "route.outcome") && this.deps.experimentalEnabled?.() !== true) return;
+    try { if(!isInstalledAssistant(this.deps.installRecord?.(ASSISTANT_PLUGIN_ID) ?? null))return; }
+    catch { return; }
     let safeEvent = event.type === "tool-outcome" ? this.safeToolOutcome(event)
       : event.type === "activity" || event.type === "pretool" ? this.safePretool(event) : event;
     if (!safeEvent) return;
@@ -222,6 +228,7 @@ export class PluginSessions {
       safeEvent = { ...safeEvent, evidenceId };
     }
     for (const subscriber of this.subscribers.values()) {
+      if(subscriber.pluginId!==ASSISTANT_PLUGIN_ID || subscriber.serviceId!==ASSISTANT_SERVICE_ID)continue;
       if (subscriber.ownedOnly && context.owner !== subscriber.pluginId) continue;
       this.deps.notify(subscriber.pluginId,subscriber.serviceId,"canvastty.activity",safeEvent);
     }
@@ -246,6 +253,11 @@ export class PluginSessions {
     const evidenceId = randomBytes(18).toString("base64url");
     this.loopEvidence.set(evidenceId, { sessionId, turnEpoch, issuedAt: now });
     return evidenceId;
+  }
+
+  /** Equality survives inside one host session, while plugins cannot test guessed commands against plain SHA. */
+  private fingerprint(sessionId:string,domain:string,hash:string):string {
+    return createHmac("sha256",this.fingerprintKey).update(JSON.stringify(["activity-v1",sessionId,domain,hash])).digest("hex");
   }
 
   private safeToolOutcome(event: PluginActivity): PluginActivity | null {
@@ -273,10 +285,10 @@ export class PluginSessions {
       ...(Number.isSafeInteger(event.turnEpoch) && (event.turnEpoch as number) > 0 ? { turnEpoch: event.turnEpoch as number } : {}),
       toolName: safeName || "unknown",
       resultClass: event.resultClass,
-      ...(actionHash ? { normalizedActionHash: actionHash } : {}),
-      ...(errorHash ? { errorHash } : {}),
-      ...(outputHash ? { outputHash } : {}),
-      changedPathHashes
+      ...(actionHash ? { normalizedActionHash: this.fingerprint(event.sessionId,"action",actionHash) } : {}),
+      ...(errorHash ? { errorHash:this.fingerprint(event.sessionId,"error",errorHash) } : {}),
+      ...(outputHash ? { outputHash:this.fingerprint(event.sessionId,"output",outputHash) } : {}),
+      changedPathHashes:changedPathHashes.map(hash=>this.fingerprint(event.sessionId,"path",hash))
     };
   }
 
@@ -296,7 +308,9 @@ export class PluginSessions {
       sessionId: event.sessionId,
       at: event.at,
       toolName: safeName || "unknown",
-      normalizedAction: action,
+      normalizedAction: this.fingerprint(event.sessionId,"action",action),
+      ...(typeof event.normalizedActionHash==="string" && /^[a-f0-9]{64}$/u.test(event.normalizedActionHash)
+        ? {normalizedActionHash:this.fingerprint(event.sessionId,"action",event.normalizedActionHash)} : {}),
       ...(Number.isSafeInteger(event.turnEpoch) && (event.turnEpoch as number) > 0 ? { turnEpoch: event.turnEpoch as number } : {}),
       ...(resultClass ? { resultClass } : {}),
       ...(turnId ? { turnId } : {})

@@ -109,6 +109,10 @@ test("host import opens a v1 workspace with absent newer card fields, remaps tas
   });
 
   const event = { sender: windowWebContents, senderFrame: windowWebContents.mainFrame };
+  const unmappedGroups=JSON.stringify({format:"canvastty-workspace",version:1,sessions:[],
+    tasks:[{rootSessionId:"constructor",tasks:oldTasks},{rootSessionId:"toString",tasks:oldTasks}]});
+  const skippedGroups=await handlers.get(BACKLOG_IPC.importWorkspace)(event,unmappedGroups,{confirmBypass:false});
+  assert.deepEqual(skippedGroups,{warnings:[],sessions:[]},"inherited map entries are not restored roots");
   const imported = await handlers.get(BACKLOG_IPC.importWorkspace)(event, snapshot, { confirmBypass: false });
   assert.equal(imported.sessions.length, 2);
   const [root, child] = imported.sessions;
@@ -147,6 +151,23 @@ test("host import opens a v1 workspace with absent newer card fields, remaps tas
     { id: "archive-note", text: "Resume the review thread", position: { x: 1800, y: 120 } }
   ]);
   assert.deepEqual(importedSettings.browserCanvas, { position: { x: 2800, y: 100 }, size: { width: 900, height: 620 } });
+
+  await workspace.savePreset({id: "fresh", name: "Fresh", snapshot});
+  const reloaded = new WorkspaceArchive(userData, {descriptors: () => [], create: request => terminals.create(request),
+    setBounds: (id, bounds) => terminals.setBounds(id, bounds), available: () => true, redact: text => text});
+  const presetSnapshot = (await reloaded.presets())[0].snapshot;
+  assert.deepEqual(JSON.parse(presetSnapshot).canvas, JSON.parse(snapshot).canvas);
+  assert.equal(JSON.parse(presetSnapshot).tasks[0].tasks.length, 2);
+  const fresh = await handlers.get(BACKLOG_IPC.importWorkspace)(event, presetSnapshot, {confirmBypass: false});
+  const freshTasks = (await board.listTasks(project, fresh.sessions[0].id)).tasks;
+  assert.equal(freshTasks.length, 2);
+  assert.equal(freshTasks[1].ownerSessionId, fresh.sessions[1].id);
+  assert.equal(freshTasks[1].dependencies[0], freshTasks[0].id);
+  assert.notEqual(freshTasks[0].id, importedTasks[0].id);
+  assert.ok(launches.slice(2).every(({args}) => !args.includes("resume")), "presets start fresh conversations");
+  const freshSettings = await settings.update(JSON.parse(presetSnapshot).canvas);
+  assert.deepEqual(freshSettings.stickyNotes, importedSettings.stickyNotes);
+  for (const row of fresh.sessions.toReversed()) terminals.dispose(row.id);
 
   await timeline.append(child.id, "checkpoint", "Closed child rollback point");
   await timeline.append(root.id, "command", "Parent command");

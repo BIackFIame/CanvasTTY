@@ -51,6 +51,8 @@ import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutp
 import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
 import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
 import { terminalLinkTarget } from "./terminalLinkTarget";
+import { terminalFileLinkProvider } from "./terminalFileLinks";
+import { parseTerminalFileLink } from "../../../../shared/terminalFileLink";
 import {
   constrainResize,
   snapMove,
@@ -398,8 +400,8 @@ function TerminalCardView({
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchMatches, setSearchMatches] = useState<{ current: number; total: number }>({ current: 0, total: 0 });
-  const externalSearchRequestRef = useRef(externalSearchRequest);
-  externalSearchRequestRef.current = externalSearchRequest;
+  const historicalRequestEpoch = useRef(0);
+  const historicalSearchActive = useRef(false);
   const searchQueryRef = useRef(searchQuery);
   searchQueryRef.current = searchQuery;
   const [historicalOutput, setHistoricalOutput] = useState<{
@@ -447,6 +449,14 @@ function TerminalCardView({
     const host = terminalHost.current;
     if (!host) return;
 
+    const openFile = (event: MouseEvent, reference: string): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      void window.canvasTTY.terminal.openFile(session.id, reference).catch((error: unknown) => {
+        setActionToast({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+      });
+    };
+
     const terminal = new Terminal({
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
@@ -471,7 +481,12 @@ function TerminalCardView({
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
       linkHandler: {
+        allowNonHttpProtocols: true,
         activate: (event, uri, range) => {
+          if (parseTerminalFileLink(uri)) {
+            openFile(event, uri);
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           onOpenUrlRef.current(terminalLinkTarget(uri, range, terminal.buffer.active, terminal.cols));
@@ -489,6 +504,7 @@ function TerminalCardView({
     terminal.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(webLinksAddon);
+    const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
@@ -735,24 +751,11 @@ function TerminalCardView({
     markBootOnce("restoredTerminalInteractive");
     const titleChange = terminal.onTitleChange((title) => setOscTitle(title.trim() ? title : null));
     const searchResults = searchAddon.onDidChangeResults(({ resultIndex, resultCount }) => {
+      if (historicalSearchActive.current) return;
       setSearchMatches({
         current: resultCount > 0 && resultIndex >= 0 ? resultIndex + 1 : 0,
         total: resultCount
       });
-      const requested = externalSearchRequestRef.current;
-      if (resultCount > 0) {
-        setHistoricalOutput(null);
-      } else if (requested && searchQueryRef.current === requested.query) {
-        setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: true });
-        void backlogTerminalApi().readOutputContext(session.id, requested.offset).then((context) => {
-          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
-          setHistoricalOutput({ ...context, loading: false });
-        }).catch((reason: unknown) => {
-          if (externalSearchRequestRef.current?.requestId !== requested.requestId) return;
-          setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: false,
-            error: reason instanceof Error ? reason.message : String(reason) });
-        });
-      }
     });
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
@@ -777,6 +780,7 @@ function TerminalCardView({
       pinnedInput.remove();
       titleChange.dispose();
       searchResults.dispose();
+      fileLinks.dispose();
       searchAddonRef.current = null;
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;
@@ -1097,6 +1101,8 @@ function TerminalCardView({
   };
 
   const runSearch = (query: string, direction: "next" | "previous", incremental: boolean): void => {
+    historicalRequestEpoch.current += 1;
+    historicalSearchActive.current = false;
     const addon = searchAddonRef.current;
     searchQueryRef.current = query;
     setSearchQuery(query);
@@ -1113,16 +1119,33 @@ function TerminalCardView({
   };
 
   useEffect(() => {
-    if (!externalSearchRequest || summaryMode) return;
-    searchQueryRef.current = externalSearchRequest.query;
+    const epoch = ++historicalRequestEpoch.current;
+    historicalSearchActive.current = false;
     setHistoricalOutput(null);
+    if (!externalSearchRequest || summaryMode) return;
+    const requested = externalSearchRequest;
+    historicalSearchActive.current = true;
+    searchQueryRef.current = requested.query;
     setSearchOpen(true);
-    setSearchQuery(externalSearchRequest.query);
-    searchAddonRef.current?.findNext(externalSearchRequest.query, { decorations: SEARCH_DECORATIONS });
+    setSearchQuery(requested.query);
+    setSearchMatches({ current: 0, total: 0 });
+    searchAddonRef.current?.clearDecorations();
+    setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: true });
+    // A text match in xterm is not the selected occurrence in retained history.
+    void backlogTerminalApi().readOutputContext(session.id, requested.offset).then(context => {
+      if (historicalRequestEpoch.current === epoch) setHistoricalOutput({ ...context, loading: false });
+    }).catch((reason: unknown) => {
+      if (historicalRequestEpoch.current !== epoch) return;
+      setHistoricalOutput({ text: "", firstLine: requested.line, targetLine: requested.line, loading: false,
+        error: reason instanceof Error ? reason.message : String(reason) });
+    });
     terminalRef.current?.focus();
-  }, [externalSearchRequest, summaryMode]);
+    return () => { historicalRequestEpoch.current += 1; historicalSearchActive.current = false; };
+  }, [externalSearchRequest, summaryMode, session.id]);
 
   const closeSearch = (): void => {
+    historicalRequestEpoch.current += 1;
+    historicalSearchActive.current = false;
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMatches({ current: 0, total: 0 });

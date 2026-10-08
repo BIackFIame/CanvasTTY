@@ -106,6 +106,8 @@ interface RuntimeLease {
   /** How long a decision may take for this session (sized at launch from the decision services' budgets). */
   gatewayMs: number;
   checks: Set<AbortController>;
+  lifecycleChecks: Set<AbortController>;
+  lifecycleRevision: number;
 }
 
 /** One decision hook call (permission-gate.mjs). The tool input is agent-influenced data, never instructions. */
@@ -152,6 +154,12 @@ export interface RuntimeGatewayOptions {
   windowsPipeHostFactory?: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
   /** A connection must send its one message within this time (default 5 s). */
   firstMessageTimeoutMs?: number;
+  /** Captures a synchronous host freshness token, checked even if checkpoint cancellation settles later. */
+  lifecycleGuard?(terminalSessionId: string, signal: RuntimeLifecycleSignal): () => boolean;
+  /** Barrier for authenticated working events only; UI delivery stays asynchronous. Failures/timeouts fail open. */
+  beforeLifecycle?(terminalSessionId: string, signal: RuntimeLifecycleSignal, cancellation: AbortSignal): Promise<boolean | void> | boolean | void;
+  /** Must remain below the unchanged 1 s JS/native hook deadline. Tests may shorten it. */
+  lifecycleBarrierMs?: number;
   onSignal?(terminalSessionId: string, signal: RuntimeLifecycleSignal): void;
   onAnswerCaptureRevoked?(terminalSessionId: string): void;
   /**
@@ -172,6 +180,9 @@ export class RuntimeGateway {
   private readonly requestedRuntimeDirectory: string | undefined;
   private readonly windowsHostPath: string | undefined;
   private readonly windowsPipeHostFactory: (options: WindowsPipeHostTransportOptions) => WindowsPipeHostTransport;
+  private readonly lifecycleGuard: RuntimeGatewayOptions["lifecycleGuard"];
+  private readonly beforeLifecycle: RuntimeGatewayOptions["beforeLifecycle"];
+  private readonly lifecycleBarrierMs: number;
   private readonly onSignal: RuntimeGatewayOptions["onSignal"];
   private readonly onAnswerCaptureRevoked: RuntimeGatewayOptions["onAnswerCaptureRevoked"];
   private readonly onPermissionRequest: RuntimeGatewayOptions["onPermissionRequest"];
@@ -202,6 +213,9 @@ export class RuntimeGateway {
       ?? ((transportOptions) => new WindowsPipeHostTransport(transportOptions));
     this.firstMessageTimeoutMs = options.firstMessageTimeoutMs ?? FIRST_MESSAGE_TIMEOUT_MS;
     this.onSignal = options.onSignal;
+    this.beforeLifecycle = options.beforeLifecycle;
+    this.lifecycleGuard = options.lifecycleGuard;
+    this.lifecycleBarrierMs = Math.max(1, Math.min(750, options.lifecycleBarrierMs ?? 750));
     this.onAnswerCaptureRevoked = options.onAnswerCaptureRevoked;
     this.onPermissionRequest = options.onPermissionRequest;
     this.now = options.now ?? Date.now;
@@ -312,6 +326,7 @@ export class RuntimeGateway {
         : null,
       decisions,
       gatewayMs: permissionGateTimings(decisionBudgetMs).gatewayMs,
+      lifecycleChecks: new Set(), lifecycleRevision: 0,
       checks: new Set()
     });
     return { address: this.endpoint, terminalSessionId, provider, capabilityToken };
@@ -339,6 +354,7 @@ export class RuntimeGateway {
     lease.tokenDigest.fill(0);
     this.leases.delete(terminalSessionId);
     for (const check of lease.checks) check.abort();
+    for (const check of lease.lifecycleChecks) check.abort();
     if (lease.answerCaptureGrantExpiresAt !== null) {
       this.onAnswerCaptureRevoked?.(terminalSessionId);
     }
@@ -374,6 +390,7 @@ export class RuntimeGateway {
     for (const lease of this.leases.values()) {
       lease.tokenDigest.fill(0);
       for (const check of lease.checks) check.abort();
+      for (const check of lease.lifecycleChecks) check.abort();
       if (lease.answerCaptureGrantExpiresAt !== null) {
         this.onAnswerCaptureRevoked?.(lease.terminalSessionId);
       }
@@ -438,10 +455,18 @@ export class RuntimeGateway {
             answerCapture
           })}\n`, "utf8"));
         } else {
-          // The ack goes out before the app reacts: the hook (and the agent behind it) waits only for the check.
           const delivery = this.handleLifecycle(value);
-          socket.write(Buffer.from(`${JSON.stringify({ v: RUNTIME_PROTOCOL_VERSION, type: "ack" })}\n`, "utf8"));
-          this.deliverLater(delivery);
+          const acknowledge = (accepted: Delivery | null): void => {
+            socket.write(Buffer.from(`${JSON.stringify({ v: RUNTIME_PROTOCOL_VERSION, type: "ack" })}\n`, "utf8"));
+            this.deliverLater(accepted);
+            const timeout = setTimeout(close, 1_000); timeout.unref();
+          };
+          if (this.beforeLifecycle && delivery?.signal.state === "working") {
+            void this.waitBeforeLifecycle(delivery, socket).then(acknowledge).catch(close);
+            return;
+          }
+          acknowledge(delivery);
+          return;
         }
         const timeout = setTimeout(close, 1_000);
         timeout.unref();
@@ -547,6 +572,9 @@ export class RuntimeGateway {
     if (message.lastAssistantMessage !== undefined && lease.answerCaptureGrantExpiresAt !== null) {
       signal.answerCaptureGrantExpiresAt = lease.answerCaptureGrantExpiresAt;
     }
+    // A newer accepted signal supersedes an in-flight pre-turn barrier, including its snapshot work.
+    for (const check of lease.lifecycleChecks) check.abort();
+    lease.lifecycleRevision++;
     // Captured text is delivered once and never stored in the lifecycle lease.
     lease.latest = {
       state: signal.state,
@@ -555,7 +583,39 @@ export class RuntimeGateway {
       turnEpoch: signal.turnEpoch,
       ...(signal.threadId === undefined ? {} : { threadId: signal.threadId })
     };
-    return { terminalSessionId: message.terminalSessionId, signal };
+    return { terminalSessionId: message.terminalSessionId, signal, lease, revision: lease.lifecycleRevision };
+  }
+
+  private async waitBeforeLifecycle(delivery: Delivery, connection: { on(event: "close", listener: () => void): unknown }): Promise<Delivery | null> {
+    const controller = new AbortController(), { lease } = delivery;
+    const hostCurrent=this.lifecycleGuard?.(delivery.terminalSessionId,delivery.signal) ?? (()=>true);
+    const current = (): boolean => this.leases.get(delivery.terminalSessionId) === lease && lease.lifecycleRevision === delivery.revision && hostCurrent();
+    delivery.current=()=>this.leases.get(delivery.terminalSessionId) === lease && hostCurrent();
+    let listening = true;
+    const abort = (): void => { if (listening) controller.abort(); };
+    connection.on("close", abort);
+    lease.lifecycleChecks.add(controller);
+    let cancel!: () => void;
+    const cancelled = new Promise<void>(resolve => { cancel = resolve; });
+    controller.signal.addEventListener("abort", cancel, { once: true });
+    const timeout = setTimeout(abort, this.lifecycleBarrierMs);
+    timeout.unref();
+    try {
+      if (!current()) return null;
+      const work = Promise.resolve().then(() => this.beforeLifecycle?.(delivery.terminalSessionId, delivery.signal, controller.signal));
+      const accepted = await Promise.race([work, cancelled]);
+      // The callback must observe cancellation before publishing a checkpoint. A timeout remains fail-open.
+      if (controller.signal.aborted) console.warn("Pre-turn checkpoint unavailable: lifecycle barrier cancelled or timed out.");
+      return accepted !== false && current() ? delivery : null;
+    } catch (error) {
+      console.warn("Pre-turn checkpoint unavailable:", error instanceof Error ? error.message : String(error));
+      return current() ? delivery : null;
+    } finally {
+      clearTimeout(timeout);
+      listening = false;
+      controller.signal.removeEventListener("abort", cancel);
+      lease.lifecycleChecks.delete(controller);
+    }
   }
 
   /** Runs the app's reaction after the current I/O callback, in arrival order; a failure there never reaches a hook. */
@@ -563,6 +623,7 @@ export class RuntimeGateway {
     const onSignal = this.onSignal;
     if (!delivery || !onSignal) return;
     setImmediate(() => {
+      if(delivery.current && !delivery.current())return;
       try {
         onSignal(delivery.terminalSessionId, delivery.signal);
       } catch (error) {
@@ -658,16 +719,17 @@ export class RuntimeGateway {
       } catch {
         delivery = null;
       }
-      // An oversized body is still being sent: answer once it has arrived (read and dropped), so the connection is
-      // closed after it rather than reset under the sender, which would lose the answer (ECONNRESET).
-      if (oversized && !request.complete) {
-        request.resume();
-        request.once("end", () => finish(200, true));
-        request.once("close", () => finish(200, true));
-      } else {
-        finish(200, oversized);
-      }
-      this.deliverLater(delivery);
+      const acknowledge = (accepted: Delivery | null): void => {
+        // Drain an oversized request before closing its connection, preserving the helper's fail-open contract.
+        if (oversized && !request.complete) {
+          request.resume();
+          request.once("end", () => finish(200, true));
+          request.once("close", () => finish(200, true));
+        } else finish(200, oversized);
+        this.deliverLater(accepted);
+      };
+      if (this.beforeLifecycle && delivery?.signal.state === "working") void this.waitBeforeLifecycle(delivery, response).then(acknowledge);
+      else acknowledge(delivery);
     };
     if (oversized) return complete();
     request.on("data", (chunk: Buffer) => {
@@ -764,6 +826,9 @@ export class RuntimeGateway {
 }
 
 interface Delivery {
+  current?: () => boolean;
+  lease: RuntimeLease;
+  revision: number;
   terminalSessionId: string;
   signal: RuntimeLifecycleSignal;
 }
@@ -971,15 +1036,17 @@ function parseToolOutcome(value: unknown): RuntimeToolOutcome {
 }
 
 function isCompletedToolEvent(provider: string, event: string): boolean {
-  return event === "PostToolUse" || (provider === "claude" && event === "PostToolUseFailure")
-    || (provider === "hermes" && event === "post_tool_call");
+  return event === "PostToolUse" || ((provider === "claude" || provider === "kimi") && event === "PostToolUseFailure")
+    || (provider === "hermes" && event === "post_tool_call")
+    || (provider === "opencode" && (event === "tool.execute.after" || event === "message.part.updated"));
 }
 
 function isTurnStart(event: string): boolean {
   return event === "UserPromptSubmit"
     || event === "TurnStarted"
     || event === "pre_llm_call"
-    || event === "session.status:busy";
+    || event === "session.status:busy"
+    || event === "session.status:retry";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

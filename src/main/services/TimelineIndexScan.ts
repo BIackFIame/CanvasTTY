@@ -15,6 +15,8 @@ export type TimelineIndexedUsage = TimelineUsageContext & {
   counterId?: string;
   /** A resumed conversation's first sample: its counter already held usage from earlier runs. */
   baseline?: boolean;
+  /** Host index sequence of the last observation; rebuilt from journal order on load. */
+  sampleOrder?: number;
 };
 type Usage=TimelineIndexedUsage;
 export interface BudgetUsageContribution {
@@ -59,7 +61,7 @@ export async function scanTimelineDirectory(directory: string): Promise<Timeline
   const budgetCounters=new Map<string,BudgetCounterState>();
   const taskSessions=new Map<string,Map<string,TimelineTaskSessionIndex>>();
   const segments=new Map<string,TimelineSegmentSearchIndex>();
-  let lastSegmentAt = 0;
+  let lastSegmentAt = 0, sampleOrder = 0;
   for (const name of names) {
     lastSegmentAt = Math.max(lastSegmentAt, Number(name.slice(0, 16)) || 0);
     const metadata = await stat(join(directory, name));
@@ -73,7 +75,7 @@ export async function scanTimelineDirectory(directory: string): Promise<Timeline
       addTimelineSearchEvent(index, event);
       indexTimelineTaskSession(taskSessions,event,name);
       const usageUpdate = nextTimelineUsage(usage, event);
-      if (usageUpdate) usage.set(usageUpdate.key, usageUpdate.value);
+      if (usageUpdate) usage.set(usageUpdate.key, {...usageUpdate.value,sampleOrder:sampleOrder++});
       applyTimelineBudgetUsageEvent(budgetUsage,budgetCounters,event);
     }
     segments.set(name,index);
@@ -106,6 +108,11 @@ async function* boundedLines(path: string): AsyncGenerator<string | null> {
   else if (pending) yield pending;
 }
 
+/** A card may use the same provider counter name under different accounts. */
+export function timelineUsageKey(sessionId:string,row:Pick<Usage,"source"|"counterId"|"provider"|"accountId">):string {
+  return JSON.stringify([sessionId,row.source,row.counterId ?? "",row.provider ?? "",row.accountId ?? ""]);
+}
+
 export function nextTimelineUsage(
   usage: ReadonlyMap<string, Usage>,
   event: TimelineEvent
@@ -113,7 +120,7 @@ export function nextTimelineUsage(
   if (event.type !== "usage" || typeof event.detail !== "string" || !event.detail) return null;
   try {
     const row = JSON.parse(event.detail) as Usage;
-    const key=JSON.stringify([event.sessionId,row.source,row.counterId ?? ""]);
+    const key=timelineUsageKey(event.sessionId,row);
     if (row.cumulative === true) {
       if (isTimelineCount(row.total) && typeof row.source === "string") {
         const input = row.input === null || isTimelineCount(row.input) ? row.input : null;

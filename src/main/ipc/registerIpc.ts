@@ -45,6 +45,7 @@ import type { GithubAuthService } from "../services/GithubAuthService";
 import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { readHomeMedia } from "../services/homeMedia";
+import { openTerminalFile } from "../services/terminalFileEditor";
 
 interface CriticalDependencies {
   settings: SettingsStore;
@@ -842,6 +843,13 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     return terminals.list();
   });
+  ipcMain.handle(IPC.terminalOpenFile, (event, id: unknown, reference: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof id !== "string") throw new Error("Terminal session ID is required.");
+    const session = terminals.getMetadata(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    return openTerminalFile(reference, session.cwd);
+  });
   ipcMain.handle(IPC.terminalReadBuffer, (event, id: unknown) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof id !== "string") throw new Error("Terminal session ID is required.");
@@ -855,6 +863,10 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   ipcMain.handle(IPC.terminalRestart, (event, id: string, options?: { resume?: unknown }) => {
     assertMainRenderer(event, getMainWindow);
     return terminals.restart(id, { resume: options?.resume === true });
+  });
+  ipcMain.handle(IPC.terminalPasteClipboard, (event, id: string, text: string, startedAt: number) => {
+    assertMainRenderer(event, getMainWindow);
+    return terminals.pasteClipboard(id, text, startedAt);
   });
   ipcMain.on(IPC.terminalInput, (event, id: string, data: string) => {
     // Fire-and-forget: a foreign sender is dropped instead of throwing into the IPC layer.

@@ -8,11 +8,11 @@ export type BacklogTextKey =
   | "elapsed" | "gatherTask" | "workspaceTools" | "layout" | "layoutTree" | "layoutStatus" | "layoutProject"
   | "layoutGrid" | "undoLayout" | "broadcast" | "broadcastEnable" | "broadcastTargetCount" | "snapshot"
   | "exportSnapshot" | "importSnapshot" | "snapshotExported" | "confirmImport" | "importPreview" | "confirmBypass"
-  | "importComplete" | "presets" | "presetName" | "savePreset" | "presetSaved" | "openPreset"
+  | "importComplete" | "importSessionsComplete" | "presets" | "presetName" | "savePreset" | "presetSaved" | "openPreset"
   | "noPresets"
   | "contextPreview" | "contextPreviewDescription" | "contextFiles" | "contextOutsideWarning" | "contextAllowOutside"
-  | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
-  | "broadcastPlaceholder" | "broadcastSend" | "contextFailed"
+  | "contextTooLong" | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
+  | "broadcastPlaceholder" | "broadcastSend" | "broadcastFailed" | "contextFailed"
   | "historicalOutput" | "historicalOutputContext" | "historicalOutputLoading" | "outputHistoryPruned"
   | "tabTasks" | "tabBudget" | "taskBoard" | "taskTitle" | "taskDescription" | "taskDependencies" | "taskOwner"
   | "unassigned" | "addTask" | "noTasks" | "closeTask" | "taskOpen" | "taskClaimed" | "taskDone" | "taskClosed"
@@ -47,6 +47,7 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   broadcast: ["Общий ввод", "Broadcast input"], broadcastEnable: ["Включить общий ввод", "Enable broadcast input"], broadcastTargetCount: ["Получатели: {count}", "Recipients: {count}"],
   snapshot: ["Снимок рабочего пространства", "Workspace snapshot"], exportSnapshot: ["Экспортировать снимок", "Export snapshot"], importSnapshot: ["Импортировать снимок", "Import snapshot"],
   snapshotExported: ["Снимок скачан.", "Snapshot downloaded."], confirmImport: ["Восстановить снимок", "Restore snapshot"], importPreview: ["Будут восстановлены карточки: {count}", "Cards to restore: {count}"],
+  importSessionsComplete: ["Импорт карточек и задач завершён. Настройки холста ещё не сохранены.", "Card and task import completed. Canvas settings have not been saved yet."],
   confirmBypass: ["Я подтверждаю запуск профилей Bypass.", "I confirm launching Bypass profiles."], importComplete: ["Импорт завершён.", "Import completed."],
   presets: ["Пресеты", "Presets"], presetName: ["Название пресета", "Preset name"], savePreset: ["Сохранить текущий холст", "Save current canvas"],
   presetSaved: ["Пресет сохранён.", "Preset saved."], openPreset: ["Открыть", "Open"], noPresets: ["Сохранённых пресетов нет.", "No saved presets."],
@@ -56,7 +57,9 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   contextEditablePreview: ["Текст, который получит агент", "Text the agent will receive"], contextConfirmSend: ["Подтвердить и вставить", "Confirm and paste"],
   searchOutput: ["Вывод терминалов", "Terminal output"], outputLine: ["строка", "line"],
   broadcastPlaceholder: ["Команда для выбранных карточек…", "Prompt for selected cards…"],
+  broadcastFailed: ["Не удалось отправить сообщение всем выбранным карточкам.", "Could not deliver the message to every selected card."],
   broadcastSend: ["Отправить всем", "Send to all"], contextFailed: ["Не удалось подготовить предпросмотр. Ничего не отправлено.", "Could not prepare the preview. Nothing was sent."],
+  contextTooLong: ["Сократите текст до {limit} символов перед отправкой.", "Shorten the text to {limit} characters before sending."],
   historicalOutput: ["Исторический вывод терминала", "Historical terminal output"],
   historicalOutputContext: ["Показан маскированный контекст найденной строки.", "This masked excerpt shows the matched historical line."],
   historicalOutputLoading: ["Загружаем найденную строку…", "Loading the matched line…"],

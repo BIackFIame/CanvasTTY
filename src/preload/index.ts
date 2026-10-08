@@ -133,9 +133,13 @@ const api: CanvasTTYApi = {
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.materialsSetBounds, id, bounds),
     setBoundsBatch: (entries: { id: string; bounds: SessionBounds }[]) => ipcRenderer.send(IPC.materialsSetBoundsBatch, entries),
     remove: (id: string) => ipcRenderer.invoke(IPC.materialsRemove, id),
+    pinVersion: (id: string) => ipcRenderer.invoke(IPC.materialsPinVersion, id),
     reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
     relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
     acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
+    addRemark: (draft: unknown) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
+    updateRemark: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
+    deleteRemark: (id: string) => ipcRenderer.invoke(IPC.materialsDeleteRemark, id),
     onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
   },
   limits: {
@@ -276,6 +280,7 @@ const api: CanvasTTYApi = {
     searchOutput: (query, sessionIds) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.searchOutput, query, sessionIds),
     readOutputContext: (id, offset) => ipcRenderer.invoke(BACKLOG_TERMINAL_IPC.readOutputContext,id,offset),
     onFocusRequested: (listener) => subscribe(BACKLOG_TERMINAL_IPC.focusRequested, listener),
+    openFile: (id: string, reference: string) => ipcRenderer.invoke(IPC.terminalOpenFile, id, reference),
     fileDropText: (files: File[]) => terminalFileDropText(
       files.map((file) => webUtils.getPathForFile(file)),
       process.platform
@@ -285,6 +290,7 @@ const api: CanvasTTYApi = {
     create: (request: CreateSessionRequest) => ipcRenderer.invoke(IPC.terminalCreate, request),
     restart: (id: string, options?: { resume?: boolean }) => ipcRenderer.invoke(IPC.terminalRestart, id, options),
     input: (id: string, data: string) => ipcRenderer.send(IPC.terminalInput, id, data),
+    pasteClipboard: (id, text, startedAt) => ipcRenderer.invoke(IPC.terminalPasteClipboard, id, text, startedAt),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.send(IPC.terminalResize, id, cols, rows),
     setBounds: (id: string, bounds: SessionBounds) => ipcRenderer.send(IPC.terminalBounds, id, bounds),
     rename: (id: string, title: string) => ipcRenderer.invoke(IPC.terminalRename, id, title),

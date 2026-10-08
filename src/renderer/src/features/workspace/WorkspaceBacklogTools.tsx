@@ -21,6 +21,7 @@ interface WorkspaceBacklogToolsProps {
   onUndoLayout(): void;
   onSetBroadcastEnabled(enabled: boolean): void;
   onSendBroadcast(text: string): Promise<void>;
+  onPersistSettings(patch: Partial<AppSettings>): Promise<void>;
   onClose(): void;
 }
 
@@ -36,6 +37,7 @@ export function WorkspaceBacklogTools({
   onUndoLayout,
   onSetBroadcastEnabled,
   onSendBroadcast,
+  onPersistSettings,
   onClose
 }: WorkspaceBacklogToolsProps): React.JSX.Element {
   const bt = (key: BacklogTextKey): string => backlogText(locale, key);
@@ -50,6 +52,8 @@ export function WorkspaceBacklogTools({
   const [confirmBypass, setConfirmBypass] = useState(false);
   const [broadcastText, setBroadcastText] = useState("");
   const broadcastSendOperation = useRef(new PendingOperation());
+  const importOperation = useRef(new PendingOperation());
+  const committedImports = useRef(new WeakSet<PendingImport>());
   const dialogRef = useRef<HTMLElement>(null);
   useDialogFocus(dialogRef, { onEscape: onClose, trapFocus: false });
 
@@ -88,10 +92,22 @@ export function WorkspaceBacklogTools({
   };
 
   const applyImport = async (pending: PendingImport, confirmBypass: boolean): Promise<void> => {
-    const result = await api.importWorkspace(pending.text, { confirmBypass });
-    if (Object.keys(pending.canvas).length > 0) await window.canvasTTY.settings.update(pending.canvas);
-    setNotice([bt("importComplete"), ...result.warnings].join("\n"));
-    setPendingImport(null);
+    if (committedImports.current.has(pending)) return;
+    const operation = importOperation.current.begin();
+    if (operation === null) return;
+    try {
+      await runOperation(async () => {
+        const result = await api.importWorkspace(pending.text, { confirmBypass });
+        // Session/task creation is already committed, even if saving canvas settings fails next.
+        committedImports.current.add(pending);
+        setPendingImport(current => current === pending ? null : current);
+        setNotice([bt("importSessionsComplete"), ...result.warnings].join("\n"));
+        if (Object.keys(pending.canvas).length > 0) await onPersistSettings(pending.canvas);
+        setNotice([bt("importComplete"), ...result.warnings].join("\n"));
+      });
+    } finally {
+      importOperation.current.finish(operation);
+    }
   };
 
   const runOperation = async (action: () => Promise<void>, clearNotice = false): Promise<void> => {
@@ -141,7 +157,7 @@ export function WorkspaceBacklogTools({
 
   const confirmImport = async (): Promise<void> => {
     if (!pendingImport || (pendingImport.bypass && !confirmBypass)) return;
-    await runOperation(() => applyImport(pendingImport, confirmBypass));
+    await applyImport(pendingImport, confirmBypass);
   };
 
   const savePreset = async (): Promise<void> => {
@@ -159,12 +175,15 @@ export function WorkspaceBacklogTools({
     }, true);
   };
 
-  const openPreset = (preset: WorkspacePreset): Promise<void> => runOperation(async () => {
-    const pending = await prepareImport(preset.snapshot);
-    setConfirmBypass(false);
-    if (pending.bypass) setPendingImport(pending);
-    else await applyImport(pending, false);
-  }, true);
+  const openPreset = async (preset: WorkspacePreset): Promise<void> => {
+    let pending: PendingImport | undefined;
+    await runOperation(async () => {
+      pending = await prepareImport(preset.snapshot);
+      setConfirmBypass(false);
+      if (pending.bypass) setPendingImport(pending);
+    }, true);
+    if (pending && !pending.bypass) await applyImport(pending, false);
+  };
 
   const removePreset = (id: string): Promise<void> => runOperation(async () => {
     await api.deleteWorkspacePreset(id);

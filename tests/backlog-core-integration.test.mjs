@@ -39,7 +39,11 @@ test("authenticated orchestration gateway carries templates, routed review/retry
       reviewerAnswerRecorded = true;
     }
   });
-  terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, spawner);
+  terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, (...args) => {
+    const process = spawner(...args);
+    queueMicrotask(() => process.emitData("Ask anything…\nctrl+p commands"));
+    return process;
+  });
   // Automatic Plan reviews must exercise the isolated launch path; this stub records the
   // launch shape without weakening production's fail-closed requirement for a real OS layer.
   terminals.configureIsolation({
@@ -56,7 +60,7 @@ test("authenticated orchestration gateway carries templates, routed review/retry
     budget,
     waitTiming: { checkMs: 1, settleMs: 0, quietMs: 10 },
     reviewModel: () => "openai/gpt-4.1",
-    reviewStartupMs: 20, // the fake reviewer reports no TUI status
+    reviewStartupMs: 100, // the fixture emits the real OpenCode home-screen readiness marker
     reviewDiff: async () => "diff --git a/example b/example\n+safe result\n"
   });
   terminals.configureInputGate((sessionId) => control.assertInputAllowed(sessionId));

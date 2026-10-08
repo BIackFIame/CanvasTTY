@@ -6,6 +6,7 @@ import checkIcon from "../assets/icons/lucide/check.svg";
 import chevronIcon from "../assets/icons/lucide/chevron-down.svg";
 import closeIcon from "../assets/icons/lucide/x.svg";
 import copyIcon from "../assets/icons/lucide/copy.svg";
+import crosshairIcon from "../assets/icons/lucide/crosshair.svg";
 import downloadIcon from "../assets/icons/lucide/download.svg";
 import errorIcon from "../assets/icons/lucide/circle-alert.svg";
 import folderIcon from "../assets/icons/lucide/folder.svg";
@@ -17,6 +18,7 @@ import fileSearchIcon from "../assets/icons/lucide/file-search.svg";
 import fileTextIcon from "../assets/icons/lucide/file-text.svg";
 import filmIcon from "../assets/icons/lucide/film.svg";
 import imageIcon from "../assets/icons/lucide/image.svg";
+import messageSquarePlusIcon from "../assets/icons/lucide/message-square-plus.svg";
 import musicIcon from "../assets/icons/lucide/music.svg";
 import browserIcon from "../assets/icons/lucide/globe.svg";
 import bringToFrontIcon from "../assets/icons/lucide/bring-to-front.svg";
@@ -25,6 +27,7 @@ import imagePlusIcon from "../assets/icons/lucide/image-plus.svg";
 import infoIcon from "../assets/icons/lucide/info.svg";
 import maximizeIcon from "../assets/icons/lucide/square.svg";
 import minusIcon from "../assets/icons/lucide/minus.svg";
+import pinIcon from "../assets/icons/lucide/pin.svg";
 import plusIcon from "../assets/icons/lucide/plus.svg";
 import paletteIcon from "../assets/icons/lucide/palette.svg";
 import pencilIcon from "../assets/icons/lucide/pencil.svg";
@@ -73,6 +76,9 @@ export type UiIconName =
   | "file-search"
   | "film"
   | "music"
+  | "pin"
+  | "crosshair"
+  | "remark-add"
   | "folder-open"
   | "clipboard-paste"
   | "ellipsis"
@@ -122,6 +128,9 @@ const ICONS: Record<UiIconName, string> = {
   "file-search": fileSearchIcon,
   film: filmIcon,
   music: musicIcon,
+  pin: pinIcon,
+  crosshair: crosshairIcon,
+  "remark-add": messageSquarePlusIcon,
   "folder-open": folderOpenIcon,
   "clipboard-paste": clipboardPasteIcon,
   ellipsis: ellipsisIcon,

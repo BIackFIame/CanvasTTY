@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { dirname, join, isAbsolute, normalize } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
@@ -33,6 +33,8 @@ export interface PersistedTerminalSession {
   executionGoal?: SessionMetadata["executionGoal"];
   executionTask?: string;
   executionStrategy?: SessionMetadata["executionStrategy"];
+  /** Host-only launch history; missing evidence on a legacy placed card is conservatively unknown. */
+  isolatedEnvironmentScopes?: {roots:string[];ambiguous:boolean};
   taskScope?:{id:string;cwd:string;startedAt:number};
   id: string;
   provider: ProviderId;
@@ -241,7 +243,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** Launch extras contain no scrollback or secrets. The bounded, redacted overall task is held in metadata. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "executionClass" | "executionAuthorization" | "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "executionClass" | "executionAuthorization" | "options" | "executionPrivacy" | "reviewTasks" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince" | "isolatedEnvironmentScopes"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -275,6 +277,7 @@ export function persistedTerminalSession(
     ...(extras.executionAuthorization ? {executionAuthorization:structuredClone(extras.executionAuthorization)} : {}),
     ...(extras.reviewTasks ? { reviewTasks: { ...extras.reviewTasks } } : {}),
     ...(extras.executionPrivacy ? { executionPrivacy: { ...extras.executionPrivacy } } : {}),
+    ...(extras.isolatedEnvironmentScopes ? {isolatedEnvironmentScopes:structuredClone(extras.isolatedEnvironmentScopes)} : {}),
     ...(extras.options ? { options: structuredClone(extras.options) } : {}),
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
@@ -285,6 +288,17 @@ export function persistedTerminalSession(
     ...(metadata.modelRoute ? { modelRoute: { ...metadata.modelRoute } } : {}),
     ...(metadata.reviewRequested !== undefined ? { reviewRequested: metadata.reviewRequested } : {})
   };
+}
+
+/** Invalid or pre-evidence environment records must never silently regain local restoration authority. */
+function normalizeIsolationEvidence(value:unknown,placed:boolean):PersistedTerminalSession["isolatedEnvironmentScopes"] {
+  if(value===undefined)return placed ? {roots:[],ambiguous:true} : undefined;
+  const invalid={roots:[],ambiguous:true};
+  if(!value || typeof value!=="object" || Array.isArray(value))return invalid;
+  const evidence=value as {roots?:unknown;ambiguous?:unknown};
+  if(Object.keys(value).some(key=>key!=="roots" && key!=="ambiguous") || typeof evidence.ambiguous!=="boolean" || !Array.isArray(evidence.roots) || evidence.roots.length>32)return invalid;
+  if(evidence.roots.some(root=>typeof root!=="string" || root.length===0 || root.length>4096 || root.includes("\0") || !isAbsolute(root) || normalize(root)!==root))return invalid;
+  return {roots:[...new Set(evidence.roots as string[])],ambiguous:evidence.ambiguous};
 }
 
 export function normalizePersistedTerminalSessions(candidate: unknown): PersistedTerminalSessionState {
@@ -346,6 +360,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
     const strategy = normalizeExecutionStrategy(session.executionStrategy);
     const executionAuthorization = normalizeExecutionAuthorization(session.executionAuthorization);
+    const isolation=normalizeIsolationEvidence(session.isolatedEnvironmentScopes,Boolean(environment));
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -374,6 +389,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(reviewTasks ? { reviewTasks: { ...reviewTasks } as Record<string, string> } : {}),
       ...(executionPrivacy ? { executionPrivacy: { ...executionPrivacy } as Record<string, string> } : {}),
       ...(environment ? { environment } : {}),
+      ...(isolation ? {isolatedEnvironmentScopes:isolation} : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
       ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0

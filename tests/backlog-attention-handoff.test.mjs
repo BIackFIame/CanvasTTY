@@ -31,6 +31,7 @@ test('attention masks names, coalesces events and persists independent channel/q
 
 function world(failDelivery=false, ...options){
   const experimentalEnabled=options.length ? options[0] : ()=>true;
+  const installRecord=options[1] ?? (()=>null);
   const calls=[],notices=[];
   const metadata={id:'source',provider:'codex',title:'Original',role:'agent',profile:'auto',cwd:'/project',position:{x:0,y:0},status:'working',startedAt:1,exitCode:null};
   const contexts=new Map([['source',{metadata,workingDirectory:'/project/worktree',environment:{kind:'worktree',pluginId:'environments',label:'branch',ref:{}},owner:'different-plugin',restored:false}]]);
@@ -39,7 +40,7 @@ function world(failDelivery=false, ...options){
     async deliverInput(id,text){calls.push({type:'input',id,text});return {delivered:!failDelivery};},
     dispose(id,options){calls.push({type:'dispose',id,options});contexts.delete(id);},redactSecrets:text=>text.replaceAll('SECRET','[masked]'),
     redactSecretsTail:text=>text,readBuffer:()=>({buffer:'PRIVATE OUTPUT'}),setPluginOwner(){}};
-  const sessions=new PluginSessions({experimentalEnabled,terminals,notify:(...args)=>{notices.push(args);return true;}});
+  const sessions=new PluginSessions({experimentalEnabled,terminals,installRecord,notify:(...args)=>{notices.push(args);return true;}});
   return {sessions,calls,contexts,notices};
 }
 
@@ -75,19 +76,22 @@ test('an untrusted plugin cannot mint Accounts handoff consent for another card'
   assert.equal(contexts.has('source'),true);
 });
 
-test('activity honors subscription ownership and never includes terminal screen',()=>{
-  const {sessions,notices}=world();
-  sessions.handle('accounts','one','sessions.subscribe',{},['sessions:events']);
-  sessions.handle('accounts','two','sessions.subscribe',{ownedOnly:true},['sessions:events']);
+test('quota activity honors trusted assistant ownership and never includes terminal screen',()=>{
+  const trusted={sourceUrl:'https://github.com/BIackFIame/canvastty-plugin-assistant.git',enabled:true,nativeCodeTrusted:true};
+  const {sessions,notices}=world(false,()=>true,()=>trusted);
+  sessions.handle('canvastty-assistant','assistant','sessions.subscribe',{},['sessions:events']);
   sessions.activity({type:'limit.exhausted',sessionId:'source',at:1,provider:'codex'});
-  assert.equal(notices.length,1);assert.equal(notices[0][1],'one');assert.equal(notices[0][2],'canvastty.activity');
+  assert.equal(notices.length,1);assert.equal(notices[0][2],'canvastty.activity');
+  sessions.handle('canvastty-assistant','assistant','sessions.subscribe',{ownedOnly:true},['sessions:events']);
+  sessions.activity({type:'limit.exhausted',sessionId:'source',at:2,provider:'codex'});
+  assert.equal(notices.length,1);
   assert.equal(JSON.stringify(notices).includes('PRIVATE OUTPUT'),false);
 });
 
 test('handoff and quota events are off by default and follow the runtime setting', async()=>{
   for (const enabled of [undefined,()=>false]) {
-    const {sessions,calls,notices}=world(false,enabled);
-    sessions.handle('accounts','one','sessions.subscribe',{},['sessions:events']);
+    const {sessions,calls,notices}=world(false,enabled,()=>({sourceUrl:'https://github.com/BIackFIame/canvastty-plugin-assistant.git',enabled:true,nativeCodeTrusted:true}));
+    sessions.handle('canvastty-assistant','assistant','sessions.subscribe',{},['sessions:events']);
     sessions.activity({type:'limit.exhausted',sessionId:'source',at:1,provider:'codex'});
     sessions.activity({type:'route.outcome',sessionId:'source',at:1,provider:'codex'});
     await assert.rejects(sessions.handle('canvastty-accounts','service','sessions.handoff',{sessionId:'source',summary:'Context'},['sessions:launch']),/disabled/);
@@ -101,4 +105,36 @@ test('handoff and quota events are off by default and follow the runtime setting
     return sessions.handle('canvastty-accounts','service','sessions.handoff',{sessionId:'source',summary:'Context'},['sessions:launch']);
   }),/disabled/);
   assert.equal(calls.length,0);
+});
+
+test('metadata permission does not grant tool activity',()=>{
+  const {sessions,notices}=world();
+  sessions.handle('accounts','one','sessions.subscribe',{},['sessions:events']);
+  sessions.handle('accounts','two','sessions.subscribe',{ownedOnly:true},['sessions:events']);
+  sessions.activity({type:'pretool',sessionId:'source',at:1,provider:'codex',toolName:'Read',normalizedActionHash:'a'.repeat(64)});
+  assert.equal(notices.length,0);
+  assert.equal(JSON.stringify(notices).includes('PRIVATE OUTPUT'),false);
+});
+
+
+test('tool activity requires the exact live trusted assistant and exposes only scoped opaque fingerprints',()=>{
+ const trusted={sourceUrl:'https://github.com/BIackFIame/canvastty-plugin-assistant.git',enabled:true,nativeCodeTrusted:true};
+ let installed=trusted;const f=world(false,()=>true,()=>installed);
+ for(const [plugin,service] of [['canvastty-assistant','assistant'],['canvastty-assistant','other'],['other','assistant']])f.sessions.handle(plugin,service,'sessions.subscribe',{},['sessions:events']);
+ const hash='a'.repeat(64),pre={type:'pretool',sessionId:'source',at:1,turnEpoch:1,toolName:'Bash',normalizedAction:hash,normalizedActionHash:hash};
+ const outcome={type:'tool-outcome',sessionId:'source',at:2,turnEpoch:1,toolName:'Bash',resultClass:'success',normalizedActionHash:hash,outputHash:hash,changedPathHashes:[hash]};
+ f.sessions.activity(pre);f.sessions.activity(outcome);f.sessions.activity(outcome);
+ assert.equal(f.notices.length,3);assert.ok(f.notices.every(n=>n[0]==='canvastty-assistant'&&n[1]==='assistant'));
+ const a=f.notices[0][3],b=f.notices[1][3],c=f.notices[2][3];
+ assert.equal(a.normalizedAction,a.normalizedActionHash);assert.equal(a.normalizedActionHash,b.normalizedActionHash);
+ assert.equal(b.outputHash,c.outputHash);assert.equal(b.changedPathHashes[0],c.changedPathHashes[0]);
+ assert.notEqual(b.outputHash,b.normalizedActionHash);assert.notEqual(b.outputHash,b.changedPathHashes[0]);
+ for(const value of [a.normalizedAction,b.normalizedActionHash,b.outputHash,...b.changedPathHashes]){assert.match(value,/^[a-f0-9]{64}$/);assert.notEqual(value,hash);}
+ const context=f.contexts.get('source');f.contexts.set('other-card',{...context,metadata:{...context.metadata,id:'other-card'}});
+ f.sessions.activity({...outcome,sessionId:'other-card'});assert.notEqual(f.notices.at(-1)[3].normalizedActionHash,b.normalizedActionHash);
+ const otherHost=world(false,()=>true,()=>trusted);otherHost.sessions.handle('canvastty-assistant','assistant','sessions.subscribe',{},['sessions:events']);otherHost.sessions.activity(outcome);
+ assert.notEqual(otherHost.notices[0][3].normalizedActionHash,b.normalizedActionHash);
+ const count=f.notices.length;
+ for(const record of [null,{...trusted,sourceUrl:'https://github.com/attacker/canvastty-plugin-assistant.git'},{...trusted,enabled:false},{...trusted,nativeCodeTrusted:false}]){installed=record;f.sessions.activity(outcome);assert.equal(f.notices.length,count);}
+ installed=trusted;f.sessions.activity(outcome);assert.equal(f.notices.length,count+1,'live trust restored without changing metadata subscription');
 });

@@ -55,7 +55,7 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     for(const id of new Set<string>(ids)){
       const row=terminals.getMetadata(id);
       if(!row || row.exitCode!==null || row.status!=="idle" && row.status!=="working"){skipped.push(id);continue;}
-      try{if(terminals.inputChecked(id,`\x1b[200~${data}\x1b[201~\r`))delivered.push(id);else skipped.push(id);}catch{skipped.push(id);}
+      try{terminals.pasteClipboard(id,data,row.startedAt,{submit:true});delivered.push(id);}catch{skipped.push(id);}
     }
     return {delivered,skipped};
   });
@@ -200,13 +200,15 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   });
   handle(BACKLOG_IPC.previewCheckpoint, (id: string, ref: string) => checkpoints.preview(id,session(id).cwd,ref));
   handle(BACKLOG_IPC.restoreCheckpoint, async (id: string, ref: string) => {
-    const row=session(id); if (row.status === "working" || row.status === "needs_approval") throw new Error("Stop the active turn before restoring files.");
-    const result=await checkpoints.restore(id,row.cwd,ref); await timeline.append(id,"checkpoint","Person restored a checkpoint",ref); return result;
+    session(id);
+    const result=await terminals.withCheckpointRestore(id,cwd=>checkpoints.restore(id,cwd,ref));
+    await timeline.append(id,"checkpoint","Person restored a checkpoint",ref);return result;
   });
   handle(BACKLOG_IPC.exportWorkspace, async () => {
     const value=JSON.parse(workspace.export()),roots=new Map<string,{id:string;cwd:string;startedAt:number}>();
-    const rows=terminals.listMetadata(),rootCards=new Map(rows.filter(row=>!row.parentSessionId).map(row=>[row.taskScope?.id ?? row.id,row.id]));
-    for(const row of rows){const task=root(row.id);roots.set(task.id,task);}
+    const exportedIds=new Set<string>(value.sessions.map((row:{id:string})=>row.id));
+    const rows=terminals.listMetadata().filter(row=>exportedIds.has(row.id)),rootCards=new Map(rows.filter(row=>!row.parentSessionId).map(row=>[row.taskScope?.id ?? row.id,row.id]));
+    for(const row of rows){const task=root(row.id);roots.set(task.id,task);if(!rootCards.has(task.id))rootCards.set(task.id,row.id);}
     value.tasks=await Promise.all([...roots.values()].map(async task=>({rootSessionId:rootCards.get(task.id) ?? task.id,tasks:(await deps.board.listTasks(task.cwd,task.id)).tasks})));
     return JSON.stringify(masked(value),null,2);
   });
@@ -219,7 +221,8 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     const result=await workspace.import(text,options?.confirmBypass === true);
     for(const group of groups ?? []) {
       if(!group || typeof group.rootSessionId!=="string") {result.warnings.push("An invalid task group was skipped.");continue;}
-      const restored=result.restoredIds[group.rootSessionId];if(!restored)continue;
+      const restored=Object.hasOwn(result.restoredIds,group.rootSessionId) ? result.restoredIds[group.rootSessionId] : undefined;
+      if(typeof restored!=="string" || !restored)continue;
       try{await deps.board.importGroup(session(restored).cwd,restored,masked(group.tasks),result.restoredIds);}
       catch(error){result.warnings.push(`Task board: ${error instanceof Error ? error.message : "could not be restored"}`);}
     }
@@ -236,9 +239,9 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     return {text:terminals.redactSecrets(terminalFileDropText(canonical,process.platform)),paths:canonical,outsideProject};
   });
   handle(BACKLOG_TERMINAL_IPC.paste, (id: string, text: unknown) => {
-    session(id); if (typeof text !== "string" || text.length > 16_000) throw new Error("Context paste is limited to 16,000 characters.");
+    const startedAt=session(id).startedAt; if (typeof text !== "string" || text.length > 16_000) throw new Error("Context paste is limited to 16,000 characters.");
     const clean=terminals.redactSecrets(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,"");
-    if (!terminals.inputChecked(id,`\x1b[200~${clean}\x1b[201~`)) throw new Error("The card cannot accept input right now.");
+    terminals.pasteClipboard(id,clean,startedAt);
   });
   handle(BACKLOG_TERMINAL_IPC.searchOutput, async (query: unknown, requested?: unknown) => {
     if (typeof query !== "string" || query.length > 200 || !query.trim()) return {matches:[],prunedSessionIds:[]};

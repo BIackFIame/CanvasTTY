@@ -12,7 +12,7 @@ export interface UsageSummary {
 export interface UsagePrice {provider:string;model:string;inputPerMillion:number;outputPerMillion:number}
 export interface UsageBreakdown {sessionId:string;provider:string|null;model:string|null;accountId:string|null;taskId:string|null;tokens:{input:number|null;output:number|null;total:number|null};costUsd:number|null;costSource:"reported"|"human-price"|null;source:string;period:"all"|"day"|"week"}
 export type SecretGrantDuration = "10m" | "turn" | "session";
-export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number}
+export interface SecretGrantRequest {id:string;sessionId:string;secretId:ProviderSecretId;reason:string;createdAt:number;expiresAt:number;turnAvailable:boolean}
 export interface SecretGrant {sessionId:string;secretId:ProviderSecretId;duration:SecretGrantDuration;approvedAt:number;expiresAt:number|null}
 export interface WorkspacePreset { id: string; name: string; snapshot: string }
 export type NotificationChannel = "desktop"|"phone"|"glasses";

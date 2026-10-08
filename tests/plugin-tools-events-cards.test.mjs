@@ -68,7 +68,7 @@ function spawner(calls) {
 }
 
 /** A terminal manager whose events feed a PluginSessions, the way the main process wires them. */
-function world({ agentBrowser, orchestration } = {}) {
+function world({ agentBrowser, orchestration, installRecord=()=>null } = {}) {
   const calls = [];
   const notices = [];
   let sessions = null;
@@ -79,7 +79,7 @@ function world({ agentBrowser, orchestration } = {}) {
   redaction.add("test", [SECRET]);
   terminals.configureRedaction(redaction);
   sessions = new PluginSessions({
-    terminals,
+    terminals, installRecord,
     notify: (pluginId, serviceId, method, params) => { notices.push({ pluginId, serviceId, method, params: structuredClone(params) }); return true; }
   });
   return { calls, notices, terminals, sessions, redaction };
@@ -335,8 +335,8 @@ test("session events carry card metadata, never screen text without sessions:rea
 });
 
 test("completed-tool activity carries one-use host evidence scoped to a live card turn", () => {
-  const { notices, terminals, sessions } = world();
-  sessions.handle("p1", "svc", "sessions.subscribe", {}, ["sessions:events"]);
+  const { notices, terminals, sessions } = world({installRecord:()=>({sourceUrl:"https://github.com/BIackFIame/canvastty-plugin-assistant.git",enabled:true,nativeCodeTrusted:true})});
+  sessions.handle("canvastty-assistant", "assistant", "sessions.subscribe", {}, ["sessions:events"]);
   const card = terminals.create({ provider: "claude", cwd, profile: "normal", position: at });
   sessions.activity({
     type: "tool-outcome", sessionId: card.id, at: Date.now(), turnId: "turn:42", turnEpoch: 42, toolName: `Edit ${SECRET}`,
@@ -351,8 +351,12 @@ test("completed-tool activity carries one-use host evidence scoped to a live car
   assert.deepEqual(safeActivity, {
     type: "tool-outcome", sessionId: card.id, at: activity.params.at, turnId: "turn:42", turnEpoch: 42,
     toolName: `Edit <redacted:secret>`, resultClass: "error",
-    normalizedActionHash: "a".repeat(64), errorHash: "b".repeat(64), changedPathHashes: ["c".repeat(64)]
+    normalizedActionHash: activity.params.normalizedActionHash, errorHash: activity.params.errorHash, changedPathHashes: activity.params.changedPathHashes
   });
+  for(const hash of [activity.params.normalizedActionHash,activity.params.errorHash,...activity.params.changedPathHashes])assert.match(hash,/^[a-f0-9]{64}$/);
+  assert.notEqual(activity.params.normalizedActionHash,"a".repeat(64));
+  assert.notEqual(activity.params.errorHash,"b".repeat(64));
+  assert.notEqual(activity.params.changedPathHashes[0],"c".repeat(64));
   assert.equal(JSON.stringify(activity.params).includes(SECRET), false);
   assert.equal(sessions.consumeLoopEvidence(card.id, evidenceId, 42), true, "current-turn evidence is accepted once");
   assert.equal(sessions.consumeLoopEvidence(card.id, evidenceId, 42), false, "replay cannot reuse consumed evidence");
@@ -373,8 +377,11 @@ test("completed-tool activity carries one-use host evidence scoped to a live car
   const { evidenceId: _pretoolEvidenceId, ...safePretool } = pretool.params;
   assert.deepEqual(safePretool, {
     type: "activity", sessionId: card.id, at: pretool.params.at, turnId: "turn:43", turnEpoch: 43,
-    toolName: "Bash <redacted:secret>", normalizedAction: "f".repeat(64)
+    toolName: "Bash <redacted:secret>", normalizedAction: pretool.params.normalizedAction, normalizedActionHash: pretool.params.normalizedActionHash
   });
+  assert.match(pretool.params.normalizedAction,/^[a-f0-9]{64}$/);
+  assert.equal(pretool.params.normalizedAction,pretool.params.normalizedActionHash);
+  assert.notEqual(pretool.params.normalizedAction,"f".repeat(64));
   const foreignSessionId = "not-the-evidence-session";
   assert.equal(sessions.consumeLoopEvidence(foreignSessionId, pretool.params.evidenceId, 43), false);
 
@@ -395,7 +402,8 @@ test("completed-tool activity carries one-use host evidence scoped to a live car
   const lastOutcome = () => notices.filter((notice) => notice.params.type === "tool-outcome").at(-1).params;
   sessions.activity({ type: "tool-outcome", sessionId: card.id, at: Date.now(), turnEpoch: 43, toolName: "Bash", resultClass: "success",
     changedPathHashes: [], outputHash: "d".repeat(64) });
-  assert.equal(lastOutcome().outputHash, "d".repeat(64), "a successful tool's output hash reaches loop detection");
+  assert.match(lastOutcome().outputHash,/^[a-f0-9]{64}$/);
+  assert.notEqual(lastOutcome().outputHash,"d".repeat(64),"output is opaque at the plugin boundary");
   sessions.activity({ type: "tool-outcome", sessionId: card.id, at: Date.now(), turnEpoch: 43, toolName: "Bash", resultClass: "error",
     changedPathHashes: [], outputHash: "e".repeat(64) });
   assert.equal(lastOutcome().resultClass, "error");

@@ -73,6 +73,7 @@ test("revocation while environment prepares releases it and never wraps or spawn
   const events = environment(f, () => new Promise(r => release = r));
   f.set({ enabled: true, defaultDataClass: "D2", targets: [{ ...target, environment: choice }] });
   const s = f.m.create(request({ environment: choice }));
+  await Promise.resolve(); // contributed launches register cancellation ownership before invoking plugins
   assert.deepEqual(events, ["prepare"]);
   f.set({ enabled: true, defaultDataClass: "D2", targets: [] });
   release({ ok: true, environment: { pluginId: "fixture", kind: "remote", label: "Fixture", ref: {} } });
@@ -87,6 +88,7 @@ test("cancel during prepare releases late placement and never starts a local fal
   const events = environment(f, () => new Promise(r => release = r));
   f.set({ enabled: true, defaultDataClass: "D2", targets: [{ ...target, environment: choice }] });
   const s = f.m.create(request({ environment: choice }));
+  await Promise.resolve(); // reach the deferred prepare before cancelling its owner
   f.m.dispose(s.id);
   release({ ok: true, environment: { pluginId: "fixture", kind: "remote", label: "Fixture", ref: {} } });
   await tick();

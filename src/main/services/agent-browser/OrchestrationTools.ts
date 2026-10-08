@@ -127,7 +127,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         throw orchestrationBridgeError("INVALID_REQUEST", "Read-only reviewers cannot call agent or plugin tools.", false);
       }
       if (request.tool === "ask_user") return await this.askUser(sessionId, request.arguments, signal);
-      if (SECRET_TOOL_NAMES.has(request.tool)) return await this.secretTool(sessionId, request.tool, request.arguments);
+      if (SECRET_TOOL_NAMES.has(request.tool)) return await this.secretTool(sessionId, request.tool, request.arguments, signal);
       if (isPluginOrchestrationTool(request.tool)) return await this.plugin(sessionId, session, request);
       if (TASK_TOOL_NAMES.has(request.tool)) {
         if (session.provider === "terminal") throw orchestrationBridgeError("INVALID_REQUEST", "Plain terminals cannot use the orchestration task board.", false);
@@ -187,7 +187,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
-  private async secretTool(sessionId: string, tool: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  private async secretTool(sessionId: string, tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const service = this.integrations.secretGrants;
     if (!service) throw orchestrationBridgeError("INVALID_REQUEST", "Secret-grant controls are unavailable.", false);
     if (this.control.status(sessionId).provider === "terminal") {
@@ -211,11 +211,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
           path: args.path as string,
           ...(args.body && typeof args.body === "object" && !Array.isArray(args.body) ? { body: args.body as Record<string, unknown> } : {}),
           ...(typeof args.timeoutMs === "number" ? { timeoutMs: args.timeoutMs } : {})
-        });
+        }, signal);
         return { ...result };
       }
       throw new Error("Unsupported secret operation.");
     } catch (error) {
+      if (signal?.aborted) throw canceledError();
       throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : "Secret operation failed.", false);
     }
   }

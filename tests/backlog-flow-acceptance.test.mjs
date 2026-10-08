@@ -25,7 +25,12 @@ test('all four built-in flows launch fixture agents and collect every final resu
    const agents=[];
    for(const role of flow.roles)for(let i=0;i<role.count;i++){
     const spawned=await execute('spawn_agent',{provider:'codex',cwd:root,title:role.title,prompt:role.instruction});
-    agents.push(spawned.sessionId);terminals.recordAnswer(spawned.sessionId,{text:`${role.id}:${i}:completed`,truncated:false});calls.at(-1).process.emitExit(0);
+    agents.push(spawned.sessionId);
+    // A real final-answer capture carries the current input generation; uncorrelated old answers are rejected.
+    const generation=terminals.answerCaptureGeneration(spawned.sessionId);
+    terminals.recordAnswer(spawned.sessionId,{text:`${role.id}:${i}:completed`,truncated:false},{generation});
+    assert.equal(terminals.answer(spawned.sessionId)?.text,`${role.id}:${i}:completed`);
+    calls.at(-1).process.emitExit(0);
    }
    const results=await Promise.all(agents.map(sessionId=>execute('get_agent_result',{sessionId})));
    assert.equal(results.length,flow.expectedSubagents);assert.ok(results.every(row=>row.state==='done' && row.answer.text.endsWith(':completed')));

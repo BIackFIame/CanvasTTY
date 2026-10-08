@@ -7,7 +7,6 @@ import type {
   SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
-import { GitCheckpoints } from "./GitCheckpoints.ts";
 import { realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
@@ -124,6 +123,7 @@ export interface AgentControlOptions {
   budget?: Pick<OrchestrationBudgetService, "snapshot">;
   /** Resolves an explicit or automatic subagent environment using the already trusted environments plugin. */
   resolveSubagentEnvironment?: (request: {
+    provider: AgentProviderId;
     parentSessionId: string;
     projectRoot: string;
     cwd: string;
@@ -135,10 +135,10 @@ export interface AgentControlOptions {
   /** Actual CLI model metadata/configuration, used when the worker kept its CLI default. */
   workerModel?: (session:SessionMetadata) => string | null | Promise<string|null>;
   reviewCost?: (reviewerSessionId:string) => number|null;
-  /** Optional environment-aware diff reader for worktree plugins. */
+  /** Trusted host override: the returned diff must already be scoped to this worker and its launch. */
   reviewDiff?: (session: SessionMetadata) => Promise<string>;
   reviewTimeoutMs?: number;
-  /** How long an OpenCode reviewer may take to report its first status before the prompt is typed anyway. */
+  /** How long an OpenCode reviewer may take to expose its input prompt before startup is refused. */
   reviewStartupMs?: number;
   onReview?: (sessionId: string, review: AgentReviewResult) => void;
 }
@@ -191,7 +191,7 @@ export class PromptNotDeliveredError extends Error {
 }
 
 export class AgentControlService {
-  private readonly reviewRoots = new Set<string>();
+  private readonly reviewRoots = new Map<string, symbol>();
   private readonly loopWarnings = new Map<string,{at:number;turnEpoch:number}>();
   private readonly terminals: TerminalManager;
   private readonly options: AgentControlOptions;
@@ -205,6 +205,8 @@ export class AgentControlService {
   private readonly strategyReviews = new Set<string>();
   private readonly readOnlyReviewers = new Set<string>();
   private readonly reviews = new Map<string, AgentReviewResult>();
+  private readonly reviewGenerations = new Map<string, object>();
+  private readonly reviewInputObservers = new Map<string, () => void>();
   private readonly reviewPending = new Map<string, Promise<AgentReviewResult>>();
   private readonly reviewControllers = new Map<string, AbortController>();
   private readonly reviewAgents = new Map<string, string>();
@@ -272,6 +274,7 @@ export class AgentControlService {
     let environment: SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
     try {
       environment = resolveEnvironment({
+          provider: request.provider,
           parentSessionId: parent.id,
           projectRoot: taskScope.cwd,
           cwd: cwd.cwd,
@@ -325,12 +328,12 @@ export class AgentControlService {
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})
-    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
+    }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
     const strategyReview = this.executionContext(parent.id).strategy?.review === "required";
     if (strategyReview) this.strategyReviews.add(created.id);
-    if (request.review === true || strategyReview) this.reviewRequested.add(created.id);
+    if (request.review === true || strategyReview) this.trackReview(created.id);
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
@@ -385,11 +388,7 @@ export class AgentControlService {
     if (typeof text !== "string" || text.length === 0) throw new Error("Prompt text is required.");
     if (session.exitCode !== null) throw new Error("Agent session has already exited.");
     this.assertInputAllowed(sessionId);
-    this.reviews.delete(sessionId);
-    this.retryableQuiet.delete(sessionId);
-    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal).then(() => {
-      this.scheduleReview(sessionId);
-    });
+    return this.deliver(sessionId, submit ? `${text}\r` : text, "text", signal);
   }
 
   status(sessionId: string): SessionMetadata {
@@ -473,8 +472,11 @@ export class AgentControlService {
 
   /** Called when TerminalManager removes a card; retries belonging to a live replacement retain their shared count. */
   forgetSession(sessionId: string): void {
-    const activeReviewerId = this.reviewAgents.get(sessionId);
     this.loopWarnings.delete(sessionId);
+    this.reviewInputObservers.get(sessionId)?.();
+    this.reviewInputObservers.delete(sessionId);
+    this.invalidateReview(sessionId);
+    this.reviewGenerations.delete(sessionId);
     this.launchRequests.delete(sessionId);
     this.retryableQuiet.delete(sessionId);
     this.reviewRequested.delete(sessionId);
@@ -486,18 +488,9 @@ export class AgentControlService {
     this.retryOrigins.delete(sessionId);
     if (!this.pendingRetries.has(sourceId) && ![...this.retryOrigins.values()].includes(sourceId)) this.retryCounts.delete(sourceId);
 
-    this.reviewWatchers.get(sessionId)?.controller.abort();
-    this.reviewWatchers.delete(sessionId);
-    this.reviewControllers.get(sessionId)?.abort();
-    this.reviewControllers.delete(sessionId);
-    this.reviewPending.delete(sessionId);
-    this.reviewAgents.delete(sessionId);
     for (const [workerId, workerReviewerId] of this.reviewAgents) {
       if (workerReviewerId !== sessionId) continue;
       this.reviewAgents.delete(workerId);
-    }
-    if (activeReviewerId) {
-      try { this.terminals.dispose(activeReviewerId); } catch { /* it has already ended */ }
     }
   }
 
@@ -623,15 +616,18 @@ export class AgentControlService {
   async resultWithReview(sessionId: string, options: { deferReview?: boolean } = {}): Promise<AgentResult> {
     const current = this.result(sessionId);
     if (!this.reviewRequested.has(sessionId)) return current;
-    if (current.status !== "idle" && current.status !== "done" && current.status !== "failed" && current.exitCode === null) {
+    const status = this.resultLifecycleStatus(sessionId) ?? current.status;
+    if (status !== "idle" && status !== "done" && status !== "failed" && current.exitCode === null) {
       return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
     }
     if (options.deferReview) {
       void this.ensureReview(sessionId);
       return { ...current, review: this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null }) };
     }
+    const generation = this.reviewGeneration(sessionId);
     const review = await this.ensureReview(sessionId);
-    return { ...this.result(sessionId), review:this.reviewWithCost(review) };
+    return { ...this.result(sessionId), review: this.reviewWithCost(
+      this.reviewGenerations.get(sessionId) === generation ? review : supersededReview()) };
   }
 
   private reviewWithCost(review:AgentReviewResult):AgentReviewResult{
@@ -651,7 +647,8 @@ export class AgentControlService {
     return true;
   }
 
-  private hasCurrentLoopWarning(sessionId:string):boolean {
+  /** Current host loop warning, shared by retry eligibility and companion attention. */
+  hasCurrentLoopWarning(sessionId:string):boolean {
     const warning=this.loopWarnings.get(sessionId);
     if(!warning)return false;
     const age=Date.now()-warning.at;
@@ -739,9 +736,10 @@ export class AgentControlService {
         assertWorktreeRetryAllowed();
         const restarted = this.terminals.restart(sessionId, { resume: false });
         restartedWorktree = true;
-        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (reviewWasRequested) this.trackReview(sessionId);
         if (strategyReviewWasRequested) this.strategyReviews.add(sessionId);
         await this.send(sessionId, retryPrompt, true, signal);
+        this.scheduleReview(sessionId);
         return this.terminals.getMetadata(sessionId) ?? restarted;
       }
       const retried = await this.spawn({
@@ -753,15 +751,15 @@ export class AgentControlService {
       this.retryOrigins.set(retried.id, sourceId);
       // Each attempt starts from the original request, with only this attempt's masked failure context appended.
       this.launchRequests.set(retried.id, original);
-      if (original.review === true) this.reviewRequested.add(retried.id);
+      if (original.review === true) this.trackReview(retried.id);
       return retried;
     } catch (error) {
       if (reuseWorktree && this.terminals.getMetadata(sessionId)) {
         // `forgetSession` clears stale loop/quiet/review state without disposing this card or its environment.
-        // Restore only its launch identity and requested review so a failed relaunch can be retried deliberately.
+        // Restore its launch identity and review observer, without reviewing a prompt that never reached the PTY.
         this.launchRequests.set(sessionId, original);
         this.retryOrigins.set(sessionId, sourceId);
-        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (reviewWasRequested) this.trackReview(sessionId);
         if (strategyReviewWasRequested) this.strategyReviews.add(sessionId);
         if (readOnlyReviewWasRequested) this.readOnlyReviewers.add(sessionId);
       }
@@ -819,11 +817,16 @@ export class AgentControlService {
       try { observation = this.observe(sessionId); } catch { observation = null; }
       const finalAnswer: AgentAnswer | null = reason === "timeout" || reason === "needs_approval" ? null : this.answer(sessionId);
       let review: AgentReviewResult | undefined;
+      const generation = this.reviewGeneration(sessionId);
       if (this.reviewRequested.has(sessionId) && (reason === "idle" || reason === "done" || reason === "failed" || reason === "quiet")) {
         if (request.deferReview) {
-          void this.ensureReview(sessionId);
-          review = this.reviewWithCost(this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
-        } else review = this.reviewWithCost(await this.ensureReview(sessionId));
+          const readiness = this.reviewReadiness(sessionId, reason === "quiet");
+          if (!readiness) void this.ensureReview(sessionId, reason === "quiet");
+          review = this.reviewWithCost(readiness ?? this.reviews.get(sessionId) ?? { status: "pending", costUsd: null });
+        } else {
+          const result = await this.ensureReview(sessionId, reason === "quiet");
+          review = this.reviewWithCost(this.reviewGenerations.get(sessionId) === generation ? result : supersededReview());
+        }
       }
       return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
         ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(finalAnswer ? { answer: finalAnswer } : {}), ...(review ? { review } : {}) };
@@ -838,16 +841,17 @@ export class AgentControlService {
       if (current !== offset) { offset = current; changedAt = now; }
       const quietFor = now - changedAt;
       if (session.exitCode !== null) return answer(session, session.exitCode === 0 ? "done" : "failed");
-      if (session.status === "needs_approval") return answer(session, "needs_approval");
+      const status = this.resultLifecycleStatus(sessionId) ?? session.status;
+      if (status === "needs_approval") return answer(session, "needs_approval");
       // After a prompt, an idle that no turn followed (the CLI's startup idle, or one reported before the turn began)
       // is not the answer: only an idle after a turn that started since that prompt is. A CLI that never reports its
       // turns still ends as "quiet" once its screen stops changing.
       const progress = this.turnProgress(sessionId);
       const awaitingTurn = progress !== null && progress.promptSent && !progress.turnStartedSincePrompt;
-      if (!awaitingTurn && (session.status === "idle" || session.status === "done" || session.status === "failed") && quietFor >= timing.settleMs) {
-        return answer(session, session.status);
+      if (!awaitingTurn && (status === "idle" || status === "done" || status === "failed") && quietFor >= timing.settleMs) {
+        return answer(session, status);
       }
-      if ((session.status === "unavailable" || awaitingTurn) && quietFor >= timing.quietMs) return answer(session, "quiet");
+      if ((status === "unavailable" || awaitingTurn) && quietFor >= timing.quietMs) return answer(session, "quiet");
       const waited = now - started;
       if (waited >= timeoutMs) return answer(session, "timeout");
       await pause(Math.min(timing.checkMs, timeoutMs - waited), signal);
@@ -859,29 +863,93 @@ export class AgentControlService {
     this.terminals.dispose(sessionId);
   }
 
-  private async ensureReview(sessionId: string): Promise<AgentReviewResult> {
+  /** Restores review ownership without starting a watcher before the next prompt is actually delivered. */
+  private trackReview(sessionId: string): void {
+    this.reviewRequested.add(sessionId);
+    if (this.reviewInputObservers.has(sessionId)) return;
+    this.reviewInputObservers.set(sessionId, this.terminals.observeInputWrites(sessionId, (_data, submitted) => {
+      this.invalidateReview(sessionId);
+      const generation = this.reviewGeneration(sessionId);
+      this.retryableQuiet.delete(sessionId);
+      if (!submitted) {
+        this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
+        return;
+      }
+      return () => queueMicrotask(() => {
+        if (this.reviewRequested.has(sessionId) && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
+      });
+    }));
+  }
+
+  private reviewGeneration(sessionId: string): object {
+    let generation = this.reviewGenerations.get(sessionId);
+    if (!generation) { generation = {}; this.reviewGenerations.set(sessionId, generation); }
+    return generation;
+  }
+
+  private invalidateReview(sessionId: string): void {
+    const reviewerIds = new Set([this.reviews.get(sessionId)?.reviewerSessionId, this.reviewAgents.get(sessionId)]);
+    this.reviewGenerations.set(sessionId, {});
+    this.reviews.delete(sessionId);
+    this.reviewWatchers.get(sessionId)?.controller.abort();
+    this.reviewWatchers.delete(sessionId);
+    this.reviewControllers.get(sessionId)?.abort();
+    this.reviewControllers.delete(sessionId);
+    this.reviewPending.delete(sessionId);
+    this.reviewAgents.delete(sessionId);
+    for (const reviewerId of reviewerIds) this.disposeReviewer(reviewerId);
+  }
+
+  private disposeReviewer(reviewerId: string | undefined): void {
+    if (!reviewerId) return;
+    this.readOnlyReviewers.delete(reviewerId);
+    try { this.terminals.dispose(reviewerId); } catch { /* the reviewer may already have ended */ }
+  }
+
+  private reviewReadiness(sessionId: string, quiet = false): AgentReviewResult | null {
+    // An old idle/answer can remain visible until the provider acknowledges the submitted input.
+    const progress = this.turnProgress(sessionId);
+    if (progress?.promptSent && !progress.turnStartedSincePrompt && !this.answer(sessionId)) {
+      return quiet || this.terminals.getMetadata(sessionId)?.exitCode !== null
+        ? { status: "unavailable", reason: "The provider did not report a new completed turn or final answer after the submitted input.", costUsd: null }
+        : { status: "pending", costUsd: null };
+    }
+    return null;
+  }
+
+  private async ensureReview(sessionId: string, quiet = false): Promise<AgentReviewResult> {
+    const readiness = this.reviewReadiness(sessionId, quiet);
+    if (readiness) return readiness;
+    const generation = this.reviewGeneration(sessionId);
     const cached = this.reviews.get(sessionId);
     if (cached) return cached;
     const active = this.reviewPending.get(sessionId);
-    if (active) return active;
+    if (active) {
+      const result = await active;
+      return this.reviewGenerations.get(sessionId) === generation ? result : supersededReview();
+    }
     const controller = new AbortController();
     this.reviewControllers.set(sessionId, controller);
+    // Store the guarded promise, so every concurrent caller observes invalidation, not the raw verdict.
     const pending = this.queuedReview(sessionId, controller.signal).catch((error: unknown): AgentReviewResult => ({
       status: "unavailable",
       reason: this.redactTail(error instanceof Error ? error.message : "The reviewer failed.", 500),
       costUsd: null
-    }));
-    this.reviewPending.set(sessionId, pending);
-    try {
-      const result = await pending;
-      if (controller.signal.aborted) return result;
+    })).then(result => {
+      if (controller.signal.aborted || this.reviewGenerations.get(sessionId) !== generation) {
+        this.disposeReviewer(result.reviewerSessionId);
+        return supersededReview();
+      }
       this.reviews.set(sessionId, result);
       try { this.options.onReview?.(sessionId, result); } catch { /* review observers cannot affect the result */ }
       return result;
-    } finally {
+    }).finally(() => {
       if (this.reviewPending.get(sessionId) === pending) this.reviewPending.delete(sessionId);
       if (this.reviewControllers.get(sessionId) === controller) this.reviewControllers.delete(sessionId);
-    }
+    });
+    this.reviewPending.set(sessionId, pending);
+    const result = await pending;
+    return this.reviewGenerations.get(sessionId) === generation ? result : supersededReview();
   }
 
   private requireReviewEnabled(sessionId: string): void {
@@ -906,9 +974,15 @@ export class AgentControlService {
     signal.throwIfAborted();
     this.requireBudgetActive(sessionId);
     this.requireReviewEnabled(sessionId);
-    this.reviewRoots.add(rootId);
+    const lease = Symbol(rootId);
+    this.reviewRoots.set(rootId, lease);
+    const release = (): void => {
+      if (this.reviewRoots.get(rootId) === lease) this.reviewRoots.delete(rootId);
+    };
+    // Cancellation disposes the obsolete reviewer; a delayed old verdict must not hold the next turn's slot.
+    signal.addEventListener("abort", release, { once: true });
     try { return await this.performReview(sessionId, signal); }
-    finally { this.reviewRoots.delete(rootId); }
+    finally { signal.removeEventListener("abort", release); release(); }
   }
 
   private async performReview(sessionId: string, signal: AbortSignal): Promise<AgentReviewResult> {
@@ -934,7 +1008,7 @@ export class AgentControlService {
     if ("error" in profile) return { status: "unavailable", reason: `A read-only Plan reviewer is unavailable: ${profile.error}`, costUsd: null };
     let diff: string;
     try {
-      diff = this.options.reviewDiff ? await this.options.reviewDiff(worker) : await this.readReviewDiff(worker.cwd);
+      diff = this.options.reviewDiff ? await this.options.reviewDiff(worker) : await this.terminals.readReviewDiff(sessionId);
     } catch (error) {
       return { status: "unavailable", reason: `The worker diff could not be read: ${error instanceof Error ? error.message : "unknown error"}`, costUsd: null };
     }
@@ -952,6 +1026,7 @@ export class AgentControlService {
     ].join("\n\n");
     let reviewer: SessionMetadata | undefined;
     let keepReviewer = false;
+    let reviewerAccount: Awaited<ReturnType<TerminalManager["prepareReviewerAccount"]>> | undefined;
     let workspace: DiffOnlyReviewWorkspace;
     try {
       workspace = createDiffOnlyReviewWorkspace(maskedDiff);
@@ -960,20 +1035,15 @@ export class AgentControlService {
     }
     try {
       try {
-        const reviewerAccount = account
+        reviewerAccount = account
           ? await this.terminals.prepareReviewerAccount({ taskRootSessionId: root.id, provider: worker.provider as AgentProviderId, workspace,
             launchOptions: { [MODEL_ACCOUNTS_PLUGIN_ID]: { account } } })
           : undefined;
-        if (signal.aborted) { void reviewerAccount?.contribution.cleanup().catch(() => undefined); throw new Error("The worker session was removed before review."); }
-        try {
-          this.requireReviewEnabled(sessionId);
-          this.requireSession(root.id);
-          this.requireBudgetActive(sessionId);
-          this.assertSpawnCapacity(root.id, undefined, true);
-        } catch (error) {
-          void reviewerAccount?.contribution.cleanup().catch(() => undefined);
-          throw error;
-        }
+        if (signal.aborted) throw new Error("The worker session was removed before review.");
+        this.requireReviewEnabled(sessionId);
+        this.requireSession(root.id);
+        this.requireBudgetActive(sessionId);
+        this.assertSpawnCapacity(root.id, undefined, true);
         reviewer = this.terminals.createReadOnlyReviewer({
           taskRootSessionId: root.id,
           provider: worker.provider as AgentProviderId,
@@ -981,11 +1051,17 @@ export class AgentControlService {
           title: `Review: ${worker.title}`.slice(0, 80),
           ...(reviewerAccount ? { account: reviewerAccount } : { model })
         });
+        // Once creation succeeds, TerminalManager owns the contribution and cleans it up with the session.
+        reviewerAccount = undefined;
         this.readOnlyReviewers.add(reviewer.id);
-        // OpenCode drops what is typed before its TUI is up: wait for its first lifecycle status (bounded).
+        // OpenCode's fresh home has no conversation until submission; wait for its rendered input prompt or hook.
         if (worker.provider === "opencode") {
           const readyBy = Date.now() + (this.options.reviewStartupMs ?? REVIEW_STARTUP_QUIET_MS);
-          while (Date.now() < readyBy && this.terminals.getMetadata(reviewer.id)?.status === "unavailable") await pause(250, signal);
+          const ready = (): boolean => typeof this.terminals.inputReady === "function"
+            ? this.terminals.inputReady(reviewer!.id)
+            : (this.resultLifecycleStatus(reviewer!.id) ?? this.terminals.getMetadata(reviewer!.id)?.status) !== "unavailable";
+          while (Date.now() < readyBy && !ready()) await pause(250, signal);
+          if (!ready()) throw new Error("The reviewer CLI did not expose its input prompt before the startup deadline.");
         }
         await this.deliver(reviewer.id, `${prompt}\r`, "prompt", signal);
       } catch (error) {
@@ -1037,6 +1113,7 @@ export class AgentControlService {
         costUsd: null
       };
     } finally {
+      if (reviewerAccount) await reviewerAccount.contribution.cleanup().catch(() => undefined);
       if (reviewer && this.reviewAgents.get(sessionId) === reviewer.id) this.reviewAgents.delete(sessionId);
       if (!keepReviewer) {
         if (reviewer) try { this.terminals.dispose(reviewer.id); } catch { /* the task may already have removed it */ }
@@ -1046,9 +1123,6 @@ export class AgentControlService {
     }
   }
 
-  private async readReviewDiff(cwd: string): Promise<string> {
-    return new GitCheckpoints(text => this.redactTail(text,MAX_REVIEW_DIFF_BYTES + 8192)).workingDiff(cwd);
-  }
 
   private requireBudgetActive(sessionId: string): void {
     if (!this.options.budget) return;
@@ -1081,13 +1155,15 @@ export class AgentControlService {
         return;
       }
       const result = await this.waitFor(sessionId, { timeoutMs: MAX_AGENT_WAIT_MS, signal });
+      if (signal.aborted) return;
       if (result.reason === "idle" || result.reason === "done" || result.reason === "failed" || result.reason === "quiet") {
-        await this.ensureReview(sessionId);
-        return;
+        const review = result.review ?? await this.ensureReview(sessionId, result.reason === "quiet");
+        if (signal.aborted) return;
+        if (review.status !== "pending") return;
       }
       if (result.reason === "closed") return;
       // Approval and quiet states need a later human input or another output sample; avoid spinning on either.
-      await pause(1_000);
+      await pause(1_000, signal);
     }
   }
 
@@ -1110,6 +1186,10 @@ export class AgentControlService {
   private redactTail(text: string, maxChars: number): string {
     if (typeof this.terminals.redactSecretsTail === "function") return this.terminals.redactSecretsTail(text, maxChars);
     return tail(typeof this.terminals.redactSecrets === "function" ? this.terminals.redactSecrets(text) : text, maxChars);
+  }
+
+  private resultLifecycleStatus(sessionId: string): "idle" | "working" | "needs_approval" | null {
+    return typeof this.terminals.resultLifecycleState === "function" ? this.terminals.resultLifecycleState(sessionId) : null;
   }
 
   private turnProgress(sessionId: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
@@ -1259,4 +1339,8 @@ const MODEL_ACCOUNTS_PLUGIN_ID = "canvastty-accounts";
 function selectedModelAccount(launchOptions: SpawnAgentRequest["launchOptions"]): string | null {
   const account = launchOptions?.[MODEL_ACCOUNTS_PLUGIN_ID]?.account;
   return typeof account === "string" && account && account !== "none" ? account : null;
+}
+
+function supersededReview(): AgentReviewResult {
+  return { status: "unavailable", reason: "The worker prompt changed or the session was removed before this review completed.", costUsd: null };
 }

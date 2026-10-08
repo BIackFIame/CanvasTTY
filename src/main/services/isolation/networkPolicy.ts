@@ -87,6 +87,7 @@ const PACKAGE_REGISTRY_DOMAINS = [
 const MAX_DOCUMENT_BYTES = 256 * 1024;
 const PROXY_HEADERS_TIMEOUT_MS = 10_000;
 const PROXY_REQUEST_TIMEOUT_MS = 30_000;
+const PROXY_CONNECT_TIMEOUT_MS = 10_000;
 
 /**
  * Stores the user's global and per-project policy and owns the strict-mode egress proxy. Proxy listeners are prepared
@@ -296,16 +297,43 @@ export class NetworkPolicyManager {
     }
     const address = await this.resolveAddress(target.hostname);
     if (!address) return refuseSocket(client, 403, "Destination DNS is not public");
+    if (client.destroyed) return;
     const upstream = this.openConnection(address, target.port);
-    upstream.once("error", () => refuseSocket(client, 502, "Proxy connection failed"));
-    upstream.once("connect", () => {
+    let connected = false;
+    let finished = false;
+    const timer = setTimeout(() => fail(), PROXY_CONNECT_TIMEOUT_MS);
+    const clearDeadline = (): void => {
+      clearTimeout(timer); upstream.off("connect", onConnect); client.off("end", onClientEnd);
+    };
+    const onClientClose = (): void => {
+      finished = true; clearDeadline();
+      client.off("close", onClientClose); client.off("error", onClientClose);
+      // Keep the upstream error sink until close: destroying a pending dial can queue an error.
+      upstream.destroy(); client.destroy();
+    };
+    const onClientEnd = (): void => { if (!connected) onClientClose(); };
+    const fail = (): void => {
+      if (finished) return;
+      finished = true; clearDeadline(); upstream.destroy();
+      if (connected) client.destroy(); else refuseSocket(client, 502, "Proxy connection failed");
+    };
+    const onError = (): void => fail();
+    const onClose = (): void => {
+      if (!connected && !finished) fail();
+      else if (connected && !upstream.readableEnded) client.destroy();
+      clearDeadline(); upstream.off("error", onError); upstream.off("close", onClose);
+      // A normal connected EOF is flushed by pipe/end; only an abrupt close tears down its client.
+    };
+    const onConnect = (): void => {
+      if (finished || client.destroyed) { onClientClose(); return; }
+      connected = true; clearDeadline();
       client.write("HTTP/1.1 200 Connection Established\r\nProxy-Agent: CanvasTTY\r\n\r\n");
       if (head.length) upstream.write(head);
       client.pipe(upstream);
       upstream.pipe(client);
-    });
-    client.once("close", () => upstream.destroy());
-    client.once("error", () => upstream.destroy());
+    };
+    upstream.once("error", onError); upstream.once("close", onClose); upstream.once("connect", onConnect);
+    client.once("close", onClientClose); client.once("error", onClientClose); client.once("end", onClientEnd);
   }
 
   private async forwardHttp(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -323,22 +351,55 @@ export class NetworkPolicyManager {
     if (target.protocol !== "http:") return sendResponse(response, 400, "HTTPS proxy requests must use CONNECT");
     const address = await this.resolveAddress(hostname);
     if (!address) return sendResponse(response, 403, "Destination DNS is not public");
+    if (response.destroyed || request.aborted) return;
     const headers = { ...request.headers };
     delete headers["proxy-authorization"];
     delete headers["proxy-connection"];
     headers.host = target.host;
     headers.connection = "close";
+    let connected = false;
+    let finished = false;
+    let socket: Socket | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const clearDeadline = (): void => { if (timer !== undefined) clearTimeout(timer); socket?.off("connect", onConnect); };
+    const onConnect = (): void => { connected = true; clearDeadline(); };
+    const onSocket = (value: Socket): void => {
+      socket = value;
+      if (finished) { value.destroy(); return; }
+      if (value.connecting) value.once("connect", onConnect); else onConnect();
+    };
+    const cleanup = (): void => {
+      clearDeadline(); upstream.off("socket", onSocket); upstream.off("error", onError); upstream.off("close", onClose);
+      request.off("aborted", onClientClose); response.off("close", onClientClose);
+    };
+    const onClientClose = (): void => {
+      finished = true; clearDeadline();
+      request.off("aborted", onClientClose); response.off("close", onClientClose);
+      // ClientRequest can emit a queued ECONNRESET after destruction; close owns final listener cleanup.
+      upstream.destroy();
+    };
+    const fail = (): void => {
+      if (finished) return;
+      finished = true; clearDeadline(); upstream.destroy();
+      sendResponse(response, 502, "Proxy connection failed");
+    };
+    const onError = (): void => fail();
+    const onClose = (): void => { if (!connected && !finished) fail(); cleanup(); };
     const upstream = httpRequest({
       protocol: "http:", hostname, port, path: `${target.pathname}${target.search}`,
-      method: request.method, headers, agent: false,
-      lookup: (_name, _options, callback) => callback(null, address, isIP(address))
+      method: request.method, headers,
+      // A custom connection bypasses pooling and dials only the already validated public IP.
+      createConnection: () => this.openConnection(address, port)
     }, (upstreamResponse) => {
+      if (finished || response.destroyed) { upstreamResponse.destroy(); return; }
+      onConnect();
       response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.statusMessage, upstreamResponse.headers);
       upstreamResponse.pipe(response);
     });
-    upstream.once("error", () => { if (!response.headersSent) sendResponse(response, 502, "Proxy connection failed"); });
+    timer = setTimeout(() => fail(), PROXY_CONNECT_TIMEOUT_MS);
+    upstream.once("socket", onSocket); upstream.once("error", onError); upstream.once("close", onClose);
+    request.once("aborted", onClientClose); response.once("close", onClientClose);
     request.pipe(upstream);
-    request.once("aborted", () => upstream.destroy());
   }
 
   private readDocument(): PolicyDocument {
@@ -399,7 +460,7 @@ export function validatePolicy(input: unknown): AgentNetworkPolicy {
   };
 }
 
-/** Exact hostnames and `*.example.com` patterns are supported; URLs, ports and IP literals are refused. */
+/** Domains include their subdomains; `*.example.com` patterns exclude the root; URLs, ports and IP literals are refused. */
 export function canonicalDomain(input: string): string {
   const value = input.trim().toLowerCase().replace(/\.$/u, "");
   const wildcard = value.startsWith("*.");
@@ -417,7 +478,7 @@ function domainAllowed(hostname: string, rules: readonly string[]): boolean {
   const host = hostname.toLowerCase().replace(/\.$/u, "");
   return rules.some((rule) => rule.startsWith("*.")
     ? host !== rule.slice(2) && host.endsWith(`.${rule.slice(2)}`)
-    : host === rule);
+    : host === rule || host.endsWith(`.${rule}`));
 }
 
 function parseAuthority(authority: string, defaultPort: number): { hostname: string; port: number } | null {
