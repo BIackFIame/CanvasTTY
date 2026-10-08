@@ -94,6 +94,9 @@ function TerminalCardLoading({
   const compositionCommit = useRef<string | null>(null);
   const compositionCommitFrame = useRef<number | null>(null);
   const mounted = useRef(true);
+  const inputHolds = useRef(new Set<symbol>());
+  const compositionRelease = useRef<(() => void) | null>(null);
+  const inputGeneration = useRef(0);
   const sessionRef = useRef(session);
   sessionRef.current = session;
 
@@ -105,13 +108,32 @@ function TerminalCardLoading({
     mounted.current = true;
     return () => {
       mounted.current = false;
+      inputGeneration.current += 1;
+      composing.current = false;
+      compositionSessionStartedAt.current = null;
+      compositionRelease.current = null;
+      compositionCommit.current = null;
+      if (inputHolds.current.size) {
+        inputHolds.current.clear();
+        onInputHoldChange(false);
+      }
       if (compositionCommitFrame.current !== null) cancelAnimationFrame(compositionCommitFrame.current);
     };
-  }, []);
+  }, [session.id, session.startedAt]);
+
+  const holdInput = (): (() => void) => {
+    const token = Symbol();
+    inputHolds.current.add(token);
+    if (inputHolds.current.size === 1) onInputHoldChange(true);
+    return () => {
+      if (!inputHolds.current.delete(token)) return;
+      if (mounted.current && inputHolds.current.size === 0) onInputHoldChange(false);
+    };
+  };
 
   const sendText = (text: string, startedAt = sessionRef.current.startedAt): void => {
     const current = sessionRef.current;
-    if (!text || current.id !== session.id || current.startedAt !== startedAt) return;
+    if (!mounted.current || !text || current.id !== session.id || current.startedAt !== startedAt) return;
     window.canvasTTY.terminal.input(session.id, text);
     if (!text.startsWith("\u001b") && /[^\u0000-\u001f\u007f]/.test(text)) {
       window.dispatchEvent(new CustomEvent("canvastty:terminal-input", { detail: { sessionId: session.id } }));
@@ -151,10 +173,11 @@ function TerminalCardLoading({
       event.preventDefault();
       event.stopPropagation();
       const startedAt = sessionRef.current.startedAt;
+      const generation = inputGeneration.current;
       const acceptsPaste = (): boolean => mounted.current && sessionRef.current.id === session.id
-        && sessionRef.current.startedAt === startedAt;
+        && sessionRef.current.startedAt === startedAt && inputGeneration.current === generation;
       if (!acceptsPaste()) return;
-      onInputHoldChange(true);
+      const release = holdInput();
       void (event.metaKey ? window.canvasTTY.clipboard.hasImage() : Promise.resolve(false))
         .then(async (hasImage) => {
           if (!acceptsPaste()) return;
@@ -166,9 +189,7 @@ function TerminalCardLoading({
           if (text && acceptsPaste()) sendText(text, startedAt);
         })
         .catch(() => undefined)
-        .finally(() => {
-          if (mounted.current) onInputHoldChange(false);
-        });
+        .finally(release);
       return;
     }
 
@@ -182,12 +203,14 @@ function TerminalCardLoading({
   };
 
   const startComposition = (): void => {
+    if (composing.current || !mounted.current) return;
     composing.current = true;
     compositionSessionStartedAt.current = sessionRef.current.startedAt;
-    onInputHoldChange(true);
+    compositionRelease.current = holdInput();
   };
 
   const finishComposition = (event: React.CompositionEvent<HTMLTextAreaElement>): void => {
+    if (!composing.current) return;
     const field = event.currentTarget;
     const text = field.value || event.data;
     const startedAt = compositionSessionStartedAt.current;
@@ -195,7 +218,8 @@ function TerminalCardLoading({
     composing.current = false;
     compositionSessionStartedAt.current = null;
     if (startedAt !== null) sendText(text, startedAt);
-    onInputHoldChange(false);
+    compositionRelease.current?.();
+    compositionRelease.current = null;
 
     // Chromium can emit the committed input immediately after compositionend.
     // If it does, the textarea input handler must not send that commit twice.

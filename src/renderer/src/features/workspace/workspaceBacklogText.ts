@@ -8,7 +8,7 @@ export type BacklogTextKey =
   | "elapsed" | "gatherTask" | "workspaceTools" | "layout" | "layoutTree" | "layoutStatus" | "layoutProject"
   | "layoutGrid" | "undoLayout" | "broadcast" | "broadcastEnable" | "broadcastTargetCount" | "snapshot"
   | "exportSnapshot" | "importSnapshot" | "snapshotExported" | "confirmImport" | "importPreview" | "confirmBypass"
-  | "importComplete" | "presets" | "presetName" | "savePreset" | "presetSaved" | "openPreset"
+  | "importComplete" | "importSessionsComplete" | "presets" | "presetName" | "savePreset" | "presetSaved" | "openPreset"
   | "noPresets"
   | "contextPreview" | "contextPreviewDescription" | "contextFiles" | "contextOutsideWarning" | "contextAllowOutside"
   | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
@@ -47,6 +47,7 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   broadcast: ["Общий ввод", "Broadcast input"], broadcastEnable: ["Включить общий ввод", "Enable broadcast input"], broadcastTargetCount: ["Получатели: {count}", "Recipients: {count}"],
   snapshot: ["Снимок рабочего пространства", "Workspace snapshot"], exportSnapshot: ["Экспортировать снимок", "Export snapshot"], importSnapshot: ["Импортировать снимок", "Import snapshot"],
   snapshotExported: ["Снимок скачан.", "Snapshot downloaded."], confirmImport: ["Восстановить снимок", "Restore snapshot"], importPreview: ["Будут восстановлены карточки: {count}", "Cards to restore: {count}"],
+  importSessionsComplete: ["Импорт карточек и задач завершён. Настройки холста ещё не сохранены.", "Card and task import completed. Canvas settings have not been saved yet."],
   confirmBypass: ["Я подтверждаю запуск профилей Bypass.", "I confirm launching Bypass profiles."], importComplete: ["Импорт завершён.", "Import completed."],
   presets: ["Пресеты", "Presets"], presetName: ["Название пресета", "Preset name"], savePreset: ["Сохранить текущий холст", "Save current canvas"],
   presetSaved: ["Пресет сохранён.", "Preset saved."], openPreset: ["Открыть", "Open"], noPresets: ["Сохранённых пресетов нет.", "No saved presets."],

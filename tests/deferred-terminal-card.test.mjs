@@ -7,6 +7,10 @@ import { fire, installMiniDom, typeInto } from "./helpers/mini-dom.mjs";
 
 // react-dom detects the DOM when it is first evaluated, so the document must exist before the bundle loads.
 const { document, restore } = installMiniDom();
+const platformGlobals = new Map(["CompositionEvent", "requestAnimationFrame", "cancelAnimationFrame"].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+const compositionFrames = new Map(); let frameId = 0;
+Object.assign(globalThis, {CompositionEvent: class {}, requestAnimationFrame: callback => {compositionFrames.set(++frameId, callback);return frameId;}, cancelAnimationFrame: id => compositionFrames.delete(id)});
+after(() => {for (const [name,descriptor] of platformGlobals) {if(descriptor)Object.defineProperty(globalThis,name,descriptor);else delete globalThis[name];}});
 after(restore);
 
 // The terminal card's code (xterm) loads after the first frame. These tests mount the real deferred card with
@@ -29,14 +33,14 @@ const { outputFiles } = await build({
 });
 const { createComponentLoader, DeferredTerminalCard, useDeferredComponent } =
   await import(`data:text/javascript;base64,${Buffer.from(outputFiles[0].contents).toString("base64")}`);
-const { createElement: h, act } = await import("react");
+const { createElement: h, act, useState } = await import("react");
 const { createRoot } = await import("react-dom/client");
 
 const session = (id) => ({
   id, provider: "terminal", title: `Shell ${id}`, status: "running", startedAt: 1,
   position: { x: 0, y: 0 }, size: { width: 400, height: 300 }
 });
-const shortcuts = { terminalCopy: "Mod+C", terminalPaste: "Mod+V" };
+const shortcuts = { terminalCopy: "Meta+C", terminalPaste: "Meta+V" };
 
 /** What the real card does with input, without xterm: one field that sends what is typed to the PTY. */
 function stubCard(broken = new Set()) {
@@ -166,4 +170,53 @@ test("a terminal card that throws while drawing fails alone, and Retry mounts it
   await act(async () => { fire(failed[0].querySelector("button"), "click"); });
   assert.equal(container.querySelectorAll("article").length, 0);
   assert.deepEqual(container.querySelectorAll("[data-stub-card]").map((node) => node.getAttribute("data-stub-card")), ["a", "b"]);
+});
+
+
+function HeldWorkspace({loader,row,holds}) {
+ const card=useDeferredComponent(loader,true);const [held,setHeld]=useState(false);
+ return h(DeferredTerminalCard,{card,inputHeld:held,loading:{session:row,locale:"en",borderSkin:"default",shortcuts,stackIndex:1,fullscreen:false,
+  selected:true,groupSelected:false,focused:true,focusRevision:0,onRetry(){},onSelect(){},onInputHoldChange(active){holds.push(active);setHeld(active);}},
+  render:Card=>h(Card,{sessionId:row.id,focused:true})});
+}
+async function mountHeld(t) {
+ const loaded=deferred(),loader=createComponentLoader(()=>loaded.promise),reads=[],inputs=[],holds=[];
+ globalThis.canvasTTY={terminal:{input:(id,text)=>inputs.push([id,text])},window:{isMacOS:true},clipboard:{hasImage:async()=>false,readText:()=>{const next=deferred();reads.push(next);return next.promise;}}};
+ const container=document.createElement('div');document.body.appendChild(container);const root=createRoot(container);let row=session('held'),unmounted=false;
+ const render=()=>act(async()=>root.render(h(HeldWorkspace,{loader,row,holds})));
+ const unmount=async()=>{if(!unmounted){unmounted=true;await act(async()=>root.unmount());}};
+ t.after(async()=>{await unmount();container.parentNode?.removeChild(container);delete globalThis.canvasTTY;});await render();
+ const field=()=>container.querySelector('textarea');const shell=()=>container.querySelector('article.terminal-card--loading');
+ const paste=()=>act(async()=>{fire(field(),'keydown',{key:'v',code:'KeyV',metaKey:true,ctrlKey:false,shiftKey:false,altKey:false});});
+ const start=()=>act(async()=>{fire(field(),'compositionstart',{data:''});});
+ const finish=(text='IME text')=>act(async()=>{const node=field();node.value=text;fire(node,'compositionend',{data:text});});
+ return{container,loaded,reads,inputs,holds,field,shell,paste,start,finish,unmount,change:async patch=>{row={...row,...patch};await render();}};
+}
+for(const order of [[0,1],[1,0]])test(`loading shell holds both clipboard operations until final completion (${order})`,async t=>{
+ const f=await mountHeld(t);await f.paste();await f.paste();assert.equal(f.reads.length,2);
+ await act(async()=>f.loaded.resolve(stubCard()));assert.ok(f.shell());
+ await act(async()=>f.reads[order[0]].resolve(`paste ${order[0]}`));assert.ok(f.shell(),'first completion cannot unmount another paste');
+ assert.deepEqual(f.holds,[true]);await act(async()=>f.reads[order[1]].resolve(`paste ${order[1]}`));
+ assert.equal(f.shell(),null);assert.deepEqual(f.inputs,order.map(i=>['held',`paste ${i}`]));assert.deepEqual(f.holds,[true,false]);
+});
+for(const first of ['paste','composition'])test(`paste and IME own independent loading holds (${first} finishes first)`,async t=>{
+ const f=await mountHeld(t);await f.paste();await f.start();await f.start();await act(async()=>f.loaded.resolve(stubCard()));assert.ok(f.shell());
+ if(first==='paste')await act(async()=>f.reads[0].resolve('paste'));else{await f.finish();await f.finish();}
+ assert.ok(f.shell());assert.deepEqual(f.holds,[true]);
+ if(first==='paste')await f.finish();else await act(async()=>f.reads[0].resolve('paste'));
+ assert.equal(f.shell(),null);assert.deepEqual(f.holds,[true,false]);assert.deepEqual(f.inputs,first==='paste'?[['held','paste'],['held','IME text']]:[['held','IME text'],['held','paste']]);
+});
+test('rejected clipboard operation cannot release a second pending paste',async t=>{
+ const f=await mountHeld(t);await f.paste();await f.paste();await act(async()=>f.loaded.resolve(stubCard()));
+ await act(async()=>f.reads[0].reject(new Error('clipboard failed')));assert.ok(f.shell());assert.deepEqual(f.holds,[true]);
+ await act(async()=>f.reads[1].resolve('kept'));assert.equal(f.shell(),null);assert.deepEqual(f.inputs,[['held','kept']]);assert.deepEqual(f.holds,[true,false]);
+});
+for(const transition of ['restart','session roundtrip','unmount'])test(`pending input does not escape loading shell ${transition}`,async t=>{
+ const f=await mountHeld(t);await f.paste();await f.start();
+ if(transition==='unmount'){await f.unmount();await act(async()=>f.reads[0].resolve('stale'));assert.deepEqual(f.inputs,[]);assert.deepEqual(f.holds,[true,false]);return;}
+ if(transition==='restart')await f.change({startedAt:2});else{await f.change({id:'other'});await f.change({id:'held'});}
+ await f.finish('stale IME');await f.paste();assert.equal(f.reads.length,2);
+ await act(async()=>f.reads[0].resolve('stale'));assert.deepEqual(f.inputs,[]);assert.deepEqual(f.holds,[true,false,true]);
+ await act(async()=>f.loaded.resolve(stubCard()));assert.ok(f.shell());await act(async()=>f.reads[1].resolve('new paste'));
+ assert.equal(f.shell(),null);assert.deepEqual(f.inputs,[['held','new paste']]);assert.deepEqual(f.holds,[true,false,true,false]);
 });

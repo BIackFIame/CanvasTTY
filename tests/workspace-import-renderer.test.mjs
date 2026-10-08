@@ -32,8 +32,40 @@ for(const failure of [false,true])test(`actual workspace import applies confirme
  file.props.onChange({currentTarget:{files:[{text:async()=>JSON.stringify({format:'canvastty-workspace',version:1,sessions:[],canvas:importedCanvas})}],value:'file'}});
  await tick();render();const restore=findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot')[0];assert.ok(restore);restore.props.onClick();
  await tick();assert.ok(updateWork,"import reached settings persistence");await updateWork.catch(()=>{});await tick();render();assert.equal(imports,1);assert.equal(updates,1);
- if(failure){assert.equal(live,before);assert.match(JSON.stringify(tree),/settings write failed/);assert.ok(findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot').length);}
+ if(failure){assert.equal(live,before);assert.match(JSON.stringify(tree),/settings write failed/);assert.equal(findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot').length,0);assert.match(JSON.stringify(tree),/Card and task import completed/);}
  else {assert.deepEqual(live.canvasRegions,importedCanvas.canvasRegions);assert.deepEqual(live.stickyNotes,importedCanvas.stickyNotes);assert.deepEqual(live.browserCanvas,importedCanvas.browserCanvas);
   assert.equal(findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot').length,0);
   await persist({stickyNotes:live.stickyNotes.map(note=>({...note,text:'Later edit'}))});assert.equal(store.get().canvasRegions[0].title,'Imported lane');assert.equal(store.get().stickyNotes[0].text,'Later edit');}
+});
+
+function deferred(){let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return{promise,resolve,reject};}
+async function importFixture(t,importWorkspace,onPersistSettings){
+ const oldWindow=globalThis.window,oldDocument=globalThis.document;globalThis.document={body:{nodeType:1}};
+ globalThis.window={setTimeout,clearTimeout,canvasTTY:{backlog:{workspacePresets:async()=>[],previewImport:async()=>({warnings:[],count:1}),importWorkspace}}};
+ tools.__reset();t.after(()=>{tools.__unmount();globalThis.window=oldWindow;globalThis.document=oldDocument;});
+ const props={sessions:[],settings:{},locale:'en',broadcastEnabled:false,broadcastSending:false,broadcastTargetCount:0,onClose(){},onPersistSettings};
+ let tree;const render=()=>{tools.__flush();tree=tools.__render(tools.WorkspaceBacklogTools,props);};
+ const confirmation=()=>findAll(tree,node=>node.type==='button'&&node.props.children==='Restore snapshot')[0];
+ render();await tick();render();findAll(tree,node=>node.type==='input'&&node.props.type==='file')[0].props.onChange({currentTarget:{files:[{text:async()=>JSON.stringify({canvas:importedCanvas})}],value:'file'}});
+ await tick();render();return{render,confirmation,tree:()=>tree};
+}
+test('committed import cannot repeat during or after failed canvas persistence, even through a stale handler',async t=>{
+ const host=deferred(),settings=deferred();let imports=0,updates=0;
+ const f=await importFixture(t,()=>{imports++;return host.promise;},()=>{updates++;return settings.promise;});
+ const click=f.confirmation().props.onClick;click();click();assert.equal(imports,1,'same-tick double click has one owner');
+ host.resolve({warnings:['One unavailable card skipped'],sessions:[{id:'created'}]});await tick();f.render();
+ assert.equal(updates,1);assert.equal(f.confirmation(),undefined,'confirmation is consumed before settings settles');
+ const importFile=findAll(f.tree(),node=>node.type==='input'&&node.props.type==='file')[0];assert.equal(importFile.props.disabled,true,'loading stays held until deferred canvas persistence settles');
+ assert.match(JSON.stringify(f.tree()),/Card and task import completed/);click();await tick();f.render();assert.equal(imports,1);
+ assert.equal(findAll(f.tree(),node=>node.type==='input'&&node.props.type==='file')[0].props.disabled,true,'stale confirm cannot release loading');
+ settings.reject(new Error('canvas persistence failed'));await tick();f.render();
+ assert.match(JSON.stringify(f.tree()),/canvas persistence failed/);assert.match(JSON.stringify(f.tree()),/One unavailable card skipped/);
+ assert.equal(f.confirmation(),undefined);click();await tick();f.render();assert.equal(imports,1,'stale committed confirmation never recreates cards');assert.equal(updates,1);
+});
+test('host import rejection remains retryable and only successful host completion consumes confirmation',async t=>{
+ const first=deferred();let imports=0,updates=0;
+ const f=await importFixture(t,()=>{imports++;return imports===1?first.promise:Promise.resolve({warnings:[],sessions:[{id:'created'}]});},async()=>{updates++;});
+ f.confirmation().props.onClick();first.reject(new Error('host rejected before commit'));await tick();f.render();
+ assert.match(JSON.stringify(f.tree()),/host rejected before commit/);assert.ok(f.confirmation());assert.equal(updates,0);
+ f.confirmation().props.onClick();await tick();f.render();assert.equal(imports,2);assert.equal(updates,1);assert.equal(f.confirmation(),undefined);
 });
