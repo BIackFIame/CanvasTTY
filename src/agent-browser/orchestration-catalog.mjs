@@ -110,7 +110,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "retry_agent",
-    "Retry one failed or quiet subagent with its original prompt, launch profile, model and folder plus a short masked failure tail. CanvasTTY allows at most two retries per original agent.",
+    "Replace one failed or quiet subagent launch with a fresh conversation in the same card, stopping its previous process first. Retains task ownership, history, launch profile, model and folder; sends the original prompt plus a short masked failure tail. Only one retry may run at a time, with at most two successful retries per original agent. A failed retry keeps the stopped card for inspection; it cannot restore a stopped process.",
     { sessionId, reason: string({ maxLength: 500 }) },
     ["sessionId"]
   ),

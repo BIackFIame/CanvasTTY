@@ -73,7 +73,9 @@ test("a subagent whose CLI is killed by SIGKILL is failed (128+9) with the signa
   assert.equal(ended.exitCode, 137);
   assert.match(ended.failureDetails, /killed by signal SIGKILL \(9\)/u);
   const retried = await s.control.retry(child.id, "killed in the test");
-  assert.notEqual(retried.id, child.id);
+  assert.equal(retried.id, child.id, "retry preserves the existing card");
+  assert.notEqual(s.spawned.at(-1).pid, live.pid, "retry starts a fresh process");
+  assert.equal(retried.exitCode, null);
   assert.equal(retried.parentSessionId, s.orchestrator.id);
 });
 

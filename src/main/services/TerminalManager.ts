@@ -1219,25 +1219,123 @@ export class TerminalManager {
     return session ? snapshot(session) : null;
   }
 
-  restart(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
-    if(this.isCheckpointRestoreActive(id))throw new LaunchRefusal("Workspace checkpoint restoration is in progress.");
+  private readonly retryingLaunches = new Set<string>();
+  private readonly retryLaunchValidators = new Map<string, () => void>();
+
+  /** Replace the process, retaining this card's task ownership, environment and diagnostic scrollback. */
+  async retryAgentLaunch(id: string, prompt: string, validate: () => void, signal?: AbortSignal, beforeStop?: () => void): Promise<SessionMetadata> {
     const session = this.sessions.get(id);
-    if (!session) throw new Error("Terminal session does not exist.");
+    if (!session || session.metadata.role !== "subagent") throw new LaunchRefusal("Only an existing subagent can be retried.");
+    if (this.retryingLaunches.has(id)) throw new LaunchRefusal("A retry of this agent is already in progress.");
+    const ancestors: Array<{ session: ManagedSession; epoch: number }> = [];
+    const seen = new Set<string>([id]);
+    for (let parentId = session.metadata.parentSessionId; parentId;) {
+      if (seen.has(parentId)) throw new LaunchRefusal("The subagent's parent lineage is invalid.");
+      seen.add(parentId);
+      const parent = this.sessions.get(parentId);
+      if (!parent) throw new LaunchRefusal("The subagent's parent was closed.");
+      ancestors.push({ session: parent, epoch: parent.launchEpoch });
+      parentId = parent.metadata.parentSessionId;
+    }
+    let epoch = session.launchEpoch;
+    const current = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch;
+    const check = (): void => {
+      if (signal?.aborted) throw new DOMException("The retry was canceled.", "AbortError");
+      if (!current() || ancestors.some(({ session: parent, epoch: parentEpoch }) =>
+        this.sessions.get(parent.metadata.id) !== parent || parent.launchEpoch !== parentEpoch)) {
+        throw new LaunchRefusal("The agent or its parent was closed or restarted during retry.");
+      }
+      validate();
+      this.validateRestart(session);
+      assertDirectory(session.metadata.cwd);
+      if (session.metadata.provider === "terminal" || this.providerClis.get(session.metadata.provider).state !== "available") throw new LaunchRefusal("The agent CLI is unavailable.");
+    };
+    const previousFailure = session.metadata.failureDetails;
+    let replacementStarted = false;
+    this.retryingLaunches.add(id);
+    try {
+      check();
+      beforeStop?.();
+      // Never start a successor while the old PTY might still be alive. A timeout keeps its live slot occupied.
+      await this.stopRetryProcess(session);
+      check();
+      // restartSession advances the epoch synchronously before starting either launch path. Set the expected
+      // epoch first so synchronous spawn failures are ours to clean up, and contributed guards see it immediately.
+      epoch += 1;
+      replacementStarted = true;
+      this.retryLaunchValidators.set(id, check);
+      this.restartSession(id);
+      const delivery = await this.deliverInput(id, `${prompt}\r`, undefined, signal);
+      check();
+      if (!delivery.delivered) throw new LaunchRefusal(`The retry prompt was not delivered: ${delivery.reason}`);
+      return publicSessionMetadata(session);
+    } catch (error) {
+      if (replacementStarted && current()) {
+        // Stop only our replacement. Closing/restarting elsewhere must never let this cleanup kill a later launch.
+        try { await this.stopRetryProcess(session); }
+        catch (stopError) {
+          throw new LaunchRefusal(`Retry failed and its process could not be stopped: ${this.redactSecrets(String(stopError))}`);
+        }
+        if (current()) {
+          session.metadata.status = "failed";
+          session.metadata.exitCode = session.metadata.exitCode || 1;
+          session.metadata.failureDetails = this.redactSecrets([
+            previousFailure, "The previous process was stopped; it was not restored.",
+            `Retry failed: ${error instanceof Error ? error.message : String(error)}`
+          ].filter(Boolean).join("\n")).slice(0, 8_000);
+          this.emitSession(session.metadata);
+          this.schedulePersistence();
+        }
+      }
+      throw error;
+    } finally {
+      this.retryingLaunches.delete(id);
+      this.retryLaunchValidators.delete(id);
+    }
+  }
+
+  private async stopRetryProcess(session: ManagedSession): Promise<void> {
+    const process = session.process;
+    if (process) {
+      await this.stopSubagentPtyForRetry(session.metadata.id);
+    } else if (session.metadata.exitCode === null) {
+      // Fence asynchronous plugin preparation even when no PTY has been adopted yet.
+      session.launchToken += 1;
+      this.wakeLaunchWaiters(session);
+      session.metadata.exitCode = 1;
+      session.metadata.status = "failed";
+      session.metadata.failureDetails = session.metadata.failureDetails ?? "The pending launch was stopped before retry completed.";
+      void this.cleanupLaunchFiles(session).catch(() => undefined);
+      this.emitSession(session.metadata);
+      this.schedulePersistence();
+    }
+  }
+
+  private validateRestart(session: ManagedSession): void {
     if (session.reviewWorkspace) throw new LaunchRefusal("A diff-only reviewer session cannot be restarted; request a new isolated review instead.");
-    if(this.isSessionBudgetPaused(session))throw new LaunchRefusal("This task's usage budget is paused. Clear or raise the task budget before restarting it.");
-    if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
+    if (this.isSessionBudgetPaused(session)) throw new LaunchRefusal("This task's usage budget is paused. Clear or raise the task budget before restarting it.");
+    if(this.isCheckpointRestoreActive(session.metadata.id))throw new LaunchRefusal("Workspace checkpoint restoration is in progress.");
     this.assertCheckpointLaunchAllowed(session.metadata.cwd,Boolean(session.extras.environment || session.extras.environmentChoice || session.extras.options));
     const environment = session.extras.environment;
     if (environment && !this.environmentUsable(environment)) {
-      // Never run a placed session locally instead of where it belongs.
       throw new Error(`This card runs in ${environment.label} from plugin ${environment.pluginId}, which is not available. It was not started locally.`);
     }
-    const pendingChoice = session.extras.environment ? undefined : session.extras.environmentChoice;
-    if (pendingChoice && !this.environments?.available(pendingChoice)) {
-      throw new Error(`${this.pendingEnvironmentReason(pendingChoice)} It was not started locally.`);
-    }
+    const pendingChoice = environment ? undefined : session.extras.environmentChoice;
+    if (pendingChoice && !this.environments?.available(pendingChoice)) throw new Error(`${this.pendingEnvironmentReason(pendingChoice)} It was not started locally.`);
     const missingPlugins = this.unavailableLaunchPlugins(session.extras.options);
     if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
+  }
+
+  restart(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
+    if (this.retryingLaunches.has(id)) throw new LaunchRefusal("A retry of this agent is already in progress.");
+    return this.restartSession(id, options);
+  }
+
+  private restartSession(id: string, options: { resume?: boolean } = {}): SessionSnapshot {
+    const session = this.sessions.get(id);
+    if (!session) throw new Error("Terminal session does not exist.");
+    this.validateRestart(session);
+    if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
     delete session.extras.heldState;
     delete session.metadata.restoreNote;
     this.reviewDiffTracker.forget(id);
@@ -2807,6 +2905,7 @@ export class TerminalManager {
       let process: IPty;
       try {
         this.assertCheckpointLaunchAllowed(spawn.cwd);
+        this.retryLaunchValidators.get(id)?.();
         this.reviewDiffTracker.beforeSpawn(id, spawn.cwd, session.captureReviewDiff === true, this.reviewParentDirectory(metadata.parentSessionId));
         process = this.spawnPty(spawn.command, spawn.args, {
           name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
