@@ -72,8 +72,11 @@ test("generated Kimi/Hermes core completion commands deliver real envelopes thro
    const env=baseEnvironment({[AGENT_RUNTIME_ENV.address]:capability.address,[AGENT_RUNTIME_ENV.terminalSessionId]:capability.terminalSessionId,[AGENT_RUNTIME_ENV.provider]:provider,[AGENT_RUNTIME_ENV.capabilityToken]:capability.capabilityToken});
    const run=async(event,input)=>{
     const configured=commandFrom(config,provider,event);
-    const shell=process.platform==="win32"?[process.env.ComSpec??"cmd.exe","/d","/s","/c",configured]:["/bin/sh","-c",configured];
-    const result=await runOnce(shell,{env,input:JSON.stringify(input)});assert.equal(result.code,0);assert.equal(result.stdout,"");
+    // Let Node wrap cmd.exe's /s /c command and preserve its quotes verbatim on Windows.
+    // Passing that shell manually through ordinary argv escaping corrupts quoted executable paths.
+    const result=await runOnce([configured],{env,input:JSON.stringify(input),shell:true});
+    assert.equal(result.code,0,`${implementation.name} ${provider} ${event}: ${result.stderr}`);
+    assert.equal(result.stdout,"");
    };
    await run(provider==="kimi"?"TurnStarted":"pre_llm_call",{session_id,...(provider==="hermes"?{extra:{turn_id:"turn-1"}}:{})});
    for(const entry of cases.filter(row=>row.provider===provider)){
