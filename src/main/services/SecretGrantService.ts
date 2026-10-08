@@ -457,7 +457,10 @@ export class SecretGrantService {
   private capOutput(value: string): string {
     const bytes = Buffer.from(value, "utf8");
     if (bytes.byteLength <= MAX_OUTPUT_BYTES) return value;
-    return `…${bytes.subarray(bytes.byteLength - MAX_OUTPUT_BYTES + 3).toString("utf8")}`;
+    let start = bytes.byteLength - MAX_OUTPUT_BYTES + 3;
+    // The ellipsis uses three bytes; skip any partial leading code point in the retained UTF-8 tail.
+    while ((bytes[start]! & 0xc0) === 0x80) start += 1;
+    return `…${bytes.subarray(start).toString("utf8")}`;
   }
 
   private now(): number { return this.options.now?.() ?? Date.now(); }

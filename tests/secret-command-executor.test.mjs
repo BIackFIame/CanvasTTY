@@ -116,13 +116,17 @@ test("malformed UTF-8 replacement expansion remains within the decoded response 
 
 test("actual secret executor accepts fixed-worker bounded UTF-8 and malformed stream results", async () => {
   for (const suffix of [Buffer.from("é"), Buffer.from("€"), Buffer.from("🌍"), Buffer.alloc(responseLimit, 0xff)]) {
-    const bytes = suffix[0] === 0xff ? suffix : Buffer.concat([Buffer.alloc(responseLimit - 1, 0x61), suffix]);
+    const bytesExpression = suffix[0] === 0xff ? `Buffer.alloc(${responseLimit}, 0xff)`
+      : `Buffer.concat([Buffer.alloc(${responseLimit - 1}, 0x61), Buffer.from(${JSON.stringify([...suffix])})])`;
     const script = `globalThis.fetch = async () => {
-      const bytes = Buffer.from(${JSON.stringify(bytes.toString("base64"))}, "base64");
+      const bytes = ${bytesExpression};
       return new Response(new ReadableStream({ start(controller) {
         controller.enqueue(bytes.subarray(0, 32767)); controller.enqueue(bytes.subarray(32767)); controller.close();
       } }));
     }; ${SECRET_API_REQUEST_WORKER_SOURCE}`;
+    // Keep ample room below Windows' 32,767 UTF-16 command-line limit, including quoting and executable path.
+    assert.ok(JSON.stringify([process.execPath, "-e", script]).length < 16_000, "fixture command must fit Windows process creation limits");
+    assert.equal(script.includes(fixtureSecret), false, "the synthetic secret still travels only on stdin");
     const executor = secretApiRequestExecutor({ containment: () => true,
       // Only fetch is replaced; the actual bundled worker and executor result validation run unchanged.
       wrap: request => ({ ...request, args: ["-e", script], cleanup() {} }) });

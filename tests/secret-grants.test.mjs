@@ -400,6 +400,42 @@ test("masked output is capped after redaction and revocation aborts an active AP
   assert.equal(output.body.includes(secret), false);
 });
 
+test("service retains complete UTF-8 tails within 16 KiB including the ellipsis", async () => {
+  const cap = 16 * 1024;
+  for (const character of ["é", "€", "🌍"]) {
+    const width = Buffer.byteLength(character);
+    for (let padding = 0; padding < width; padding += 1) {
+      const tail = `${"z".repeat(padding)}tail`;
+      const body = character.repeat(Math.ceil(20_000 / width)) + tail;
+      const { service } = setup({ execute: async () => ({ status: 200, body, truncated: false }) });
+      service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Bound Unicode tail.").id, "session");
+      const result = await service.runSecretRequest("session-a", secretApiInput);
+      const expected = `…${character.repeat(Math.floor((cap - 3 - tail.length) / width))}${tail}`;
+      assert.equal(result.body === expected, true, `${width}-byte character, padding ${padding}`);
+      assert.ok(Buffer.byteLength(result.body) <= cap);
+      assert.equal(result.body.includes("�"), false); assert.equal(result.truncated, true);
+    }
+    const exact = `${"a".repeat(cap % width)}${character.repeat(Math.floor(cap / width))}`;
+    for (const truncated of [false, true]) {
+      const { service } = setup({ execute: async () => ({ status: 200, body: exact, truncated }) });
+      service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Exact Unicode limit.").id, "session");
+      assert.deepEqual(await service.runSecretRequest("session-a", secretApiInput), { status: 200, body: exact, truncated });
+    }
+  }
+});
+
+test("service measures the redacted output before applying its UTF-8 tail limit", async () => {
+  const cap = 16 * 1024, masked = "[masked]", secret = "unit-test-secret-7342";
+  const body = "é".repeat((cap - Buffer.byteLength(masked)) / 2) + secret;
+  const { service } = setup({ execute: async () => ({ status: 200, body, truncated: false }) });
+  service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Mask before measuring.").id, "session");
+  const result = await service.runSecretRequest("session-a", secretApiInput);
+  assert.equal(result.body, body.replace(secret, masked));
+  assert.equal(Buffer.byteLength(result.body), cap);
+  assert.equal(result.truncated, false, "redaction shrinks an over-cap raw response to an exact-cap result");
+  assert.equal(result.body.includes(secret), false);
+});
+
 test("orchestration exposes secret request/run tools to agents but not read-only reviewers", async (t) => {
   const calls = [];
   const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, fakeSpawner(calls));
