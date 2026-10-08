@@ -410,14 +410,14 @@ test('worktree retry reinstalls one observer and automatically reviews each retr
 
 for(const failure of ['restart','cancel before restart','delivery'])test(`worktree retry restores review ownership after ${failure} failure without a premature watcher`,{timeout:5000},async t=>{
  const f=await fixture(t,{worktree:true}),id=f.worker.id;f.terminals.sessions.get(id).process.emitExit(1);
- const restart=f.terminals.restart.bind(f.terminals),stop=f.terminals.stopSubagentPtyForRetry.bind(f.terminals),deliver=f.terminals.deliverInput.bind(f.terminals),controller=new AbortController();
- if(failure==='restart')f.terminals.restart=()=>{throw new Error('fixture restart failed');};
- if(failure==='cancel before restart')f.terminals.stopSubagentPtyForRetry=async(...args)=>{await stop(...args);controller.abort();};
+ const restart=f.terminals.restartSession.bind(f.terminals),stop=f.terminals.stopRetryProcess.bind(f.terminals),deliver=f.terminals.deliverInput.bind(f.terminals),controller=new AbortController();
+ if(failure==='restart')f.terminals.restartSession=()=>{throw new Error('fixture restart failed');};
+ if(failure==='cancel before restart')f.terminals.stopRetryProcess=async(...args)=>{await stop(...args);controller.abort();};
  if(failure==='delivery')f.terminals.deliverInput=async()=>({delivered:false,reason:'fixture no write'});
  await assert.rejects(f.control.retry(id,undefined,controller.signal));
  assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);assert.equal(f.control.reviewWatchers.has(id),false);assert.equal(f.prompts.length,0);
- f.terminals.restart=restart;f.terminals.stopSubagentPtyForRetry=stop;f.terminals.deliverInput=deliver;
- if(failure==='delivery')f.terminals.sessions.get(id).process.emitExit(1);
+ f.terminals.restartSession=restart;f.terminals.stopRetryProcess=stop;f.terminals.deliverInput=deliver;
+ assert.equal(f.terminals.getMetadata(id).exitCode !== null,true,'failed retry retains a stopped card');
  await f.control.retry(id);assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);
  f.finish(id,'recovered answer');await until(()=>f.prompts.length===1);
  f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
