@@ -11,7 +11,7 @@ export type BacklogTextKey =
   | "importComplete" | "importSessionsComplete" | "presets" | "presetName" | "savePreset" | "presetSaved" | "openPreset"
   | "noPresets"
   | "contextPreview" | "contextPreviewDescription" | "contextFiles" | "contextOutsideWarning" | "contextAllowOutside"
-  | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
+  | "contextTooLong" | "contextTruncated" | "contextEditablePreview" | "contextConfirmSend" | "searchOutput" | "outputLine"
   | "broadcastPlaceholder" | "broadcastSend" | "broadcastFailed" | "contextFailed"
   | "historicalOutput" | "historicalOutputContext" | "historicalOutputLoading" | "outputHistoryPruned"
   | "tabTasks" | "tabBudget" | "taskBoard" | "taskTitle" | "taskDescription" | "taskDependencies" | "taskOwner"
@@ -59,6 +59,7 @@ const text: Record<BacklogTextKey, readonly [string, string]> = {
   broadcastPlaceholder: ["Команда для выбранных карточек…", "Prompt for selected cards…"],
   broadcastFailed: ["Не удалось отправить сообщение всем выбранным карточкам.", "Could not deliver the message to every selected card."],
   broadcastSend: ["Отправить всем", "Send to all"], contextFailed: ["Не удалось подготовить предпросмотр. Ничего не отправлено.", "Could not prepare the preview. Nothing was sent."],
+  contextTooLong: ["Сократите текст до {limit} символов перед отправкой.", "Shorten the text to {limit} characters before sending."],
   historicalOutput: ["Исторический вывод терминала", "Historical terminal output"],
   historicalOutputContext: ["Показан маскированный контекст найденной строки.", "This masked excerpt shows the matched historical line."],
   historicalOutputLoading: ["Загружаем найденную строку…", "Loading the matched line…"],

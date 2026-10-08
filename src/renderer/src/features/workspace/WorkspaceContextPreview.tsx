@@ -2,7 +2,7 @@ import { useRef, useState } from "react";
 import type { LocaleId } from "../../../../shared/contracts";
 import { t } from "../../lib/i18n";
 import { backlogText } from "./workspaceBacklogText";
-import type { WorkspaceContextPreview as Preview } from "./workspaceContextDrop";
+import { MAX_CONTEXT_PREVIEW_CHARS, type WorkspaceContextPreview as Preview } from "./workspaceContextDrop";
 import { useDialogFocus } from "./useDialogFocus";
 import { findSessionCard } from "./workspaceDom";
 
@@ -19,13 +19,14 @@ export function WorkspaceContextPreview({ preview, locale, onConfirm, onCancel }
   const [allowOutside, setAllowOutside] = useState(false);
   const [sending, setSending] = useState(false);
   const confirming = useRef(false);
+  const overLimit = text.length > MAX_CONTEXT_PREVIEW_CHARS;
   const dialogRef = useRef<HTMLElement>(null);
   useDialogFocus(dialogRef, {
     onEscape: () => { if (!confirming.current) onCancel(); },
     fallbackFocus: () => findSessionCard(preview.sessionId)
   });
   const confirm = async (): Promise<void> => {
-    if (!text.trim() || (outsideApprovalRequired && !allowOutside)) return;
+    if (overLimit || !text.trim() || (outsideApprovalRequired && !allowOutside)) return;
     if (confirming.current) return;
     confirming.current = true;
     setSending(true);
@@ -58,12 +59,13 @@ export function WorkspaceContextPreview({ preview, locale, onConfirm, onCancel }
         {preview.truncated && <p className="workspace-context-preview__notice">{bt("contextTruncated")}</p>}
         <label className="workspace-context-preview__editor">
           <span>{bt("contextEditablePreview")}</span>
-          <textarea value={text} disabled={sending} onChange={(event) => setText(event.currentTarget.value)} rows={12} />
+          <textarea value={text} disabled={sending} maxLength={MAX_CONTEXT_PREVIEW_CHARS} aria-invalid={overLimit} onChange={(event) => setText(event.currentTarget.value)} rows={12} />
         </label>
+        {overLimit && <p role="alert">{bt("contextTooLong").replace("{limit}", String(MAX_CONTEXT_PREVIEW_CHARS))}</p>}
         <footer>
           <button type="button" disabled={sending} onClick={cancel}>{t(locale, "cancel")}</button>
           <button className="workspace-context-preview__send" type="button"
-            disabled={sending || !text.trim() || (outsideApprovalRequired && !allowOutside)} onClick={() => void confirm()}>
+            disabled={sending || overLimit || !text.trim() || (outsideApprovalRequired && !allowOutside)} onClick={() => void confirm()}>
             {sending ? t(locale, "loading") : bt("contextConfirmSend")}
           </button>
         </footer>

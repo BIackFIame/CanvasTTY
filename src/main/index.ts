@@ -1173,7 +1173,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   markMainBoot("coreServicesReady");
   const workspace = new WorkspaceArchive(userDataPath,{
-    descriptors: () => terminalSessionStore.get(),
+    descriptors: () => managedTerminals.archiveDescriptors(),
     create: request => managedTerminals.create(request), setBounds: (id,bounds) => managedTerminals.setBounds(id,bounds),
     available: provider => provider === "terminal" || providerCliAvailability(providerClis!)[provider as AgentProviderId] === true,
     bypassAcknowledged: provider => settings.get().acknowledgedDangerousProfiles.includes(provider as AgentProviderId),

@@ -1493,22 +1493,24 @@ export class TerminalManager {
     for (const wake of [...session.launchWaiters]) wake();
   }
 
-  /** Clipboard paste follows the current PTY mode; stale renderer reads cannot reach a restarted process. */
-  pasteClipboard(id: string, text: string, startedAt: number): void {
+  /** Paste follows the current PTY mode; only host callers can request a separate submission suffix. */
+  pasteClipboard(id: string, text: string, startedAt: number, options: { submit?: boolean } = {}): void {
     const session = this.sessions.get(id);
     if (typeof text !== "string" || !text || !Number.isFinite(startedAt) || !session
       || session.metadata.startedAt !== startedAt || !session.pasteMode
-      || !this.inputChecked(id, session.pasteMode.paste(text))) {
+      || !this.inputChecked(id, session.pasteMode.paste(text)
+        + (options.submit ? "\r" : ""), { expectedStartedAt: startedAt })) {
       throw new Error("Clipboard paste could not be delivered to the current terminal.");
     }
   }
 
-  inputChecked(id: string, data: string, internal: { acknowledgementRetry?: boolean } = {}): boolean {
+  inputChecked(id: string, data: string, internal: { acknowledgementRetry?: boolean; expectedStartedAt?: number } = {}): boolean {
     if(this.isCheckpointRestoreActive(id))return false;
     if (data !== "\x03") { try { this.inputGate?.(id); } catch { return false; } }
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
-    if (!session || session.metadata.exitCode !== null || !session.process) return false;
+    if (!session || session.metadata.exitCode !== null || !session.process
+      || (internal.expectedStartedAt !== undefined && session.metadata.startedAt !== internal.expectedStartedAt)) return false;
     if(data!=="\x03" && this.isSessionBudgetPaused(session))return false;
     const process = session.process;
     const mark = session.turnStarts ?? 0;
@@ -2141,13 +2143,18 @@ export class TerminalManager {
     this.schedulePersistence();
   }
 
+  /** Current host-owned card descriptors, independent of restart persistence and excluding temporary reviewers. */
+  archiveDescriptors(): PersistedTerminalSession[] {
+    return [...this.sessions.values()].filter(session => !session.reviewWorkspace)
+      .map(session => persistedTerminalSession(session.metadata, session.threadId, session.extras));
+  }
+
   private persistSessions(): Promise<void> {
     if (this.sessionRestoreMode === "off" || this.suppressPersistence || !this.sessionStore) {
       return Promise.resolve();
     }
     return this.sessionStore.replace(
-      [...this.sessions.values()].filter((session) => !session.reviewWorkspace)
-        .map((session) => persistedTerminalSession(session.metadata, session.threadId, session.extras))
+      this.archiveDescriptors()
     );
   }
 

@@ -9,7 +9,7 @@ test('broadcast rechecks live status in the host and submits one ordered write p
   const webContents={mainFrame:{}};
   registerBacklogIpc({handle:(name,fn)=>handlers.set(name,fn)},{board:{subscribe:()=>()=>{}},getMainWindow:()=>({webContents}),terminals:{
     getMetadata:id=>rows.get(id),redactSecrets:text=>text.replaceAll('sensitive-example','[redacted]'),
-    inputChecked:(id,data)=>{if(id==='paused')throw Error('budget');writes.push({id,data});return true;}
+    pasteClipboard:(id,text,startedAt,options)=>{if(id==='paused')throw Error('budget');assert.equal(options.submit,true);writes.push({id,data:`\x1b[200~${text}\x1b[201~\r`});}
   }});
   const invoke=handlers.get(BACKLOG_IPC.broadcast),event={sender:webContents,senderFrame:webContents.mainFrame};
   const result=invoke(event,['one','approval','paused','closed','one'],'literal sensitive-example\x1b[201~');

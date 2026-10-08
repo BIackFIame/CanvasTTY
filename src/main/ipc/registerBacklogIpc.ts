@@ -55,7 +55,7 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     for(const id of new Set<string>(ids)){
       const row=terminals.getMetadata(id);
       if(!row || row.exitCode!==null || row.status!=="idle" && row.status!=="working"){skipped.push(id);continue;}
-      try{if(terminals.inputChecked(id,`\x1b[200~${data}\x1b[201~\r`))delivered.push(id);else skipped.push(id);}catch{skipped.push(id);}
+      try{terminals.pasteClipboard(id,data,row.startedAt,{submit:true});delivered.push(id);}catch{skipped.push(id);}
     }
     return {delivered,skipped};
   });
@@ -206,8 +206,9 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   });
   handle(BACKLOG_IPC.exportWorkspace, async () => {
     const value=JSON.parse(workspace.export()),roots=new Map<string,{id:string;cwd:string;startedAt:number}>();
-    const rows=terminals.listMetadata(),rootCards=new Map(rows.filter(row=>!row.parentSessionId).map(row=>[row.taskScope?.id ?? row.id,row.id]));
-    for(const row of rows){const task=root(row.id);roots.set(task.id,task);}
+    const exportedIds=new Set<string>(value.sessions.map((row:{id:string})=>row.id));
+    const rows=terminals.listMetadata().filter(row=>exportedIds.has(row.id)),rootCards=new Map(rows.filter(row=>!row.parentSessionId).map(row=>[row.taskScope?.id ?? row.id,row.id]));
+    for(const row of rows){const task=root(row.id);roots.set(task.id,task);if(!rootCards.has(task.id))rootCards.set(task.id,row.id);}
     value.tasks=await Promise.all([...roots.values()].map(async task=>({rootSessionId:rootCards.get(task.id) ?? task.id,tasks:(await deps.board.listTasks(task.cwd,task.id)).tasks})));
     return JSON.stringify(masked(value),null,2);
   });
@@ -238,9 +239,9 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
     return {text:terminals.redactSecrets(terminalFileDropText(canonical,process.platform)),paths:canonical,outsideProject};
   });
   handle(BACKLOG_TERMINAL_IPC.paste, (id: string, text: unknown) => {
-    session(id); if (typeof text !== "string" || text.length > 16_000) throw new Error("Context paste is limited to 16,000 characters.");
+    const startedAt=session(id).startedAt; if (typeof text !== "string" || text.length > 16_000) throw new Error("Context paste is limited to 16,000 characters.");
     const clean=terminals.redactSecrets(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g,"");
-    if (!terminals.inputChecked(id,`\x1b[200~${clean}\x1b[201~`)) throw new Error("The card cannot accept input right now.");
+    terminals.pasteClipboard(id,clean,startedAt);
   });
   handle(BACKLOG_TERMINAL_IPC.searchOutput, async (query: unknown, requested?: unknown) => {
     if (typeof query !== "string" || query.length > 200 || !query.trim()) return {matches:[],prunedSessionIds:[]};
