@@ -42,6 +42,32 @@ test("turn secret authority requires this launch's installed completion transpor
  assert.throws(()=>f.service.approve(pending.id,"turn"),/unavailable/u);
 });
 
+test("accepted production idle keeps asynchronous human approval available only for longer scopes", async t => {
+ const signalStart=source.indexOf("      onSignal: (terminalSessionId, signal)");
+ const signalCode=(await transform("result={"+source.slice(signalStart,source.indexOf("      onAnswerCaptureRevoked:",signalStart))+"};",{loader:"ts",format:"cjs"})).code;
+ for(const duration of ["10m","session"]){
+  let reads=0;
+  const f=await setup(t,{getSecret:async()=>{reads+=1;return "fake-grant-value";}});
+  f.working();const pending=f.request();assert.equal(pending.turnAvailable,true);
+  const sandbox={result:null,console,terminalManager:f.terminals,secretGrants:f.service,checkpointTurns:new Map(),
+   timeline:{append:async()=>{}},agentControl:null};
+  runInNewContext(signalCode,sandbox);
+  sandbox.result.onSignal(f.row.id,{state:"idle",event:"Stop"});
+  assert.equal(f.terminals.getMetadata(f.row.id).status,"idle","the production handler accepted completion");
+  assert.deepEqual(f.service.pending(),[{...pending,turnAvailable:false}]);
+  await assert.rejects(f.service.runSecretRequest(f.row.id,api),/Human approval is required/u);
+  assert.equal(reads,0,"neither request nor idle nor an unapproved run reads the secret");
+  assert.throws(()=>f.service.approve(pending.id,"turn"),/unavailable/u);
+  if(duration==="session"){
+   f.working(2);
+   assert.throws(()=>f.service.approve(pending.id,"turn"),/unavailable/u,"a later active turn cannot be borrowed");
+  }
+  f.service.approve(pending.id,duration);
+  await f.service.runSecretRequest(f.row.id,api);
+  assert.equal(reads,1);assert.equal(f.runs.length,1);assert.equal(f.service.listGrants()[0].duration,duration);
+ }
+});
+
 test("real guarded input preserves typing/approval/control replies but new prompt invalidates turn grants",async t=>{
  const f=await setup(t);f.working();const request=f.request();assert.equal(request.turnAvailable,true);
  assert.equal("turnIdentity" in request,false);f.service.approve(request.id,"turn");

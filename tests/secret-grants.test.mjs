@@ -144,6 +144,44 @@ test("grant expiry is checked for every run and turn/session end revoke the righ
   assert.equal(service.listGrants().length, 0);
 });
 
+test("completed-turn pending requests retain their original TTL and lose turn authority permanently", () => {
+  const { service, setNow, events } = setup({
+    getSession: () => ({ provider: "codex", cwd: "/project", profile: "normal", active: true })
+  });
+  const ended = service.requestSecret("session-a", "OPENAI_API_KEY", "Await human approval.");
+  const other = service.requestSecret("session-b", "OPENAI_API_KEY", "Independent request.");
+  setNow(ended.expiresAt - 1);
+  service.turnEnded("session-a");
+  const remaining = service.pending(["session-a"])[0];
+  assert.deepEqual(remaining, { ...ended, turnAvailable: false });
+  assert.deepEqual(service.pending(["session-b"]), [other], "another session retains its turn option");
+  assert.throws(() => service.approve(ended.id, "turn"), /unavailable/u, "even the same reported identity cannot revive an ended request");
+  const duplicate = service.requestSecret("session-a", "OPENAI_API_KEY", "Retry the request.");
+  assert.deepEqual(duplicate, remaining, "duplicate requests do not refresh TTL or capture a new turn");
+  service.turnEnded("session-a");
+  assert.deepEqual(service.pending(["session-a"]), [remaining], "repeated idle signals do not refresh TTL");
+  assert.equal(events.some(([type, event]) => type === "decision" && event.request.id === ended.id), false,
+    "ending the turn is not a human denial or request revocation");
+  setNow(ended.expiresAt);
+  assert.deepEqual(service.pending(), []);
+  assert.throws(() => service.approve(ended.id, "10m"), /expired/u);
+  assert.ok(events.some(([type, event]) => type === "decision" && event.request.id === ended.id && event.decision === "expired"));
+});
+
+test("pending requests retained after a turn can still be denied or cleared when the session closes", () => {
+  const { service } = setup();
+  const denied = service.requestSecret("session-a", "OPENAI_API_KEY", "Await a decision.");
+  service.turnEnded("session-a");
+  service.deny(denied.id);
+  assert.deepEqual(service.pending(), []);
+  assert.throws(() => service.approve(denied.id, "session"), /expired/u);
+  const closed = service.requestSecret("session-a", "OPENAI_API_KEY", "Wait until card closes.");
+  service.turnEnded("session-a");
+  service.sessionEnded("session-a");
+  assert.deepEqual(service.pending(), []);
+  assert.throws(() => service.approve(closed.id, "session"), /expired/u);
+});
+
 test("request expiry, denial, invalid API requests, and missing isolation fail closed", async () => {
   const { service, setNow } = setup({ execute: undefined });
   const expired = service.requestSecret("session-a", "OPENAI_API_KEY", "One-off request.");

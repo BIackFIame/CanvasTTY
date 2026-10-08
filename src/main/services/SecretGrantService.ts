@@ -209,7 +209,11 @@ export class SecretGrantService {
       if (grant.sessionId === sessionId && grant.duration === "turn") this.removeGrant(grant, "turn-ended");
     }
     this.abortRuns(sessionId);
-    this.clearPending(sessionId);
+    // Human approval may arrive after the reply ends. Keep its original TTL and longer scopes,
+    // but never let this pending request borrow the ended turn or any later turn.
+    for (const request of this.pendingRequests.values()) {
+      if (request.sessionId === sessionId) request.turnIdentity = null;
+    }
   }
 
   /** Revoke promptly on launch/input/hook changes; longer grants retain their established lifetime. */
