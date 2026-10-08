@@ -54,6 +54,8 @@ import { attachTerminalOutput, createTerminalDeliveryGate } from "./terminalOutp
 import { surfaceIsLive, surfaceLifecycle, type SurfaceGate } from "../workspace/surfaceLifecycle";
 import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput } from "./terminalPinnedInput";
 import { terminalLinkTarget } from "./terminalLinkTarget";
+import { terminalFileLinkProvider } from "./terminalFileLinks";
+import { parseTerminalFileLink } from "../../../../shared/terminalFileLink";
 import {
   constrainResize,
   snapMove,
@@ -427,6 +429,14 @@ function TerminalCardView({
     const host = terminalHost.current;
     if (!host) return;
 
+    const openFile = (event: MouseEvent, reference: string): void => {
+      event.preventDefault();
+      event.stopPropagation();
+      void window.canvasTTY.terminal.openFile(session.id, reference).catch((error: unknown) => {
+        setActionToast({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+      });
+    };
+
     const terminal = new Terminal({
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
@@ -451,7 +461,12 @@ function TerminalCardView({
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
       linkHandler: {
+        allowNonHttpProtocols: true,
         activate: (event, uri, range) => {
+          if (parseTerminalFileLink(uri)) {
+            openFile(event, uri);
+            return;
+          }
           event.preventDefault();
           event.stopPropagation();
           onOpenUrlRef.current(terminalLinkTarget(uri, range, terminal.buffer.active, terminal.cols));
@@ -469,6 +484,7 @@ function TerminalCardView({
     terminal.loadAddon(searchAddon);
     searchAddonRef.current = searchAddon;
     terminal.loadAddon(webLinksAddon);
+    const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
@@ -743,6 +759,7 @@ function TerminalCardView({
       pinnedInput.remove();
       titleChange.dispose();
       searchResults.dispose();
+      fileLinks.dispose();
       searchAddonRef.current = null;
       resize.dispose();
       if (terminalRef.current === terminal) terminalRef.current = null;

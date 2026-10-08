@@ -84,6 +84,7 @@ export function AgentLaunchDialog({
   const changeLaunchOptions = useCallback((options: Record<string, PluginLaunchValues>) => setLaunchOptions(options), []);
   const [environment, setEnvironment] = useState<SessionEnvironmentChoice | null>(null);
   const [flowId, setFlowId] = useState("");
+  const [flowTask, setFlowTask] = useState("");
   const [flows, setFlows] = useState<Array<Awaited<ReturnType<ReturnType<typeof backlogApi>["flows"]>>["templates"][number]>>([]);
   const [flowErrors, setFlowErrors] = useState<Array<{ file: string; line: number; message: string }>>([]);
   const [flowLoading, setFlowLoading] = useState(false);
@@ -98,6 +99,7 @@ export function AgentLaunchDialog({
     setProfile(initialProfile(provider, settings, platform));
     setRole("agent");
     setFlowId("");
+    setFlowTask("");
     setFlows([]);
     setFlowErrors([]);
     setCwd(settings.lastDirectory);
@@ -200,6 +202,10 @@ export function AgentLaunchDialog({
 
   const submit = async (): Promise<void> => {
     if (endpointMissing) return;
+    if (flowId && !flowTask.trim()) {
+      setError(locale === "ru" ? "Опишите задачу для рабочего процесса." : "Describe the task for this workflow.");
+      return;
+    }
     if (profile === "yolo" && !acknowledged && !confirmDanger) {
       setConfirmDanger(true);
       return;
@@ -210,7 +216,7 @@ export function AgentLaunchDialog({
     try {
       if (profile === "yolo" && !acknowledged && !isTerminal) await onAcknowledge(provider);
       const initialPrompt = flowId
-        ? await backlog.redactText(await backlog.flowInstructions(cwd, flowId))
+        ? await backlog.redactText((await backlog.flowInstructions(cwd, flowId)).split("{{TASK}}").join(flowTask))
         : undefined;
       await onLaunch(provider, profile, cwd, flowId ? "orchestrator" : role, Object.keys(launchOptions).length > 0 ? launchOptions : undefined,
         environment ?? undefined, initialPrompt);
@@ -270,6 +276,12 @@ export function AgentLaunchDialog({
             <button type="button" disabled={flowLoading} onClick={() => setFlowRefresh((value) => value + 1)}
               aria-label={locale === "ru" ? "Обновить шаблоны" : "Refresh templates"}>↻</button>
           </div>
+          {flowId && <>
+            <label htmlFor="launch-flow-task">{locale === "ru" ? "Задача" : "Task"}</label>
+            <textarea id="launch-flow-task" className="launch-flow-picker__task" rows={3} required
+              value={flowTask} disabled={busy} onChange={(event) => setFlowTask(event.currentTarget.value)}
+              placeholder={locale === "ru" ? "Что должен сделать этот рабочий процесс?" : "What should this workflow accomplish?"} />
+          </>}
           {flowId && <small>{locale === "ru" ? "Ожидается подагентов" : "Expected subagents"}: {flows.find((flow) => flow.id === flowId)?.expectedSubagents ?? 0}</small>}
           {flowId && selectedFlow?.trusted !== true && <div className="launch-flow-picker__approval">
             <p>{locale === "ru" ? "Просмотрите инструкции из файла проекта перед их использованием. Изменённые инструкции потребуют нового одобрения." : "Review the project file's instructions before using them. Changed instructions require approval again."}</p>
@@ -293,7 +305,7 @@ export function AgentLaunchDialog({
                 setConfirmDanger(false);
               }}>{t(locale, PROFILE_LABEL[mode])}</button>
           ))}
-          <button className="launch-submit" type="button" disabled={busy || endpointMissing || Boolean(flowId && selectedFlow?.trusted !== true)} onClick={() => void submit()}>
+          <button className="launch-submit" type="button" disabled={busy || endpointMissing || Boolean(flowId && (selectedFlow?.trusted !== true || !flowTask.trim()))} onClick={() => void submit()}>
             {busy ? <span className="launch-submit__busy" /> : <UiIcon name="arrow" size={38} />}
           </button>
         </div>

@@ -95,3 +95,5 @@
 .launch-flow-picker__errors { max-height: 100px; overflow: auto; margin: 0; padding-left: 18px; color: #ffb3b7; font: 11px/1.4 var(--font-mono); }
 .terminal-card--with-task-summary:not(.terminal-card--fullscreen) .terminal-card__surface { height: calc(100% - var(--card-header-height) - var(--terminal-task-summary-height)); }
 .terminal-card--with-task-summary:not(.terminal-card--fullscreen) .terminal-card__summary { top: calc(var(--card-header-height) + var(--terminal-task-summary-height)); height: calc(100% - var(--card-header-height) - var(--terminal-task-summary-height)); }
+
+.launch-flow-picker__task { width: 100%; box-sizing: border-box; resize: vertical; padding: 7px; border: 1px solid rgba(255,255,255,.15); border-radius: 7px; color: inherit; background: #30323f; font: inherit; }

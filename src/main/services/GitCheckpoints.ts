@@ -84,23 +84,26 @@ export class GitCheckpoints {
     return `refs/canvastty/${sessionId}/`;
   }
   private async git(cwd: string, args: string[]): Promise<string> {
+    const env = { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))),
+      GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0" };
     const safe = ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external="];
     // Snapshotting runs outside the agent process; never execute repository-provided clean filters.
-    const configured = await exec("git", [...safe, "-C", cwd, "config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], {timeout: 5000}).catch((error: unknown) => {
+    const configured = await exec("git", [...safe, "-C", cwd, "config", "--get-regexp", "^filter\\..*\\.(clean|smudge|process|required)$"], {env, timeout: 5000}).catch((error: unknown) => {
       if ((error as {code?: unknown}).code === 1) return {stdout: ""}; throw error;
     });
     for (const line of configured.stdout.split("\n")) {
       const key = line.split(/\s/, 1)[0];
       if (/^filter\..*\.(clean|smudge|process|required)$/.test(key)) safe.push("-c", `${key}=${key.endsWith(".required") ? "false" : ""}`);
     }
-    return (await exec("git", [...safe, "-C", cwd, ...args], {timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();
+    return (await exec("git", [...safe, "-C", cwd, ...args], {env, timeout: 15_000, maxBuffer: 2 * 1024 * 1024})).stdout.trimEnd();
   }
   async available(cwd: string): Promise<boolean> {
     try { return await realpath(await this.git(cwd, ["rev-parse", "--show-toplevel"])) === await realpath(cwd); }
     catch { return false; }
   }
-  async workingDiff(cwd:string):Promise<string> {
-    const parts = [await this.git(cwd,["diff","--no-ext-diff","--no-textconv","--unified=3","HEAD","--"])];
+  async workingDiff(cwd:string, baselineHead?:string):Promise<string> {
+    if (baselineHead !== undefined && !/^[a-f0-9]{40,64}$/u.test(baselineHead)) throw new Error("Invalid review baseline commit.");
+    const parts = [await this.git(cwd,["diff","--no-ext-diff","--no-textconv","--unified=3",baselineHead ?? "HEAD","--"])];
     const root = await realpath(cwd);
     const paths = (await this.git(cwd,["ls-files","--others","--exclude-standard","-z"])).split("\0").filter(Boolean);
     let bytes = Buffer.byteLength(parts[0]), omitted = 0;

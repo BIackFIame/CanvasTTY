@@ -580,17 +580,18 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
           void source.codexUsage(signal.threadId).then(usage=>usage===null || !terminalManager?.getMetadata(terminalSessionId) ? undefined : timeline.recordCumulativeUsage(terminalSessionId,usage,"codex-cli conversation counter",signal.threadId,{provider:"codex",accountId:account.id,taskId:agentControlService.taskRoot(terminalSessionId).id,...(usage.model ?? usageRow.model ? {model:usage.model ?? usageRow.model} : {})},{resumed:terminalManager!.resumedConversation(terminalSessionId,signal.threadId!)})).catch(console.warn);
         }
 
-        if (signal.state !== "working") checkpointTurns.delete(terminalSessionId);
-        else void checkpointBeforeTurn(terminalSessionId);
-        terminalManager?.applyProviderSignal(terminalSessionId, {
+        const accepted = terminalManager?.applyProviderSignal(terminalSessionId, {
           kind: "lifecycle",
           state: signal.state,
           event: signal.event,
           ...(signal.turnId ? { requestId: signal.turnId } : {}),
           ...(signal.threadId ? { threadId: signal.threadId } : {})
         });
-        // A subagent's final answer (Codex Stop hook, OpenCode plugin) for get_agent_result and wait_for_agent.
-        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result);
+        if (!accepted) return;
+        if (signal.state !== "working") checkpointTurns.delete(terminalSessionId);
+        else void checkpointBeforeTurn(terminalSessionId);
+        // The answer belongs to the accepted provider turn and its host-submitted input generation.
+        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result, { turnId: signal.turnId });
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
           evenG2?.answer(
@@ -773,7 +774,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       providers: () => pluginManager!.environmentProviders()
     }),
     reviewModel:(provider,model)=>model ? providerDirectorySources.models?.(provider)?.models.find(candidate=>candidate!==model) ?? null : null,
-    reviewDiff:worker=>checkpoints.workingDiff(managedTerminals.pluginContext(worker.id)?.workingDirectory ?? worker.cwd),
     onReview:id=>managedTerminals.setTaskMetadata(id,{reviewRequested:true})
   });
   budgetInputGate=id=>agentControlService.assertInputAllowed(id);
@@ -1404,6 +1404,8 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
     }
   });
   pluginWindows.set(window, pluginId);
+  attachEditContextMenu(window.webContents, () => editMenuLocale(),
+    (template, contents) => Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined }));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     if (!url.startsWith(`canvastty-plugin://${pluginId}/`)) event.preventDefault();

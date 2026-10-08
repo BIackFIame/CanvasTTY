@@ -15,9 +15,12 @@ import type {
   HomeWidgetPlacement,
   InstalledPlugin,
   LimitsSnapshot,
+  MaterialRemark,
   Point,
   ProviderId,
   RadialLauncherItemId,
+  RemarkAnchor,
+  RemarkDraft,
   SessionBounds,
   SessionSnapshot,
   Size,
@@ -37,7 +40,10 @@ import { sessionStatusTone } from "../../lib/sessionStatusTone";
 import { RadialLauncher } from "../launcher/QuickRadialMenu";
 import { StickyNoteCard } from "../notes/StickyNoteCard";
 const MaterialCard = lazy(() => import("../materials/MaterialCard").then((module) => ({ default: module.MaterialCard })));
-import type { MaterialCommand } from "../materials/materialCardModel";
+import { remarkDrawable, remarkPickable, type MaterialCommand } from "../materials/materialCardModel";
+import { remarkNeedsWork } from "../materials/materialRemarksModel";
+import { RemarkPopover } from "../materials/RemarkPopover";
+import { useRemarkDraft } from "../materials/useRemarkDraft";
 import { stickyNoteAtPoint } from "../notes/stickyNoteBounds";
 import { PluginCanvasCard } from "../plugins/PluginCanvasCard";
 import { TerminalCard } from "../terminal/TerminalCard";
@@ -78,6 +84,7 @@ import {
 } from "./canvasStacking";
 import type { SnapLayout } from "./canvasStacking";
 import {
+  acceptsTextInput,
   browserCanvasWidgetId,
   canvasWidgetInDirection,
   canvasWidgetTarget,
@@ -103,16 +110,20 @@ import { BacklogSessionInspector } from "./BacklogSessionInspector";
 import { createTaskBoundsPreviewStore, TaskEdgeLayer } from "./TaskEdgeLayer";
 import { taskTreeBounds } from "./workspaceTaskLayout";
 import { directTaskEdges, sessionLayoutItems } from "./workspaceTaskGraph";
+import { useRemarkPopoverRect } from "./useRemarkPopoverRect";
 import { webglContextPool } from "../terminal/webglContextPool";
 
 const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
-  "top-left",
-  "top-right",
+  "top-left",  "top-right",
   "bottom-left",
   "bottom-right"
 ];
 
-/** Focus commands use the shared keyboard settings. */
+const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
+const NO_SNAP_TARGETS = (): readonly SessionBounds[] => [];
+/** The fullscreen layer is outside the scene: its card always draws at scale 1. */
+const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
+
 const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefined>> = {
   focusUp: "up",
   focusDown: "down",
@@ -121,10 +132,6 @@ const CANVAS_FOCUS_ARROWS: Readonly<Record<string, CanvasFocusDirection | undefi
 };
 
 const EMPTY_TASK_CHILDREN: readonly SessionSnapshot[] = [];
-const EMPTY_MARQUEE_SELECTION: ReadonlySet<string> = new Set<string>();
-const NO_SNAP_TARGETS = (): readonly SessionBounds[] => [];
-/** The fullscreen layer is outside the scene: its card always draws at scale 1. */
-const FULLSCREEN_CAMERA = fixedCameraStore({ x: 0, y: 0, zoom: 1 });
 
 /** What the workspace does for a terminal card; the card gets stable functions that call the latest of these. */
 interface TerminalCardHandlers {
@@ -250,6 +257,9 @@ interface WorkspaceCanvasProps {
   onMaterialBoundsChangeBatch(entries: { id: string; bounds: SessionBounds }[]): void;
   onRemoveMaterial(id: string): void;
   onMaterialCommand(id: string, command: MaterialCommand): void;
+  remarks: readonly MaterialRemark[];
+  onAddRemark(draft: RemarkDraft): Promise<boolean>;
+  onRemarkAction(remarkId: string, action: "delete"): void;
 }
 
 export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element {
@@ -267,7 +277,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     onCanvasRegionBoundsChange, onDeleteCanvasRegion, onCreateStickyNote,
     onStickyNoteBoundsChange, onStickyNoteTextChange, onDeleteStickyNote,
     materials, onAddMaterialFiles, onPickMaterials, onPasteMaterials, onMaterialBoundsChange,
-    onMaterialBoundsChangeBatch, onRemoveMaterial, onMaterialCommand, surfacesMounted = true
+    onMaterialBoundsChangeBatch, onRemoveMaterial, onMaterialCommand, remarks, onAddRemark, onRemarkAction, surfacesMounted = true
   } = props;
   const viewport = useRef<HTMLDivElement>(null);
   const [contextMenu, setContextMenu] = useState<CanvasMenuState | null>(null);
@@ -381,6 +391,12 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     const start = regionMovePreview?.noteBounds.get(note.id);
     return start && previewDelta ? { ...note, ...translateBounds(start, previewDelta) } : note;
   }), [previewDelta, regionMovePreview, settings.stickyNotes]);
+  const { remarkDraft, selectedRemarkId, materialNames, remarkActions, remarkingFor } = useRemarkDraft({
+    materials,
+    remarks,
+    onAddRemark,
+    onRemarkAction
+  });
   const renderedMaterials = useMemo(() => materials.map((material) => {
     const start = regionMovePreview?.materialBounds.get(material.id);
     return start && previewDelta ? { ...material, ...translateBounds(start, previewDelta) } : material;
@@ -591,15 +607,29 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     settings.minimapPlacement,
     settings.shortcutHintsPlacement,
     settings.showShortcutHints,
-    settings.uiScale
+    settings.uiScale,
+    remarkDraft?.picking
   ]);
   const browserOccluded = renderedBrowserCanvas !== null
     && canvasLayerIsOccluded(browserLayerId, layerOrder, boundsByLayer);
+  const selectedRemark = selectedRemarkId ? remarks.find((remark) => remark.id === selectedRemarkId) ?? null : null;
+  const popoverMaterial = remarkDraft
+    ? renderedMaterials.find((material) => material.id === remarkDraft.materialId) ?? null
+    : selectedRemark
+      ? renderedMaterials.find((material) => material.id === selectedRemark.target.materialId) ?? null
+      : null;
+  const popoverRect = useRemarkPopoverRect(
+    camera,
+    !homeEditing && !remarkDraft?.picking ? popoverMaterial : null,
+    viewport,
+    settings.uiScale
+  );
   // A boolean derived from the camera: the workspace renders only when it flips.
   const browserUnderOverlay = useCameraSelector(camera, (current) => {
     if (renderedBrowserCanvas === null) return false;
     const browserScreenRect = canvasScreenRect(renderedBrowserCanvas, current);
-    return overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect));
+    return overlayRects.some((rect) => boundsOverlap(browserScreenRect, rect))
+      || (popoverRect !== null && boundsOverlap(browserScreenRect, popoverRect));
   });
   const wheelNavigation = useCanvasWheelNavigation({
     viewport,
@@ -982,6 +1012,16 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           const layerId = element.closest<HTMLElement>("[data-canvas-layer-id]")?.dataset.canvasLayerId;
           if (layerId) raiseLayer(layerId);
         }
+        if (remarkDraft?.picking && event.button === 0) {
+          const materialId = element.closest<HTMLElement>("[data-material-id]")?.dataset.materialId;
+          const material = materialId ? renderedMaterials.find((candidate) => candidate.id === materialId) : null;
+          if (material && remarkPickable(material) && !element.closest(".material-annotator")) {
+            event.preventDefault();
+            event.stopPropagation();
+            remarkActions.draw(material.id, { kind: "whole" });
+            return;
+          }
+        }
         if (contextMenu && !element.closest(".canvas-menu")) setContextMenu(null);
         if (regionEditor && !element.closest(".canvas-region-editor")) setRegionEditor(null);
         if (pointerNavigation.handlePointerDownCapture(event)) return;
@@ -1250,6 +1290,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               getSnapTargets={snapTargets.forLayer(materialLayerId(material.id))}
               groupSelected={marqueeSelection.has(materialLayerId(material.id))}
               removeRequest={materialRemoveRequest?.id === material.id ? materialRemoveRequest.version : 0}
+              remarking={remarkingFor(material)}
+              remarkActions={remarkActions}
               onBoundsChange={onMaterialBoundsChange}
               onRemove={onRemoveMaterial}
               onOpenMenu={openMaterialMenu}
@@ -1296,6 +1338,18 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
             />
           ))}
       </div>
+
+      {popoverMaterial && (popoverRect || remarkDraft?.picking) && (
+        <RemarkPopover
+          locale={settings.locale}
+          material={popoverMaterial}
+          rect={popoverRect}
+          remarkDraft={remarkDraft}
+          selectedRemark={selectedRemark}
+          materialNames={materialNames}
+          remarkActions={remarkActions}
+        />
+      )}
 
       {pointerNavigation.marquee && (
         <div
@@ -1373,6 +1427,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
           materialHasLocation={Boolean(materials.find((material) => material.id === contextMenu.targetId)?.location)}
           onAddFiles={() => pickMaterialsAt(contextMenu.worldPoint)}
           onPasteFiles={() => pasteMaterialsAt(contextMenu.worldPoint)}
+          onPinMaterial={() => {
+            if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "pin");
+            setContextMenu(null);
+          }}
           onRevealMaterial={() => {
             if (contextMenu.targetId) onMaterialCommand(contextMenu.targetId, "reveal");
             setContextMenu(null);
@@ -1459,6 +1517,15 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       )}
 
       <div className="canvas-overlays" ref={overlays}>
+        {remarkDraft?.picking && (
+          <div className="canvas-overlay-slot canvas-overlay-slot--top-center">
+            <div className="material-reference-banner" role="status" data-interactive="true">
+              <UiIcon name="crosshair" size={16} />
+              <span>{t(settings.locale, "remarkPickBanner")}</span>
+              <button type="button" onClick={remarkActions.clearReference}>{t(settings.locale, "cancel")}</button>
+            </div>
+          </div>
+        )}
         {CANVAS_OVERLAY_PLACEMENTS.map((placement) => (
           <div className={`canvas-overlay-slot canvas-overlay-slot--${placement}`} key={placement}>
             {settings.agentChatHistoryVisible && settings.agentChatHistoryPlacement === placement && (
@@ -1568,8 +1635,4 @@ function acceptsMaterialDrop(event: React.DragEvent<HTMLElement>): boolean {
     && !(event.target instanceof Element && event.target.closest(
       "[data-canvas-layer-id], .home-zone, .canvas-overlays, .canvas-menu, .canvas-region-editor, .home-editor-toolbar"
     ));
-}
-
-function acceptsTextInput(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest("textarea, input, select, [contenteditable='true']"));
 }

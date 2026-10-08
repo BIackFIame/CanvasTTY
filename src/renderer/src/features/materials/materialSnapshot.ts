@@ -2,11 +2,22 @@ import type { CanvasMaterial, MaterialsSnapshot, SessionBounds } from "../../../
 
 export const EMPTY_MATERIALS_SNAPSHOT: MaterialsSnapshot = {
   revision: 0,
-  materials: []
+  materials: [],
+  remarks: [],
+  storage: { usedBytes: 0, limitBytes: 0 }
 };
 
 export function acceptMaterialsSnapshot(current: MaterialsSnapshot, next: MaterialsSnapshot): MaterialsSnapshot {
-  return next.revision < current.revision ? current : next;
+  if (next.revision < current.revision) return current;
+  const previous = new Map(current.materials.map((material) => [material.id, material]));
+  let shared: CanvasMaterial[] | null = null;
+  for (let index = 0; index < next.materials.length; index += 1) {
+    const material = next.materials[index];
+    const before = previous.get(material.id);
+    if (!before || before.position === material.position || !sameBounds(before, material)) continue;
+    (shared ??= [...next.materials])[index] = { ...material, position: before.position, size: before.size };
+  }
+  return shared ? { ...next, materials: shared } : next;
 }
 
 export function withPendingBounds(
