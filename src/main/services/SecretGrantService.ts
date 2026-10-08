@@ -87,7 +87,7 @@ export interface SecretGrantServiceOptions {
   now?: () => number;
 }
 
-interface PendingRequest extends Omit<SecretRequestSnapshot, "turnAvailable"> { turnIdentity: string | null; }
+interface PendingRequest extends Omit<SecretRequestSnapshot, "turnAvailable"> { readonly originTurnIdentity: string | null; turnIdentity: string | null; }
 interface Grant extends SecretGrantSnapshot { expiresAt: number | null; turnIdentity: string | null; }
 
 /**
@@ -114,7 +114,10 @@ export class SecretGrantService {
       throw new Error("Give a short reason for requesting this provider secret.");
     }
     this.pruneExpired();
-    const duplicate = [...this.pendingRequests.values()].find((item) => item.sessionId === sessionId && item.secretId === secretId);
+    const originTurnIdentity = this.currentTurn(sessionId);
+    // Only a genuinely observed new turn gets a separate request. Idle/unsupported repeats keep the prior TTL.
+    const duplicate = [...this.pendingRequests.values()].reverse().find((item) => item.sessionId === sessionId && item.secretId === secretId
+      && (originTurnIdentity === null || item.originTurnIdentity === originTurnIdentity));
     if (duplicate) return this.requestSnapshot(duplicate);
     const now = this.now();
     const request: PendingRequest = {
@@ -124,7 +127,8 @@ export class SecretGrantService {
       reason: this.mask(reason.trim()).slice(0, MAX_REASON_CHARS),
       createdAt: now,
       expiresAt: now + REQUEST_TTL_MS,
-      turnIdentity: this.currentTurn(sessionId)
+      originTurnIdentity,
+      turnIdentity: originTurnIdentity
     };
     this.pendingRequests.set(request.id, request);
     if (!this.turnWatches.has(sessionId) && this.options.watchTurn) {
@@ -297,9 +301,18 @@ export class SecretGrantService {
     const run = { sessionId, secretIds: new Set([request.secretId]), controller };
     this.activeRuns.add(run);
     let timedOut = false;
+    let grantExpired = false;
+    let expiryHandle: ReturnType<typeof setTimeout> | undefined;
+    const expireGrant = (): void => {
+      grantExpired = true;
+      // removeGrant checks identity: an older run must not revoke a replacement approval.
+      this.removeGrant(grant, "expired");
+      controller.abort();
+    };
     let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
     let abortListener: (() => void) | undefined;
     try {
+      if (grant.expiresAt !== null) expiryHandle = setTimeout(expireGrant, Math.max(0, grant.expiresAt - this.now()));
       const apiRequestPromise = this.options.execute({
         secretId: request.secretId,
         apiProfile: { protocol: profile.protocol, baseUrl },
@@ -327,6 +340,7 @@ export class SecretGrantService {
         if (controller.signal.aborted) abortListener();
       });
       const result = await Promise.race([apiRequestPromise, timeoutPromise, abortPromise]);
+      if (grant.expiresAt !== null && grant.expiresAt <= this.now()) expireGrant();
       this.revalidateTurn(sessionId);
       controller.signal.throwIfAborted();
       if (!result || !Number.isInteger(result.status) || result.status < 100 || result.status > 599
@@ -340,9 +354,10 @@ export class SecretGrantService {
         truncated: result.truncated || Buffer.byteLength(maskedBody, "utf8") > MAX_OUTPUT_BYTES
       };
     } catch {
-      throw new Error(timedOut ? "Provider API request timed out." : controller.signal.aborted ? "Provider API request was canceled." : "Provider API request failed.");
+      throw new Error(grantExpired ? "Provider secret approval expired." : timedOut ? "Provider API request timed out." : controller.signal.aborted ? "Provider API request was canceled." : "Provider API request failed.");
     } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
+      if (expiryHandle !== undefined) clearTimeout(expiryHandle);
+      if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
       if (abortListener) controller.signal.removeEventListener("abort", abortListener);
       secretValue = "";
       this.activeRuns.delete(run);
@@ -354,7 +369,7 @@ export class SecretGrantService {
   }
 
   private requestSnapshot(request: PendingRequest): SecretRequestSnapshot {
-    const { turnIdentity, ...snapshot } = request;
+    const { turnIdentity, originTurnIdentity: _origin, ...snapshot } = request;
     return { ...snapshot, turnAvailable: Boolean(turnIdentity && turnIdentity === this.currentTurn(request.sessionId)) };
   }
 

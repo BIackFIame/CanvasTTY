@@ -124,7 +124,7 @@ test("secret grants panel disables unavailable turn approval while keeping expli
  globalThis.document={hidden:false,addEventListener(){},removeEventListener(){}};
  globalThis.window={setInterval:()=>1,clearInterval(){},addEventListener(){},removeEventListener(){},canvasTTY:{backlog:{secretRequests:async()=>requests,secretGrants:async()=>[]}}};
  t.after(()=>{panel.__unmount();globalThis.window=oldWindow;globalThis.document=oldDocument;});panel.__reset();
- const props={sessionId:"s",sessions:[],locale:"en",onError:()=>{}};const render=()=>{panel.__flush();return panel.__render(panel.SecretGrantsPanel,props);};
+ const props={sessionId:"s",sessions:[],locale:"en",onError:()=>{}};const render=()=>{panel.__flush();const child=panel.SecretGrantsPanel(props);return panel.__render(child.type,child.props);};
  render();await tick();let tree=render();const button=label=>findAll(tree,node=>node.type==="button"&&node.props.children===label)[0];
  assert.equal(button("Until this turn ends").props.disabled,true);assert.match(button("Until this turn ends").props.title,/cannot track/u);
  assert.equal(button("10 minutes").props.disabled,false);assert.equal(button("Until card closes").props.disabled,false);

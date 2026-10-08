@@ -182,6 +182,100 @@ test("pending requests retained after a turn can still be denied or cleared when
   assert.throws(() => service.approve(closed.id, "session"), /expired/u);
 });
 
+test("pending requests deduplicate by original turn without borrowing authority or extending TTL", () => {
+  let turn = "launch:turn-1";
+  const { service, setNow } = setup({ getTurnIdentity: () => turn });
+  const first = service.requestSecret("session-a", "OPENAI_API_KEY", "First turn.");
+  service.turnEnded("session-a");
+  assert.equal(service.requestSecret("session-a", "OPENAI_API_KEY", "Same ended origin.").id, first.id);
+  turn = null;
+  assert.equal(service.requestSecret("session-a", "OPENAI_API_KEY", "Idle repeat.").id, first.id);
+  setNow(2_000); turn = "launch:turn-2";
+  const second = service.requestSecret("session-a", "OPENAI_API_KEY", "Second turn.");
+  assert.notEqual(second.id, first.id); assert.equal(second.turnAvailable, true);
+  assert.equal(service.requestSecret("session-a", "OPENAI_API_KEY", "Repeated second turn.").id, second.id);
+  assert.deepEqual(service.pending(), [{ ...first, turnAvailable: false }, second]);
+  assert.equal("originTurnIdentity" in second, false); assert.equal("turnIdentity" in second, false);
+  assert.throws(() => service.approve(first.id, "turn"), /unavailable/u);
+  setNow(first.expiresAt);
+  assert.deepEqual(service.pending(), [second], "the first request expires independently without changing the second TTL");
+  service.approve(second.id, "turn");
+  assert.equal(service.listGrants()[0].duration, "turn");
+  turn = null;
+  const unsupported = service.requestSecret("session-a", "OPENAI_API_KEY", "No observed turn.");
+  assert.equal(service.requestSecret("session-a", "OPENAI_API_KEY", "Repeated unsupported request.").id, unsupported.id);
+  turn = "launch:turn-3";
+  const third = service.requestSecret("session-a", "OPENAI_API_KEY", "New observed turn.");
+  assert.notEqual(third.id, unsupported.id);
+  assert.equal(third.turnAvailable, true);
+  assert.equal(service.pending().find(item => item.id === unsupported.id).turnAvailable, false);
+  service.approve(unsupported.id, "session");
+  assert.equal(service.listGrants()[0].duration, "session", "old requests retain deliberate longer-scope approval");
+});
+
+const deferredSecretTest = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
+const secretApiInput = { secretId: "OPENAI_API_KEY", method: "GET", path: "models" };
+
+test("10m grant expiry aborts pending execution even when the executor ignores abort", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const started = deferredSecretTest(), response = deferredSecretTest(); let signal;
+  const { service, setNow, events } = setup({ execute: request => { signal = request.signal; started.resolve(); return response.promise; } });
+  const grant = service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Bound execution.").id, "10m");
+  setNow(grant.expiresAt - 40);
+  const running = service.runSecretRequest("session-a", secretApiInput);
+  await started.promise;
+  const rejected = assert.rejects(running, /expired/u);
+  setNow(grant.expiresAt); t.mock.timers.tick(40);
+  assert.equal(signal.aborted, true, "the grant deadline, not the 30-second API timeout, aborts execution");
+  await rejected;
+  response.resolve({ status: 200, body: "unit-test-secret-7342 late output", truncated: false });
+  assert.deepEqual(service.listGrants(), []);
+  assert.equal(events.filter(([type, event]) => type === "revoke" && event.reason === "expired").length, 1);
+  t.mock.timers.tick(30_000);
+  assert.equal(events.filter(([type]) => type === "revoke").length, 1, "settled execution has no active expiry timer");
+});
+
+test("result deadline check rejects late output before a delayed expiry timer runs", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const started = deferredSecretTest(), response = deferredSecretTest(); let signal;
+  const { service, setNow } = setup({ execute: request => { signal = request.signal; started.resolve(); return response.promise; } });
+  const grant = service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Bound response.").id, "10m");
+  const running = service.runSecretRequest("session-a", secretApiInput); await started.promise;
+  setNow(grant.expiresAt); // Do not run timers: simulate a delayed event loop deadline callback.
+  response.resolve({ status: 200, body: "unit-test-secret-7342 confidential output", truncated: false });
+  await assert.rejects(running, error => /expired/u.test(error.message) && !/unit-test|confidential/u.test(error.message));
+  assert.equal(signal.aborted, true);
+});
+
+test("successful short execution clears its expiry timer without revoking the live grant", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const { service, setNow, events } = setup();
+  const grant = service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Short response.").id, "10m");
+  setNow(grant.expiresAt - 40);
+  assert.deepEqual(await service.runSecretRequest("session-a", secretApiInput), { status: 200, body: "received [masked]", truncated: false });
+  t.mock.timers.tick(300_000);
+  assert.equal(events.some(([type]) => type === "revoke"), false, "completed execution timers cannot revoke a grant later");
+  assert.equal(service.listGrants().length, 1);
+});
+
+test("an older execution's expiry cannot revoke or abort a re-approved grant", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const starts = [deferredSecretTest(), deferredSecretTest()], responses = [deferredSecretTest(), deferredSecretTest()], signals = []; let count = 0;
+  const { service, setNow } = setup({ execute: request => { const index = count++; signals.push(request.signal); starts[index].resolve(); return responses[index].promise; } });
+  const grant = service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "First approval.").id, "10m");
+  setNow(grant.expiresAt - 40);
+  const oldRun = service.runSecretRequest("session-a", secretApiInput); await starts[0].promise;
+  const replacement = service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "New approval.").id, "session");
+  const newRun = service.runSecretRequest("session-a", secretApiInput); await starts[1].promise;
+  const rejected = assert.rejects(oldRun, /expired/u);
+  setNow(grant.expiresAt); t.mock.timers.tick(40); await rejected;
+  assert.equal(signals[0].aborted, true); assert.equal(signals[1].aborted, false);
+  assert.deepEqual(service.listGrants(), [replacement]);
+  responses[1].resolve({ status: 200, body: "new approval result", truncated: false });
+  assert.equal((await newRun).body, "new approval result");
+  responses[0].resolve({ status: 200, body: "old output must not escape", truncated: false });
+});
+
 test("request expiry, denial, invalid API requests, and missing isolation fail closed", async () => {
   const { service, setNow } = setup({ execute: undefined });
   const expired = service.requestSecret("session-a", "OPENAI_API_KEY", "One-off request.");
