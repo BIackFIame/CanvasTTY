@@ -294,21 +294,7 @@ export class AgentControlService {
     }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent", captureReviewDiff: request.review === true });
     this.launchRequests.set(created.id, { ...request, cwd, profile });
     this.retryOrigins.set(created.id, created.id);
-    if (request.review === true) {
-      this.reviewRequested.add(created.id);
-      this.reviewInputObservers.set(created.id, this.terminals.observeInputWrites(created.id, (_data, submitted) => {
-        this.invalidateReview(created.id);
-        const generation = this.reviewGeneration(created.id);
-        this.retryableQuiet.delete(created.id);
-        if (!submitted) {
-          this.reviews.set(created.id, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
-          return;
-        }
-        return () => queueMicrotask(() => {
-          if (this.reviewRequested.has(created.id) && this.reviewGenerations.get(created.id) === generation) this.scheduleReview(created.id);
-        });
-      }));
-    }
+    if (request.review === true) this.trackReview(created.id);
     if (request.readOnlyReview === true) this.readOnlyReviewers.add(created.id);
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     return this.deliver(created.id, `${request.initialPrompt}\r`, "prompt", signal)
@@ -654,8 +640,9 @@ export class AgentControlService {
         assertWorktreeRetryAllowed();
         const restarted = this.terminals.restart(sessionId, { resume: false });
         restartedWorktree = true;
-        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (reviewWasRequested) this.trackReview(sessionId);
         await this.send(sessionId, retryPrompt, true, signal);
+        this.scheduleReview(sessionId);
         return this.terminals.getMetadata(sessionId) ?? restarted;
       }
       const retried = await this.spawn({
@@ -667,15 +654,15 @@ export class AgentControlService {
       this.retryOrigins.set(retried.id, sourceId);
       // Each attempt starts from the original request, with only this attempt's masked failure context appended.
       this.launchRequests.set(retried.id, original);
-      if (original.review === true) this.reviewRequested.add(retried.id);
+      if (original.review === true) this.trackReview(retried.id);
       return retried;
     } catch (error) {
       if (reuseWorktree && this.terminals.getMetadata(sessionId)) {
         // `forgetSession` clears stale loop/quiet/review state without disposing this card or its environment.
-        // Restore only its launch identity and requested review so a failed relaunch can be retried deliberately.
+        // Restore its launch identity and review observer, without reviewing a prompt that never reached the PTY.
         this.launchRequests.set(sessionId, original);
         this.retryOrigins.set(sessionId, sourceId);
-        if (reviewWasRequested) this.reviewRequested.add(sessionId);
+        if (reviewWasRequested) this.trackReview(sessionId);
         if (readOnlyReviewWasRequested) this.readOnlyReviewers.add(sessionId);
       }
       if (!restartedWorktree) {
@@ -776,6 +763,24 @@ export class AgentControlService {
   cancel(sessionId: string): void {
     this.requireSession(sessionId);
     this.terminals.dispose(sessionId);
+  }
+
+  /** Restores review ownership without starting a watcher before the next prompt is actually delivered. */
+  private trackReview(sessionId: string): void {
+    this.reviewRequested.add(sessionId);
+    if (this.reviewInputObservers.has(sessionId)) return;
+    this.reviewInputObservers.set(sessionId, this.terminals.observeInputWrites(sessionId, (_data, submitted) => {
+      this.invalidateReview(sessionId);
+      const generation = this.reviewGeneration(sessionId);
+      this.retryableQuiet.delete(sessionId);
+      if (!submitted) {
+        this.reviews.set(sessionId, { status: "unavailable", reason: "Input has not been submitted as a new worker task.", costUsd: null });
+        return;
+      }
+      return () => queueMicrotask(() => {
+        if (this.reviewRequested.has(sessionId) && this.reviewGenerations.get(sessionId) === generation) this.scheduleReview(sessionId);
+      });
+    }));
   }
 
   private reviewGeneration(sessionId: string): object {

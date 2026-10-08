@@ -590,8 +590,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         const controller=new AbortController(), abort=():void=>controller.abort();
         cancellation.addEventListener("abort",abort,{once:true});
         if(cancellation.aborted)abort();
-        // After-write callback: rejected/queued input leaves the existing turn's checkpoint intact.
-        const unobserve=manager.observeInputWrites(terminalSessionId,()=>abort);
+        // Only a successful write that changes the captured turn cancels its checkpoint; typing and approval replies do not.
+        const unobserve=manager.observeInputWrites(terminalSessionId,()=>()=>{if(!current())abort();});
         try { await checkpointBeforeTurn(terminalSessionId,controller.signal);return current(); }
         finally {unobserve();cancellation.removeEventListener("abort",abort);}
       },

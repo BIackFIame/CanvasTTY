@@ -111,3 +111,18 @@ for(const action of ['disconnect','revoke','supersede'])test(`an in-flight lifec
  assert.equal(cancel.aborted,true);release.resolve();await tick();assert.equal(saved,false);
  if(action!=='disconnect')assert.ok(!f.signals.some(row=>row.signal.turnId==='old'));
 });
+
+for(const [label,input,approval,changesTurn] of [
+ ['typing','draft',false,false],['Control-C','\x03',false,false],['approval reply','y\r',true,false],['new submitted task','next task\r',false,true]
+])test(`production checkpoint observer handles ${label} according to the actual turn generation`,{timeout:5000},async t=>{
+ const terminals=new TerminalManager(()=>undefined,availableRegistry(),undefined,undefined,true,fakeSpawner([]));t.after(()=>terminals.disposeAll());
+ const worker=terminals.create({provider:'codex',profile:'yolo',cwd:process.cwd(),position:{x:0,y:0}});
+ if(approval)terminals.applyProviderSignal(worker.id,{state:'needs_approval',event:'PermissionRequest'});
+ const entered=deferred(),release=deferred();t.after(()=>release.resolve());let saved=false;
+ const sandbox={terminalManager:terminals,checkpoints:{capture:async(_id,_cwd,signal)=>{entered.resolve(signal);await release.promise;signal.throwIfAborted();saved=true;}},redaction:{redact:text=>text},console,AbortController,result:null};
+ runInNewContext(callbackCode,sandbox);
+ const pending=sandbox.result.beforeLifecycle(worker.id,{state:'working',event:'pre_llm_call',turnId:null},new AbortController().signal);
+ const signal=await entered.promise;assert.equal(terminals.inputChecked(worker.id,input),true);
+ assert.equal(signal.aborted,changesTurn);release.resolve();assert.equal(await pending,!changesTurn);assert.equal(saved,!changesTurn);
+ assert.equal(terminals.inputWriteObservers.get(worker.id)?.size??0,0);
+});
