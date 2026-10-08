@@ -87,6 +87,11 @@ export interface SecretGrantServiceOptions {
   now?: () => number;
 }
 
+interface SecretApiRequestInput {
+  secretId: string; apiProfileId?: string; method: string; path: string;
+  body?: Record<string, unknown>; timeoutMs?: number;
+}
+
 interface PendingRequest extends Omit<SecretRequestSnapshot, "turnAvailable"> { readonly originTurnIdentity: string | null; turnIdentity: string | null; }
 interface Grant extends SecretGrantSnapshot { expiresAt: number | null; turnIdentity: string | null; }
 
@@ -250,11 +255,32 @@ export class SecretGrantService {
 
   async runSecretRequest(
     sessionId: string,
-    input: {
-      secretId: string; apiProfileId?: string; method: string; path: string;
-      body?: Record<string, unknown>; timeoutMs?: number;
-    }
+    input: SecretApiRequestInput,
+    signal?: AbortSignal
   ): Promise<{ status: number; body: string; truncated: boolean }> {
+    if (signal?.aborted) throw new Error("Provider API request was canceled.");
+    const controller = new AbortController();
+    if (!signal) return this.performSecretRequest(sessionId, input, controller);
+    let cancel!: () => void;
+    const canceled = new Promise<never>((_resolve, reject) => {
+      cancel = () => { controller.abort(); reject(new Error("Provider API request was canceled.")); };
+      signal.addEventListener("abort", cancel, { once: true });
+    });
+    try {
+      const result = await Promise.race([this.performSecretRequest(sessionId, input, controller), canceled]);
+      if (signal.aborted) throw new Error("Provider API request was canceled.");
+      return result;
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
+  }
+
+  private async performSecretRequest(
+    sessionId: string,
+    input: SecretApiRequestInput,
+    controller: AbortController
+  ): Promise<{ status: number; body: string; truncated: boolean }> {
+    controller.signal.throwIfAborted();
     const session = this.activeSession(sessionId);
     if (session.provider === "terminal") throw new Error("Provider secrets are available to agent sessions only.");
     const request = validateApiRequest(input);
@@ -279,10 +305,12 @@ export class SecretGrantService {
     let secretValue = "";
     try {
       const value = await this.options.getSecret(request.secretId);
+      controller.signal.throwIfAborted();
       if (typeof value !== "string" || value.length === 0) throw new Error("missing");
       secretValue = value;
       this.options.rememberSecret?.(value);
     } catch {
+      if (controller.signal.aborted) throw new Error("Provider API request was canceled.");
       throw new Error("An approved provider secret is unavailable.");
     }
 
@@ -290,6 +318,7 @@ export class SecretGrantService {
     try {
       this.activeSession(sessionId);
       this.revalidateTurn(sessionId);
+      controller.signal.throwIfAborted();
       if (this.grants.get(grantKey(sessionId, request.secretId)) !== grant || (grant.expiresAt !== null && grant.expiresAt <= this.now())) {
         throw new Error("Provider secret approval was revoked or expired.");
       }
@@ -297,7 +326,6 @@ export class SecretGrantService {
       secretValue = "";
       throw error;
     }
-    const controller = new AbortController();
     const run = { sessionId, secretIds: new Set([request.secretId]), controller };
     this.activeRuns.add(run);
     let timedOut = false;

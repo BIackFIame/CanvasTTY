@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getEventListeners } from "node:events";
 import { AgentControlService } from "../src/main/services/AgentControlService.ts";
 import { registerBacklogIpc } from "../src/main/ipc/registerBacklogIpc.ts";
 import { SecretGrantService } from "../src/main/services/SecretGrantService.ts";
@@ -274,6 +275,61 @@ test("an older execution's expiry cannot revoke or abort a re-approved grant", a
   responses[1].resolve({ status: 200, body: "new approval result", truncated: false });
   assert.equal((await newRun).body, "new approval result");
   responses[0].resolve({ status: 200, body: "old output must not escape", truncated: false });
+});
+
+test("pre-canceled secret API request never reads a secret or starts its executor", async () => {
+  let reads = 0;
+  const { service, executions } = setup({ getSecret: async () => { reads += 1; return "fake-key"; } });
+  service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Cancelable call.").id, "session");
+  const cancellation = new AbortController(); cancellation.abort(new Error("untrusted cancellation detail"));
+  await assert.rejects(service.runSecretRequest("session-a", secretApiInput, cancellation.signal), /canceled/u);
+  assert.equal(reads, 0); assert.equal(executions.length, 0); assert.equal(getEventListeners(cancellation.signal, "abort").length, 0);
+  assert.equal(service.listGrants().length, 1);
+});
+
+test("cancellation during credential read settles promptly and prevents late execution", { timeout: 2_000 }, async () => {
+  const read = deferredSecretTest(), started = deferredSecretTest();
+  const { service, executions } = setup({ getSecret: () => { started.resolve(); return read.promise; } });
+  service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Cancelable read.").id, "session");
+  const cancellation = new AbortController();
+  const running = service.runSecretRequest("session-a", secretApiInput, cancellation.signal); await started.promise;
+  const rejected = assert.rejects(running, /canceled/u); cancellation.abort();
+  try { await rejected; } finally { read.resolve("unit-test-secret-7342"); }
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(executions.length, 0); assert.equal(service.listGrants().length, 1);
+  assert.equal(getEventListeners(cancellation.signal, "abort").length, 0);
+});
+
+test("request cancellation aborts the worker, ignores its late output and preserves approval", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const response = deferredSecretTest(), started = deferredSecretTest(); let workerSignal;
+  const { service, events } = setup({ execute: request => { workerSignal = request.signal; started.resolve(); return response.promise; } });
+  service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Cancelable worker.").id, "10m");
+  const cancellation = new AbortController(), running = service.runSecretRequest("session-a", secretApiInput, cancellation.signal);
+  await started.promise; const rejected = assert.rejects(running, /canceled/u);
+  cancellation.abort(new Error("secret cancellation detail"));
+  try { assert.equal(workerSignal.aborted, true); await rejected; }
+  finally { response.resolve({ status: 200, body: "secret late output", truncated: false }); }
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(getEventListeners(cancellation.signal, "abort").length, 0);
+  t.mock.timers.tick(600_000);
+  assert.equal(events.some(([type]) => type === "revoke"), false, "canceled runs leave no deadline timer that can revoke approval");
+  assert.equal(service.listGrants().length, 1);
+});
+
+test("success racing cancellation cannot escape, while ordinary success removes the listener", async () => {
+  for (const cancel of [false, true]) {
+    const response = deferredSecretTest(), started = deferredSecretTest();
+    const { service } = setup({ execute: () => { started.resolve(); return response.promise; } });
+    service.approve(service.requestSecret("session-a", "OPENAI_API_KEY", "Response race.").id, "session");
+    const cancellation = new AbortController(), running = service.runSecretRequest("session-a", secretApiInput, cancellation.signal);
+    await started.promise;
+    response.resolve({ status: 200, body: "completed output", truncated: false });
+    if (cancel) { cancellation.abort(); await assert.rejects(running, /canceled/u); }
+    else assert.equal((await running).body, "completed output");
+    assert.equal(getEventListeners(cancellation.signal, "abort").length, 0);
+    assert.equal(service.listGrants().length, 1);
+  }
 });
 
 test("request expiry, denial, invalid API requests, and missing isolation fail closed", async () => {
