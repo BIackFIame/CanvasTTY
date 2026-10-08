@@ -1803,7 +1803,7 @@ function validateBrowserEngine(value: unknown): PluginBrowserEngine {
   return { id, title, ...(description ? { description } : {}), layout: value.layout === true };
 }
 
-const MAX_CARD_ACTIONS = 8;
+const MAX_CARD_ACTIONS = 16;
 
 function validateCardActions(value: unknown): PluginCardAction[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CARD_ACTIONS) {

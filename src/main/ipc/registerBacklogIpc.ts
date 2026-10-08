@@ -1,6 +1,7 @@
 import type { BrowserWindow, IpcMainInvokeEvent } from "electron";
 import { BACKLOG_IPC, BACKLOG_EVENTS } from "../../shared/backlog.ts";
 import type { IpcRegistrar } from "./IpcReadinessGate.ts";
+import type { GitCheckpoints } from "../services/GitCheckpoints.ts";
 import type { TerminalManager } from "../services/TerminalManager.ts";
 
 
@@ -11,11 +12,11 @@ import type { OrchestrationTemplateService } from "../services/OrchestrationTemp
 interface Dependencies {
   board:OrchestrationTaskBoard; budgets:OrchestrationBudgetService; flows:OrchestrationTemplateService;
   taskRoot(id:string):{id:string;cwd:string;startedAt:number};
-  terminals: TerminalManager;
+  terminals: TerminalManager; checkpoints: GitCheckpoints;
   getMainWindow(): BrowserWindow | null;
 }
 export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void {
-  const {terminals} = deps;
+  const {terminals,checkpoints} = deps;
   deps.board.subscribe(change=>{
     const window=deps.getMainWindow();
     if(!window || window.isDestroyed() || window.webContents.isDestroyed())return;
@@ -81,5 +82,14 @@ export function registerBacklogIpc(ipc: IpcRegistrar, deps: Dependencies): void 
   });
   handle(BACKLOG_IPC.redactText, (text: unknown) => {
     if (typeof text !== "string" || text.length > 1_000_000) throw new Error("Text is invalid or too large."); return terminals.redactSecrets(text);
+  });
+  handle(BACKLOG_IPC.checkpoints, async (id: string) => {
+    const row=session(id); if (!await checkpoints.available(row.cwd)) throw new Error("Rollback points are unavailable: the card folder must be a Git project root.");
+    return checkpoints.list(id,row.cwd);
+  });
+  handle(BACKLOG_IPC.previewCheckpoint, (id: string, ref: string) => checkpoints.preview(id,session(id).cwd,ref));
+  handle(BACKLOG_IPC.restoreCheckpoint, async (id: string, ref: string) => {
+    session(id);
+    return terminals.withCheckpointRestore(id,cwd=>checkpoints.restore(id,cwd,ref));
   });
 }

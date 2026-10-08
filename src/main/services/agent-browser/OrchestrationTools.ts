@@ -302,6 +302,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(launchOptions !== undefined ? { launchOptions } : {}),
       ...(model !== undefined ? { model } : {}),
       ...(effort !== undefined ? { effort } : {}),
+      ...(args.isolate === "worktree" ? { isolate: "worktree" as const } : {}),
       ...(args.review === true ? { review: true } : {}),
       ...(typeof args.reviewModel === "string" ? { reviewModel: args.reviewModel } : {}),
       profile: profile.profile
@@ -335,6 +336,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(created.effort !== undefined ? { effort: created.effort } : {}),
       servedBy,
       ...(args.review === true ? { reviewRequested: true } : {}),
+      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {}),
     };
   }
 

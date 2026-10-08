@@ -49,6 +49,13 @@ export function seatbeltProfile(paths: IsolationPaths): string {
       lines.push(`(allow file-read*${paths.readableAgain.map((path) => ` (subpath ${quote(path)})`).join("")})`);
     }
   }
+  // plugin-data is denied as a whole to hide the private parent and every sibling worktree. Reopen this one exact
+  // validated linked-worktree project for writes after that parent denial. The Git metadata denies below still win.
+  const privateRootProjects = paths.projectRoots.filter((project) => paths.readableAgain.includes(project)
+    && paths.unreadable.some((hidden) => hidden.endsWith("/plugin-data") && project.startsWith(`${hidden}/`)));
+  if (privateRootProjects.length > 0) {
+    lines.push(`(allow file-write*${privateRootProjects.map((path) => ` (subpath ${quote(path)})`).join("")})`);
+  }
   // The CLI's own home that sits in a hidden folder (an account home it was handed): writable again, like its other
   // folders (a sign-in refresh writes there). Its permission settings are denied again below.
   const ownHidden = paths.readableAgain.filter((path) => paths.writable.includes(path));

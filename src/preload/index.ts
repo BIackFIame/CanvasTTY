@@ -183,8 +183,8 @@ const api: CanvasTTYApi = {
     onCardDecorations: (listener: (decorations: PluginCardDecorations) => void) => (
       subscribe(IPC.pluginsCardDecorationsChanged, listener)
     ),
-    invokeCardAction: (pluginId: string, actionId: string, sessionId: string) => (
-      ipcRenderer.invoke(IPC.pluginsInvokeCardAction, pluginId, actionId, sessionId)
+    invokeCardAction: (pluginId: string, actionId: string, sessionId: string, input?: Record<string, unknown>) => (
+      ipcRenderer.invoke(IPC.pluginsInvokeCardAction, pluginId, actionId, sessionId, input)
     ),
     launchFieldOptions: (pluginId: string, provider: ProviderId) => (
       ipcRenderer.invoke(IPC.pluginsLaunchFieldOptions, pluginId, provider)

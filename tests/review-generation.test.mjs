@@ -5,6 +5,7 @@ import {realpathSync, existsSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {AgentControlService} from '../src/main/services/AgentControlService.ts';
+import {EnvironmentRegistry} from '../src/main/services/EnvironmentRegistry.ts';
 import {TerminalManager} from '../src/main/services/TerminalManager.ts';
 import {ScopedOrchestrationHandler} from '../src/main/services/agent-browser/OrchestrationTools.ts';
 import {availableRegistry, fakeSpawner} from './helpers/terminal.mjs';
@@ -15,7 +16,7 @@ async function until(predicate) {
  for(let i=0;i<200;i++){if(predicate())return;await new Promise(resolve=>setTimeout(resolve,5));}
  throw new Error('Expected review lifecycle transition did not occur');
 }
-async function fixture(t, {account=false} = {}) {
+async function fixture(t, {account=false,worktree=false} = {}) {
  const root=realpathSync(await mkdtemp(join(tmpdir(),'ctty-review-generation-')));
  const prompts=[],reviews=[],calls=[]; let terminals;
  terminals=new TerminalManager(()=>undefined,availableRegistry(),undefined,undefined,true,fakeSpawner(calls,{onWrite(data){
@@ -31,6 +32,15 @@ async function fixture(t, {account=false} = {}) {
  terminals.configureIsolation({containment:()=>true,
   decide:({profile})=>profile==='plan'?{apply:true,profile,isolation:{state:'on',layer:'seatbelt'}}:{apply:false,profile},
   wrap:launch=>({command:launch.command,args:[...launch.args],env:launch.env,cleanup(){}})});
+ if(worktree)terminals.configureEnvironments(new EnvironmentRegistry({
+  providers:()=>[{pluginId:'fixture.worktree',pluginName:'Worktree',serviceId:'env',secrets:false,kinds:[{kind:'worktree',label:'Worktree',fields:[]}]}],
+  call:async(_p,_s,method,params)=>{
+   if(method.endsWith('.prepare'))return {ref:{id:'one'},label:'Worktree'};
+   if(method.endsWith('.wrap'))return {command:process.execPath,args:params.args,cwd:root};
+   if(method.endsWith('.describe'))return {label:'Worktree'};
+   return {};
+  },secret:async()=>null
+ }));
  const accounts=[],accountCleanups=[],forgotten=new Map();
  const forgetCompletion=id=>{let done=forgotten.get(id);if(!done){done=deferred();forgotten.set(id,done);}return done;};
  if(account){
@@ -57,7 +67,7 @@ async function fixture(t, {account=false} = {}) {
    prepared.contribution.cleanup=()=>{row.cleanupCalls++;const pending=cleanup();row.cleanupPromise=pending;return pending;};return prepared;
   };
  }
- const control=new AgentControlService(terminals,{reviewModel:()=> 'fixture-reviewer',reviewDiff:async()=>'+worker scoped fixture',
+ const control=new AgentControlService(terminals,{...(worktree?{resolveSubagentEnvironment:()=>({pluginId:'fixture.worktree',kind:'worktree'})}:{}),reviewModel:()=> 'fixture-reviewer',reviewDiff:async()=>'+worker scoped fixture',
   waitTiming:{checkMs:1,settleMs:0,quietMs:10_000},onReview:(_id,review)=>reviews.push(review)});
  t.after(async()=>{
   const parentCleanups=[];
@@ -376,4 +386,40 @@ test('deferred orchestration waits return terminal unavailable for a quiet uncor
   assert.equal(result.reason,'quiet');assert.equal(result.review.status,'unavailable');assert.equal(result.answer,undefined);
  }
  assert.equal(f.prompts.length,1,'a terminal quiet outcome must not launch a billed review');
+});
+
+test('worktree retry reinstalls one observer and automatically reviews each retried and later manual turn', {timeout:5000},async t=>{
+ const f=await fixture(t,{worktree:true}),id=f.worker.id;
+ f.terminals.sessions.get(id).process.emitExit(1);
+ const retried=await f.control.retry(id);assert.equal(retried.id,id);
+ assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);
+ f.finish(id,'retry answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ assert.equal((await f.control.resultWithReview(id)).review.status,'accepted');
+ await f.control.send(id,'later task');
+ assert.notEqual((await f.control.resultWithReview(id)).review.status,'accepted','old verdict must not survive later input');
+ f.finish(id,'later answer');await until(()=>f.prompts.length===2);
+ f.finish(f.prompts[1].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===2);
+ f.terminals.sessions.get(id).process.emitExit(1);await f.control.retry(id);
+ assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1,'repeated retries must not accumulate observers');
+ f.finish(id,'second retry answer');await until(()=>f.prompts.length===3);
+ f.finish(f.prompts[2].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===3);
+ f.terminals.sessions.get(id).process.emitExit(1);await assert.rejects(f.control.retry(id),/limit of 2 retries/u);
+ assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);
+});
+
+for(const failure of ['restart','cancel before restart','delivery'])test(`worktree retry restores review ownership after ${failure} failure without a premature watcher`,{timeout:5000},async t=>{
+ const f=await fixture(t,{worktree:true}),id=f.worker.id;f.terminals.sessions.get(id).process.emitExit(1);
+ const restart=f.terminals.restartSession.bind(f.terminals),stop=f.terminals.stopRetryProcess.bind(f.terminals),deliver=f.terminals.deliverInput.bind(f.terminals),controller=new AbortController();
+ if(failure==='restart')f.terminals.restartSession=()=>{throw new Error('fixture restart failed');};
+ if(failure==='cancel before restart')f.terminals.stopRetryProcess=async(...args)=>{await stop(...args);controller.abort();};
+ if(failure==='delivery')f.terminals.deliverInput=async()=>({delivered:false,reason:'fixture no write'});
+ await assert.rejects(f.control.retry(id,undefined,controller.signal));
+ assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);assert.equal(f.control.reviewWatchers.has(id),false);assert.equal(f.prompts.length,0);
+ f.terminals.restartSession=restart;f.terminals.stopRetryProcess=stop;f.terminals.deliverInput=deliver;
+ assert.equal(f.terminals.getMetadata(id).exitCode !== null,true,'failed retry retains a stopped card');
+ await f.control.retry(id);assert.equal(f.terminals.inputWriteObservers.get(id)?.size,1);
+ f.finish(id,'recovered answer');await until(()=>f.prompts.length===1);
+ f.finish(f.prompts[0].id,'{"verdict":"accept","findings":""}');await until(()=>f.reviews.length===1);
+ assert.equal((await f.control.resultWithReview(id)).review.status,'accepted');
 });
