@@ -27,6 +27,7 @@ yarn-error.log*
 .cache/
 .electron/
 settings.json
+.pty-results/
 
 # Local agent and planning context — never publish
 .agents/
