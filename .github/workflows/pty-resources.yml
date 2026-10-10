@@ -68,6 +68,9 @@ jobs:
           done
       - name: Build a separate macOS application without publishing it
         env:
+          # Hosted read-only PR runner; mac.identity is explicitly ad-hoc ("-").
+          # No signing certificate/keychain secrets are provided to this job.
+          CSC_FOR_PULL_REQUEST: "true"
           SPARKLE_PUBLIC_ED_KEY: "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
         run: npm run package:mac
       - name: Audit the separate test bundle

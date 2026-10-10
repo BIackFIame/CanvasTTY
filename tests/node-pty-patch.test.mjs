@@ -79,6 +79,12 @@ test("CI preserves hidden synthetic reports but cannot upload a build after a fa
   assert.equal(build.if, "success()");
   assert.deepEqual(build.with.path.trim().split("\n"), ["release/*.zip", "release/*.dmg"]);
   assert.ok(steps.findIndex((step) => step.run?.startsWith("node scripts/audit-pty-test-bundle.mjs")) < steps.indexOf(build));
+  const packageStep = steps.find((step) => step.run === "npm run package:mac");
+  const builder = parse(await readFile(join(root, "electron-builder.yml"), "utf8"));
+  assert.equal(packageStep.env.CSC_FOR_PULL_REQUEST, "true", "PR runs must create the ad-hoc signature instead of retaining Electron's obsolete seal");
+  assert.equal(builder.mac.identity, "-", "the PR signing exception must never require a certificate");
+  assert.deepEqual(workflow.permissions, { contents: "read" });
+  assert.deepEqual(Object.keys(packageStep.env).sort(), ["CSC_FOR_PULL_REQUEST", "SPARKLE_PUBLIC_ED_KEY"], "no signing credentials are passed to an untrusted PR build");
 });
 
 test("packaged smoke uses the actual ASAR import route without doubling the native helper's unpacked path", async () => {
