@@ -10,6 +10,7 @@ on:
       - "electron-builder.yml"
       - "scripts/smoke-pty-resources.mjs"
       - "scripts/audit-pty-test-bundle.mjs"
+      - "scripts/fixtures/public-speech-source-path-hashes.json"
       - "tests/node-pty*"
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - "electron-builder.yml"
       - "scripts/smoke-pty-resources.mjs"
       - "scripts/audit-pty-test-bundle.mjs"
+      - "scripts/fixtures/public-speech-source-path-hashes.json"
       - "tests/node-pty*"
   workflow_dispatch:
 
@@ -56,7 +58,7 @@ jobs:
       - name: Apply the tracked patch and rebuild for Electron
         run: npm run postinstall
       - name: Check cleanup under injected native failures
-        run: node --test tests/node-pty-patch.test.mjs
+        run: node --test tests/node-pty-patch.test.mjs tests/node-pty-bundle-audit.test.mjs
       - name: Verify 400 cycles in one persistent Electron parent
         run: node scripts/smoke-pty-resources.mjs --cycles 400 --report .pty-results/source.json
       - name: Verify every combination of closed standard descriptors

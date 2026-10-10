@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,6 +11,8 @@ import { SECRET_PATTERNS } from "./audit-secrets.mjs";
 const ARCHIVE_ROOTS = new Set(["out", "node_modules", "package.json", "LICENSE"]);
 const PRIVATE_SEGMENTS = new Set([".git", ".codex", ".agents", ".runtime", ".pty-results", "logs"]);
 const PRIVATE_FILES = /^(?:\.env(?:\.|$)|(?:auth|credentials?|settings|terminal-sessions|controller|connection)\.json$)|\.(?:pem|key|p12|pfx)$/iu;
+const publicSpeechPaths = JSON.parse(await readFile(new URL("./fixtures/public-speech-source-path-hashes.json", import.meta.url), "utf8"));
+const PUBLIC_SOURCE_PATH_HASHES = new Map(Object.entries(publicSpeechPaths.files).map(([path, hashes]) => [path, new Set(hashes)]));
 
 function pathIssues(name) {
   const parts = name.replaceAll("\\", "/").split("/");
@@ -22,11 +25,18 @@ function pathIssues(name) {
   return issues;
 }
 
-function textIssues(content) {
+export function textIssues(content, publicSourcePathHashes = new Set()) {
+  // These exact NUL-terminated __FILE__ strings were already public in the
+  // checksum-pinned vendor archive. Do not exempt a username, directory,
+  // arbitrary CI path, different file, or any other credential rule.
+  const homeContent = publicSourcePathHashes.size ? content.replace(/\/(?:Users|home)\/[^\0\r\n]+(?=\0)/gu, (path) => {
+    const digest = createHash("sha256").update(path).digest("hex");
+    return publicSourcePathHashes.has(digest) ? "<public-vendor-source-file>" : path;
+  }) : content;
   const hits = [];
   for (const [name, pattern] of SECRET_PATTERNS) {
     pattern.lastIndex = 0;
-    if (pattern.test(content)) hits.push(name);
+    if (pattern.test(name === "personal home path" ? homeContent : content)) hits.push(name);
     pattern.lastIndex = 0;
   }
   return hits;
@@ -79,11 +89,19 @@ export async function auditPtyTestBundle(application) {
         // Includes unpacked addons, extraResources and native helper payload.
         // Stream large model assets; never silently skip a file due to its size.
         const hits = new Set();
-        let carry = "";
-        for await (const bytes of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
-          const text = carry + bytes.toString("utf8");
-          for (const rule of textIssues(text)) hits.add(rule);
-          carry = text.slice(-8192);
+        const publicHashes = PUBLIC_SOURCE_PATH_HASHES.get(label);
+        if (publicHashes) {
+          // Read the four small reviewed libraries whole: a block boundary
+          // must not split a proven-public source string before its NUL.
+          assert.ok((await lstat(path)).size <= 32 * 1024 * 1024, "reviewed vendor library unexpectedly large");
+          for (const rule of textIssues((await readFile(path)).toString("utf8"), publicHashes)) hits.add(rule);
+        } else {
+          let carry = "";
+          for await (const bytes of createReadStream(path, { highWaterMark: 1024 * 1024 })) {
+            const text = carry + bytes.toString("utf8");
+            for (const rule of textIssues(text)) hits.add(rule);
+            carry = text.slice(-8192);
+          }
         }
         record(label, [...hits]);
         filesScanned++;
@@ -114,5 +132,5 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     // Rules and relative paths only; never print a matched credential value.
     for (const issue of result.issues) console.error(`${issue.path}: ${issue.rule}`);
     process.exitCode = 1;
-  } else console.log(`Test bundle payload audit passed: ${result.filesScanned} files, no high-confidence secrets/private state or Darwin prebuild fallback.`);
+  } else console.log(`Test bundle payload audit passed: ${result.filesScanned} files, no high-confidence secrets, private state, unreviewed home paths or Darwin prebuild fallback; exact public vendor source-path hashes are documented separately.`);
 }

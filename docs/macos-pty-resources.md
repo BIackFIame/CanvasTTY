@@ -85,6 +85,15 @@ Only synthetic CI evidence and the separate test build are retained as Actions
 artifacts. No personal application state, terminal buffers, credentials or
 local diagnosis logs are included.
 
+The payload audit also scans `app.asar`, unpacked addons and application helper
+resources. The pinned public `transcribe.cpp` v0.2.3 arm64 release already has
+its CI builder's `__FILE__` paths in four ggml libraries. The reviewed
+`scripts/fixtures/public-speech-source-path-hashes.json` records the release URL,
+verified archive SHA-256 and exact hashes of its NUL-terminated source strings.
+Only those strings in those four files are recognized as public build metadata;
+other home paths and every credential rule still fail the audit. This does not
+alter the vendor binaries, signatures or speech behavior.
+
 ## Applying a fix is not recovering an existing process
 
 This change does not modify an installed application or hot-replace a loaded

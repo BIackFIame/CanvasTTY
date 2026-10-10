@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import asar from "@electron/asar";
-import { auditPtyTestBundle } from "../scripts/audit-pty-test-bundle.mjs";
+import { auditPtyTestBundle, textIssues } from "../scripts/audit-pty-test-bundle.mjs";
 
 async function fixture(run) {
   const root = await mkdtemp(join(tmpdir(), "canvastty-payload-audit-"));
@@ -61,4 +62,33 @@ test("payload audit cannot claim success when the package is absent", async () =
   const directory = await mkdtemp(join(tmpdir(), "canvastty-missing-payload-"));
   try { await assert.rejects(auditPtyTestBundle(directory)); }
   finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("a reviewed vendor filename still rejects an unknown home path in its real payload", async () => {
+  await fixture(async ({ app, resources }) => {
+    const directory = join(resources, "companion", "speech");
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "libggml-base.dylib"), "\0/" + "Users/synthetic-owner/private/session.txt\0");
+    const result = await auditPtyTestBundle(app);
+    assert.ok(result.issues.some((item) => item.rule === "personal home path"));
+  });
+});
+
+test("payload audit recognizes only exact proven-public NUL-terminated vendor source strings", () => {
+  const publicSource = "/" + "Users/synthetic-ci/actions-runner/_work/transcribe.cpp/transcribe.cpp/ggml/src/ggml.c";
+  const known = new Set([createHash("sha256").update(publicSource).digest("hex")]);
+  assert.deepEqual(textIssues(`\0${publicSource}\0`, known), []);
+  assert.ok(textIssues(`\0${publicSource}\0`).includes("personal home path"), "other files do not inherit the vendor exemption");
+  assert.ok(textIssues(`\0${publicSource}-changed\0`, known).includes("personal home path"));
+  assert.ok(textIssues(publicSource, known).includes("personal home path"), "a nonterminated text value is not native build metadata");
+});
+
+test("public vendor metadata never exempts another home path or a credential in the same file", () => {
+  const publicSource = "/" + "Users/synthetic-ci/actions-runner/_work/transcribe.cpp/transcribe.cpp/ggml/src/ggml.c";
+  const privateSource = "/" + "Users/synthetic-owner/private/session.txt";
+  const known = new Set([createHash("sha256").update(publicSource).digest("hex")]);
+  const content = `\0${publicSource}\0${privateSource}\0${"gh" + "p_" + "A".repeat(32)}\0`;
+  const issues = textIssues(content, known);
+  assert.ok(issues.includes("personal home path"));
+  assert.ok(issues.includes("GitHub token"));
 });
