@@ -17,6 +17,7 @@ if (process.platform !== "darwin" || process.env.CI !== "true" ||
 }
 
 const require = createRequire(import.meta.url);
+const runtimeStdioReuse = new Map();
 const options = parseArguments(process.argv.slice(2));
 if (options.worker) await runWorker(options);
 else await runDriver(options);
@@ -142,7 +143,24 @@ async function settledCensus(before) {
 function verifyClosedStdio(mask) {
   for (let fd = 0; fd < 3; fd++) {
     if (!(mask & (1 << fd))) continue;
-    assert.throws(() => fstatSync(fd), (error) => error.code === "EBADF", `stdio FD ${fd} was leaked/reopened`);
+    let metadata;
+    try { metadata = fstatSync(fd); }
+    catch (error) { if (error.code === "EBADF") continue; throw error; }
+    // Node/libuv may reuse a vacant stdio number for its own wakeup pipe or
+    // queue after the native function returns. That is not a leaked PTY. The
+    // pure native harness requires the original holes to remain closed; this
+    // integration test rejects PTY reuse and still demands stable FD counts.
+    let kind = metadata.isFIFO() ? "PIPE" : metadata.isSocket() ? "socket" : undefined;
+    if (!kind) {
+      const details = execFileSync("/usr/sbin/lsof", ["-nP", "-a", "-p", String(process.pid), "-d", String(fd), "-F", "tn"], {
+        encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024
+      }).split("\n");
+      const type = details.find((line) => line.startsWith("t"))?.slice(1);
+      if (type === "KQUEUE") kind = "KQUEUE";
+      else if (details.includes("n/dev/null")) kind = "/dev/null";
+      else throw new Error(`Unexpected reuse of stdio FD ${fd}: ${type || "unknown"}; no PTY reuse is permitted`);
+    }
+    runtimeStdioReuse.set(fd, kind);
   }
 }
 
@@ -268,6 +286,7 @@ async function runWorker(config) {
     process.exitCode = 1;
   } finally {
     clearTimeout(watchdog);
+    report.stdioReusedByRuntime = [...runtimeStdioReuse].map(([fd, kind]) => ({ fd, kind }));
     writeSync(reportFd, `${JSON.stringify(report, null, 2)}\n`);
     closeSync(reportFd);
     // A broken native watcher can retain a NAPI reference even after its child

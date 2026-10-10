@@ -69,6 +69,10 @@ The real-OS checks run ONLY in the isolated macOS GitHub Actions workflow
 - Exercise native `posix_spawn` failure with oversized argv, then create a new
   PTY to demonstrate the failure did not exhaust or poison the parent.
 - Check all seven nonempty combinations of closed standard descriptors.
+  The native ownership harness preserves the holes exactly. In full Electron,
+  Node/libuv can subsequently reuse a hole for its own pipe/socket/kqueue;
+  the integration check records that reuse, rejects PTY reuse, and still
+  requires unchanged master/slave/kqueue counts and stable total FD counts.
 - Package a new macOS application, verify its signature and repeat the checks
   using that application's actual native addon, not the development module.
 
