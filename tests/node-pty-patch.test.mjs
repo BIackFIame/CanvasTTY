@@ -3,8 +3,9 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runInNewContext } from "node:vm";
 import test from "node:test";
 import { parse } from "yaml";
 
@@ -78,4 +79,22 @@ test("CI preserves hidden synthetic reports but cannot upload a build after a fa
   assert.equal(build.if, "success()");
   assert.deepEqual(build.with.path.trim().split("\n"), ["release/*.zip", "release/*.dmg"]);
   assert.ok(steps.findIndex((step) => step.run?.startsWith("node scripts/audit-pty-test-bundle.mjs")) < steps.indexOf(build));
+});
+
+test("packaged smoke uses the actual ASAR import route without doubling the native helper's unpacked path", async () => {
+  // Evaluate only the real smoke's path declaration and the pinned dependency's
+  // helper-path calculation; no addon, application, subprocess or PTY is loaded.
+  const smoke = await readFile(join(root, "scripts", "smoke-pty-resources.mjs"), "utf8");
+  const declaration = smoke.match(/const moduleRoot =[\s\S]*?;/u)?.[0];
+  assert.ok(declaration, "the smoke's actual import-root declaration must be present");
+  const app = resolve(tmpdir(), "isolated-ci", "CanvasTTY test.app");
+  const moduleRoot = runInNewContext(`${declaration}\nmoduleRoot;`, { config: { app }, join, dirname }, { timeout: 1000 });
+  const source = await readFile(join(dependencyRoot, "lib", "unixTerminal.js"), "utf8");
+  const start = source.indexOf("var helperPath = native.dir");
+  const end = source.indexOf("var DEFAULT_FILE", start);
+  assert.ok(start >= 0 && end > start, "the pinned dependency's helper calculation must be present");
+  const helper = runInNewContext(`${source.slice(start, end)}\nhelperPath;`, {
+    native: { dir: "../build/Release/" }, path: { resolve }, __dirname: join(moduleRoot, "lib")
+  }, { timeout: 1000 });
+  assert.equal(helper, join(app, "Contents", "Resources", "app.asar.unpacked", "node_modules", "node-pty", "build", "Release", "spawn-helper"));
 });

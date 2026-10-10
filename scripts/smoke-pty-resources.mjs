@@ -185,12 +185,15 @@ async function runWorker(config) {
   }, 600_000);
   watchdog.unref();
   try {
-    const moduleRoot = config.app ? join(config.app, "Contents", "Resources", "app.asar.unpacked", "node_modules", "node-pty") :
+    // Follow the application's real ASAR import route. node-pty rewrites the
+    // helper's ASAR path itself; importing from .unpacked would double it.
+    const moduleRoot = config.app ? join(config.app, "Contents", "Resources", "app.asar", "node_modules", "node-pty") :
       dirname(require.resolve("node-pty/package.json"));
+    const physicalModuleRoot = config.app ? join(config.app, "Contents", "Resources", "app.asar.unpacked", "node_modules", "node-pty") : moduleRoot;
     const native = require(join(moduleRoot, "lib", "utils.js")).loadNativeModule("pty");
     assert.equal(native.dir, "../build/Release/", "the smoke must load the rebuilt addon, not an unpatched prebuild");
-    const binary = join(moduleRoot, "build", "Release", "pty.node");
-    accessSync(join(moduleRoot, "build", "Release", "spawn-helper"), constants.X_OK);
+    const binary = join(physicalModuleRoot, "build", "Release", "pty.node");
+    accessSync(join(physicalModuleRoot, "build", "Release", "spawn-helper"), constants.X_OK);
     report.addonSha256 = createHash("sha256").update(readFileSync(binary)).digest("hex");
     report.electron = process.versions.electron;
     report.arch = process.arch;
@@ -283,6 +286,8 @@ async function runWorker(config) {
     report.ok = true;
   } catch (error) {
     report.error = String(error.message).slice(0, 2000);
+    if (Number.isInteger(error.errno)) report.errno = error.errno;
+    if (typeof error.code === "string") report.code = error.code;
     process.exitCode = 1;
   } finally {
     clearTimeout(watchdog);
