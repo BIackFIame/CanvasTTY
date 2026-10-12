@@ -346,7 +346,7 @@ interface PluginSessionEvent {
 
 ### 卡片标记与动作（`cards:decorate`）
 
-具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 8 个 `cardActions`：
+具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 16 个 `cardActions`：
 
 ```json
 "permissions": ["cards:decorate"],
@@ -359,6 +359,8 @@ interface PluginSessionEvent {
 - `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`：`text` 最多 24 个字符，`tone` 为 `neutral`（默认）、`info`、`warn` 或 `error`，`tooltip` 最多 200 个字符；`null` 移除该插件的标记。每张卡片最多 4 个插件标记。标记是纯文本，像 agent 文本一样被遮蔽，并随卡片关闭或插件信任撤销而消失。
 - 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session }`（仅宿主可发；`session` 为上面的摘要），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
 - 任何地方都没有 HTML：标记、标题和消息都按文本渲染。
+- 带有 `review` 的回答会打开变更审查对话框，而不是提示。`review` 为 `{ title, groups, acceptActionId?, rejectActionId?, nextOffset? }`；每个分组为 `{ sessionId, title, files, error? }`（每个代理一个），每个文件为 `{ path, diff, status?, page?, hasMore?, truncated?, conflict? }`，其中 `conflict` 为 `{ current, agent }` 两个文本页 `{ label?, text, startLine, totalLines, hasMore }`。整个审查最多 512 KiB、24 个分组和 400 个文件；文本为纯文本、经过遮蔽、去除控制字符并截断到 16 KiB（此时文件标记为已截断）；文件路径不得因遮蔽而改变。`acceptActionId` 和 `rejectActionId` 必须是本插件声明的动作 id，否则回答被拒绝。
+- 对话框打开期间，宿主会带着 `input` 对象（最多 1 MiB 的 JSON 对象，仅由应用窗口发送，从不作为会话身份）再次调用同一动作：不带 `input` 表示刷新审查，`{ offset }` 表示下一页文件（`nextOffset`），`{ agentSessionId, file, page }` 表示某个文件 diff 的一页（打开文件时为第 0 页）。接受会以 `{ agentSessionId?, files, resolutions? }` 调用 `acceptActionId`（所选文件；`resolutions` 把冲突路径映射为 `"current"` 或 `"agent"`；整个任务时不带 `agentSessionId`），拒绝会以 `{ agentSessionId? }` 调用 `rejectActionId`。接受和拒绝只在用户于对话框中确认后才发送。对修改请回答剩余的审查或一条消息。
 
 完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。
 
