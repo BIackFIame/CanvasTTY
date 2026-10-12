@@ -1995,6 +1995,8 @@ export interface CanvasTTYApi {
   canvasNavigation: {
     armOwnerWheelSequence(clientX: number, clientY: number): void;
     setShortcutCaptureActive(active: boolean): void;
+    /** macOS: a terminal surface gained or lost keyboard focus (decides who handles Command+C/V/A). */
+    setTerminalEditFocus(active: boolean): void;
     setPointerBindingState(input: CanvasNavigationPointerBindingInput): void;
     setPointerGestureActive(active: boolean): void;
     onOverrideState(listener: (event: CanvasNavigationOverrideStateEvent) => void): () => void;
@@ -2175,6 +2177,7 @@ export const IPC = {
   browserCanvasPointer: "browser:canvas-pointer",
   browserCanvasNavigationPointer: "browser:canvas-navigation-pointer",
   canvasNavigationShortcutCapture: "canvas-navigation:shortcut-capture",
+  canvasNavigationTerminalEditFocus: "canvas-navigation:terminal-edit-focus",
   canvasNavigationPointerBinding: "canvas-navigation:pointer-binding",
   canvasNavigationOwnerWheel: "canvas-navigation:owner-wheel",
   canvasNavigationPointerGesture: "canvas-navigation:pointer-gesture",

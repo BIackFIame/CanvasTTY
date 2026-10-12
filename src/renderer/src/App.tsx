@@ -90,7 +90,8 @@ import {
   isShortcutCaptureTarget,
   matchesPointerShortcut,
   matchesShortcut,
-  shouldKeepNativeKeyboardInput
+  shouldKeepNativeKeyboardInput,
+  trackTerminalEditFocus
 } from "./lib/shortcuts";
 import { homeGridPixelSize, homeLayoutFitsGrid, placeHomeWidget } from "./features/home/homeLayout";
 import { boundsInsideRegion, translateBounds } from "./features/workspace/canvasRegions";
@@ -1857,9 +1858,13 @@ export function App(): React.JSX.Element {
 
     window.addEventListener("keydown", handleShortcut, true);
     window.addEventListener("pointerdown", handlePointerShortcut, true);
+    const stopTerminalFocus = window.canvasTTY.window.isMacOS
+      ? trackTerminalEditFocus(document, (focused) => window.canvasTTY.canvasNavigation.setTerminalEditFocus(focused))
+      : () => undefined;
     return () => {
       window.removeEventListener("keydown", handleShortcut, true);
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
+      stopTerminalFocus();
     };
   }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, toggleSessionFullscreen]);
 

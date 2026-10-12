@@ -11,6 +11,7 @@ import {
   matchesShortcut,
   shouldKeepNativeKeyboardInput,
   shortcutFromKeyboardEvent,
+  trackTerminalEditFocus,
   shortcutFromPointerEvent
 } from "../src/renderer/src/lib/shortcuts.ts";
 
@@ -222,4 +223,27 @@ test("App restores native Command+A before its native-input guard without interc
   assert.deepEqual(actions, []);
   handler(event(new ElementTarget(), { key: "Home", code: "Home", metaKey: false }));
   assert.deepEqual(actions, ["home"]);
+});
+
+test("terminal keyboard focus is reported on change only; a plugin iframe or app field is not a terminal", async (t) => {
+  const previousElement = globalThis.Element;
+  class FakeElement { constructor(selector) { this.selector = selector; } closest(query) { return this.selector && query.includes(this.selector) ? this : null; } }
+  globalThis.Element = FakeElement;
+  t.after(() => { if (previousElement === undefined) delete globalThis.Element; else globalThis.Element = previousElement; });
+  const listeners = new Map();
+  const doc = {
+    activeElement: new FakeElement(null),
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+    defaultView: { addEventListener() {}, removeEventListener() {} }
+  };
+  const reports = [];
+  const stop = trackTerminalEditFocus(doc, (focused) => reports.push(focused));
+  doc.activeElement = new FakeElement(".xterm"); listeners.get("focusin")();
+  doc.activeElement = new FakeElement(".xterm"); listeners.get("focusin")();
+  doc.activeElement = new FakeElement(null); listeners.get("focusout")();   // e.g. the plugin iframe took focus
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.deepEqual(reports, [false, true, false]);
+  stop();
+  assert.equal(listeners.size, 0);
 });
