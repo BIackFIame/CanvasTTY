@@ -9,7 +9,8 @@ import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
 import { ProviderRuntimeLaunchAdapters } from "../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts";
 import { ProviderLaunchAdapters } from "../src/main/services/agent-browser/ProviderLaunch.ts";
 import { AgentBrowserBridge } from "../src/main/services/agent-browser/AgentBrowserBridge.ts";
-import { accountHookHome, contributedHookHome } from "../src/main/services/accountHomes.ts";
+import { accountHookHome } from "../src/main/services/accountHomes.ts";
+import { contributedAccountHome } from "../src/main/services/isolation/accountHomeIsolation.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 
 const helper = Object.freeze({
@@ -64,18 +65,25 @@ test("accountHookHome: GROK_HOME for Grok, KIMI_CODE_HOME for Kimi, nothing for 
   assert.equal(accountHookHome("grok", { GROK_HOME: "" }), undefined);
 });
 
-test("contributedHookHome: only the contributor's own data folder, only the hook home variable", () => {
+test("account home: only the contributor's own data folder; only GROK_HOME / KIMI_CODE_HOME get the hooks", () => {
   const dataDir = "/data/plugin-data/accounts";
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", `${dataDir}/homes/a/`), `${dataDir}/homes/a`);
-  assert.equal(contributedHookHome("kimi", dataDir, "KIMI_CODE_HOME", `${dataDir}/homes/k`), `${dataDir}/homes/k`);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", "/data/plugin-data/other/homes/a"), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", dataDir), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", `${dataDir}/../other/homes/a`), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", "homes/a"), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "KIMI_CODE_HOME", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("kimi", dataDir, "KIMI_SHARE_DIR", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("claude", dataDir, "CLAUDE_CONFIG_DIR", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("grok", undefined, "GROK_HOME", `${dataDir}/homes/a`), undefined);
+  // The launch's account home (one rule, contributedAccountHome) gets the hooks only when it is the hook home too, as
+  // TerminalManager checks it.
+  const hookHome = (provider, key, value) => {
+    const home = contributedAccountHome(provider, dataDir, key, value);
+    const hook = accountHookHome(provider, { [key]: value });
+    return home !== undefined && home === hook ? home : undefined;
+  };
+  assert.equal(hookHome("grok", "GROK_HOME", `${dataDir}/homes/a/`), `${dataDir}/homes/a`);
+  assert.equal(hookHome("kimi", "KIMI_CODE_HOME", `${dataDir}/homes/k`), `${dataDir}/homes/k`);
+  assert.equal(hookHome("grok", "GROK_HOME", "/data/plugin-data/other/homes/a"), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", dataDir), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", `${dataDir}/../other/homes/a`), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", "homes/a"), undefined);
+  assert.equal(hookHome("grok", "KIMI_CODE_HOME", `${dataDir}/homes/a`), undefined);
+  assert.equal(hookHome("kimi", "KIMI_SHARE_DIR", `${dataDir}/homes/a`), undefined);
+  assert.equal(hookHome("claude", "CLAUDE_CONFIG_DIR", `${dataDir}/homes/a`), undefined);
+  assert.equal(contributedAccountHome("grok", undefined, "GROK_HOME", `${dataDir}/homes/a`), undefined);
 });
 
 test("Grok: an account home gets the status hooks, the default home is left alone, and the release removes them", async (t) => {
