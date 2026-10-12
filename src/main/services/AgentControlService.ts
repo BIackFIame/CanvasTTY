@@ -76,6 +76,8 @@ export interface AgentWaitResult {
   exitLines?: string;
   /** The final answer of the turn that ended (Codex, OpenCode subagents), masked. */
   answer?: AgentAnswer;
+  /** Why a Codex or OpenCode subagent has no answer and never will in this launch (read its output instead). */
+  answerUnavailable?: AgentAnswerUnavailable;
 }
 
 export interface AgentWaitTiming {
@@ -111,7 +113,19 @@ export interface AgentResult {
   exitLines?: string;
   /** The last turn's final answer as the agent reported it (Codex, OpenCode subagents), masked; absent otherwise. */
   answer?: AgentAnswer;
+  /** Why a Codex or OpenCode subagent has no answer and never will in this launch (read its output instead). */
+  answerUnavailable?: AgentAnswerUnavailable;
 }
+
+export interface AgentAnswerUnavailable {
+  /** "status_hooks_off": CanvasTTY status hooks were off for its launch, so it has no hooks to report an answer. */
+  reason: "status_hooks_off";
+  message: string;
+}
+
+const STATUS_HOOKS_OFF_MESSAGE = "This subagent's final answer cannot be captured because CanvasTTY status hooks are off "
+  + "(Settings → Agents; turning them on applies to agents started or restarted afterwards). Read its output instead: "
+  + "the output field here, or observe_agent.";
 
 export interface AgentAnswer {
   text: string;
@@ -388,7 +402,7 @@ export class AgentControlService {
       exitCode: session.exitCode,
       output: this.redactTail(buffer, MAX_OBSERVE_CHARS),
       ...(session.exitCode !== null && this.exitLines(buffer) ? { exitLines: this.exitLines(buffer)! } : {}),
-      ...(answer ? { answer } : {})
+      ...(answer ? { answer } : this.answerUnavailable(sessionId))
     };
   }
 
@@ -415,7 +429,7 @@ export class AgentControlService {
       try { observation = this.observe(sessionId); } catch { observation = null; }
       const answer = reason === "timeout" || reason === "needs_approval" ? null : this.answer(sessionId);
       return { sessionId, reason, status: session.status, exitCode: session.exitCode, waitedMs, output: observation?.output ?? "",
-        ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(answer ? { answer } : {}) };
+        ...(observation?.exitLines ? { exitLines: observation.exitLines } : {}), ...(answer ? { answer } : this.answerUnavailable(sessionId)) };
     };
     let offset = this.outputOffset(sessionId);
     let changedAt = started;
@@ -476,6 +490,14 @@ export class AgentControlService {
 
   private turnProgress(sessionId: string): { promptSent: boolean; turnStartedSincePrompt: boolean } | null {
     try { return typeof this.terminals.turnProgress === "function" ? this.terminals.turnProgress(sessionId) : null; } catch { return null; }
+  }
+
+  /** Says so when no answer can be captured for this agent, so an orchestrator reads its output instead of waiting for one. */
+  private answerUnavailable(sessionId: string): { answerUnavailable?: AgentAnswerUnavailable } {
+    try {
+      const reason = typeof this.terminals.answerUnavailable === "function" ? this.terminals.answerUnavailable(sessionId) : null;
+      return reason === "status_hooks_off" ? { answerUnavailable: { reason, message: STATUS_HOOKS_OFF_MESSAGE } } : {};
+    } catch { return {}; }
   }
 
   private answer(sessionId: string): AgentAnswer | null {

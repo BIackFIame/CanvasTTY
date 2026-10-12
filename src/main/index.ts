@@ -92,6 +92,7 @@ import {
   RuntimeGateway
 } from "./services/agent-runtime";
 import type { RuntimeHookHelperLaunch } from "./services/agent-runtime/ProviderRuntimeLaunch";
+import { applyRuntimeSignal } from "./services/agent-runtime/applyRuntimeSignal";
 import { agentHelperLaunches } from "./services/agentHelpers";
 import {
   recoverHermesConfigurationOnStartup,
@@ -531,15 +532,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       runtimeDirectory: lifecycleRuntimeDirectory,
       windowsHostPath,
       onSignal: (terminalSessionId, signal) => {
-        terminalManager?.applyProviderSignal(terminalSessionId, {
-          kind: "lifecycle",
-          state: signal.state,
-          event: signal.event,
-          ...(signal.turnId ? { requestId: signal.turnId } : {}),
-          ...(signal.threadId ? { threadId: signal.threadId } : {})
-        });
-        // A subagent's final answer (Codex Stop hook, OpenCode plugin) for get_agent_result and wait_for_agent.
-        if (signal.result) terminalManager?.recordAnswer(terminalSessionId, signal.result);
+        if (terminalManager) applyRuntimeSignal(terminalManager, terminalSessionId, signal);
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
           evenG2?.answer(

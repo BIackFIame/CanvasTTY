@@ -248,7 +248,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       exitCode: result.exitCode,
       output: result.output,
       ...(result.exitLines ? { exitLines: result.exitLines } : {}),
-      ...(result.answer ? { answer: result.answer } : {})
+      ...(result.answer ? { answer: result.answer } : {}),
+      ...(result.answerUnavailable ? { answerUnavailable: result.answerUnavailable } : {})
     };
   }
 
