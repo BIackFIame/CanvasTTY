@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   CanvasLauncherItemId,
   LocaleId,
@@ -17,11 +17,8 @@ import {
   CanvasMenuRow,
   CanvasMenuSub
 } from "../../components/CanvasMenuPrimitives";
-import {
-  chooseCanvasSubmenuSide,
-  type CanvasContextMenuKind,
-  type CanvasSubmenuSide
-} from "./canvasContextRouting";
+import type { CanvasContextMenuKind, CanvasSubmenuSide } from "./canvasContextRouting";
+import { canvasMenuPlacementClearOfPanels, chooseCanvasSubmenuPlacement, chooseCanvasSubmenuSide } from "./canvasMenuPlacement";
 import type { CanvasAutoSortHost } from "./canvasAutoSortScope";
 import { CANVAS_REGION_COLORS } from "./canvasRegions";
 
@@ -67,6 +64,13 @@ interface CanvasContextMenuProps {
   onSendRemarks: (() => void) | null;
   autoSort: CanvasAutoSortHost;
   onClose(): void;
+}
+
+/** The visible canvas corner panels (minimap, shortcut hints, Home/zoom controls), wherever Settings put them. */
+function cornerPanelRects(workspace: HTMLElement): DOMRect[] {
+  return [...workspace.querySelectorAll<HTMLElement>(".canvas-overlays .canvas-overlay-slot > *")]
+    .map((panel) => panel.getBoundingClientRect())
+    .filter((panel) => panel.width > 0 && panel.height > 0);
 }
 
 export function CanvasContextMenu({
@@ -119,6 +123,44 @@ export function CanvasContextMenu({
     loadToolsMenu().then((loaded) => { if (live) setToolsMenu(() => loaded); }, () => undefined);
     return () => { live = false; };
   }, [kind]);
+  // Before the first paint: keep the menu off the corner panels (up, or else sideways), and point the submenu chevrons
+  // where they open.
+  const [place, setPlace] = useState({ left: position.x, top: position.y });
+  useLayoutEffect(() => {
+    const root = menu.current;
+    const workspace = root?.closest<HTMLElement>(".workspace");
+    if (!root || !workspace) {
+      setPlace({ left: position.x, top: position.y });
+      return;
+    }
+    const area = workspace.getBoundingClientRect();
+    const rect = root.getBoundingClientRect();
+    const placed = { left: area.left + position.x, right: area.left + position.x + rect.width, top: area.top + position.y,
+      bottom: area.top + position.y + rect.height };
+    const panels = cornerPanelRects(workspace);
+    const fontSize = Number.parseFloat(window.getComputedStyle(root).fontSize) || 13;
+    const clear = canvasMenuPlacementClearOfPanels(placed, panels,
+      { minTop: area.top + .9 * fontSize, minLeft: area.left + .9 * fontSize, maxRight: area.right - .9 * fontSize }, .6 * fontSize);
+    setPlace({ left: clear.left - area.left, top: clear.top - area.top });
+  }, [kind, position.x, position.y]);
+  // After the menu has its place: the submenus open toward the side with room.
+  useLayoutEffect(() => {
+    chooseSubmenuSide();
+  }, [kind, place.left, place.top]);
+  // An open submenu, once measured, goes where it covers no corner panel: the other direction or side when needed.
+  useLayoutEffect(() => {
+    const submenu = menu.current?.querySelector<HTMLElement>(".canvas-menu__submenu");
+    const anchor = submenu?.closest<HTMLElement>(".canvas-menu__submenu-anchor");
+    const workspace = menu.current?.closest<HTMLElement>(".workspace");
+    if (!submenu || !anchor || !workspace) return;
+    const fontSize = Number.parseFloat(window.getComputedStyle(menu.current!).fontSize) || 13;
+    const { width, height } = submenu.getBoundingClientRect();
+    const placement = chooseCanvasSubmenuPlacement(anchor.getBoundingClientRect(), { width, height },
+      workspace.getBoundingClientRect(), cornerPanelRects(workspace),
+      { gap: .55 * fontSize, offset: .45 * fontSize, clearance: .6 * fontSize }, toolsOpen);
+    setSubmenuSide(placement.side);
+    if (toolsOpen) setToolsUp(placement.up);
+  }, [launcherOpen, toolsOpen, ToolsMenu, place.left, place.top]);
 
   const chooseSubmenuSide = (): void => {
     const root = menu.current;
@@ -139,21 +181,16 @@ export function CanvasContextMenu({
       setLauncherOpen(false);
       return;
     }
-    chooseSubmenuSide();
     setToolsOpen(false);
     setLauncherOpen(true);
   };
 
-  const toggleTools = (event: React.MouseEvent<HTMLButtonElement>): void => {
+  // Where an open submenu goes (side, up or down) is chosen once it is measured, in the layout effect above.
+  const toggleTools = (): void => {
     if (toolsOpen) {
       setToolsOpen(false);
       return;
     }
-    chooseSubmenuSide();
-    const workspace = menu.current?.closest<HTMLElement>(".workspace");
-    const fontSize = Number.parseFloat(window.getComputedStyle(event.currentTarget).fontSize) || 13;
-    setToolsUp(Boolean(workspace)
-      && event.currentTarget.getBoundingClientRect().top + 22 * fontSize > workspace!.getBoundingClientRect().bottom);
     setLauncherOpen(false);
     setToolsOpen(true);
     if (!loadedToolsMenu) {
@@ -174,7 +211,7 @@ export function CanvasContextMenu({
       data-interactive="true"
       role="menu"
       aria-label={t(locale, "canvasContextMenu")}
-      style={{ left: position.x, top: position.y }}
+      style={{ left: place.left, top: place.top }}
       onContextMenu={(event) => event.preventDefault()}
       onKeyDown={(event) => {
         if (event.key === "Escape") {
@@ -219,7 +256,7 @@ export function CanvasContextMenu({
           <div className="canvas-menu__submenu-anchor">
             <CanvasMenuRow
               icon="terminal"
-              right={<CanvasMenuChevron />}
+              right={<CanvasMenuChevron side={submenuSide} />}
               role="menuitem"
               aria-haspopup="menu"
               aria-expanded={launcherOpen}
@@ -264,7 +301,7 @@ export function CanvasContextMenu({
           <div className="canvas-menu__submenu-anchor">
             <CanvasMenuRow
               icon="wrench"
-              right={<CanvasMenuChevron />}
+              right={<CanvasMenuChevron side={submenuSide} />}
               role="menuitem"
               aria-haspopup="menu"
               aria-expanded={toolsOpen}

@@ -510,7 +510,17 @@ test("auto-sort strings exist in every locale and new code uses tokens, vendored
   assert.ok(sortStyles.length >= 4);
   for (const line of sortStyles) assert.doesNotMatch(line, /#[\da-f]{3,8}\b|rgba?\(|\d+px/i, line);
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{ \.workspace--auto-sorting [^}]*transition: none; \}/);
-  assert.doesNotMatch(styles, /\.workspace--auto-sorting[^{]*\.browser-card/, "the native Browser view never glides");
+  assert.doesNotMatch(styles, /\.workspace--auto-sorting :is\(\.terminal-card, \.plugin-canvas-card\) \{[^}]*\.browser-card/, "the native Browser view never glides");
+  // Zoomed out, the outline of the moved windows keeps its on-screen thickness: it grows with the summary scale.
+  assert.match(styles, /\.workspace--auto-sorting :is\(\.terminal-card--summary\.terminal-card--selected, \.plugin-canvas-card--summary\.plugin-canvas-card--selected, \.browser-card--summary\.browser-card--selected\) \{ box-shadow: 0 0 0 calc\([^)]*var\(--summary-scale, 1\)\) var\(--primary\)/);
+  // "Needs at least 2 windows" is a plain muted hint, not the uppercase group label.
+  assert.match(tools, /\{!available && <p className="canvas-menu__hint">\{t\(locale, "canvasAutoSortUnavailable"\)\}<\/p>\}/);
+  const hint = styles.match(/\.canvas-menu__hint \{[^}]*\}/)[0];
+  const disabledRow = styles.match(/\.canvas-menu__row:disabled \{[^}]*\}/)[0];
+  assert.match(hint, /padding: [^;]*calc\(1\.55em \/ \.92\)/, "the hint's text lines up with the indented rows despite its smaller font");
+  assert.match(hint, /color: var\(--text\); opacity: \.5;/, "as quiet as the disabled rows it explains");
+  assert.match(disabledRow, /opacity: \.5/);
+  assert.doesNotMatch(styles.match(/\.canvas-menu__hint \{[^}]*\}/)[0], /uppercase|font-mono/);
 
   assert.match(icons, /import undoIcon from "\.\.\/assets\/icons\/lucide\/undo-2\.svg";/);
   assert.match(icons, /import wrenchIcon from "\.\.\/assets\/icons\/lucide\/wrench\.svg";/);

@@ -93,7 +93,7 @@ export function CanvasAutoSortMenu({ host, locale, className, onDone }: {
             onClick={() => run(() => runCanvasAutoSort(host, mode))}
           >{t(locale, LABELS[mode])}</CanvasMenuRow>
         ))}
-        {!available && <CanvasMenuLabel>{t(locale, "canvasAutoSortUnavailable")}</CanvasMenuLabel>}
+        {!available && <p className="canvas-menu__hint">{t(locale, "canvasAutoSortUnavailable")}</p>}
       </div>
       {undoAvailable && (
         <>
