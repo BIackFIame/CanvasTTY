@@ -54,8 +54,6 @@ import { TerminalCard } from "../terminal/TerminalCard";
 import { shouldTogglePixelSkinMasterView } from "../terminal/terminalShortcuts";
 import { isPixelSkinThemeId } from "../skins/skinCatalog";
 import { isPixelSkinPackId, usePixelSkinPackAssets } from "../skins/SkinAssets";
-import { CanvasCommandPalette } from "./CanvasCommandPalette";
-import { CanvasContextMenu } from "./CanvasContextMenu";
 import { CanvasMinimap } from "./CanvasMinimap";
 import { AgentChatHistoryHud } from "./AgentChatHistoryHud";
 import { CanvasRegionCard } from "./CanvasRegionCard";
@@ -115,6 +113,8 @@ import { useCanvasWheelNavigation } from "./useCanvasWheelNavigation";
 import { useCanvasWidgetFocus } from "./useCanvasWidgetFocus";
 import { useRemarkPopoverRect } from "./useRemarkPopoverRect";
 import { webglContextPool } from "../terminal/webglContextPool";
+import { preloadWhenIdle, usePreloadedSurface } from "../../lib/preloadedSurface";
+import { canvasCommandPaletteSurface, canvasContextMenuSurface } from "./canvasOverlaySurfaces";
 
 const CANVAS_OVERLAY_PLACEMENTS: readonly CanvasOverlayPlacement[] = [
   "top-left",  "top-right",
@@ -307,6 +307,10 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const [contextMenu, setContextMenu] = useState<CanvasMenuState | null>(null);
   const [regionEditor, setRegionEditor] = useState<RegionEditorState | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  // Out of the startup bundle, preloaded once the canvas is idle, rendered without a Suspense boundary (see preloadedSurface).
+  const CanvasContextMenu = usePreloadedSurface(canvasContextMenuSurface, contextMenu !== null);
+  const CanvasCommandPalette = usePreloadedSurface(canvasCommandPaletteSurface, commandPaletteOpen);
+  useEffect(() => preloadWhenIdle([canvasContextMenuSurface, canvasCommandPaletteSurface]), []);
   const [radialLauncher, setRadialLauncher] = useState<{
     anchor: Point;
     pointerAnchor: Point;
@@ -1454,7 +1458,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         </div>
       )}
 
-      {contextMenu && (
+      {contextMenu && CanvasContextMenu && (
         <CanvasContextMenu
           kind={contextMenu.kind}
           position={contextMenu.position}
@@ -1580,7 +1584,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
         />
       )}
 
-      {commandPaletteOpen && (
+      {commandPaletteOpen && CanvasCommandPalette && (
         <CanvasCommandPalette
           locale={settings.locale}
           sessions={sessions}
