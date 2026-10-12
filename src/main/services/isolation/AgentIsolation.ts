@@ -6,6 +6,7 @@ import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts"
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
 import { isolationPaths, type PlacedProject } from "./isolationPaths.ts";
+import { isPluginDataPath, worktreeGitAccess } from "./worktreeGitAccess.ts";
 import { validateAccountHome } from "./accountHomeIsolation.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments, projectHooks, type PathKind } from "./bubblewrap.ts";
@@ -21,6 +22,8 @@ export const BUBBLEWRAP_USERNS_DOCS = "docs/installing-and-security.md#linux-whe
 /** A failed bubblewrap check is repeated after this long, so allowing it takes effect without a restart. */
 const BUBBLEWRAP_PROBE_RETRY_MS = 60_000;
 export const ISOLATION_NOTE = "CanvasTTY agent isolation: files can be written only inside the project folder, $TMPDIR and this CLI's own folders; SSH/cloud keys, other agents' credentials and CanvasTTY's tokens cannot be read; other processes, apps and daemons are out of reach. \"Operation not permitted\" outside that is this rule: do the work inside the project, or tell the person what you need.";
+/** Added to ISOLATION_NOTE for an agent in a validated plugin worktree (its environment only; nothing on the card). */
+export const WORKTREE_GIT_NOTE = "A plugin worktree's Git metadata stays read-only under agent isolation to protect the shared repository and sibling worktrees. You can edit project files; git add and git commit are unavailable here. The host environment collects your file edits into a review for the user to accept.";
 
 export interface AgentIsolationOptions {
   /** CanvasTTY's userData folder (its private data is never readable inside the layer). */
@@ -71,6 +74,8 @@ export interface IsolationLaunch {
   sessionId: string;
   provider: ProviderId;
   cwd: string;
+  /** The task's original project root (the root agent's folder), for validating a linked worktree in plugin data. */
+  taskProjectRoot?: string;
   command: string;
   args: readonly string[];
   env: Record<string, string>;
@@ -190,12 +195,19 @@ export class AgentIsolation {
       chmodSync(folder, 0o700);
       const temp = join(folder, "tmp");
       mkdirSync(temp, { mode: 0o700 });
+      const requestedCwdInPluginData = isPluginDataPath(launch.cwd, this.options.userDataPath);
       const cwd = realpathSync(launch.cwd);
+      // A project in plugin data must be a linked worktree the host validates against the task's own repository.
+      const trustedWorktree = worktreeGitAccess(cwd, launch.taskProjectRoot ?? cwd, this.options.userDataPath);
+      if ((requestedCwdInPluginData || isPluginDataPath(cwd, this.options.userDataPath)) && !trustedWorktree) {
+        throw new LaunchRefusal("The plugin environment worktree could not be verified against the task's original Git repository. The agent was not started.");
+      }
       const accountHome = launch.accountHome === undefined
         ? undefined
         : validateAccountHome(this.options.userDataPath, launch.provider, launch.accountHome, launch.env);
       const granted = [...(launch.grantedPrivate ?? []), ...(accountHome ? [accountHome] : [])];
       const paths = isolationPaths({
+        ...(trustedWorktree ? { worktreeGitAccess: trustedWorktree } : {}),
         provider: launch.provider,
         cwd,
         sessionTemp: temp,
@@ -212,10 +224,13 @@ export class AgentIsolation {
       const gitTemplate = join(folder, "git-template");
       mkdirSync(gitTemplate, { mode: 0o500 });
       // An agent that meets "Operation not permitted" can read why here, instead of trying other ways around it.
-      const env: Record<string, string> = { ...launch.env, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: ISOLATION_NOTE };
+      const isolationNote = trustedWorktree ? `${ISOLATION_NOTE} ${WORKTREE_GIT_NOTE}` : ISOLATION_NOTE;
+      const env: Record<string, string> = { ...launch.env, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: isolationNote };
       // Claude Code ignores TMPDIR for its Bash tool and editor files: `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>`, which
       // all of the person's Claude sessions share and the layer keeps read-only. Its own folder is the launch's temp.
       if (launch.provider === "claude") env.CLAUDE_CODE_TMPDIR = temp;
+      // Read-only Git metadata: `git status` must not try to refresh the index (an optional lock it cannot take).
+      if (trustedWorktree) env.GIT_OPTIONAL_LOCKS = "0";
       if (available.layer === "seatbelt") {
         const profilePath = join(folder, "profile.sb");
         writeFileSync(profilePath, seatbeltProfile(paths), { mode: 0o600, flag: "wx" });
