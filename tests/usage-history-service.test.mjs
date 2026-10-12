@@ -142,7 +142,7 @@ test("first collection creates a private, atomically replaced history file with 
     assert.deepEqual(limits.calls, [["codex", "claude"]]);
 
     assert.deepEqual(await readdir(directory), [FILE], "no temporary files remain");
-    assert.equal((await stat(join(directory, FILE))).mode & 0o777, 0o600);
+    if (process.platform !== "win32") assert.equal((await stat(join(directory, FILE))).mode & 0o777, 0o600);
     const persisted = JSON.parse(await readFile(join(directory, FILE), "utf8"));
     assert.deepEqual(persisted.history.samples, collected.samples);
     assert.equal(JSON.stringify(history.get()).includes("\"files\""), false, "collector cursors stay private to the main process");
@@ -431,7 +431,7 @@ test("a symlinked history file is neither followed nor replaced", async () => {
   });
 });
 
-test("save failures are surfaced without losing the in-memory history", { skip: process.getuid?.() === 0 }, async () => {
+test("save failures are surfaced without losing the in-memory history", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async () => {
   await withDirectory(async (directory) => {
     const store = join(directory, "store");
     await mkdir(store);

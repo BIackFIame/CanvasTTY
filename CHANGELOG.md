@@ -2,7 +2,16 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## Unreleased
+## 1.8.0
+
+- Added image/material cards, pinned versions, remarks, and handoff to an existing agent session. The handoff icon stays fixed in the card header, and the dialog places its Cancel/Send actions together at the bottom right (#123, #128, #130).
+- Added usage history with measured quota changes, conditional session estimates, local-log token evidence, and source health. Five sections in the left sidebar replace the long report: conditional estimate, quotas, agents, local-log tokens, and source state. Estimates remain explicitly distinct from measured usage (#138).
+- Added interactive mascots and a Codex workflow for creating them (#139).
+- Added per-agent default launch profiles and opening terminal file links in VS Code (#127, #129).
+- Fixed macOS text-field clipboard/edit menus, OpenCode plugin exports, and native PTY file-descriptor leaks (#126, #131, #140).
+- Fixed minimap navigation by fitting the camera viewport and all canvas objects together, keeping the camera outline inside the overview.
+- Fixed usage collection creating WAL side files beside stopped Hermes databases, and blocked symlinked usage-history files on Windows. Completed the lockfile for clean npm 10 installs.
+- Thanks to @tab11pm, @SaneSanders, @BIackFIame, @pepechka-kun, @CLOSETTTY, @teo-nex, @Yt4aZaveta, and @theorangecolorv2. Original contributor commits are preserved in the merge history.
 
 - Added a rich file viewer to the **Files** card: Markdown files (`.md`, `.markdown`, `.mdown`, `.mkd`) render as formatted GitHub-Flavored Markdown with headings, lists, task lists, tables, blockquotes, horizontal rules, inline code, and fenced code blocks with syntax highlighting, recognized code files are syntax-highlighted by the language detected from their extension while unknown languages stay plain monospaced text, all rendered content is sanitized so raw HTML, scripts, event-handler attributes, and dangerous link schemes never render, `http(s)` links open in the app's built-in browser with other schemes inert, only embedded `data:` images show while remote or relative sources fall back to alt text or a placeholder without a network request, and text and code files above the rich-rendering size threshold fall back to plain text with a notice.
 - Added a read-only **Files** canvas card and reader: open it from the empty-canvas context menu or the `Cmd/Ctrl+K` palette, root it at a live terminal session working directory or a folder picked in a native dialog, browse a directory tree that loads on demand, and read text/code as selectable monospace (bounded at 2 MB with a truncation marker and total size) or supported images (bounded at 25 MB) with explicit binary, unsupported, and too-large states. Quick open searches file names inside the active root, each card's root, bounds, open file, and expanded folders persist and restore with an unavailable state when the root is gone, and a new main-process `FileAccessService` enforces `realpath` containment so every listing, read, and search uses relative paths strictly inside registered roots with no write, rename, or delete capability.

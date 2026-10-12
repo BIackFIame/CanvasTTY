@@ -303,7 +303,8 @@ test("App mounts the trigger beside the title bar and portals the overlay outsid
   assert.match(app, /<div ref=\{setOverlayHost\} className=\{rootClasses\}/);
   assert.match(app, /<TitleBar[^\n]*\/>\n\s*<UsageHistoryPanel\n\s*locale=\{settings\.locale\}\n\s*open=\{usageHistoryOpen\}\n\s*container=\{overlayHost\}/);
   assert.match(app, /browserViewVisible=\{!settingsOpen && !usageHistoryOpen && /);
-  assert.equal((app.match(/if \(usageHistoryOpen\) return;/g) ?? []).length, 2);
+  assert.match(app, /if \(usageHistoryOpen\) return;/);
+  assert.match(app, /if \(shortcutReferenceOpen \|\| usageHistoryOpen \|\| handoffRemarkIds !== null\) return;/);
   const workspaceIndex = app.indexOf("<WorkspaceCanvas");
   assert.ok(app.indexOf("<UsageHistoryPanel") < workspaceIndex, "not inside the transformed canvas");
 });
