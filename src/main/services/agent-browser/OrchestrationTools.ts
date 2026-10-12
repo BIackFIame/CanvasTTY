@@ -6,6 +6,7 @@ import { PromptNotDeliveredError, type AgentControlService, type SpawnAgentReque
 import { LaunchRefusal } from "../launchRefusal.ts";
 import type { PluginAgentTools } from "../PluginAgentTools.ts";
 import {
+  CLIENT_SAFE_AGENT_WAIT_SECONDS,
   DEFAULT_AGENT_WAIT_SECONDS,
   MAX_AGENT_WAIT_SECONDS,
   ORCHESTRATION_TOOL_DEFINITIONS,
@@ -125,12 +126,15 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
     this.requireOwned(orchestratorId, target);
     const seconds = typeof args.timeoutSeconds === "number" ? args.timeoutSeconds : DEFAULT_AGENT_WAIT_SECONDS;
+    // Shorter than the orchestrator's MCP client lets a tool call run, so it gets "timeout" and progress, not an error.
+    const limit = this.control.status(orchestratorId).provider === "claude" ? MAX_AGENT_WAIT_SECONDS : CLIENT_SAFE_AGENT_WAIT_SECONDS;
     try {
       const result = await this.control.waitFor(target, {
-        timeoutMs: Math.min(MAX_AGENT_WAIT_SECONDS, Math.max(1, seconds)) * 1_000,
+        timeoutMs: Math.min(limit, Math.max(1, seconds)) * 1_000,
         ...(signal ? { signal } : {})
       });
-      return { ...result };
+      return { ...result, ...(result.reason === "timeout"
+        ? { message: "Still running. Read output for its progress and call wait_for_agent again." } : {}) };
     } catch (error) {
       if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw canceledError();
       throw error;

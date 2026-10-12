@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   AGENT_PROVIDER_IDS,
+  CLIENT_SAFE_AGENT_WAIT_SECONDS,
+  DEFAULT_AGENT_WAIT_SECONDS,
   MAX_AGENT_WAIT_SECONDS,
   ORCHESTRATION_TOOL_DEFINITIONS,
   ORCHESTRATION_TOOL_NAMES,
@@ -22,10 +24,14 @@ test("the catalog lists list_providers first and wait_for_agent with a bounded t
   assert.deepEqual(definition("list_providers").inputSchema, { type: "object", properties: {}, required: [], additionalProperties: false });
   const wait = definition("wait_for_agent").inputSchema;
   assert.deepEqual(wait.required, ["sessionId"]);
-  assert.equal(wait.properties.timeoutSeconds.maximum, 600);
-  assert.equal(MAX_AGENT_WAIT_SECONDS, 600);
-  assert.equal(validateOrchestrationArguments("wait_for_agent", { sessionId: "a", timeoutSeconds: 600 }).ok, true);
-  assert.match(validateOrchestrationArguments("wait_for_agent", { sessionId: "a", timeoutSeconds: 601 }).error, /above the maximum/u);
+  assert.equal(wait.properties.timeoutSeconds.maximum, 100);
+  assert.equal(MAX_AGENT_WAIT_SECONDS, 100);
+  assert.ok(DEFAULT_AGENT_WAIT_SECONDS <= CLIENT_SAFE_AGENT_WAIT_SECONDS && CLIENT_SAFE_AGENT_WAIT_SECONDS < 60,
+    "a call without timeoutSeconds, and every call from a 60-second MCP client, ends before that client gives up");
+  assert.equal(validateOrchestrationArguments("wait_for_agent", { sessionId: "a", timeoutSeconds: 100 }).ok, true);
+  assert.match(validateOrchestrationArguments("wait_for_agent", { sessionId: "a", timeoutSeconds: 101 }).error, /above the maximum/u);
+  assert.match(definition("wait_for_agent").description, /at most 100; unless this session is Claude Code, a call returns after at most 50 seconds/u);
+  assert.match(definition("wait_for_agent").description, /A timeout means it is still running: read output as its progress and call wait_for_agent again/u);
   assert.equal(validateOrchestrationArguments("list_providers", {}).ok, true);
   assert.match(validateOrchestrationArguments("list_providers", { x: 1 }).error, /Unexpected argument/u);
   assert.match(definition("list_providers").description, /Never search the filesystem/u);
@@ -217,7 +223,7 @@ test("wait_for_agent stops at once when the call is canceled", async () => {
   const controller = new AbortController();
   const started = Date.now();
   setTimeout(() => controller.abort(), 20);
-  await assert.rejects(call(handler, "wait_for_agent", { sessionId: "child", timeoutSeconds: 600 }, controller.signal),
+  await assert.rejects(call(handler, "wait_for_agent", { sessionId: "child", timeoutSeconds: 100 }, controller.signal),
     (error) => error.bridgeError?.code === "CANCELED");
   assert.ok(Date.now() - started < 1_000);
   const aborted = new AbortController();
@@ -304,4 +310,24 @@ test("the skill tells the orchestrator to pass a model the person names", async 
   const { readFile } = await import("node:fs/promises");
   const skill = await readFile(new URL("../agent/orchestrator/SKILL.md", import.meta.url), "utf8");
   assert.match(skill, /If the person names a model, pass it as `model`/u);
+});
+
+test("wait_for_agent returns before the orchestrator's MCP client gives up, as a timeout that says the agent still runs", async () => {
+  for (const [provider, requested, expectedMs] of [
+    ["opencode", 100, 50_000], ["codex", 100, 50_000], ["opencode", undefined, 50_000], ["opencode", 20, 20_000], ["claude", 100, 100_000]
+  ]) {
+    const { terminals, control, handler } = setup();
+    terminals.sessions.get("orch").provider = provider;
+    let received;
+    const real = control.waitFor.bind(control);
+    control.waitFor = (id, request) => { received = request.timeoutMs; return real(id, { ...request, timeoutMs: 30 }); };
+    terminals.sessions.get("child").buffer = "step 3 of 5";
+    const result = await call(handler, "wait_for_agent", { sessionId: "child", ...(requested ? { timeoutSeconds: requested } : {}) });
+    assert.equal(received, expectedMs, `${provider} asking for ${requested ?? "the default"}`);
+    assert.deepEqual([result.reason, result.status, result.output], ["timeout", "working", "step 3 of 5"]);
+    assert.match(result.message, /Still running\. Read output for its progress and call wait_for_agent again\./u);
+  }
+  const { terminals, handler } = setup();
+  terminals.sessions.get("child").status = "idle";
+  assert.equal((await call(handler, "wait_for_agent", { sessionId: "child" })).message, undefined, "only a timeout says to call again");
 });
