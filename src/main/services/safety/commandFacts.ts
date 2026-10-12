@@ -583,17 +583,31 @@ function componentMatches(pattern: string, name: string): boolean {
   try { return new RegExp(`^${source}$`, 'u').test(name); } catch { return true; }
 }
 
+/** The gateway socket folder under a temporary folder that holds `abs` (`$TMPDIR/ctty-control-XXXX`), or null. */
+function socketFolder(abs: string, ctx: PathContext): string | null {
+  for (const temp of ctx.tempRoots) {
+    if (!isPathInside(temp, abs, { allowRoot: false })) continue;
+    const first = parts(relative(temp, abs))[0] ?? '';
+    if (SOCKET_DIR.test(first)) return join(temp, first);
+  }
+  return null;
+}
+
 /**
  * Whether one path (absolute, maybe a glob) is CanvasTTY's private data: inside a private path, a folder of the app
  * that holds one when the command walks folders, or a gateway's socket folder under a temporary folder.
  */
 function privatePath(abs: string, glob: boolean, recursive: boolean, ctx: PathContext): boolean {
   if (!glob) {
-    // The project, and the agent's own config folder (an account home it was launched with), are its own.
-    if (isPathInside(ctx.rootReal, abs) || ctx.agentRoots.some(dir => isPathInside(dir, abs))) return false;
-    if (ctx.privatePaths.some(path => isPathInside(path, abs))) return true;
     if (recursive && ctx.privatePaths.some(path => isPathInside(abs, path)) && ctx.appRoots.some(root => isPathInside(root, abs))) return true;
-    return ctx.tempRoots.some(temp => isPathInside(temp, abs, { allowRoot: false }) && SOCKET_DIR.test(parts(relative(temp, abs))[0] ?? ''));
+    const socket = socketFolder(abs, ctx);
+    const holders = [...ctx.privatePaths.filter(path => isPathInside(path, abs)), ...(socket ? [socket] : [])];
+    if (!holders.length) return false;
+    // The project, and the agent's own config folder (an account home it was launched with), are its own, but only
+    // below the private data: a broad folder (HOME, or one that holds the app's data or a temporary folder) does not
+    // make the private data inside it the agent's. A folder inside a private path (that account home) stays its own.
+    const owns = (root: string): boolean => isPathInside(root, abs) && !holders.some(holder => isPathInside(root, holder));
+    return !(owns(ctx.rootReal) || ctx.agentRoots.some(owns));
   }
   // A glob: the folders before its first wildcard resolved, the rest matched name by name.
   const all = parts(abs);

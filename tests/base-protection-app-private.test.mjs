@@ -102,8 +102,76 @@ test("CanvasTTY's own tokens, secret stores and sockets are refused for every re
   for (const command of DENY) assert.equal(rule(command), "app-private", command);
 });
 
+test("the per-card Claude Code draft folders are private data too", () => {
+  const draft = join(userData, "claude-draft", "card-2", "draft.1");
+  assert.equal(rule(`cat ${q(draft)}`), "app-private");
+  assert.equal(rule(`touch ${q(join(userData, "claude-draft", "card-2", "req.1"))}`), "app-private");
+  assert.equal(rule("cat \"$HOME/Library/Application Support/canvastty/claude-draft/card-2/draft.1\""), "app-private");
+  assert.equal(rule("cat notes/claude-drafting.md"), null, "a project file with a similar name stays allowed");
+});
+
 test("look-alikes in the project, the app's other files and other sockets stay allowed", () => {
   for (const command of ALLOW) assert.equal(rule(command), null, command);
+});
+
+test("a broad project (HOME, or a folder holding the app's data) cannot reopen the private data below it", () => {
+  const secrets = join(userData, "provider-secrets.bin");
+  const otherAccount = join(userData, "account-homes", "acct-2", "auth.json");
+  for (const root of [home, join(home, "Library"), userData]) {
+    const broad = (command, extra = {}) => denyRule(analyzeAction(shell(command), root, { home, privateData, ...extra }));
+    const tool = (toolName, toolInput, extra = {}) => checkBaseProtection({ toolName, toolInput, root, home, privateData, ...extra })?.rule ?? null;
+    for (const command of [
+      `cat ${q(secrets)}`,
+      "cat ~/Library/Application\\ Support/canvastty/provider-secrets.bin",
+      `cat ${q(token)}`,
+      `cat ${q(join(userData, "github-oauth.json"))}`,
+      `cat ${q(otherAccount)}`,
+      `ls ${q(join(userData, "plugin-secrets"))}`,
+      `cat ${q(join(userData, "lifecycle", "runtime", "connection.json"))}`,
+      `cd ${q(userData)} && cat provider-secrets.bin`,
+      `python3 -c "print(open('${secrets}','rb').read())"`,
+      `echo x > ${q(secrets)}`,
+      `cp ./x ${q(token)}`,
+      `grep -r token ${q(userData)}`
+    ]) assert.equal(broad(command), "app-private", `${root}: ${command}`);
+    assert.equal(tool("Write", { file_path: secrets, content: "x" }), "app-private", `${root}: Write`);
+    assert.equal(tool("Edit", { file_path: join(userData, "github-oauth.json"), old_string: "a", new_string: "b" }), "app-private", `${root}: Edit`);
+    assert.equal(tool("apply_patch", { input: `*** Begin Patch\n*** Update File: ${token}\n*** End Patch` }), "app-private", `${root}: apply_patch`);
+    assert.equal(tool("Bash", { command: `cat ${q(secrets)}` }), "app-private", `${root}: Bash`);
+    // The app's other files, and the project's own ordinary files, stay usable.
+    assert.equal(broad(`cat ${q(join(userData, "settings.json"))}`), null, root);
+    assert.equal(broad(`ls ${q(userData)}`), null, root);
+    // The agent's own account home (strictly inside account-homes) stays its own; its neighbours do not.
+    const accountHome = join(userData, "account-homes", "acct-1", ".claude");
+    assert.equal(broad(`cat ${q(join(accountHome, "projects", "p", "memory", "MEMORY.md"))}`, { agentRoots: [accountHome] }), null, root);
+    assert.equal(tool("Write", { file_path: join(accountHome, "plans", "p.md"), content: "x" }, { agentRoots: [accountHome] }), null, root);
+    assert.equal(broad(`cat ${q(otherAccount)}`, { agentRoots: [accountHome] }), "app-private", root);
+    assert.equal(broad(`cat ${q(secrets)}`, { agentRoots: [accountHome] }), "app-private", root);
+  }
+  const atHome = (command) => denyRule(analyzeAction(shell(command), home, { home, privateData }));
+  assert.equal(atHome(`cat ${q(join(home, "notes.txt"))}`), null);
+  assert.equal(atHome("grep -rn todo ."), null, "a recursive search of the project itself is not a read of the app's folder");
+});
+
+test("a broad agent config folder does not reopen the private data below it either", () => {
+  assert.equal(rule(`cat ${q(token)}`, { agentRoots: [home] }), "app-private");
+  assert.equal(rule(`cat ${q(join(home, "notes.txt"))}`, { agentRoots: [home] }), null);
+});
+
+test("a project in a temporary folder does not make the gateways' socket folders its own", () => {
+  const temp = realpathSync(tmpdir());
+  const atTemp = (command) => denyRule(analyzeAction(shell(command), temp, { home, privateData }));
+  assert.equal(atTemp(`nc -U ${q(join(temp, "ctty-control-Ab12Cd", "c.sock"))}`), "app-private");
+  assert.equal(atTemp(`cat ${q(join(temp, "ctty-runtime-501-ab12", "connection.json"))}`), "app-private");
+  assert.equal(atTemp(`cat ${q(join(temp, "notes.txt"))}`), null);
+});
+
+test("a project inside the app's private data keeps its own files, not its neighbours", () => {
+  const accountProject = join(userData, "account-homes", "acct-1");
+  const inside = (command) => denyRule(analyzeAction(shell(command), accountProject, { home, privateData }));
+  assert.equal(inside("cat .claude/settings.json"), null);
+  assert.equal(inside(`cat ${q(join(userData, "account-homes", "acct-2", "auth.json"))}`), "app-private");
+  assert.equal(inside(`cat ${q(join(userData, "provider-secrets.bin"))}`), "app-private");
 });
 
 test("file tools that name private data are refused; the agent's own account home is its own", () => {
