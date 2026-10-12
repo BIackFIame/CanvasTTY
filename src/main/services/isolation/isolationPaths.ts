@@ -28,6 +28,11 @@ export interface IsolationPathInput {
   grantedPrivate?: readonly string[];
   /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
   socketFolders?: readonly string[];
+  /**
+   * The sockets of CanvasTTY's own gateways for this launch, as the host set them up. Their folders are bound back;
+   * a CANVASTTY_*_ADDRESS in the launch environment (the person's own or a plugin's) never is.
+   */
+  gatewaySockets?: readonly string[];
   /** Plan: the project is readable only (the CLI's own folders stay writable). */
   readOnlyProject?: boolean;
 }
@@ -266,9 +271,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   }
   const configSources = input.provider === "opencode" ? openCodeConfigPaths(input.env, input.cwd) : { jsonFiles: [], agentDirectories: [] };
   const socketFolders = [
-    ...Object.entries(input.env)
-      .filter(([name, value]) => /^CANVASTTY_.*_ADDRESS$/u.test(name) && typeof value === "string" && isAbsolute(value))
-      .map(([, value]) => dirname(value!)),
+    ...(input.gatewaySockets ?? []).filter((path) => isAbsolute(path)).map((path) => dirname(path)),
     ...(input.socketFolders ?? []),
     input.sessionTemp,
     join(input.userDataPath, "browser", "runtime"),
