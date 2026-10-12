@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { analyzeAction } from "../src/main/services/safety/commandFacts.ts";
 import { canvasTtyPrivateData, checkBaseProtection, denyRule } from "../src/main/services/safety/baseProtection.ts";
 import { DecisionHooks } from "../src/main/services/DecisionHooks.ts";
+import { guardedCall } from "../src/agent-runtime/opencode-decisions.mjs";
 
 const base = realpathSync(mkdtempSync(join(tmpdir(), "canvastty-app-private-")));
 const home = join(base, "home");
@@ -184,6 +185,60 @@ test("file tools that name private data are refused; the agent's own account hom
   assert.equal(check("Bash", { command: `cat ${q(token)}` }, { agentRoots: [accountHome] })?.rule, "app-private");
 });
 
+test("read-only file tools are refused only for CanvasTTY's private data", () => {
+  const secrets = join(userData, "provider-secrets.bin");
+  const accountHome = join(userData, "account-homes", "acct-1", ".claude");
+  for (const root of [project, home]) {
+    const read = (toolName, toolInput, extra = {}) => checkBaseProtection({ toolName, toolInput, root, home, privateData, ...extra })?.rule ?? null;
+    for (const [toolName, toolInput, extra] of [
+      ["Read", { file_path: secrets }],
+      ["Read", { file_path: "~/Library/Application Support/canvastty/agent-control/token-0123abcd" }],
+      ["NotebookRead", { notebook_path: join(userData, "github-oauth.json") }],
+      ["Grep", { pattern: "token", path: userData }],
+      ["Grep", { pattern: "x", path: join(userData, "plugin-secrets") }],
+      ["Glob", { pattern: "*", path: control }],
+      ["Glob", { pattern: join(userData, "provider-*") }],
+      ["LS", { path: join(userData, "account-homes") }],
+      ["read_file", { absolute_path: secrets }],
+      ["read_many_files", { paths: [join(userData, "plugin-secrets")] }],
+      ["grep_search", { pattern: "x", path: userData }],
+      ["list_directory", { path: control }],
+      ["Read", { file_path: join(userData, "account-homes", "acct-2", "auth.json") }, { agentRoots: [accountHome] }]
+    ]) assert.equal(read(toolName, toolInput, extra), "app-private", `${root}: ${toolName} ${JSON.stringify(toolInput)}`);
+    // Everything else stays as it was: reads outside the project are not "outside", and nothing new is refused.
+    for (const [toolName, toolInput] of [
+      ["Read", { file_path: join(project, "src", "a.ts") }],
+      ["Read", { file_path: "src/a.ts" }],
+      ["Read", { file_path: "/etc/hosts" }],
+      ["Read", { file_path: join(userData, "settings.json") }],
+      ["Grep", { pattern: "todo", path: "src" }],
+      ["Grep", { pattern: "todo" }],
+      ["Grep", { pattern: "todo", path: home }],
+      ["Glob", { pattern: "**/*.ts" }],
+      ["LS", { path: userData }],
+      ["read_file", { absolute_path: join(project, "src", "a.ts") }]
+    ]) assert.equal(read(toolName, toolInput), null, `${root}: ${toolName} ${JSON.stringify(toolInput)}`);
+    // The agent's own account home stays its own.
+    assert.equal(read("Read", { file_path: join(accountHome, "settings.json") }, { agentRoots: [accountHome] }), null, root);
+    assert.equal(read("Grep", { pattern: "x", path: accountHome }, { agentRoots: [accountHome] }), null, root);
+  }
+});
+
+test("decision hooks refuse a private read without asking decision plugins about reads", async () => {
+  let asked = 0;
+  const hooks = new DecisionHooks({
+    baseProtection: () => true, services: () => [{ pluginId: "p", pluginName: "P", serviceId: "s", mayAllow: false }],
+    call: async () => { asked++; return { behavior: "deny", message: "plugin" }; }, home, privateData,
+    session: () => ({ provider: "claude", role: "agent", cwd: home, configDirs: [] })
+  });
+  const request = (toolInput) => ({ toolName: "Read", toolInput, toolInputPreview: null, cwd: null, truncated: false });
+  const denied = await hooks.decide("s1", request({ file_path: join(userData, "provider-secrets.bin") }), new AbortController().signal);
+  assert.equal(denied.behavior, "deny");
+  assert.match(denied.message, /Orchestrator role/u);
+  assert.equal((await hooks.decide("s1", request({ file_path: join(home, "notes.txt") }), new AbortController().signal)).behavior, "none");
+  assert.equal(asked, 0, "plugins are not asked about read-only tools");
+});
+
 test("without the app's folder the socket folders are still known; the userData paths are not guessed", () => {
   assert.equal(denyRule(analyzeAction(shell(`nc -U ${sock}`), project, { home })), "app-private");
   assert.equal(denyRule(analyzeAction(shell(`cat ${q(token)}`), project, { home })), null);
@@ -209,3 +264,33 @@ test("decision hooks pass the app's private data to base protection", async () =
   const ordinary = await hooks.decide("s1", { toolName: "bash", toolInput: { command: "cat src/a.ts" }, toolInputPreview: null, cwd: null, truncated: false }, new AbortController().signal);
   assert.equal(ordinary.behavior, "none");
 });
+
+test("Qwen read_many_files: more than 32 paths is refused, and its include globs are checked", () => {
+  const secrets = join(userData, "provider-secrets.bin");
+  const read = (toolInput) => checkBaseProtection({ toolName: "read_many_files", toolInput, root: project, home, privateData }) ?? null;
+  const benign = Array.from({ length: 32 }, (_, i) => `src/f${i}.ts`);
+  assert.equal(read({ paths: benign }), null, "32 project paths are checked and allowed");
+  const many = read({ paths: [...benign, secrets] });
+  assert.equal(many?.rule, "too-many-paths", "the 33rd path is not skipped");
+  assert.match(many.message, /at most 32/u);
+  assert.equal(read({ paths: [...benign, "src/g.ts"] })?.rule, "too-many-paths");
+  assert.equal(read({ paths: benign.slice(0, 20), include: benign.slice(0, 13) })?.rule, "too-many-paths", "include counts toward the limit");
+  assert.equal(read({ paths: ["src/a.ts"], include: [secrets] })?.rule, "app-private");
+  assert.equal(read({ paths: ["src/a.ts"], include: [join(userData, "account-homes", "**", "*.json")] })?.rule, "app-private");
+  assert.equal(read({ paths: ["src/a.ts"], include: ["**/*.ts"] }), null);
+});
+
+test("OpenCode's read-only tools reach base protection: a grep without a path searches the current folder, a glob's pattern is checked", () => {
+  const check = (tool, args, root) => {
+    const call = guardedCall(tool, args, true);
+    assert.ok(call, `${tool} is forwarded`);
+    return checkBaseProtection({ toolName: call.toolName, toolInput: call.toolInput, root, home, privateData })?.rule ?? null;
+  };
+  assert.equal(check("grep", { pattern: "token" }, userData), "app-private", "grep with no path, run in the app's folder");
+  assert.equal(check("grep", { pattern: "token", include: "*.json" }, control), "app-private");
+  assert.equal(check("grep", { pattern: "token" }, project), null);
+  assert.equal(check("glob", { pattern: join(userData, "provider-*") }, project), "app-private");
+  assert.equal(check("glob", { pattern: "agent-control/token-*", path: userData }, project), "app-private");
+  assert.equal(check("glob", { pattern: "**/*.ts" }, project), null);
+});
+
