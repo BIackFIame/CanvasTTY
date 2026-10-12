@@ -67,6 +67,10 @@ export function bubblewrapArguments(
   for (const path of paths.readableAgain) {
     if (exists(path)) args.push(seen.has(path) ? "--bind" : "--ro-bind", path, path);
   }
+  // The project's repository folder becomes a mount point before anything is mounted inside it: a mount point cannot
+  // be renamed (EBUSY), so `.git` cannot be moved away from the read-only mounts below and back.
+  const repository = join(launch.cwd, ".git");
+  if ([...seen].some((folder) => within(launch.cwd, folder)) && exists(repository) === "directory") args.push("--bind", repository, repository);
   // Last, over every bind above (a rebound home included): the read-only files and the project's git hooks.
   for (const path of [...paths.gitHooks, ...(paths.protectedDirectories ?? []), ...paths.protectedWrites]) {
     const kind = exists(path);
