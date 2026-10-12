@@ -129,6 +129,20 @@ interface ManagedSession {
   /** The last turn's final answer its hook or plugin reported (captureResult only); cleared when a turn starts. */
   answer?: { text: string; truncated: boolean; at: number };
   /**
+   * Status hooks were off when this launch was planned, or were turned off since: it has no lifecycle hooks, so its
+   * card stays unavailable and no answer is captured until a restart with status hooks on.
+   */
+  statusHooksOff?: boolean;
+  /** Something other than Enter was typed since the last submitted input (an Enter alone then submits nothing). */
+  typedSinceSubmit?: boolean;
+  /** Bumped by every submitted input (except an approval answer) and every launch: the turn an answer must belong to. */
+  inputGeneration?: number;
+  /** inputGeneration when the current turn started. */
+  answerTurnGeneration?: number;
+  /** OpenCode's current turn id and the inputGeneration each recent turn id started in. */
+  providerTurnId?: string;
+  providerTurnGenerations?: Map<string, number>;
+  /**
    * Plugin options, environment ref (or, until the plugin has prepared it, the launcher's environment choice)
    * and owning plugin carried into the saved record.
    */
@@ -1026,6 +1040,23 @@ export class TerminalManager {
     return { delivered: true };
   }
 
+  /**
+   * Submitted text starts a new task (an approval answer continues the current turn), so an earlier answer is not its.
+   * An Enter with nothing typed before it in an idle card submits nothing: the stored answer stays.
+   */
+  private noteSubmittedInput(session: ManagedSession, data: string): void {
+    const typed = /[^\r\n]/u.test(data);
+    if (!data.endsWith("\r")) {
+      if (typed) session.typedSinceSubmit = true;
+      return;
+    }
+    const empty = !typed && !session.typedSinceSubmit;
+    session.typedSinceSubmit = false;
+    if (empty && session.metadata.status === "idle") return;
+    if (session.metadata.status !== "needs_approval") session.inputGeneration = (session.inputGeneration ?? 0) + 1;
+    delete session.answer;
+  }
+
   private wakeLaunchWaiters(session: ManagedSession): void {
     for (const wake of [...session.launchWaiters]) wake();
   }
@@ -1034,8 +1065,18 @@ export class TerminalManager {
     if (typeof data !== "string" || data.length === 0) return false;
     const session = this.sessions.get(id);
     if (!session || session.metadata.exitCode !== null || !session.process) return false;
-    const process = session.process;
+    return this.writeInput(id, session, session.process, data);
+  }
+
+  /**
+   * The one write of person or agent input to a card's CLI, and what it means for turns and answers. Everything that
+   * types into a card goes through here: input(), deliverInput, and any writer that holds input and replays it later,
+   * so a replayed Enter is a submitted prompt like a typed one. Nothing is written to a process the card no longer runs.
+   */
+  private writeInput(id: string, session: ManagedSession, process: IPty, data: string): boolean {
+    if (this.sessions.get(id) !== session || session.process !== process || session.metadata.exitCode !== null) return false;
     const written = tryPtyOperation(() => process.write(data));
+    if (written) this.noteSubmittedInput(session, data);
     if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
     return written;
   }
@@ -1106,10 +1147,40 @@ export class TerminalManager {
     return publicSessionMetadata(session);
   }
 
-  /** `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title. */
-  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): void {
+  /**
+   * `source` "hook" is the agent's own lifecycle hook (through the runtime gateway); "title" is its terminal title.
+   * Returns whether the signal belongs to the current turn and the last submitted input, so the answer it carries may
+   * be kept (applyRuntimeSignal). With status hooks off for this launch nothing applies and no answer is kept.
+   */
+  applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): boolean {
     const session = this.sessions.get(id);
-    if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
+    if (!this.lifecycleHooksEnabled || !session || session.statusHooksOff) return false;
+    // A result-capturing OpenCode names each turn. A signal of an earlier turn is stale and changes nothing; a signal
+    // of the current turn that started before the last submitted input still moves the status (so a wait ends), but
+    // is not that input's turn: it neither counts as a turn start nor brings an answer.
+    const exited = session.metadata.status === "done" || session.metadata.status === "failed";
+    let current = true;
+    let startsProviderTurn = false;
+    if (source === "hook" && session.captureResult && session.metadata.provider === "opencode" && signal.requestId) {
+      const turns = session.providerTurnGenerations ??= new Map();
+      const generation = session.inputGeneration ?? 0;
+      const known = turns.get(signal.requestId);
+      if (known === undefined) {
+        // A turn id not seen yet opens the next turn, also when its start was lost (as the gateway counts it); after
+        // the exit no turn opens.
+        if (exited) return false;
+        startsProviderTurn = true;
+        turns.set(signal.requestId, generation);
+        session.providerTurnId = signal.requestId;
+        while (turns.size > 64) turns.delete(turns.keys().next().value!);
+      } else if (session.providerTurnId !== signal.requestId) {
+        return false;
+      } else {
+        current = known === generation;
+      }
+    }
+    // The process already exited: its status stays, but the answer its last turn reported as it ended still counts.
+    if (exited) return current;
     if (source === "hook") {
       session.hookSignals = (session.hookSignals ?? 0) + 1;
       // The CLI runs, but its input field may not be up yet: input waiting for it (deliverInput) goes on the cursor
@@ -1133,24 +1204,44 @@ export class TerminalManager {
 
     const nextStatus = signal.state;
     // A turn starts when the agent moves to working; wait_for_agent compares it with the last delivered prompt.
-    if (nextStatus === "working" && session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
-    // A new turn: the previous answer is no longer this turn's.
-    if (nextStatus === "working") session.answer = undefined;
+    if (current && nextStatus === "working") {
+      if (startsProviderTurn || session.metadata.status !== "working") session.turnStarts = (session.turnStarts ?? 0) + 1;
+      // A new turn: the previous answer is no longer this turn's.
+      session.answer = undefined;
+      session.answerTurnGeneration = session.inputGeneration ?? 0;
+    }
     const completed = nextStatus === "idle" && ["Stop", "StopFailure", "StopCancelled"].includes(signal.event ?? "");
     const nextTurnCompleted = nextStatus === "working" ? false : completed || Boolean(session.metadata.turnCompleted);
-    if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return;
+    if (!threadChanged && session.metadata.status === nextStatus && Boolean(session.metadata.turnCompleted) === nextTurnCompleted) return current;
     session.metadata.status = nextStatus;
     session.metadata.turnCompleted = nextTurnCompleted;
     this.emitSession(session.metadata);
+    return current;
+  }
+
+  /**
+   * Why a result-capturing session's final answer cannot be captured, or null when it can (or the session does not
+   * capture one). With CanvasTTY status hooks off for its launch it gets no hooks, so nothing reports the answer.
+   */
+  answerUnavailable(id: string): "status_hooks_off" | null {
+    const session = this.sessions.get(id);
+    if (!session?.captureResult) return null;
+    return !this.lifecycleHooksEnabled || session.statusHooksOff ? "status_hooks_off" : null;
   }
 
   /**
    * Keeps the final answer a result-capturing session reported with its turn's end (the Codex Stop hook, the OpenCode
-   * plugin's session.idle); read back masked by answer(). In memory only, never saved.
+   * plugin's session.idle), only while it belongs to the current turn and the last submitted input; read back masked
+   * by answer(). OpenCode passes its turn id. In memory only, never saved.
    */
-  recordAnswer(id: string, result: { text: string; truncated: boolean }): void {
+  recordAnswer(id: string, result: { text: string; truncated: boolean }, correlation?: { turnId?: string | null }): void {
     const session = this.sessions.get(id);
     if (!session?.captureResult || typeof result?.text !== "string") return;
+    const generation = session.inputGeneration ?? 0;
+    if (session.metadata.provider === "opencode" && correlation && "turnId" in correlation) {
+      if (!correlation.turnId || correlation.turnId !== session.providerTurnId
+        || session.providerTurnGenerations?.get(correlation.turnId) !== generation) return;
+    } else if (session.promptTurnMark !== undefined && session.answerTurnGeneration !== generation) return;
     session.answer = { text: result.text, truncated: result.truncated === true, at: Date.now() };
   }
 
@@ -1168,6 +1259,7 @@ export class TerminalManager {
     if (next) return;
     for (const session of this.sessions.values()) {
       session.lifecycle = null;
+      session.statusHooksOff = true;
       if (
         session.metadata.provider === "terminal"
         || session.metadata.status === "done"
@@ -2151,6 +2243,8 @@ export class TerminalManager {
 
       // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
       let planned: PlannedSpawn | { failure: LaunchFailure };
+      // Whether this launch gets lifecycle hooks is decided as it is planned; the wrap below may take a while.
+      const statusHooks = this.lifecycleHooksEnabled;
       try {
         planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
           session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
@@ -2224,7 +2318,7 @@ export class TerminalManager {
       metadata.status = initialSessionStatus(metadata.provider);
       metadata.exitCode = null;
       metadata.failureDetails = null;
-      this.bindProcess(id, session, process);
+      this.bindProcess(id, session, process, statusHooks);
       const runtimeStatus = this.agentRuntime?.currentStatus(id);
       if (runtimeStatus) metadata.status = runtimeStatus;
       if (environment) this.describeEnvironment(id, session, environment);
@@ -2253,7 +2347,13 @@ export class TerminalManager {
     }).catch(() => undefined);
   }
 
-  private bindProcess(id: string, session: ManagedSession, process: IPty): void {
+  /**
+   * `statusHooks`: status hooks were on when this launch was planned (and so got its lifecycle hooks). A launch planned
+   * and spawned in one step passes nothing; a contributed launch passes what held before its asynchronous steps.
+   */
+  private bindProcess(id: string, session: ManagedSession, process: IPty, statusHooks = this.lifecycleHooksEnabled): void {
+    if (statusHooks && this.lifecycleHooksEnabled) delete session.statusHooksOff;
+    else session.statusHooksOff = true;
     session.agentBrowser?.retainUntilExit?.();
     process.onData((data) => {
       const current = this.sessions.get(id);
@@ -2415,6 +2515,13 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.answer;
   delete session.turnStarts;
   delete session.promptTurnMark;
+  // A late answer of the ended launch never belongs to the new one.
+  session.inputGeneration = (session.inputGeneration ?? 0) + 1;
+  delete session.statusHooksOff;
+  delete session.typedSinceSubmit;
+  delete session.answerTurnGeneration;
+  delete session.providerTurnId;
+  delete session.providerTurnGenerations;
   delete session.hookSignals;
   delete session.titleState;
   delete session.inputReady;
