@@ -4,6 +4,18 @@ import type { CoverageKind, UnestimableReason, UsagePeriod, WeightBasis } from "
 const RU = {
   trigger: "История использования",
   title: "История использования",
+  sections: "Разделы истории",
+  navigation: {
+    conditional: "Условная оценка",
+    quotas: "Квоты",
+    agents: "Агенты",
+    evidence: "Токены из локальных логов",
+    sources: "Состояние источников"
+  },
+  previousPage: "Предыдущая страница",
+  nextPage: "Следующая страница",
+  page: "Страница {current} из {total}",
+  noAgentHistory: "За выбранный период нет истории Claude.",
   subtitle: "Измеренные изменения квот, их автоматическая условная оценка по локальным сеансам и сами свидетельства токенов. Атрибуция не доказана.",
   close: "Закрыть",
   refresh: "Обновить",
@@ -153,6 +165,18 @@ type UsageText = typeof RU;
 const EN: UsageText = {
   trigger: "Usage history",
   title: "Usage history",
+  sections: "History sections",
+  navigation: {
+    conditional: "Conditional estimate",
+    quotas: "Quotas",
+    agents: "Agents",
+    evidence: "Tokens from local logs",
+    sources: "Source status"
+  },
+  previousPage: "Previous page",
+  nextPage: "Next page",
+  page: "Page {current} of {total}",
+  noAgentHistory: "No Claude history for the selected period.",
   subtitle: "Measured quota changes, their automatic conditional estimate by local session, and the token evidence itself. Attribution is not proven.",
   close: "Close",
   refresh: "Refresh",

@@ -7,7 +7,7 @@ import { UiIcon } from "../../components/UiIcon";
 import { loadUsageHistory, resolveUsageHistoryApi, UsageHistoryUnavailableError } from "./usageHistoryApi.ts";
 import { startUsageHistoryPoller, type UsageHistoryPoller } from "./usageHistoryPoller.ts";
 import { usageText } from "./usageText.ts";
-import type { UsageHistoryLoadError } from "./UsageHistoryView";
+import type { UsageHistoryLoadError, UsageHistorySection } from "./UsageHistoryView";
 import "./usageHistory.css";
 
 interface UsageHistoryPanelProps {
@@ -31,6 +31,7 @@ export function UsageHistoryPanel({ locale, open, container, onOpenChange }: Usa
   const [clock, setClock] = useState(() => Date.now());
   const [period, setPeriod] = useState<UsagePeriod>("24h");
   const [weightBasis, setWeightBasis] = useState<WeightBasis>("uncached");
+  const [section, setSection] = useState<UsageHistorySection>("conditional");
   const pollerRef = useRef<UsageHistoryPoller | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -149,6 +150,7 @@ export function UsageHistoryPanel({ locale, open, container, onOpenChange }: Usa
               loadedAt={loadedAt}
               period={period}
               weightBasis={weightBasis}
+              section={section}
               titleId={titleId}
               descriptionId={descriptionId}
               closeButtonRef={closeButtonRef}
@@ -157,6 +159,7 @@ export function UsageHistoryPanel({ locale, open, container, onOpenChange }: Usa
                 setClock(Date.now());
               }}
               onWeightBasisChange={setWeightBasis}
+              onSectionChange={setSection}
               onRefresh={() => pollerRef.current?.refresh()}
               onClose={() => onOpenChange(false)}
             /> : <header className="usage-history__header">
@@ -180,7 +183,7 @@ export function UsageHistoryPanel({ locale, open, container, onOpenChange }: Usa
 function wrapFocus(event: KeyboardEvent, dialog: HTMLElement | null): void {
   if (!dialog) return;
   const stops = [...dialog.querySelectorAll<HTMLElement>(TABBABLE)].filter((element) => {
-    if (element.getClientRects().length === 0) return false;
+    if (element.tabIndex < 0 || element.getClientRects().length === 0) return false;
     if (!(element instanceof HTMLInputElement) || element.type !== "radio" || element.checked) return true;
     return !dialog.querySelector(`input[type="radio"][name="${CSS.escape(element.name)}"]:checked`);
   });

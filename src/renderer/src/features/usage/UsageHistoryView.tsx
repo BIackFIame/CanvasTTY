@@ -13,7 +13,8 @@ import {
   type WeightBasis,
   type WindowReport
 } from "../../../../shared/usageReport.ts";
-import { UiIcon } from "../../components/UiIcon";
+import { UiIcon, type UiIconName } from "../../components/UiIcon";
+import { UsageHistoryPages } from "./UsageHistoryPages";
 import {
   fill,
   formatDateTime,
@@ -32,6 +33,15 @@ export interface UsageHistoryLoadError {
   at: number;
 }
 
+export type UsageHistorySection = "conditional" | "quotas" | "agents" | "evidence" | "sources";
+const SECTIONS: { id: UsageHistorySection; icon: UiIconName }[] = [
+  { id: "conditional", icon: "sliders-horizontal" },
+  { id: "quotas", icon: "blocks" },
+  { id: "agents", icon: "terminal" },
+  { id: "evidence", icon: "file-text" },
+  { id: "sources", icon: "info" }
+];
+
 export interface UsageHistoryViewProps {
   locale: LocaleId;
   timeZone: string;
@@ -43,11 +53,13 @@ export interface UsageHistoryViewProps {
   loadedAt: number | null;
   period: UsagePeriod;
   weightBasis: WeightBasis;
+  section: UsageHistorySection;
   titleId: string;
   descriptionId: string;
   closeButtonRef?: Ref<HTMLButtonElement>;
   onPeriodChange(period: UsagePeriod): void;
   onWeightBasisChange(basis: WeightBasis): void;
+  onSectionChange(section: UsageHistorySection): void;
   onRefresh(): void;
   onClose(): void;
 }
@@ -72,7 +84,7 @@ const COVERAGE_ORDER: CoverageKind[] = [
 
 /** Stateless: every value comes from props so the container owns all hooks. */
 export function UsageHistoryView(props: UsageHistoryViewProps): React.JSX.Element {
-  const { locale, timeZone, now, report, period, loading, titleId, descriptionId } = props;
+  const { locale, timeZone, now, report, period, loading, section, titleId, descriptionId } = props;
   const text = usageText(locale);
   const format: Format = {
     locale,
@@ -127,16 +139,54 @@ export function UsageHistoryView(props: UsageHistoryViewProps): React.JSX.Elemen
         </div>
       </div>
 
-      <div className="usage-history__body">
-        <StatusBanners {...props} format={format} />
-        {report && (
-          <>
-            <ConditionalSection report={report} format={format} weightBasis={props.weightBasis} onWeightBasisChange={props.onWeightBasisChange} />
-            <QuotaSection report={report} format={format} />
-            <EvidenceSection report={report} format={format} />
-            <SourcesSection report={report} format={format} />
-          </>
-        )}
+      <div className="usage-history__layout">
+        <aside className="settings-panel__sidebar usage-history__sidebar">
+          <nav className="settings-tabs" role="tablist" aria-label={text.sections} aria-orientation="vertical">
+            {SECTIONS.map(({ id, icon }, index) => (
+              <button
+                key={id}
+                id={`${titleId}-tab-${id}`}
+                type="button"
+                role="tab"
+                className={`settings-tabs__button${section === id ? " settings-tabs__button--active" : ""}`}
+                aria-selected={section === id}
+                aria-controls={section === id ? `${titleId}-section-${id}` : undefined}
+                tabIndex={section === id ? 0 : -1}
+                onClick={() => props.onSectionChange(id)}
+                onKeyDown={(event) => {
+                  const next = event.key === "ArrowDown" ? (index + 1) % SECTIONS.length
+                    : event.key === "ArrowUp" ? (index + SECTIONS.length - 1) % SECTIONS.length
+                    : event.key === "Home" ? 0 : event.key === "End" ? SECTIONS.length - 1 : null;
+                  if (next === null) return;
+                  event.preventDefault();
+                  props.onSectionChange(SECTIONS[next].id);
+                  event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>("[role='tab']")[next]?.focus({ preventScroll: true });
+                }}
+              >
+                <span className="settings-tabs__icon"><UiIcon name={icon} size="1.05em" /></span>
+                <span>{text.navigation[id]}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
+        <div
+          id={`${titleId}-section-${section}`}
+          className="usage-history__body"
+          role="tabpanel"
+          aria-labelledby={`${titleId}-tab-${section}`}
+          tabIndex={0}
+        >
+          <UsageHistoryPages key={`${section}:${period}`} locale={locale}>
+            <StatusBanners {...props} format={format} />
+            {report && <>
+              {section === "conditional" && <ConditionalSection report={report} format={format} weightBasis={props.weightBasis} onWeightBasisChange={props.onWeightBasisChange} />}
+              {section === "quotas" && <QuotaSection report={report} format={format} />}
+              {section === "agents" && <AgentsSection report={report} format={format} />}
+              {section === "evidence" && <EvidenceSection report={report} format={format} />}
+              {section === "sources" && <SourcesSection report={report} format={format} />}
+            </>}
+          </UsageHistoryPages>
+        </div>
       </div>
     </>
   );
@@ -337,6 +387,23 @@ function EvidenceSection({ report, format }: { report: UsageReport; format: Form
           {fill(text.outsidePeriod, { events: evidence.outsidePeriod.events, tokens: format.tokens(evidence.outsidePeriod.input + evidence.outsidePeriod.output) })}
         </p>
       )}
+    </section>
+  );
+}
+
+function AgentsSection({ report, format }: { report: UsageReport; format: Format }): React.JSX.Element {
+  const quota = report.providers.find((provider) => provider.provider === "claude");
+  const evidence = report.evidence.providers.find((provider) => provider.provider === "claude");
+  return (
+    <section className="usage-history__section" aria-labelledby="usage-history-agents">
+      <h3 id="usage-history-agents">{format.text.navigation.agents} · Claude</h3>
+      {!quota && !evidence && <p className="usage-history__empty">{format.text.noAgentHistory}</p>}
+      {quota && <ProviderQuota provider={quota} format={format} />}
+      {evidence && <>
+        <h4>{format.text.evidenceTitle}</h4>
+        <p className="usage-history__note">{format.text.evidenceNote}</p>
+        <EvidenceTable provider={evidence} format={format} />
+      </>}
     </section>
   );
 }

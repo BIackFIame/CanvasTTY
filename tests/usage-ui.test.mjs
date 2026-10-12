@@ -168,16 +168,29 @@ function fixtureHistory(patch = {}) {
 }
 
 function render(props = {}) {
+  if (!props.section) return ["conditional", "quotas", "agents", "evidence", "sources"]
+    .map((section) => render({ ...props, section })).join("");
   const report = "report" in props ? props.report : buildUsageReport(props.history ?? fixtureHistory(), {
     now: NOW, period: "1h", weightBasis: props.weightBasis ?? "uncached"
   });
   return renderToStaticMarkup(createElement(UsageHistoryView, {
     locale: "ru", timeZone: "Europe/Moscow", now: NOW, report, reportError: null, loading: false, loadError: null,
     loadedAt: NOW, period: "1h", weightBasis: "uncached", titleId: "t", descriptionId: "d",
-    onPeriodChange() {}, onWeightBasisChange() {}, onRefresh() {}, onClose() {},
+    onPeriodChange() {}, onWeightBasisChange() {}, onRefresh() {}, onClose() {}, onSectionChange() {},
     ...props
   }));
 }
+
+test("section selection shows a single report pane while retaining the settings sidebar", () => {
+  const quotas = render({ section: "quotas" });
+  assert.match(quotas, /role="tablist"/);
+  assert.match(quotas, /aria-orientation="vertical"/);
+  assert.match(quotas, /usage-history-quota/);
+  assert.doesNotMatch(quotas, /usage-history__section--conditional/);
+  const conditional = render({ section: "conditional" });
+  assert.match(conditional, /usage-history__section--conditional/);
+  assert.doesNotMatch(conditional, /id="usage-history-quota"/);
+});
 
 test("renders measured change as unattributed, with evidence tree and explicit unknown", () => {
   const html = render();
@@ -325,12 +338,12 @@ test("overlay is an accessible modal with Escape, focus containment, restore and
   for (const file of [panel, view]) assert.doesNotMatch(file, /<svg|<path/);
 });
 
-test("overlay styles keep the trigger clickable in the drag region and the content scrollable", async () => {
+test("overlay styles keep the trigger clickable and paginate beside the settings sidebar", async () => {
   const css = await source("src/renderer/src/features/usage/usageHistory.css");
   assert.match(css, /\.usage-history-trigger \{[^}]*position: fixed;[^}]*-webkit-app-region: no-drag;/);
   assert.match(css, /\.usage-history-backdrop \{[^}]*position: fixed;[^}]*inset: var\(--titlebar-height, 44px\) 0 0;/);
-  assert.match(css, /\.usage-history__body \{[^}]*overflow: auto;/);
-  assert.match(css, /\.usage-history__table-wrap \{[^}]*overflow-x: auto;/);
+  assert.match(css, /\.usage-history__page-viewport \{[^}]*overflow: clip;/);
+  assert.match(css, /column-count: 1;/);
   assert.match(css, /@media \(max-width: 720px\)/);
   assert.match(css, /\.app--macos \.usage-history-trigger/);
   assert.match(css, /\.app--macos-fullscreen \.usage-history-trigger/);

@@ -19,7 +19,7 @@ const home = {
 };
 const viewportSize = { width: 1_400, height: 820 };
 
-test("camera pan and zoom change the viewport without rescaling the workspace overview", () => {
+test("camera pan and zoom project proportionally into a supplied overview", () => {
   const initialViewport = cameraWorldViewport({ x: 0, y: 0, zoom: 1 }, viewportSize);
   const movedViewport = cameraWorldViewport({ x: -400, y: -200, zoom: 0.75 }, viewportSize);
   const world = minimapWorldBounds([home]);
@@ -34,6 +34,27 @@ test("camera pan and zoom change the viewport without rescaling the workspace ov
   assert.deepEqual(minimapAreaForBounds(home, world), homeArea);
   assert.ok(Math.abs(initialArea.width * MINIMAP_SURFACE_SIZE.width
     / (initialArea.height * MINIMAP_SURFACE_SIZE.height) - viewportSize.width / viewportSize.height) < 1e-9);
+});
+
+test("fitting the camera and objects keeps both inside the overview after distant pan and zoom", () => {
+  const marginX = MINIMAP_CONTENT_PADDING / MINIMAP_SURFACE_SIZE.width;
+  const marginY = MINIMAP_CONTENT_PADDING / MINIMAP_SURFACE_SIZE.height;
+  const initialWorld = minimapWorldBounds([home, cameraWorldViewport({ x: 0, y: 0, zoom: 1 }, viewportSize)]);
+  for (const camera of [
+    { x: -20_000, y: -12_000, zoom: 0.25 },
+    { x: 20_000, y: 12_000, zoom: 2 }
+  ]) {
+    const viewport = cameraWorldViewport(camera, viewportSize);
+    const world = minimapWorldBounds([home, viewport]);
+    assert.ok(world.size.width > initialWorld.size.width);
+    for (const bounds of [home, viewport]) {
+      const area = minimapAreaForBounds(bounds, world);
+      assert.ok(area);
+      assert.ok(area.x >= marginX - 1e-9 && area.y >= marginY - 1e-9);
+      assert.ok(area.x + area.width <= 1 - marginX + 1e-9);
+      assert.ok(area.y + area.height <= 1 - marginY + 1e-9);
+    }
+  }
 });
 
 test("minimap projection uses one scale for both axes and never stretches objects", () => {
