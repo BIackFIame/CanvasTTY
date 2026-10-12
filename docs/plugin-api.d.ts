@@ -379,6 +379,8 @@ export interface CanvasTTYEnvironmentPrepareParams {
   kind: string;
   provider: CanvasTTYProviderId;
   cwd: string;
+  /** The folder of the agent the person started (the task's project), for a worktree of that repository. */
+  projectRoot?: string;
   options: Record<string, boolean | string>;
 }
 export type CanvasTTYEnvironmentPrepareResult =

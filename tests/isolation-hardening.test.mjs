@@ -13,6 +13,7 @@ import { contributedAccountHome, validateAccountHome } from "../src/main/service
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
 import { isolationPaths } from "../src/main/services/isolation/isolationPaths.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { normalizePersistedTerminalSessions, persistedTerminalSession } from "../src/main/services/TerminalSessionStore.ts";
 import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
 
 // Plugin data and gateway sockets together: the account home a launch plugin selected stays open, a CANVASTTY_*_ADDRESS
@@ -45,8 +46,21 @@ async function world(t) {
   const lifecycle = join(userData, "lifecycle", "runtime");
   const project = join(base, "p");
   const temp = join(base, "t");
-  for (const dir of [home, join(home, ".ssh"), selected, sibling, worktree, otherWorktree, lifecycle, project, temp,
+  for (const dir of [home, join(home, ".ssh"), selected, sibling, worktrees, lifecycle, project, temp,
     join(userData, "agent-control")]) await mkdir(dir, { recursive: true });
+  // The environment's worktrees are real linked worktrees of the project: the layer opens a project in plugin data only
+  // when it validates as one (and CanvasTTY placed the launch there).
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", project, "-c", "user.name=CanvasTTY test", "-c", "user.email=test@example.invalid",
+      "-c", "commit.gpgsign=false", ...args], { encoding: "utf8", env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" } });
+    assert.equal(result.status, 0, `git ${args.join(" ")}: ${result.stderr}`);
+  };
+  git("init", "-q", "-b", "main");
+  await writeFile(join(project, "README.md"), "project\n");
+  git("add", "README.md");
+  git("commit", "-qm", "base");
+  git("worktree", "add", "-q", "-b", "env-w1", worktree, "HEAD");
+  git("worktree", "add", "-q", "-b", "env-w2", otherWorktree, "HEAD");
   await writeFile(join(selected, "auth.json"), "FAKE-SELECTED-TOKEN\n");
   await writeFile(join(sibling, "auth.json"), "FAKE-SIBLING-TOKEN\n");
   await writeFile(join(otherWorktree, "file.txt"), "other worktree\n");
@@ -232,6 +246,14 @@ test("an environment's worktree inside its own plugin data still runs inside the
   assert.deepEqual(mountFor(args, join(w.otherWorktree, "file.txt")), { target: w.pluginData, mode: "tmpfs" });
   assert.deepEqual(mountFor(args, join(w.selected, "auth.json")), { target: w.pluginData, mode: "tmpfs" });
 
+  // The card shows the worktree, and keeps the folder the person chose as its task's project across a restore.
+  const saved = persistedTerminalSession(own.card(placed.id), undefined, { environment: { pluginId: ENVIRONMENTS, kind: "worktree", ref: { id: "w1" }, label: "w1" },
+    projectRoot: w.project });
+  assert.equal(saved.cwd, w.worktree);
+  const restored = normalizePersistedTerminalSessions({ version: 2, sessions: [saved, { ...saved, id: "relative", projectRoot: "p" },
+    { ...persistedTerminalSession({ ...own.card(placed.id), id: "local" }, undefined, { projectRoot: w.project }), projectRoot: w.project }] }).sessions;
+  assert.deepEqual(restored.map((record) => record.projectRoot ?? null), [w.project, null, null], "absolute, and only with an environment");
+
   // The environment plugin answers with the accounts plugin's homes: not its own data, so the launch is refused.
   const foreign = manager(t, w, { environments: environments(w.homes) });
   const refused = create(foreign.terminals);
@@ -323,11 +345,42 @@ except Exception: print('${label}-CONNECT-denied')"`;
     "echo x > new.txt && echo WORKTREE-WRITE-ok",
     `cat ${JSON.stringify(join(w.otherWorktree, "file.txt"))} >/dev/null 2>&1 || echo OTHER-WORKTREE-denied`,
     `cat ${JSON.stringify(join(w.selected, "auth.json"))} >/dev/null 2>&1 || echo ACCOUNT-denied`
-  ].join("; ")], env: w.env, profile: "acceptEdits", placedProjects: [{ folder: w.worktree, pluginId: ENVIRONMENTS }] });
+  ].join("; ")], env: w.env, profile: "acceptEdits", taskProjectRoot: w.project,
+  placedProjects: [{ folder: w.worktree, pluginId: ENVIRONMENTS }] });
   try {
     const result = spawnSync(placed.command, placed.args, { cwd: w.worktree, env: placed.env, encoding: "utf8", timeout: 20_000 });
     assert.deepEqual(result.stdout.split("\n").filter(Boolean), ["WORKTREE-WRITE-ok", "OTHER-WORKTREE-denied", "ACCOUNT-denied"]);
   } finally {
     placed.cleanup();
   }
+});
+
+test("a worktree card saved before its project folder was recorded still restarts inside the layer", posixHost, async (t) => {
+  const w = await world(t);
+  const { TerminalSessionStore } = await import("../src/main/services/TerminalSessionStore.ts");
+  const store = join(w.base, "store");
+  await mkdir(store);
+  const environment = { pluginId: ENVIRONMENTS, kind: "worktree", ref: { id: "w1" }, label: "worktree w1" };
+  // Saved by a build without `projectRoot`: only the placed worktree is known.
+  await writeFile(join(store, "terminal-sessions.json"), JSON.stringify({ version: 2, sessions: [{ id: "legacy", provider: "codex",
+    profile: "acceptEdits", role: "agent", title: "T", titleCustomized: false, cwd: w.worktree, position: at,
+    size: { width: 700, height: 430 }, lastState: "running", restore: true, environment }] }));
+  const registry = new EnvironmentRegistry({
+    providers: () => [{ pluginId: ENVIRONMENTS, pluginName: "Env", serviceId: "env", secrets: false,
+      kinds: [{ kind: "worktree", label: "Worktree", keeps: { launch: true } }] }],
+    call: async (_pluginId, _serviceId, method, params) => {
+      const step = method.replace("canvastty.environment.", "");
+      if (step === "wrap") return { command: WRAPPER, args: ["run", params.command, ...params.args], cwd: params.cwd };
+      if (step === "resume") return { ok: true };
+      return {};
+    },
+    secret: async () => null
+  });
+  const { terminals, calls, card } = manager(t, w, { environments: registry });
+  terminals.configureSessionPersistence(new TerminalSessionStore(store), "continue");
+  await terminals.restorePersistedSessions();
+  await waitFor(() => calls.length === 1 || card("legacy")?.status === "failed");
+  assert.equal(card("legacy").failureDetails, null);
+  assert.equal(calls[0]?.command, BWRAP);
+  await terminals.shutdown();
 });

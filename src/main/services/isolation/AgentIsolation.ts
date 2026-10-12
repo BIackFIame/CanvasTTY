@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, relative } from "node:path";
 import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts";
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
@@ -197,11 +197,11 @@ export class AgentIsolation {
       mkdirSync(temp, { mode: 0o700 });
       const requestedCwdInPluginData = isPluginDataPath(launch.cwd, this.options.userDataPath);
       const cwd = realpathSync(launch.cwd);
-      // A project in plugin data must be a linked worktree the host validates against the task's own repository.
+      // A project in plugin data must be a linked worktree the host validates against the task's own repository, unless
+      // the person chose that folder (or one above it) for the card the launch descends from.
       const trustedWorktree = worktreeGitAccess(cwd, launch.taskProjectRoot ?? cwd, this.options.userDataPath);
-      if ((requestedCwdInPluginData || isPluginDataPath(cwd, this.options.userDataPath)) && !trustedWorktree) {
-        throw new LaunchRefusal("The plugin environment worktree could not be verified against the task's original Git repository. The agent was not started.");
-      }
+      const personChose = (launch.placedProjects ?? []).some((placed) => placed.pluginId === undefined && insideReal(cwd, placed.folder));
+      const unverifiedWorktree = !personChose && (requestedCwdInPluginData || isPluginDataPath(cwd, this.options.userDataPath)) && !trustedWorktree;
       const accountHome = launch.accountHome === undefined
         ? undefined
         : validateAccountHome(this.options.userDataPath, launch.provider, launch.accountHome, launch.env);
@@ -220,6 +220,11 @@ export class AgentIsolation {
         ...(launch.placedProjects ? { placedProjects: launch.placedProjects } : {}),
         ...(launch.profile === "plan" ? { readOnlyProject: true } : {})
       });
+      // isolationPaths refused a project in plugin data that CanvasTTY did not place; one it placed must also be a linked
+      // worktree validated against the task's own repository.
+      if (unverifiedWorktree) {
+        throw new LaunchRefusal("The plugin environment worktree could not be verified against the task's original Git repository. The agent was not started.");
+      }
       // `git init` and `git clone` copy git's template, sample hooks included: an empty one writes no hooks.
       const gitTemplate = join(folder, "git-template");
       mkdirSync(gitTemplate, { mode: 0o500 });
@@ -333,4 +338,15 @@ export function gatewaySocketAddresses(...environments: ReadonlyArray<Readonly<R
 export function controlGrantFolder(env: Readonly<Record<string, string | undefined>>): string | null {
   const connection = env.CANVASTTY_CONTROL_CONNECTION;
   return connection ? dirname(connection) : null;
+}
+
+/** `path` (already real) is `folder` or inside it once `folder` is resolved; an unreadable folder places nothing. */
+function insideReal(path: string, folder: string): boolean {
+  if (!isAbsolute(folder)) return false;
+  try {
+    const rest = relative(realpathSync(folder), path);
+    return rest === "" || (!rest.startsWith("..") && !isAbsolute(rest));
+  } catch {
+    return false;
+  }
 }

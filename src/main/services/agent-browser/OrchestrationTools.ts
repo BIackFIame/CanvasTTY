@@ -176,6 +176,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(launchOptions !== undefined ? { launchOptions } : {}),
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
+      ...(args.isolate === "worktree" ? { isolate: "worktree" as const } : {}),
       profile: profile.profile
     }, signal, Math.max(0, deadline - Date.now())).catch((error: unknown) => {
       if (signal?.aborted) throw canceledError();
@@ -201,7 +202,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(created.effort !== undefined ? { effort: created.effort } : {}),
       // Which CLI serves it, the model it was asked for (null: its launch options or the CLI's own default decide),
       // and where each plugin's launch options came from.
-      servedBy: { provider: created.provider, model: created.model ?? null, launchOptions: inheritance.sources }
+      servedBy: { provider: created.provider, model: created.model ?? null, launchOptions: inheritance.sources },
+      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {})
     };
   }
 

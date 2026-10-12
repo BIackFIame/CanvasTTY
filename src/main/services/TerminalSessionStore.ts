@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type {
   LaunchProfileId,
@@ -54,6 +54,11 @@ export interface PersistedTerminalSession {
   environmentChoice?: SessionEnvironmentChoice;
   /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
   ownerPluginId?: string;
+  /**
+   * The folder the person chose for a card that an environment then placed elsewhere (its worktree): the task's
+   * original project, which the isolation layer validates that worktree against.
+   */
+  projectRoot?: string;
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
@@ -218,7 +223,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "projectRoot" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -250,6 +255,7 @@ export function persistedTerminalSession(
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
     ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(extras.projectRoot && extras.environment ? { projectRoot: extras.projectRoot } : {}),
     ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
@@ -330,6 +336,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      ...(environment && typeof session.projectRoot === "string" && isAbsolute(session.projectRoot) ? { projectRoot: session.projectRoot } : {}),
       ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0
         ? { gitAuditSince: session.gitAuditSince } : {}),
       // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
