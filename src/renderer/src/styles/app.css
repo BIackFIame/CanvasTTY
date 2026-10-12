@@ -398,6 +398,11 @@ button { border: 0; }
 .canvas-menu__kbd { padding: .2em .55em; border-radius: .4em; color: var(--text-dark); background: var(--secondary); font: 400 .78em/1.2 var(--font-mono); white-space: nowrap; }
 .canvas-menu__sub { color: var(--text-muted-on-dark); font-size: .92em; font-weight: 400; white-space: nowrap; }
 .canvas-menu__chevron { display: inline-flex; color: var(--text-muted-on-dark); }
+/* A submenu that opens to the side: the same chevron, turned toward it. */
+.canvas-menu__chevron--right { transform: rotate(-90deg); }
+.canvas-menu__chevron--left { transform: rotate(90deg); }
+/* The hint explains the disabled rows above it: aligned with their text (1.55em of the row font) and as quiet as they are. */
+.canvas-menu__hint { margin: 0; padding: .3em .8em .45em calc(1.55em / .92); color: var(--text); opacity: .5; font-size: .92em; line-height: 1.35; }
 .canvas-menu__check { display: inline-flex; color: var(--primary); }
 .canvas-menu__row:disabled { cursor: default; opacity: .5; }
 .canvas-menu__row:disabled:hover { background: transparent; }
@@ -683,6 +688,8 @@ button { border: 0; }
 /* Auto-sort: sorted windows glide to their new place, without motion when reduced motion is requested. The Browser
    card jumps: its native page view is placed from the card's measured rect and would stay at the start of a glide. */
 .workspace--auto-sorting :is(.terminal-card, .plugin-canvas-card) { transition: transform .24s ease, box-shadow .15s ease; }
+/* Zoomed out (summary), the outline of the windows a sort moved stays as thick on screen as at 50 % zoom. */
+.workspace--auto-sorting :is(.terminal-card--summary.terminal-card--selected, .plugin-canvas-card--summary.plugin-canvas-card--selected, .browser-card--summary.browser-card--selected) { box-shadow: 0 0 0 calc(.375rem * var(--summary-scale, 1)) var(--primary), var(--shadow-lg); }
 @media (prefers-reduced-motion: reduce) { .workspace--auto-sorting :is(.terminal-card, .plugin-canvas-card) { transition: none; } }
 .browser-card:focus-within, .browser-card--selected { box-shadow: 0 0 0 3px var(--primary), var(--shadow-lg); }
 .browser-card__header { height: var(--card-header-height); padding: 0 calc(11px * var(--ui-scale, 1)) 0 calc(15px * var(--ui-scale, 1)); display: flex; align-items: center; justify-content: space-between; gap: calc(12px * var(--ui-scale, 1)); color: white; background: var(--surface-soft); cursor: move; font-size: calc(13px * var(--ui-scale, 1)); touch-action: none; }
