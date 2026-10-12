@@ -43,6 +43,16 @@ export function bubblewrapArguments(
     seen.add(path);
     args.push("--bind", path, path);
   }
+  // CanvasTTY's data folder inside a writable project: its parent folders there become mount points (a mount point
+  // cannot be renamed: EBUSY), the folder itself read-only over it, then its writable folders bound again.
+  for (const path of paths.fixedFolders) {
+    if (exists(path) === "directory") args.push("--bind", path, path);
+  }
+  for (const path of paths.readOnlyFolders) {
+    if (exists(path) !== "directory") continue;
+    args.push("--ro-bind", path, path);
+    for (const folder of seen) if (folder !== path && within(folder, path)) args.push("--bind", folder, folder);
+  }
   for (const path of paths.writableFiles) {
     if (exists(path) === "file") args.push("--bind", path, path);
   }
