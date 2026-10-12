@@ -70,9 +70,9 @@ export interface IsolationPaths {
   writableFiles: string[];
   /** Folders that may be created (empty) on the way to a writable one: `~/.local/state` for `~/.local/state/opencode`. */
   creatableFolders: string[];
-  /** Inside writable folders, still not writable: the repository's git config, the CLIs' own permission settings. */
+  /** Inside writable folders, still not writable: the repository's git config and `commondir`, the CLIs' own permission settings. */
   protectedWrites: string[];
-  /** Permission-bearing agent directories; empty directories are neutral, unlike a fabricated build.md. */
+  /** Permission-bearing agent directories and the repository's linked-worktree records; empty directories are neutral. */
   protectedDirectories?: string[];
   /** The project's git hook folders: only `*.sample` files may be written there (what `git init` creates). */
   gitHooks: string[];
@@ -297,6 +297,8 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       if (!withinGrant && !ownAccount) throw new Error(`CLI home ${folder} overlaps protected CanvasTTY data.`);
     }
   }
+  const gitDir = join(project, ".git");
+  const repository = existsSync(join(gitDir, "config"));
   const configSources = input.provider === "opencode" ? openCodeConfigPaths(input.env, input.cwd) : { jsonFiles: [], agentDirectories: [] };
   const socketFolders = [
     ...(input.gatewaySockets ?? []).filter((path) => isAbsolute(path)).map((path) => dirname(path)),
@@ -324,14 +326,19 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     creatableFolders: all([...ownFolders, join(home, ".npm"), join(home, ".bun")].flatMap((folder) => ancestorsBelow(home, folder))),
     protectedWrites: all([
       // A repository that exists keeps its config (hooksPath, fsmonitor, filters run code when the person uses git
-      // later, outside the layer); a new one may be created, which writes its config.
-      ...(existsSync(join(project, ".git", "config")) ? [join(project, ".git", "config"), join(project, ".git", "config.lock")] : []),
+      // later, outside the layer), and its per-worktree config; a new one may be created, which writes its config.
+      ...(repository ? [join(gitDir, "config"), join(gitDir, "config.lock"), join(gitDir, "config.worktree"), join(gitDir, "config.worktree.lock")] : []),
+      // Where git reads the shared config and hooks from. Protected where it exists: an empty placeholder (Linux) would
+      // stop git from working; seatbelt also denies creating it (projectRoots).
+      ...(existsSync(join(gitDir, "commondir")) ? [join(gitDir, "commondir")] : []),
       // Codex's and Kimi's config.toml hold their permission rules and hooks.
       ...(input.provider === "codex" || input.provider === "kimi" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
       ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
       ...configSources.jsonFiles
     ]),
-    protectedDirectories: all(configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")])),
+    // Linked worktrees' records (their git folder, `commondir` and config): what git reads when the person works there.
+    protectedDirectories: all([...configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")]),
+      ...(repository ? [join(gitDir, "worktrees")] : [])]),
     gitHooks: all([join(project, ".git", "hooks")]),
     projectRoots: input.readOnlyProject ? [] : all([project]),
     unreadable: all([...sensitive, ...others, ...privateData]),
