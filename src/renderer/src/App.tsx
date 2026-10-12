@@ -68,6 +68,7 @@ import { fileCardToRootReference, isFileRootUsable } from "./features/files/file
 import { matchQuickOpen, toggleExpandedFolder } from "./features/files/fileTree";
 import type { FileSessionOption } from "./features/files/FileBrowserCard";
 import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
+import { UsageHistoryPanel } from "./features/usage/UsageHistoryPanel";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import { createCameraStore } from "./features/workspace/cameraStore";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
@@ -347,6 +348,9 @@ export function App(): React.JSX.Element {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openUpdatesRequest, setOpenUpdatesRequest] = useState(0);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
+  const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
+  /** App root outside the canvas transform; overlays portal here to inherit the theme tokens. */
+  const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -422,6 +426,11 @@ export function App(): React.JSX.Element {
       if (live && !eventSeen) setUpdateStatus(status);
     }).catch(() => undefined);
     return () => { live = false; unsubscribe(); };
+  }, []);
+
+  const changeUsageHistoryOpen = useCallback((open: boolean): void => {
+    if (open) setSettingsOpen(false);
+    setUsageHistoryOpen(open);
   }, []);
 
   useEffect(() => {
@@ -1820,6 +1829,7 @@ export function App(): React.JSX.Element {
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
       if (handoffRemarkIds !== null) return;
       if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
+      if (usageHistoryOpen) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();
@@ -1841,7 +1851,7 @@ export function App(): React.JSX.Element {
     };
 
     const handlePointerShortcut = (event: PointerEvent): void => {
-      if (shortcutReferenceOpen || handoffRemarkIds !== null) return;
+      if (shortcutReferenceOpen || usageHistoryOpen || handoffRemarkIds !== null) return;
       if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       const action = matchesPointerShortcut(event, settings.shortcuts.home)
         ? "home"
@@ -1866,7 +1876,7 @@ export function App(): React.JSX.Element {
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
       stopTerminalFocus();
     };
-  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, toggleSessionFullscreen]);
+  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, usageHistoryOpen, toggleSessionFullscreen]);
 
   const appearance = resolveAppearanceSettings(settings);
   const rootClasses = useMemo(
@@ -1902,9 +1912,15 @@ export function App(): React.JSX.Element {
   }, [agentAvailability, homeEditDraft, settings]);
 
   return (
-    <div className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
+    <div ref={setOverlayHost} className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
       <TerminalBorderSkinStyleHost skinId={settings.terminalBorderSkin} />
       <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
+      <UsageHistoryPanel
+        locale={settings.locale}
+        open={usageHistoryOpen}
+        container={overlayHost}
+        onOpenChange={changeUsageHistoryOpen}
+      />
       <main className="app__content">
         {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
         {ready && <WorkspaceCanvas
@@ -1916,7 +1932,7 @@ export function App(): React.JSX.Element {
           limitsLoadState={limitsLoadState}
           plugins={plugins}
           browser={browser}
-          browserViewVisible={!settingsOpen && !shortcutReferenceOpen && launchProvider === null && pendingTerminalUrl === null && handoffRemarkIds === null}
+          browserViewVisible={!settingsOpen && !usageHistoryOpen && !shortcutReferenceOpen && launchProvider === null && pendingTerminalUrl === null && handoffRemarkIds === null}
           homeEditing={homeEditDraft !== null}
           camera={cameraStore}
           onCameraChange={changeCamera}

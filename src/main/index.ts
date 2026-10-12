@@ -23,6 +23,7 @@ import { UpdateController, type UpdateAdapter } from "./services/updates/UpdateC
 import { ManualReleaseAdapter } from "./services/updates/ManualReleaseAdapter";
 import { registerMaterialIpc } from "./ipc/registerMaterialIpc";
 import { textResponse } from "./services/fileResponse";
+import { homedir } from "node:os";
 import { SettingsStore } from "./services/SettingsStore";
 import { FileAccessService } from "./services/FileAccessService";
 import { SkinRegistry } from "./services/SkinRegistry";
@@ -32,7 +33,9 @@ import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { AgentChatHistoryService } from "./services/AgentChatHistoryService";
-import { LimitsService } from "./services/LimitsService";
+import { LimitsService, withoutAccountScope } from "./services/LimitsService";
+import { UsageHistoryService } from "./services/UsageHistoryService";
+import { LocalUsageCollector } from "./services/LocalUsageCollector";
 import {
   createProviderCliRegistry,
   providerCliAvailability,
@@ -171,6 +174,7 @@ async function showCompanionBrowser():Promise<{title:string;url:string}> {
 let terminalManager: TerminalManager | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
+let usageHistory: UsageHistoryService | null = null;
 let pluginManager: PluginManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
@@ -782,6 +786,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   };
   await applyAgentControlSetting(settings.get().agentControlEnabled);
   limitsService = new LimitsService(providerClis, app.getVersion());
+  // Read-only accounting collection; history is stored in the normal app userData directory.
+  usageHistory = new UsageHistoryService({
+    directory: userDataPath,
+    limits: limitsService,
+    createCollector: (state) => new LocalUsageCollector(homedir(), state, process.env)
+  });
+  await usageHistory.load();
+  usageHistory.start();
   await Promise.all([browserReady, storesLoaded]);
   pluginManager.registerTokenProvider(() => githubAuth!.getToken());
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
@@ -831,6 +843,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     terminals: terminalManager,
     limits: limitsService,
     agentChatHistory,
+    usageHistory,
     plugins: pluginManager,
     pluginServices,
     pluginCards,
@@ -892,7 +905,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     mobileRoot: app.isPackaged ? join(process.resourcesPath, "mobile-web") : join(app.getAppPath(), "integrations/mobile/dist"),
     providerAvailability: () => providerCliAvailability(providerClis!),
     speechWorker: app.isPackaged ? join(process.resourcesPath,"companion/asr_worker.py") : join(app.getAppPath(),"src/main/services/companion/asr_worker.py"),
-    limits: () => limitsService!.get(), openBrowser: showCompanionBrowser
+    limits: async () => withoutAccountScope(await limitsService!.get()), openBrowser: showCompanionBrowser
   });
   await evenG2.load();
   const assertCompanionSender = (event: Electron.IpcMainInvokeEvent):void => {
@@ -1263,7 +1276,10 @@ async function shutdownServices(): Promise<void> {
   const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
     if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
   });
+  // Stop the timer first, then abort in-flight limit requests so the final save is prompt.
+  const usageHistoryClosed = usageHistory?.dispose();
   limitsService?.dispose();
+  await usageHistoryClosed;
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);

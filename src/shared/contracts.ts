@@ -1,6 +1,7 @@
 import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
 export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId };
 export type { CanvasLauncherItemId, ProviderId };
+import type { UsageHistory } from "./usageHistory.ts";
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
@@ -1766,6 +1767,8 @@ export type ProviderLimitsSnapshot =
     source: LimitSource;
     fetchedAt: number;
     windows: LimitWindow[];
+    /** One-way fingerprint of the account (Codex) or credential epoch (Claude); absent or null means unknown. */
+    accountScope?: string | null;
   }
   | {
     provider: AgentProviderId;
@@ -1775,6 +1778,8 @@ export type ProviderLimitsSnapshot =
     failedAt: number;
     reason: LimitUnavailableReason;
     windows: LimitWindow[];
+    /** Scope of the repeated observation made at fetchedAt. */
+    accountScope?: string | null;
   }
   | {
     provider: AgentProviderId;
@@ -1916,6 +1921,9 @@ export interface CanvasTTYApi {
     status(): Promise<Record<ProviderSecretId, boolean>>;
     set(secretId: ProviderSecretId, value: string): Promise<void>;
     clear(secretId: ProviderSecretId): Promise<void>;
+  };
+  usageHistory: {
+    get(): Promise<UsageHistory>;
   };
   plugins: {
     list(): Promise<InstalledPlugin[]>;
@@ -2096,6 +2104,7 @@ export const IPC = {
   materialsChanged: "materials:changed",
 
   limitsGet: "limits:get",
+  usageHistoryGet: "usage-history:get",
   pluginsList: "plugins:list",
   pluginsSearch: "plugins:search",
   pluginsShowcase: "plugins:showcase",
