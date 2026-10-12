@@ -1,5 +1,5 @@
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { isPathInside } from '../../../agent-runtime/path-inside.mjs';
 import { analyzeAction, commandFromArgv, realish, type HardFacts, type PrivateData, type ToolAction } from './commandFacts.ts';
 
@@ -10,7 +10,7 @@ import { analyzeAction, commandFromArgv, realish, type HardFacts, type PrivateDa
  * model: local rules only, no git, no network.
  */
 
-const BASE_DENY_RULES = ['app-private', 'elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside', 'unknown-target'] as const;
+const BASE_DENY_RULES = ['app-private', 'elevation', 'pipe-to-shell', 'download-exec', 'disk', 'fork-bomb', 'delete-outside', 'write-outside', 'unknown-target', 'too-many-paths'] as const;
 export type BaseDenyRule = typeof BASE_DENY_RULES[number];
 
 /** What the model reads: why the call was refused and what to do instead. */
@@ -23,7 +23,8 @@ const DENY_MESSAGES: Readonly<Record<BaseDenyRule, string>> = {
   'fork-bomb': 'CanvasTTY blocked this command: it would exhaust the computer\'s processes. Do not run it.',
   'delete-outside': 'CanvasTTY blocked this command: it deletes files outside the project folder (or the folder itself). Delete only inside the project; if something elsewhere must go, ask the person.',
   'write-outside': 'CanvasTTY blocked this command: it writes outside the project folder. Keep changes inside the project; if a file elsewhere must change, ask the person.',
-  'unknown-target': 'CanvasTTY blocked this command: it deletes or moves a path held in a shell variable or command output that CanvasTTY cannot resolve, so it cannot tell whether the path is inside the project folder. Write the path out, or set the variable in the same command to a path inside the project, and run it again.'
+  'unknown-target': 'CanvasTTY blocked this command: it deletes or moves a path held in a shell variable or command output that CanvasTTY cannot resolve, so it cannot tell whether the path is inside the project folder. Write the path out, or set the variable in the same command to a path inside the project, and run it again.',
+  'too-many-paths': 'CanvasTTY blocked this tool call: it names more than 32 paths or patterns, more than base protection checks in one call. Read the files in smaller groups of at most 32.'
 };
 const TEMP_WRITE_MESSAGE = 'CanvasTTY blocked this command: it writes to the temporary folder (/tmp or $TMPDIR), which is outside the project folder. Make a scratch folder inside the project instead (for example ./tmp, added to .gitignore if needed) and use that; if a file elsewhere must change, ask the person.';
 
@@ -32,6 +33,14 @@ export interface BaseVerdict { rule: BaseDenyRule; message: string }
 /** Tool names of the CLIs' hooks: shells and file writes. Anything else is not checked. */
 const SHELL_TOOLS = new Set(['Bash', 'bash', 'run_shell_command', 'shell', 'local_shell', 'exec_command']);
 const EDIT_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'write_file', 'edit', 'replace', 'apply_patch']);
+/**
+ * Read-only file tools: Claude Code's Read, NotebookRead, Grep, Glob and LS; Qwen Code's read_file, read_many_files,
+ * grep_search (search_file_content), glob and list_directory; OpenCode's read, grep, glob and list arrive under the
+ * Claude names. They are checked only against CanvasTTY's private data, never against the project folder.
+ */
+const READ_TOOLS = new Set(['Read', 'NotebookRead', 'Grep', 'Glob', 'LS', 'read_file', 'read_many_files', 'grep_search', 'search_file_content', 'glob', 'list_directory']);
+/** Read-only tools whose `path` is a folder they walk (search), rather than one file or one listing. */
+const SEARCH_TOOLS = new Set(['Grep', 'Glob', 'grep_search', 'search_file_content', 'glob']);
 const MAX_PATHS = 32;
 const MAX_PATH_CHARS = 4_096;
 
@@ -63,6 +72,7 @@ export function actionFromHook(toolName: string, toolInput: unknown, preview: st
       : Array.isArray(candidate) && candidate.length && candidate.every(item => typeof item === 'string') ? commandFromArgv(candidate as string[]) : null;
     return { kind: 'shell', command, commandCwd, paths: [] };
   }
+  if (READ_TOOLS.has(toolName)) return readAction(toolName, raw, preview);
   if (!EDIT_TOOLS.has(toolName)) return { kind: null, command: null, commandCwd: null, paths: [] };
   if (!raw && preview && toolName !== 'apply_patch') {
     const paths: string[] = [];
@@ -78,6 +88,32 @@ export function actionFromHook(toolName: string, toolInput: unknown, preview: st
   }
   const path = text(raw?.file_path) ?? text(raw?.filePath) ?? text(raw?.path) ?? text(raw?.notebook_path) ?? text(raw?.absolute_path);
   return { kind: 'edit', command: null, commandCwd: null, paths: path ? [path] : [] };
+}
+
+/** A read-only tool's files, glob patterns and searched folders. Cut input: the paths at the start of its preview. */
+function readAction(toolName: string, raw: Record<string, unknown> | null, preview: string | null): ToolAction {
+  const text = (value: unknown): string | null => typeof value === 'string' && value.length > 0 && value.length <= MAX_PATH_CHARS ? value : null;
+  const action: ToolAction = { kind: 'read', command: null, commandCwd: null, paths: [], searched: [] };
+  if (!raw) {
+    for (const match of (preview ?? '').matchAll(PREVIEW_PATH)) {
+      try { const value: unknown = JSON.parse(`"${match[1]}"`); if (typeof value === 'string' && value) action.searched!.push(value); } catch { /* a cut escape */ }
+      if (action.searched!.length >= 4) break;
+    }
+    return action;
+  }
+  const file = text(raw.file_path) ?? text(raw.filePath) ?? text(raw.notebook_path) ?? text(raw.absolute_path);
+  if (file) action.paths.push(file);
+  const folder = text(raw.path) ?? text(raw.dir_path) ?? text(raw.directory);
+  if (folder) (SEARCH_TOOLS.has(toolName) ? action.searched! : action.paths).push(folder);
+  // A glob pattern names files itself (`/…/canvastty/provider-*`); relative ones resolve against the searched folder.
+  const pattern = toolName === 'Glob' || toolName === 'glob' ? text(raw.pattern) : null;
+  if (pattern) action.paths.push(folder && !isAbsolute(pattern) && !pattern.startsWith('~') && !pattern.startsWith('$') ? join(folder, pattern) : pattern);
+  // Qwen Code's read_many_files: `paths` and `include` are both globs it expands and reads. More than are checked is
+  // refused, not cut short.
+  const many = [raw.paths, raw.include].flatMap(list => Array.isArray(list) ? list : []);
+  if (many.length > MAX_PATHS) { action.tooMany = true; return action; }
+  for (const item of many) { const path = text(item); if (path) action.searched!.push(path); }
+  return action;
 }
 
 /**
@@ -124,6 +160,7 @@ export function checkBaseProtection(input: {
   try {
     const action = actionFromHook(input.toolName, input.toolInput, input.preview ?? null);
     if (action.kind === null) return null;
+    if (action.tooMany) return { rule: 'too-many-paths', message: DENY_MESSAGES['too-many-paths'] };
     // The agent's current folder (the hook reports it) resolves relative paths; the working folder stays the root.
     if (!action.commandCwd && input.commandCwd) action.commandCwd = input.commandCwd;
     const facts = analyzeAction(action, input.root, {
