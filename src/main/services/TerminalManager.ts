@@ -1504,6 +1504,7 @@ export class TerminalManager {
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
       ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {}),
+      ...(descriptor.projectRoot && descriptor.environment ? { projectRoot: descriptor.projectRoot } : {}),
       ...(descriptor.gitAuditSince !== undefined ? { gitAuditSince: descriptor.gitAuditSince } : {})
     };
 
@@ -2146,10 +2147,11 @@ export class TerminalManager {
   }
 
   /**
-   * The task's original project: the folder of the top-level card a session descends from (its own folder when it has
-   * no parent). A plugin worktree is validated against this repository.
+   * The task's original project: the folder the person chose for the top-level card a session descends from (its own
+   * when it has no parent), also after an environment placed that card in a worktree. A plugin worktree is validated
+   * against this repository.
    */
-  private taskProjectRoot(cwd: string, parentSessionId?: string): string {
+  private taskProjectRoot(cwd: string, parentSessionId?: string, own?: PersistedSessionExtras): string {
     let root: ManagedSession | undefined;
     for (let depth = 0, next = parentSessionId; next !== undefined && depth < 64; depth++) {
       const current = this.sessions.get(next);
@@ -2157,7 +2159,8 @@ export class TerminalManager {
       root = current;
       next = current.metadata.parentSessionId;
     }
-    return root?.metadata.cwd ?? cwd;
+    if (root) return root.extras.projectRoot ?? root.metadata.cwd;
+    return own?.projectRoot ?? cwd;
   }
 
   /**
@@ -2291,7 +2294,8 @@ export class TerminalManager {
     const choice = session.extras.environmentChoice;
     if (choice && !session.extras.environment) {
       if (!environments) return refuse("plugin environments are not available.");
-      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice });
+      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice,
+        projectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId) });
       if (!live()) {
         // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
         // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.
@@ -2304,6 +2308,8 @@ export class TerminalManager {
       session.extras.environment = placed.environment;
       metadata.environment = environmentBadge(placed.environment);
       if (placed.cwd && placed.cwd !== metadata.cwd) {
+        // The folder the person chose stays the task's project: the placed worktree is validated against it.
+        session.extras.projectRoot = this.taskProjectRoot(metadata.cwd, metadata.parentSessionId);
         metadata.cwd = placed.cwd;
         session.lifecycle = this.lifecycleHooksEnabled
           ? createProviderLifecycleParser(metadata.provider, metadata.cwd)
@@ -2429,7 +2435,7 @@ export class TerminalManager {
           spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, {
             ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
             placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment),
-            taskProjectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId)
+            taskProjectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId, session.extras)
           }), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));

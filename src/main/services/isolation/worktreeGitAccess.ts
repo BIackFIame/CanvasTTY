@@ -1,5 +1,5 @@
 import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 const POINTER_LIMIT = 4096;
 
@@ -28,10 +28,13 @@ export function worktreeGitAccess(cwd: string, taskRoot: string, userDataPath: s
     if (!workingTree || !within(workingTree, pluginData) || workingTree === pluginData) return null;
 
     const task = real(taskRoot);
-    const taskLayout = nearestGitLayout(task);
+    let taskLayout = nearestGitLayout(task);
     if (!taskLayout || !within(task, taskLayout.worktree)) return null;
     if (within(taskLayout.worktree, pluginData) && !isRegisteredLinkedWorktree(taskLayout)) return null;
-    if (workingTree === taskLayout.worktree) return null;
+    // A card saved before its project folder was recorded knows only its worktree: it is validated against the primary
+    // checkout of that worktree's own repository instead.
+    if (workingTree === taskLayout.worktree) taskLayout = primaryCheckout(taskLayout.commonDir);
+    if (!taskLayout || workingTree === taskLayout.worktree) return null;
 
     const gitEntry = join(workingTree, ".git");
     const gitEntryStat = lstatSync(gitEntry);
@@ -112,6 +115,13 @@ function gitLayout(worktree: string): GitLayout | null {
   } catch {
     return null;
   }
+}
+
+/** The primary working tree of a repository whose common directory is its `.git` folder, or null. */
+function primaryCheckout(commonDir: string): GitLayout | null {
+  if (basename(commonDir) !== ".git") return null;
+  const layout = gitLayout(dirname(commonDir));
+  return layout && layout.gitDir === commonDir && layout.commonDir === commonDir ? layout : null;
 }
 
 /** A task root can itself be a worker worktree; accept it only when its host-side Git pointers agree exactly. */

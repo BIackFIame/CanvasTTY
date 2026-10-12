@@ -3,6 +3,7 @@ import type {
   AgentProviderId,
   CreateSessionRequest,
   LaunchProfileId,
+  SessionEnvironmentChoice,
   SessionMetadata,
   SessionSnapshot
 } from "../../shared/contracts.ts";
@@ -21,6 +22,7 @@ import { PLUGIN_DATA_FOLDER, privateAppData } from "./isolation/isolationPaths.t
 
 // Cards one parent may have in total, live or exited (the live limit is the person's setting).
 const MAX_CHILDREN_PER_PARENT = 16;
+const NO_WORKTREE = "The environments plugin does not provide a worktree for this launch: no trusted environments plugin offers one for this agent in this Git project. Spawn it without isolate.";
 /** Defaults of the person's limits (Settings → Agents). */
 export const DEFAULT_DELEGATION_LIMITS: DelegationLimits = { maxDepth: 2, maxSubagents: 8 };
 
@@ -53,6 +55,19 @@ export interface SpawnAgentRequest {
   /** The CLI's --model and reasoning effort for this subagent (checked by the launch for its CLI). */
   model?: string;
   effort?: CreateSessionRequest["effort"];
+  /** "worktree": run it in a worktree of the installed environments plugin; refused when none is available. */
+  isolate?: "worktree";
+}
+
+/** What an environment resolver gets for one subagent (AgentControlOptions.resolveSubagentEnvironment). */
+export interface SubagentEnvironmentRequest {
+  provider: AgentProviderId;
+  parentSessionId: string;
+  /** The folder of the agent the person started: the task's project. */
+  projectRoot: string;
+  cwd: string;
+  liveChildren: number;
+  isolate?: "worktree";
 }
 
 export interface AgentObservation {
@@ -104,6 +119,11 @@ export interface AgentControlOptions {
   containment?: () => boolean;
   /** CanvasTTY's userData folder: a subagent never works in its private data (tokens, account homes, plugin data). */
   userDataPath?: string;
+  /**
+   * The environment a new subagent runs in (a trusted environments plugin's worktree), or null for this computer's
+   * folder. Absent: subagents run in their folder and `isolate: "worktree"` is refused.
+   */
+  resolveSubagentEnvironment?: (request: SubagentEnvironmentRequest) => SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
 }
 
 /** The longest wait one call may ask for (wait_for_agent's timeoutSeconds maximum). */
@@ -184,10 +204,6 @@ export class AgentControlService {
     const inheritance = this.subagentLaunchOptions(parent.id, request.provider, request.launchOptions, request.model);
     if (inheritance.launchOptions !== request.launchOptions) request = { ...request, launchOptions: inheritance.launchOptions };
 
-    const children = this.children(parent.id);
-    if (children.length >= MAX_CHILDREN_PER_PARENT) {
-      throw new DelegationRefusal(`Session ${parent.id} already has ${MAX_CHILDREN_PER_PARENT} subagent cards; cancel_agent the finished ones first.`);
-    }
     const lineage = this.lineage(parent.id);
     const root = lineage.at(-1)!;
     // What the request asks for first (its folder, its profile), then the person's limits.
@@ -195,6 +211,51 @@ export class AgentControlService {
     if ("error" in cwd) throw new DelegationRefusal(cwd.error);
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
+    const { live } = this.spawnCapacity(parent.id);
+    const resolve = this.options.resolveSubagentEnvironment;
+    if (!resolve) {
+      if (request.isolate === "worktree") throw new DelegationRefusal(NO_WORKTREE);
+      return this.createSubagent(parent.id, request, cwd.cwd, profile.profile, null, signal, promptWaitMs);
+    }
+    const refusal = (error: unknown): DelegationRefusal => (
+      new DelegationRefusal(`The environments plugin could not prepare this subagent: ${error instanceof Error ? error.message : "unknown error"}`)
+    );
+    let environment: SessionEnvironmentChoice | null | Promise<SessionEnvironmentChoice | null>;
+    try {
+      environment = resolve({
+        provider: request.provider,
+        parentSessionId: parent.id,
+        projectRoot: root.cwd,
+        cwd: cwd.cwd,
+        liveChildren: live,
+        ...(request.isolate ? { isolate: request.isolate } : {})
+      });
+    } catch (error) {
+      throw refusal(error);
+    }
+    if (environment instanceof Promise) {
+      // The delivery budget also covers the asynchronous environment lookup.
+      const startedAt = Date.now();
+      return environment.then(
+        (choice) => this.createSubagent(parent.id, request, cwd.cwd, profile.profile, choice, signal,
+          promptWaitMs === undefined ? undefined : Math.max(0, promptWaitMs - (Date.now() - startedAt))),
+        (error: unknown) => { throw refusal(error); }
+      );
+    }
+    return this.createSubagent(parent.id, request, cwd.cwd, profile.profile, environment, signal, promptWaitMs);
+  }
+
+  /**
+   * Checks the person's limits for one more child of this parent (throws a DelegationRefusal); the live subagents of
+   * its orchestration otherwise.
+   */
+  private spawnCapacity(parentId: string): { live: number } {
+    const children = this.children(parentId);
+    if (children.length >= MAX_CHILDREN_PER_PARENT) {
+      throw new DelegationRefusal(`Session ${parentId} already has ${MAX_CHILDREN_PER_PARENT} subagent cards; cancel_agent the finished ones first.`);
+    }
+    const lineage = this.lineage(parentId);
+    const root = lineage.at(-1)!;
     const limits = this.limits();
     // The parent is at level lineage.length - 1 below its top-level agent; the new card one further down.
     if (lineage.length > limits.maxDepth) {
@@ -204,13 +265,36 @@ export class AgentControlService {
     if (live >= limits.maxSubagents) {
       throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
     }
+    return { live };
+  }
+
+  private createSubagent(
+    parentId: string,
+    request: SpawnAgentRequest,
+    cwd: string,
+    profile: LaunchProfile,
+    environment: SessionEnvironmentChoice | null,
+    signal?: AbortSignal,
+    promptWaitMs?: number
+  ): Promise<SessionMetadata> {
+    if (request.isolate === "worktree" && !environment) return Promise.reject(new DelegationRefusal(NO_WORKTREE));
     // A call cancelled before its agent starts launches nothing.
     if (signal?.aborted) return Promise.reject(spawnCanceled());
-    const cascade = children.length;
+    let parent: SessionMetadata;
+    let cascade: number;
+    try {
+      // An asynchronous environment lookup may race another spawn or the parent's end: the parent and the limits are
+      // checked again right before the synchronous card creation, which takes the live slot.
+      parent = this.requireSession(parentId);
+      this.spawnCapacity(parentId);
+      cascade = this.children(parentId).length;
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const created = this.terminals.create({
       provider: request.provider,
-      cwd: cwd.cwd,
-      profile: profile.profile,
+      cwd,
+      profile,
       position: {
         x: parent.position.x + CHILD_POSITION_STEP.x * (cascade + 1),
         y: parent.position.y + CHILD_POSITION_STEP.y * (cascade + 1)
@@ -218,6 +302,7 @@ export class AgentControlService {
       ...(request.title !== undefined ? { title: request.title } : {}),
       role: "subagent",
       parentSessionId: parent.id,
+      ...(environment ? { environment } : {}),
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
       ...(request.effort !== undefined ? { effort: request.effort } : {})

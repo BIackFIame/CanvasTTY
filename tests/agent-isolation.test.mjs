@@ -346,12 +346,24 @@ test("host validation refuses a linked worktree sharing the primary checkout bra
   assert.equal(worktreeGitAccess(duplicate, fixture.main, w.userData), null);
   const linux = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
   assert.throws(() => linux.wrap({ sessionId: "shared", provider: "codex", cwd: duplicate, taskProjectRoot: fixture.main,
+    placedProjects: placedBy(duplicate),
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u);
   const outsideAlias = join(fixture.worktrees, "outside-alias");
   await symlink(fixture.main, outsideAlias, "dir");
   assert.throws(() => linux.wrap({ sessionId: "alias", provider: "codex", cwd: outsideAlias, taskProjectRoot: fixture.main,
+    placedProjects: placedBy(outsideAlias),
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u,
   "a lexical plugin-data path that resolves outside is still rejected");
+});
+
+test("a worktree that is its own task root is validated against its repository's primary checkout", async (t) => {
+  const w = await world(t);
+  const fixture = await linkedWorktree(w);
+  const access = worktreeGitAccess(fixture.actor, fixture.actor, w.userData);
+  assert.ok(access, "a card saved with only its worktree is checked against the primary checkout of that repository");
+  assert.deepEqual(access, worktreeGitAccess(fixture.actor, fixture.main, w.userData));
+  const duplicate = addPrimaryBranchDuplicate(fixture);
+  assert.equal(worktreeGitAccess(duplicate, duplicate, w.userData), null, "the primary checkout's branch is still its own");
 });
 
 test("host validation checks the common primary HEAD when the task root is itself a linked worktree", async (t) => {
