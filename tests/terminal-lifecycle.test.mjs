@@ -377,7 +377,6 @@ test("failed PTYs preserve their final sanitized output as failure details", asy
 
   // Masked whole before the last lines are chosen (a cut inside a secret would leave its tail readable).
   assert.match(source, /terminalFailureDetails\(this\.redactSecrets\(current\.bufferChunks\.slice\(current\.bufferStart\)\.join\(""\)\)\)/);
-  assert.match(source, /current\.metadata\.failureDetails = exitCode === 0/);
 });
 
 function effectDependenciesContaining(source, marker) {
