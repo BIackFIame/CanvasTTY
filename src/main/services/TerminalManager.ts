@@ -66,7 +66,7 @@ import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
-import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
+import { controlGrantFolder, gatewaySocketAddresses } from "./isolation/AgentIsolation.ts";
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
@@ -215,6 +215,8 @@ interface PlannedSpawn {
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
+  /** The folder of the control grant CanvasTTY itself gave this launch (orchestrators only), never read from `env`. */
+  controlGrant: string | null;
   cleanup(): void;
 }
 /** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
@@ -1791,7 +1793,7 @@ export class TerminalManager {
     let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
     if (decision.apply) {
       try {
-        spawn = this.wrapIsolated(id, provider, profile, planned, contribution?.accountHome);
+        spawn = this.wrapIsolated(id, provider, profile, planned, planned, contribution?.accountHome);
       } catch (error) {
         planned.cleanup();
         return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
@@ -1855,12 +1857,13 @@ export class TerminalManager {
   }
 
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
-  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile,
-    planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
+  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
+    gateways: Pick<PlannedSpawn, "agentBrowser" | "agentRuntime" | "agentOrchestration" | "controlGrant">,
     accountHome?: string): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
-    const grant = controlGrantFolder(planned.env);
+    // Only the grant CanvasTTY handed this launch: a CANVASTTY_CONTROL_CONNECTION a plugin set reopens nothing.
+    const grant = gateways.controlGrant;
     const wrapped = this.isolation.wrap({
       sessionId: id,
       provider,
@@ -1870,7 +1873,10 @@ export class TerminalManager {
       env: planned.env,
       profile,
       ...(accountHome ? { accountHome } : {}),
-      ...(grant ? { grantedPrivate: [grant] } : {})
+      ...(grant ? { grantedPrivate: [grant] } : {}),
+      // Only the sockets CanvasTTY's own gateways prepared; a CANVASTTY_*_ADDRESS from elsewhere is never bound in.
+      gatewaySockets: gatewaySocketAddresses(gateways.agentBrowser?.environment, gateways.agentRuntime?.environment,
+        gateways.agentOrchestration?.environment)
     });
     this.releaseIsolation(id);
     this.isolationCleanups.set(id, wrapped.cleanup);
@@ -1965,13 +1971,14 @@ export class TerminalManager {
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
+      const hostControlEnvironment = controlEnvironment(role, this.controlConnection, id);
       const providerEnvironment: Record<string, string> = {
         ...(provider === "opencode"
           ? mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment)
           : { ...browserEnvironment, ...runtimeEnvironment }),
         ...orchestrationEnvironment,
         // Orchestrators alone learn where the control descriptor and CLI are.
-        ...controlEnvironment(role, this.controlConnection, id)
+        ...hostControlEnvironment
       };
       // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
       if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
@@ -2019,6 +2026,7 @@ export class TerminalManager {
         agentBrowser,
         agentRuntime,
         agentOrchestration,
+        controlGrant: controlGrantFolder(hostControlEnvironment),
         cleanup
       };
     } catch (error) {
@@ -2291,7 +2299,7 @@ export class TerminalManager {
       }
       if (decision.apply) {
         try {
-          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, contribution?.accountHome), cwd: spawn.cwd };
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, contribution?.accountHome), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
         }
