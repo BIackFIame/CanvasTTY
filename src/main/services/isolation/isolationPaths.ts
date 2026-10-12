@@ -113,6 +113,11 @@ const HOME_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = {
 /** A CLI's configuration file named by a variable (it may hold keys): unreadable to other CLIs, never writable to its own. */
 const CONFIG_FILE_VARIABLES: Partial<Record<ProviderId, readonly string[]>> = { opencode: ["OPENCODE_CONFIG"] };
 
+/** The environment variables that name this provider's CLI home (empty when it has none). */
+export function providerHomeVariables(provider: ProviderId): readonly string[] {
+  return HOME_VARIABLES[provider] ?? [];
+}
+
 function movedProviderHomes(provider: ProviderId, env: IsolationPathInput["env"], variables = HOME_VARIABLES): string[] {
   return (variables[provider] ?? [])
     .map((name) => env[name])
@@ -138,13 +143,16 @@ function sensitiveHomeFolders(home: string, xdgConfig: string): string[] {
   ].map((name) => join(home, name)).concat([join(xdgConfig, "gh"), join(xdgConfig, "gcloud")]);
 }
 
+/** Plugins' private data below userData (PluginManager's `<userData>/plugin-data/<pluginId>`). */
+export const PLUGIN_DATA_FOLDER = "plugin-data";
+
 /**
- * CanvasTTY's own private data under userData (the same list base protection refuses): tokens, connection records,
- * secret stores, account homes and prepared launch files. Its gateways' runtime folders stay readable: they hold
- * token-authenticated sockets and per-run hook settings the CLI must read.
+ * CanvasTTY's own private data under userData: tokens, connection records, secret stores, account homes, prepared
+ * launch files and every plugin's private data (an accounts plugin keeps all of its CLI homes there). Its gateways'
+ * runtime folders stay readable: they hold token-authenticated sockets and per-run hook settings the CLI must read.
  */
 export function privateAppData(userDataPath: string): string[] {
-  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs"]
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER]
     .map((name) => join(userDataPath, name));
 }
 
@@ -212,8 +220,16 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     // variable pointing at HOME or above the project would hide them, so it is not followed.
     .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
-  const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId))];
   const project = input.cwd;
+  // A project inside plugin data (a plugin environment's worktree) stays this launch's project: that exact folder is
+  // reopened, never its siblings, its plugin's other data or all plugin data.
+  const pluginData = pathSpellings(join(input.userDataPath, PLUGIN_DATA_FOLDER));
+  const projectDepth = Math.max(-1, ...pathSpellings(project).flatMap((candidate) => pluginData
+    .filter((root) => isWithin(candidate, root))
+    .map((root) => relative(root, candidate).split(/[\\/]+/u).filter(Boolean).length)));
+  if (projectDepth >= 0 && projectDepth < 2) throw new Error(`The project ${project} is CanvasTTY's private plugin data.`);
+  const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
+    ...(projectDepth >= 2 ? [project] : [])];
   const trustedOwn = providerFolders(input.provider, {}, hostHome);
   const trustedOthers = AGENT_PROVIDERS.filter((provider) => provider !== input.provider).flatMap((provider) => {
     const defaults = providerFolders(provider, {}, hostHome);

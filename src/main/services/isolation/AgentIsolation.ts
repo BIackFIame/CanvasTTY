@@ -6,6 +6,7 @@ import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts"
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
 import { isolationPaths } from "./isolationPaths.ts";
+import { validateAccountHome } from "./accountHomeIsolation.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments, projectHooks } from "./bubblewrap.ts";
 import { LinuxHostPaths } from "./linuxHostPaths.ts";
@@ -75,6 +76,8 @@ export interface IsolationLaunch {
   env: Record<string, string>;
   /** Folders under CanvasTTY's private data this launch was handed (its control grant, its account home). */
   grantedPrivate?: readonly string[];
+  /** The CLI home a launch contributor selected inside its plugin data (LaunchPipeline); checked again here. */
+  accountHome?: string;
   /** The launch profile: in plan the project is not writable. */
   profile?: LaunchProfile;
 }
@@ -184,6 +187,10 @@ export class AgentIsolation {
       const temp = join(folder, "tmp");
       mkdirSync(temp, { mode: 0o700 });
       const cwd = realpathSync(launch.cwd);
+      const accountHome = launch.accountHome === undefined
+        ? undefined
+        : validateAccountHome(this.options.userDataPath, launch.provider, launch.accountHome, launch.env);
+      const granted = [...(launch.grantedPrivate ?? []), ...(accountHome ? [accountHome] : [])];
       const paths = isolationPaths({
         provider: launch.provider,
         cwd,
@@ -192,7 +199,7 @@ export class AgentIsolation {
         hostEnvironment: this.hostEnvironment,
         userDataPath: this.options.userDataPath,
         sessionId: launch.sessionId,
-        ...(launch.grantedPrivate ? { grantedPrivate: launch.grantedPrivate } : {}),
+        ...(granted.length > 0 ? { grantedPrivate: granted } : {}),
         ...(launch.profile === "plan" ? { readOnlyProject: true } : {})
       });
       // `git init` and `git clone` copy git's template, sample hooks included: an empty one writes no hooks.

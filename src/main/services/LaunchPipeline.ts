@@ -13,6 +13,7 @@ import { claudeCoreSettingsKey, coreOwnedLaunchArgument, parseInlineSettings } f
 import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { MAX_INSPECTED_CONFIG_BYTES, parseJsonc, readInspectedFile } from "./inspectedConfig.ts";
+import { contributedAccountHome } from "./isolation/accountHomeIsolation.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
 export interface LaunchContributor {
@@ -20,6 +21,8 @@ export interface LaunchContributor {
   pluginName: string;
   serviceId: string;
   launch: PluginServiceLaunch;
+  /** The plugin's private data folder, set by the host; never sent to the plugin or taken from its answer. */
+  dataDir?: string;
   /** The plugin holds the `secrets` permission, so `secretEnv` may name its secrets. */
   secrets: boolean;
 }
@@ -77,6 +80,12 @@ export type PreparedLaunch =
     modelSetBy: string[];
     /** This run's own folder below the card's folder; `cleanup` removes it. */
     runDirectory: string;
+    /**
+     * The CLI home a chosen contributor started this launch with inside its own data folder (an account it selected):
+     * the one folder of plugin data the isolation layer reopens for this agent. Derived by the host, never a grant a
+     * plugin can name.
+     */
+    accountHome?: string;
     cleanup(): Promise<void>;
   }
   | { ok: false; reason: string };
@@ -290,6 +299,7 @@ export class LaunchPipeline {
     const secrets: string[] = [];
     let thirdPartyModel = false;
     const modelSetBy: string[] = [];
+    let accountHome: string | undefined;
     for (const answer of answers) {
       if ("refuse" in answer) return refuse(answer.refuse);
     }
@@ -349,6 +359,7 @@ export class LaunchPipeline {
         const conflict = claim(key);
         if (conflict) return refuse(conflict);
         env[key] = expand(value);
+        accountHome = contributedAccountHome(context.provider, contributor.dataDir, key, env[key]) ?? accountHome;
       }
       for (const [key, secretKey] of Object.entries(contribution.secretEnv)) {
         const conflict = claim(key);
@@ -363,7 +374,7 @@ export class LaunchPipeline {
       args.push(...contributedArgs.map(expand));
       thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
-    return { ok: true, env, args, secrets, envSources, thirdPartyModel, modelSetBy, runDirectory, cleanup };
+    return { ok: true, env, args, secrets, envSources, thirdPartyModel, modelSetBy, runDirectory, ...(accountHome ? { accountHome } : {}), cleanup };
   }
 
   private async ask(
