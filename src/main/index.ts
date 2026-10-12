@@ -23,7 +23,9 @@ import { UpdateController, type UpdateAdapter } from "./services/updates/UpdateC
 import { ManualReleaseAdapter } from "./services/updates/ManualReleaseAdapter";
 import { registerMaterialIpc } from "./ipc/registerMaterialIpc";
 import { textResponse } from "./services/fileResponse";
+import { homedir } from "node:os";
 import { SettingsStore } from "./services/SettingsStore";
+import { FileAccessService } from "./services/FileAccessService";
 import { SkinRegistry } from "./services/SkinRegistry";
 import { PixelSkinPackRegistry } from "./services/PixelSkinPackRegistry";
 import { TerminalManager, reachesObservers, reachesRenderer } from "./services/TerminalManager";
@@ -31,13 +33,16 @@ import { TerminalRendererOutbox } from "./services/TerminalRendererOutbox";
 import { AgentControlGateway } from "./services/agent-control/AgentControlGateway";
 import { TerminalSessionStore } from "./services/TerminalSessionStore";
 import { AgentChatHistoryService } from "./services/AgentChatHistoryService";
-import { LimitsService } from "./services/LimitsService";
+import { LimitsService, withoutAccountScope } from "./services/LimitsService";
+import { UsageHistoryService } from "./services/UsageHistoryService";
+import { LocalUsageCollector } from "./services/LocalUsageCollector";
 import {
   createProviderCliRegistry,
   providerCliAvailability,
   type ProviderCliRegistry
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
+import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
@@ -50,6 +55,8 @@ import { PluginCards } from "./services/PluginCards";
 import { GithubAuthService } from "./services/GithubAuthService";
 import { PluginMediaService } from "./services/PluginMediaService";
 import { MaterialService } from "./services/materials/MaterialService";
+import { HandoffService } from "./services/materials/HandoffService";
+import { electronImageOps } from "./services/materials/electronImageOps";
 import { MATERIAL_SCHEME } from "../shared/materials.ts";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
@@ -92,6 +99,7 @@ import {
 import { startupPageUrl } from "./startupPage";
 import { mainWindowChromeOptions } from "./windowChrome";
 import { markMainBoot, mainBootMarks } from "./bootMarks";
+import { attachEditContextMenu } from "./editContextMenu";
 import { macApplicationMenuTemplate } from "./macApplicationMenu";
 
 if (process.env.CANVASTTY_USER_DATA_DIR) {
@@ -167,13 +175,16 @@ async function showCompanionBrowser():Promise<{title:string;url:string}> {
 let terminalManager: TerminalManager | null = null;
 let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
+let usageHistory: UsageHistoryService | null = null;
 let pluginManager: PluginManager | null = null;
+let mascotManager: MascotManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
 let pluginCards: PluginCards | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let materialService: MaterialService | null = null;
+let handoffService: HandoffService | null = null;
 let pluginSecretsService: PluginSecretsService | null = null;
 let providerSecretsService: ProviderSecretsService | null = null;
 let hermesHudService: HermesHudService | null = null;
@@ -194,6 +205,8 @@ let appSurfaceReady = false;
 let pendingMenuUpdateCheck = false;
 let checkUpdatesFromMenu: (() => void) | null = null;
 let installMacMenu: (() => void) | null = null;
+/** The locale of the text right-click menu; startApplication points it at the settings once they are loaded. */
+let editMenuLocale: () => LocaleId = () => (app.getLocale().toLowerCase().startsWith("ru") ? "ru" : "en");
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let updateInterval: ReturnType<typeof setInterval> | null = null;
 let startupRunning = false;
@@ -256,6 +269,8 @@ function createWindow(): BrowserWindow {
     preventMouseBindings: false,
     captureMacEditShortcuts: process.platform === "darwin"
   });
+  attachEditContextMenu(window.webContents, () => editMenuLocale(),
+    (template, contents) => Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined }));
   // Crash recovery: a dead renderer must never leave the user staring at a
   // blank window. The application surface is reloaded in place — the same entry
   // startup loads — so services, sessions and their scrollback stay untouched
@@ -327,6 +342,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   recoverKimiConfigurationOnStartup(kimiHomeDirectory);
   const userDataPath = app.getPath("userData");
   const settings = new SettingsStore(userDataPath, app.getLocale(), process.platform, providerCliAvailability(providerClis));
+  editMenuLocale = () => settings.get().locale;
   const terminalBorderSkins = new SkinRegistry(userDataPath);
   const pixelSkinPacks = new PixelSkinPackRegistry(userDataPath);
   pluginManager = new PluginManager(userDataPath);
@@ -584,6 +600,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       agentControl?.observe(channel, payload);
       evenG2?.observe(channel, payload);
       pluginSessions?.observe(channel, payload);
+      handoffService?.observe(channel, payload);
       if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }
     if (reachesRenderer(payload)) rendererOutbox.push(channel, payload);
@@ -771,9 +788,33 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   };
   await applyAgentControlSetting(settings.get().agentControlEnabled);
   limitsService = new LimitsService(providerClis, app.getVersion());
+  // Read-only accounting collection; history is stored in the normal app userData directory.
+  usageHistory = new UsageHistoryService({
+    directory: userDataPath,
+    limits: limitsService,
+    createCollector: (state) => new LocalUsageCollector(homedir(), state, process.env)
+  });
+  await usageHistory.load();
+  usageHistory.start();
   await Promise.all([browserReady, storesLoaded]);
+  mascotManager = new MascotManager(
+    userDataPath,
+    app.isPackaged ? join(process.resourcesPath, "mascot-pipeline") : join(app.getAppPath(), "assets", "mascot-pipeline"),
+    pluginManager,
+    (projects) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.mascotsChanged, projects); },
+    (pluginId, contributionId) => requestPluginCanvas({ pluginId, contributionId })
+  );
+  await mascotManager.initialize();
   pluginManager.registerTokenProvider(() => githubAuth!.getToken());
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
+  // Session roots resolve a sessionId to the terminal's current working
+  // directory through TerminalManager's metadata snapshots; the renderer never
+  // supplies a path. Folder roots come from the native dialog or a persisted
+  // folderPath on restore.
+  const fileAccessService = new FileAccessService({
+    resolveSessionCwd: (sessionId) =>
+      terminalManager?.listMetadata().find((session) => session.id === sessionId)?.cwd
+  });
   materialService = new MaterialService({
     userDataPath: app.getPath("userData"),
     persist: () => settings.get().persistMaterials,
@@ -784,8 +825,22 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     }
   });
   await materialService.load();
-  registerMaterialIpc(ipc, { materials: materialService, getMainWindow: () => mainWindow });
+  handoffService = new HandoffService({
+    materials: materialService,
+    terminals: terminalManager,
+    images: electronImageOps,
+    root: materialService.handoffsPath,
+    locale: () => settings.get().locale
+  });
+  void handoffService.prune();
+  registerMaterialIpc(ipc, {
+    materials: materialService,
+    handoffs: handoffService,
+    workingDirectory: (sessionId) => terminalManager?.pluginContext(sessionId)?.workingDirectory ?? null,
+    getMainWindow: () => mainWindow
+  });
   registerIpc(ipc, {
+    mascots: mascotManager,
     settings,
     recheckProviderClis: async () => {
       providerClis!.refresh();
@@ -799,6 +854,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     terminals: terminalManager,
     limits: limitsService,
     agentChatHistory,
+    usageHistory,
     plugins: pluginManager,
     pluginServices,
     pluginCards,
@@ -806,6 +862,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     pluginSecrets: pluginSecretsService,
     providerSecrets: providerSecretsService!,
     browser: browserService,
+    files: fileAccessService,
     githubAuth: githubAuth!,
     hermesHud: hermesHudService,
     launchFieldOptions: (pluginId, provider) => launchPipeline.fieldOptions(pluginId, provider),
@@ -836,6 +893,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       if (active) browserService?.cancelCanvasNavigationGesture();
       canvasNavigationInput?.setShortcutCaptureActive(active);
     },
+    setCanvasNavigationTerminalEditFocus: (contents, active) => {
+      canvasNavigationInput?.setTerminalEditFocus(contents, active);
+    },
     setCanvasNavigationPointerBinding: (input) => {
       canvasNavigationInput?.updatePointerBinding(input);
     },
@@ -856,7 +916,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     mobileRoot: app.isPackaged ? join(process.resourcesPath, "mobile-web") : join(app.getAppPath(), "integrations/mobile/dist"),
     providerAvailability: () => providerCliAvailability(providerClis!),
     speechWorker: app.isPackaged ? join(process.resourcesPath,"companion/asr_worker.py") : join(app.getAppPath(),"src/main/services/companion/asr_worker.py"),
-    limits: () => limitsService!.get(), openBrowser: showCompanionBrowser
+    limits: async () => withoutAccountScope(await limitsService!.get()), openBrowser: showCompanionBrowser
   });
   await evenG2.load();
   const assertCompanionSender = (event: Electron.IpcMainInvokeEvent):void => {
@@ -1215,6 +1275,7 @@ void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
   diagnostics.record("info", "application", "shutdown.started");
+  mascotManager?.dispose();
   agentChatHistory?.dispose();
   if (agentControl) await Promise.allSettled([agentControl.close()]);
   if (updateTimer) clearTimeout(updateTimer);
@@ -1227,12 +1288,16 @@ async function shutdownServices(): Promise<void> {
   const ptyExits = terminalManager?.waitForProcessExits().then((left) => {
     if (left > 0) console.warn(`CanvasTTY quit with ${left} terminal process(es) that did not exit after SIGKILL.`);
   });
+  // Stop the timer first, then abort in-flight limit requests so the final save is prompt.
+  const usageHistoryClosed = usageHistory?.dispose();
   limitsService?.dispose();
+  await usageHistoryClosed;
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);
   if (runtimeGateway) await Promise.allSettled([runtimeGateway.close()]);
   if (browserService) await Promise.allSettled([browserService.dispose()]);
   if (pluginServices) await Promise.allSettled([pluginServices.dispose()]);
   if (pluginManager) await Promise.allSettled([pluginManager.dispose()]);
+  await handoffService?.dispose();
   if (materialService) await Promise.allSettled([materialService.dispose()]);
   await ptyExits;
   diagnostics.record("info", "application", "shutdown.completed");
@@ -1264,6 +1329,8 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
     }
   });
   pluginWindows.set(window, pluginId);
+  attachEditContextMenu(window.webContents, () => editMenuLocale(),
+    (template, contents) => Menu.buildFromTemplate(template).popup({ window: BrowserWindow.fromWebContents(contents) ?? undefined }));
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   window.webContents.on("will-navigate", (event, url) => {
     if (!url.startsWith(`canvastty-plugin://${pluginId}/`)) event.preventDefault();

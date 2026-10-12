@@ -34,6 +34,7 @@ interface CanvasContextMenuProps {
   onCreateNote(): void;
   onLaunch(provider: ProviderId): void;
   onOpenBrowser(): void;
+  onOpenFiles(): void;
   onOpenSettings(): void;
   onRenameRegion(): void;
   onChangeRegionColor(color: string): void;
@@ -45,10 +46,12 @@ interface CanvasContextMenuProps {
   onAddFiles(): void;
   onPasteFiles(): void;
   onPinMaterial(): void;
+  onSendMaterial: (() => void) | null;
   onRevealMaterial(): void;
   onCopyMaterialPath(): void;
   onBringMaterialToFront(): void;
   onRemoveMaterial(): void;
+  onSendRemarks: (() => void) | null;
   onClose(): void;
 }
 
@@ -62,6 +65,7 @@ export function CanvasContextMenu({
   onCreateNote,
   onLaunch,
   onOpenBrowser,
+  onOpenFiles,
   onOpenSettings,
   onRenameRegion,
   onChangeRegionColor,
@@ -73,10 +77,12 @@ export function CanvasContextMenu({
   onAddFiles,
   onPasteFiles,
   onPinMaterial,
+  onSendMaterial,
   onRevealMaterial,
   onCopyMaterialPath,
   onBringMaterialToFront,
   onRemoveMaterial,
+  onSendRemarks,
   onClose
 }: CanvasContextMenuProps): React.JSX.Element {
   const menu = useRef<HTMLDivElement>(null);
@@ -149,6 +155,11 @@ export function CanvasContextMenu({
             role="menuitem"
             onClick={onPasteFiles}
           >{t(locale, "materialsPaste")}</CanvasMenuRow>
+          {onSendRemarks && (
+            <CanvasMenuRow icon="send" role="menuitem" onClick={onSendRemarks}>
+              {t(locale, "handoffSendToAgent")}
+            </CanvasMenuRow>
+          )}
           <CanvasMenuDivider />
           <div className="canvas-menu__submenu-anchor">
             <CanvasMenuRow
@@ -191,6 +202,9 @@ export function CanvasContextMenu({
           </div>
           <CanvasMenuRow icon="browser" role="menuitem" onClick={onOpenBrowser}>
             {t(locale, "canvasMenuOpenBrowser")}
+          </CanvasMenuRow>
+          <CanvasMenuRow icon="folder" role="menuitem" onClick={onOpenFiles}>
+            {t(locale, "files")}
           </CanvasMenuRow>
           <CanvasMenuDivider />
           <CanvasMenuRow
@@ -262,6 +276,11 @@ export function CanvasContextMenu({
 
       {kind === "material" && (
         <>
+          {onSendMaterial && (
+            <CanvasMenuRow icon="send" role="menuitem" onClick={onSendMaterial}>
+              {t(locale, "handoffSendToAgent")}
+            </CanvasMenuRow>
+          )}
           <CanvasMenuRow icon="pin" role="menuitem" onClick={onPinMaterial}>
             {t(locale, "materialPinVersion")}
           </CanvasMenuRow>

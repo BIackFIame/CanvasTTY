@@ -14,7 +14,10 @@ import type {
   CanvasTTYApi,
   CustomTerminalBorderSkinId,
   CreateSessionRequest,
+  FileRootReference,
+  HandoffDraft,
   MaterialsSnapshot,
+
   PluginBrowserOpenRequest,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
@@ -29,6 +32,8 @@ import type {
   PixelSkinZipInstallRequest,
   PixelSkinSlot,
   PixelTerminalBorderSkinId,
+  RemarkDraft,
+  RemarkPatch,
   UpdateStatus,
   SessionBounds,
   SessionEvent,
@@ -60,6 +65,15 @@ ipcRenderer.on(IPC.windowOpenUpdates, () => {
 });
 
 const api: CanvasTTYApi = {
+  mascots: {
+    list: () => ipcRenderer.invoke(IPC.mascotsList),
+    start: (image) => ipcRenderer.invoke(IPC.mascotsStart, image),
+    link: (projectId, sessionId) => ipcRenderer.invoke(IPC.mascotsLink, projectId, sessionId),
+    fail: (projectId, message) => ipcRenderer.invoke(IPC.mascotsFail, projectId, message),
+    retry: (projectId) => ipcRenderer.invoke(IPC.mascotsRetry, projectId),
+    openLog: (projectId) => ipcRenderer.invoke(IPC.mascotsOpenLog, projectId),
+    onChanged: (listener) => subscribe(IPC.mascotsChanged, listener)
+  },
   diagnostics: {
     configuration: () => ipcRenderer.invoke(IPC.diagnosticsConfiguration),
     send: (description, attachment) => ipcRenderer.invoke(IPC.diagnosticsSend, description, attachment),
@@ -120,6 +134,15 @@ const api: CanvasTTYApi = {
   media: {
     read: (path: string) => ipcRenderer.invoke(IPC.mediaRead, path)
   },
+  files: {
+    listRoots: () => ipcRenderer.invoke(IPC.filesListRoots),
+    registerRoot: (reference: FileRootReference) => ipcRenderer.invoke(IPC.filesRegisterRoot, reference),
+    openFolder: () => ipcRenderer.invoke(IPC.filesOpenFolder),
+    list: (rootId: string, relativePath: string) => ipcRenderer.invoke(IPC.filesList, rootId, relativePath),
+    read: (rootId: string, relativePath: string) => ipcRenderer.invoke(IPC.filesRead, rootId, relativePath),
+    search: (rootId: string, query: string) => ipcRenderer.invoke(IPC.filesSearch, rootId, query),
+    closeRoot: (rootId: string) => ipcRenderer.invoke(IPC.filesCloseRoot, rootId)
+  },
   materials: {
     snapshot: () => ipcRenderer.invoke(IPC.materialsSnapshot),
     addFiles: (files: File[], point: Point) => ipcRenderer.invoke(
@@ -136,10 +159,14 @@ const api: CanvasTTYApi = {
     reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
     relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
     acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
-    addRemark: (draft: unknown) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
-    updateRemark: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
+    addRemark: (draft: RemarkDraft) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
+    updateRemark: (id: string, patch: RemarkPatch) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
     deleteRemark: (id: string) => ipcRenderer.invoke(IPC.materialsDeleteRemark, id),
+    previewHandoff: (draft: HandoffDraft) => ipcRenderer.invoke(IPC.materialsPreviewHandoff, draft),
+    sendHandoff: (draft: HandoffDraft) => ipcRenderer.invoke(IPC.materialsSendHandoff, draft),
+    pickResultsFolder: (sessionId: string) => ipcRenderer.invoke(IPC.materialsPickResultsFolder, sessionId),
     onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
+
   },
   limits: {
     get: () => ipcRenderer.invoke(IPC.limitsGet)
@@ -148,6 +175,9 @@ const api: CanvasTTYApi = {
     status: () => ipcRenderer.invoke(IPC.providerSecretsStatus),
     set: (secretId: string, value: string) => ipcRenderer.invoke(IPC.providerSecretsSet, secretId, value),
     clear: (secretId: string) => ipcRenderer.invoke(IPC.providerSecretsClear, secretId)
+  },
+  usageHistory: {
+    get: () => ipcRenderer.invoke(IPC.usageHistoryGet)
   },
   plugins: {
     list: () => ipcRenderer.invoke(IPC.pluginsList),
@@ -262,6 +292,7 @@ const api: CanvasTTYApi = {
       ipcRenderer.sendSync(IPC.canvasNavigationOwnerWheel, { clientX, clientY });
     },
     setShortcutCaptureActive: (active: boolean) => ipcRenderer.send(IPC.canvasNavigationShortcutCapture, active),
+    setTerminalEditFocus: (active: boolean) => ipcRenderer.send(IPC.canvasNavigationTerminalEditFocus, active),
     setPointerBindingState: (input: CanvasNavigationPointerBindingInput) => (
       ipcRenderer.send(IPC.canvasNavigationPointerBinding, input)
     ),

@@ -1,6 +1,7 @@
 import { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId, type CanvasLauncherItemId, type ProviderId } from "./providerCatalog.ts";
 export { CANVAS_LAUNCHER_ITEMS, PROVIDER_LABELS, isProviderId };
 export type { CanvasLauncherItemId, ProviderId };
+import type { UsageHistory } from "./usageHistory.ts";
 export type AgentProviderId = Exclude<ProviderId, "terminal">;
 export type AgentCliAvailability = Record<AgentProviderId, boolean>;
 export type LimitProviderId = Extract<AgentProviderId, "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok">;
@@ -306,6 +307,7 @@ export interface MaterialsSnapshot {
   loadError?: "unreadable";
   materials: CanvasMaterial[];
   remarks: MaterialRemark[];
+  handoffs: MaterialHandoff[];
   storage: MaterialStorageUsage;
 }
 
@@ -345,8 +347,7 @@ export type RemarkAnchor =
   | { kind: "point"; x: number; y: number }
   | { kind: "lines"; start: number; end: number }
   | { kind: "time"; start: number; end: number | null }
-  | { kind: "page"; page: number }
-  | { kind: "step"; index: number };
+  | { kind: "page"; page: number };
 
 export interface RemarkTarget {
   materialId: string;
@@ -390,6 +391,85 @@ export interface RemarkPatch {
 export type RemarkResult = { ok: true; remark: MaterialRemark } | { ok: false; reason: MaterialFailure };
 
 export type MaterialVersionResult = { ok: true; version: MaterialVersion } | { ok: false; reason: MaterialFailure };
+
+export type HandoffDeliveryState = "sending" | "submitted" | "pasted" | "failed";
+
+export type HandoffPasteNote = "not-seen" | "not-observed" | "enter-failed";
+
+export interface HandoffDelivery {
+  state: HandoffDeliveryState;
+  imagesExpected: number;
+  imagesAttached: number;
+  sentAt: number | null;
+  turnStartedAt: number | null;
+  turnEndedAt: number | null;
+  note: HandoffPasteNote | null;
+  error: string | null;
+  stateSaved: boolean;
+}
+
+export interface HandoffItem {
+  materialId: string;
+  versionId: string | null;
+  editable: boolean;
+}
+
+export interface MaterialHandoff {
+  id: string;
+  number: number;
+  createdAt: number;
+  sessionId: string;
+  sessionTitle: string;
+  provider: ProviderId;
+  remarkIds: string[];
+  items: HandoffItem[];
+  note: string;
+  folder: string;
+  resultsFolder: string | null;
+  sessionStartedAt: number | null;
+  delivery: HandoffDelivery;
+}
+
+export interface HandoffDraft {
+  id: string;
+  sessionId: string;
+  remarkIds: string[];
+  editableMaterialIds: string[];
+  note: string;
+  resultsFolder: string | null;
+}
+
+export interface HandoffPreview {
+  text: string;
+  files: string[];
+  imageMode: "attach" | "paths";
+  images: number;
+  warnings: HandoffWarning[];
+}
+
+export type HandoffWarning = "results-outside-workdir" | "status-unknown";
+
+export type HandoffBlock =
+  | "no-session"
+  | "not-an-agent"
+  | "exited"
+  | "starting"
+  | "busy"
+  | "needs-approval"
+  | "remote-environment"
+  | "composer-not-ready"
+  | "already-sent"
+  | "no-remarks"
+  | "too-many-remarks"
+  | "too-long";
+
+export type HandoffResult =
+  | { ok: true; handoff: MaterialHandoff }
+  | { ok: false; reason: HandoffBlock | MaterialFailure };
+
+export type HandoffPreviewResult =
+  | { ok: true; preview: HandoffPreview }
+  | { ok: false; reason: HandoffBlock | MaterialFailure };
 
 export interface CameraState extends Point {
   zoom: number;
@@ -453,6 +533,8 @@ export interface AppSettings {
   canvasRegions: CanvasRegion[];
   stickyNotes: StickyNote[];
   pluginCanvas: PluginCanvasInstance[];
+  /** Persisted Files card state (root reference, bounds, open file, tree). */
+  fileCards: FileCard[];
   browserCanvas: BrowserCanvasState | null;
   browserAgentAccess: boolean;
   browserShowAgentPresence: boolean;
@@ -531,6 +613,33 @@ export interface CreateSessionRequest {
   model?: string;
   /** The CLI's reasoning effort for this launch; only the levels that CLI takes. */
   effort?: ReasoningEffort;
+  /** One first turn for a new Codex chat. The image must already exist inside cwd. */
+  initialPrompt?: string;
+  initialImagePath?: string;
+}
+
+export interface MascotProjectSummary {
+  id: string;
+  name: string;
+  status: "creating" | "ready" | "failed";
+  sessionId?: string;
+  pluginId?: string;
+  error?: string;
+  errorStage?: string;
+  errorLogPath?: string;
+  requestedBuildId?: string;
+  installedBuildId?: string;
+  registered?: boolean;
+  delivery?: "draft" | "final";
+  limitations?: string[];
+}
+
+export interface MascotLaunch {
+  project: MascotProjectSummary;
+  cwd: string;
+  imagePath: string;
+  prompt: string;
+  previewUrl: string;
 }
 
 /** Every non-terminal agent that CanvasTTY can install and resolve. */
@@ -1132,6 +1241,82 @@ export interface PluginPlaylistFile {
 
 export interface BrowserCanvasState extends SessionBounds {}
 
+/** How a Files card is rooted: a terminal session cwd or a dialog-picked folder. */
+export type FileRootKind = "session" | "folder";
+
+/**
+ * Identifies a root without carrying a filesystem path across the bridge.
+ * Session roots name the terminal session whose cwd main resolves; folder roots
+ * are created by the native open-folder dialog in main. A folder reference may
+ * carry `folderPath` only on restore, to re-register a persisted folder root
+ * after relaunch; list/read/search never carry paths.
+ */
+export type FileRootReference =
+  | { rootType: "session"; sessionId: string }
+  | { rootType: "folder"; folderPath?: string };
+
+/**
+ * Opaque main-owned handle for a registered root. `rootId` is the only way the
+ * renderer addresses the root; list/read/search always pair it with a relative
+ * path so no absolute root path ever reaches renderer payloads.
+ */
+export interface FileRootDescriptor {
+  rootId: string;
+  label: string;
+  available: boolean;
+  rootType: FileRootKind;
+  /**
+   * Canonical absolute folder path for folder roots, retained so a persisted
+   * root can be re-registered after relaunch. Session descriptors omit it, so a
+   * session cwd never crosses the bridge.
+   */
+  folderPath?: string | null;
+}
+
+export type FileEntryKind = "file" | "directory";
+
+export interface FileEntry {
+  name: string;
+  relativePath: string;
+  kind: FileEntryKind;
+  /** Byte size for files; null for directories. */
+  size: number | null;
+}
+
+export type FileReadUnsupportedReason = "binary" | "not-permitted" | "unavailable";
+
+/** Bounded, typed file content. Unsupported and oversized reads carry no bytes. */
+export type FileReadResult =
+  | { kind: "text"; content: string; truncated: boolean; size: number }
+  | { kind: "image"; mediaType: string; dataUrl: string; size: number }
+  | { kind: "unsupported"; reason: FileReadUnsupportedReason }
+  | { kind: "too-large"; reason: "too-large"; size: number };
+
+/** Bounded filename-search output: relative file paths only. */
+export interface FileSearchResult {
+  relativePaths: string[];
+  truncated: boolean;
+}
+
+/**
+ * Persisted Files card state. `root` records how the card was rooted; folder
+ * roots retain `folderPath` so main can re-validate and re-open the folder after
+ * relaunch, while session roots resolve `sessionId` to its cwd again. Neither
+ * value is used in list/read/search payloads, which stay relative.
+ */
+export interface FileCard extends SessionBounds {
+  id: string;
+  root: FileRootReference;
+  /** Display label for the root; null when unknown. Never an absolute path. */
+  label: string | null;
+  /** Absolute folder path for folder roots; null for session roots. */
+  folderPath: string | null;
+  /** Relative path of the file shown in the viewer, or null. */
+  activeFile: string | null;
+  /** Relative paths of expanded tree folders. */
+  expandedFolders: string[];
+}
+
 export interface BrowserViewportClipBounds extends Size {
   x: number;
   y: number;
@@ -1609,6 +1794,8 @@ export type ProviderLimitsSnapshot =
     source: LimitSource;
     fetchedAt: number;
     windows: LimitWindow[];
+    /** One-way fingerprint of the account (Codex) or credential epoch (Claude); absent or null means unknown. */
+    accountScope?: string | null;
   }
   | {
     provider: AgentProviderId;
@@ -1618,6 +1805,8 @@ export type ProviderLimitsSnapshot =
     failedAt: number;
     reason: LimitUnavailableReason;
     windows: LimitWindow[];
+    /** Scope of the repeated observation made at fetchedAt. */
+    accountScope?: string | null;
   }
   | {
     provider: AgentProviderId;
@@ -1665,6 +1854,15 @@ export interface DiagnosticRendererError {
 }
 
 export interface CanvasTTYApi {
+  mascots: {
+    list(): Promise<MascotProjectSummary[]>;
+    start(image: Uint8Array): Promise<MascotLaunch>;
+    link(projectId: string, sessionId: string): Promise<void>;
+    fail(projectId: string, message: string): Promise<void>;
+    retry(projectId: string): Promise<void>;
+    openLog(projectId: string): Promise<void>;
+    onChanged(listener: (projects: MascotProjectSummary[]) => void): () => void;
+  };
   diagnostics: {
     configuration(): Promise<DiagnosticConfiguration>;
     send(description: string, attachment?: DiagnosticAttachment): Promise<DiagnosticReportReceipt>;
@@ -1720,6 +1918,17 @@ export interface CanvasTTYApi {
   media: {
     read(path: string): Promise<string | null>;
   };
+  files: {
+    listRoots(): Promise<FileRootDescriptor[]>;
+    /** Registers a session or folder root reference; resolves null when unavailable. */
+    registerRoot(reference: FileRootReference): Promise<FileRootDescriptor | null>;
+    /** Opens the native folder picker; resolves null when canceled. */
+    openFolder(): Promise<FileRootDescriptor | null>;
+    list(rootId: string, relativePath: string): Promise<FileEntry[]>;
+    read(rootId: string, relativePath: string): Promise<FileReadResult>;
+    search(rootId: string, query: string): Promise<FileSearchResult>;
+    closeRoot(rootId: string): Promise<void>;
+  };
   materials: {
     snapshot(): Promise<MaterialsSnapshot>;
     addFiles(files: File[], point: Point): Promise<MaterialsAddResult>;
@@ -1735,7 +1944,11 @@ export interface CanvasTTYApi {
     addRemark(draft: RemarkDraft): Promise<RemarkResult>;
     updateRemark(id: string, patch: RemarkPatch): Promise<RemarkResult>;
     deleteRemark(id: string): Promise<void>;
+    previewHandoff(draft: HandoffDraft): Promise<HandoffPreviewResult>;
+    sendHandoff(draft: HandoffDraft): Promise<HandoffResult>;
+    pickResultsFolder(sessionId: string): Promise<string | null>;
     onChanged(listener: (snapshot: MaterialsSnapshot) => void): () => void;
+
   };
   limits: {
     get(): Promise<LimitsSnapshot>;
@@ -1744,6 +1957,9 @@ export interface CanvasTTYApi {
     status(): Promise<Record<ProviderSecretId, boolean>>;
     set(secretId: ProviderSecretId, value: string): Promise<void>;
     clear(secretId: ProviderSecretId): Promise<void>;
+  };
+  usageHistory: {
+    get(): Promise<UsageHistory>;
   };
   plugins: {
     list(): Promise<InstalledPlugin[]>;
@@ -1823,6 +2039,8 @@ export interface CanvasTTYApi {
   canvasNavigation: {
     armOwnerWheelSequence(clientX: number, clientY: number): void;
     setShortcutCaptureActive(active: boolean): void;
+    /** macOS: a terminal surface gained or lost keyboard focus (decides who handles Command+C/V/A). */
+    setTerminalEditFocus(active: boolean): void;
     setPointerBindingState(input: CanvasNavigationPointerBindingInput): void;
     setPointerGestureActive(active: boolean): void;
     onOverrideState(listener: (event: CanvasNavigationOverrideStateEvent) => void): () => void;
@@ -1873,6 +2091,13 @@ export interface CanvasTTYApi {
 }
 
 export const IPC = {
+  mascotsList: "mascots:list",
+  mascotsStart: "mascots:start",
+  mascotsLink: "mascots:link",
+  mascotsFail: "mascots:fail",
+  mascotsRetry: "mascots:retry",
+  mascotsOpenLog: "mascots:open-log",
+  mascotsChanged: "mascots:changed",
   diagnosticsConfiguration: "diagnostics:configuration",
   diagnosticsSend: "diagnostics:send",
   diagnosticsRendererError: "diagnostics:renderer-error",
@@ -1895,6 +2120,13 @@ export const IPC = {
   dialogPickDirectory: "dialog:pick-directory",
   dialogPickMedia: "dialog:pick-media",
   mediaRead: "media:read",
+  filesListRoots: "files:list-roots",
+  filesRegisterRoot: "files:register-root",
+  filesOpenFolder: "files:open-folder",
+  filesList: "files:list",
+  filesRead: "files:read",
+  filesSearch: "files:search",
+  filesCloseRoot: "files:close-root",
   materialsSnapshot: "materials:snapshot",
   materialsAddPaths: "materials:add-paths",
   materialsPick: "materials:pick",
@@ -1909,8 +2141,13 @@ export const IPC = {
   materialsAddRemark: "materials:add-remark",
   materialsUpdateRemark: "materials:update-remark",
   materialsDeleteRemark: "materials:delete-remark",
+  materialsPreviewHandoff: "materials:preview-handoff",
+  materialsSendHandoff: "materials:send-handoff",
+  materialsPickResultsFolder: "materials:pick-results-folder",
   materialsChanged: "materials:changed",
+
   limitsGet: "limits:get",
+  usageHistoryGet: "usage-history:get",
   pluginsList: "plugins:list",
   pluginsSearch: "plugins:search",
   pluginsShowcase: "plugins:showcase",
@@ -1992,6 +2229,7 @@ export const IPC = {
   browserCanvasPointer: "browser:canvas-pointer",
   browserCanvasNavigationPointer: "browser:canvas-navigation-pointer",
   canvasNavigationShortcutCapture: "canvas-navigation:shortcut-capture",
+  canvasNavigationTerminalEditFocus: "canvas-navigation:terminal-edit-focus",
   canvasNavigationPointerBinding: "canvas-navigation:pointer-binding",
   canvasNavigationOwnerWheel: "canvas-navigation:owner-wheel",
   canvasNavigationPointerGesture: "canvas-navigation:pointer-gesture",

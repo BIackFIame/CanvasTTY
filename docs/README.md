@@ -10,12 +10,14 @@ CanvasTTY is a spatial Electron desktop for real local terminals and AI-agent CL
 |:--|:--|
 | [Getting started](getting-started.md) | Requirements, local launch, first session, and verification commands |
 | [Built-in browser and audit log](browser.md) | Canvas controls, settings, agent access, website/file boundaries, activity, and persistent redacted audit files |
+| [File browser and reader](files.md) | Opening a Files card, session and folder roots, supported content, read limits, quick open, persistence, and read-only security boundaries |
 | [Web companion](mobile-companion.md) | Tailscale Serve HTTPS setup, browser pairing, session grants, revocation, and security limits |
 | [Installing, releases, and local data](installing-and-security.md) | Installer formats, unsigned-preview caveats, credential boundaries, and release checks |
 | [Widget authoring](widget-authoring.md) | Source-level extension paths, visual grammar, process boundaries, and an AI-agent brief |
 | [Pixel terminal themes (Russian)](pixel-skin-packs.ru.md) | Ten-PNG ZIP layout, terminal apertures, app import, and local agent CLI |
 | [Create a pixel theme with an agent](pixel-skin-agent-start.md) | Zero-context agent brief, exact install ZIP, visual checks, and validation |
 | [Runtime plugins](plugins.md) | Manifest v1, permissions, HOME widgets, canvas apps, separate windows, player media/playlist APIs, SDK, and install flow |
+| [Animated mascots](mascots.md) | PNG/JPEG intake, a Codex creation session, live previews, frame review, transparent cards, approved installation, and retry diagnostics |
 | [Metrics and telemetry](metrics-and-telemetry.md) | Subscription limits, session token usage, source priority, privacy, stale states, and tests |
 | [Terminal renderer transition check](terminal-renderer-transition.md) | Manual hide/restore check for the DOM/WebGL transition snapshot |
 | [Security policy](../SECURITY.md) | Supported release, vulnerability reporting, local data boundaries, plugins, media grants, browser storage, and audit logs |

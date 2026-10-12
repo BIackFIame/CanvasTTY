@@ -2,3 +2,8 @@
 # scripts/build-native-helpers.mjs generates (LF). Checked out with LF everywhere, a Windows checkout
 # (core.autocrlf=true) matches and a helper built there embeds the same bytes as one built on macOS or Linux.
 native/canvastty-helper/catalog.json text eol=lf
+
+# Unified diffs require space-prefixed blank context lines, including at EOF.
+# Preserve the patch bytes across Windows checkouts without treating that
+# required patch syntax as trailing whitespace in application code.
+patches/*.patch text eol=lf whitespace=-blank-at-eol,-blank-at-eof

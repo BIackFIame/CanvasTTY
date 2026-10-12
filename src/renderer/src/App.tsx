@@ -9,11 +9,14 @@ import type {
   BrowserSnapshot,
   CameraState,
   CanvasRegion,
+  FileCard,
+  FileRootDescriptor,
   GithubPluginSearchResult,
   HomeAccentColors,
   HomeGridSize,
   HomeWidgetPlacement,
   InstalledPlugin,
+  MascotProjectSummary,
   LaunchProfileId,
   MaterialsAddResult,
   LaunchRole,
@@ -58,7 +61,15 @@ import { UpdateNotice } from "./components/UpdateNotice";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
+import {
+  EMPTY_FILE_CARD_RUNTIME,
+  type FileCardRuntimeState
+} from "./features/files/fileCardRuntime";
+import { fileCardToRootReference, isFileRootUsable } from "./features/files/fileCardRestore";
+import { matchQuickOpen, toggleExpandedFolder } from "./features/files/fileTree";
+import type { FileSessionOption } from "./features/files/FileBrowserCard";
 import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
+import { UsageHistoryPanel } from "./features/usage/UsageHistoryPanel";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import { createCameraStore } from "./features/workspace/cameraStore";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
@@ -81,18 +92,22 @@ import {
   isShortcutCaptureTarget,
   matchesPointerShortcut,
   matchesShortcut,
-  shouldKeepNativeKeyboardInput
+  shouldKeepNativeKeyboardInput,
+  trackTerminalEditFocus
 } from "./lib/shortcuts";
 import { homeGridPixelSize, homeLayoutFitsGrid, placeHomeWidget } from "./features/home/homeLayout";
 import { boundsInsideRegion, translateBounds } from "./features/workspace/canvasRegions";
 import { DEFAULT_SESSION_SIZE, findNearHomeSessionPosition } from "./features/workspace/sessionPlacement";
 import { useMaterials } from "./features/materials/useMaterials";
+const HandoffDialog = lazy(() =>
+  import("./features/materials/HandoffDialog").then((module) => ({ default: module.HandoffDialog })));
 import {
   addResultNeedsNotice,
   materialFailureKey,
   materialRejectionKey,
   type MaterialCommand
 } from "./features/materials/materialCardModel";
+import { remarkNeedsWork } from "./features/materials/materialRemarksModel";
 
 interface HomeEditDraft {
   homeGridSize: HomeGridSize;
@@ -168,6 +183,7 @@ const FALLBACK_SETTINGS: AppSettings = {
   canvasRegions: [],
   stickyNotes: [],
   pluginCanvas: [],
+  fileCards: [],
   browserCanvas: null,
   browserAgentAccess: true,
   browserShowAgentPresence: true,
@@ -200,6 +216,7 @@ const EMPTY_BROWSER_SNAPSHOT: BrowserSnapshot = {
 
 const DEFAULT_FOCUS_ZOOM = 0.92;
 const PLUGIN_CANVAS_FOCUS_ZOOM = 1;
+const FILE_CARD_FOCUS_ZOOM = 1;
 
 function startHomeMediaRead(
   path: string,
@@ -303,6 +320,20 @@ export function App(): React.JSX.Element {
   const [agentAvailability, setAgentAvailability] = useState<AgentCliAvailability | null>(null);
   const [mediaData, setMediaData] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
+  const [mascotProjects, setMascotProjects] = useState<MascotProjectSummary[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = window.canvasTTY.mascots.onChanged((projects) => {
+      if (!active) return;
+      setMascotProjects(projects);
+      if (projects.some((project) => project.status === "ready")) {
+        void window.canvasTTY.plugins.list().then((installed) => { if (active) setPlugins(installed); }).catch(() => undefined);
+      }
+    });
+    void window.canvasTTY.mascots.list().then((projects) => { if (active) setMascotProjects(projects); }).catch(() => undefined);
+    return () => { active = false; unsubscribe(); };
+  }, []);
   const [browser, setBrowser] = useState<BrowserSnapshot>(EMPTY_BROWSER_SNAPSHOT);
   // The camera lives in a store, not in state: a pan or zoom must not render the application tree.
   const [cameraStore] = useState(() => createCameraStore(homeCamera(DEFAULT_HOME_GRID_SIZE)));
@@ -319,11 +350,22 @@ export function App(): React.JSX.Element {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const pluginBrowserOpenQueueRef = useRef(new PluginBrowserOpenQueue());
+  /** Non-persisted Files-card runtime (root handle + loaded listings), keyed by card id. */
+  const [fileCardRuntime, setFileCardRuntime] = useState<Record<string, FileCardRuntimeState>>({});
+  const fileCardRuntimeRef = useRef(fileCardRuntime);
+  fileCardRuntimeRef.current = fileCardRuntime;
+  /** Monotonic per-card quick-open sequence, so a stale search cannot overwrite a newer one. */
+  const fileSearchSequence = useRef<Record<string, number>>({});
+  /** Monotonic per-card read sequence, so a slow earlier read cannot overwrite a newer one. */
+  const fileReadSequence = useRef<Record<string, number>>({});
   const [launchProvider, setLaunchProvider] = useState<ProviderId | null>(null);
   const [launchPosition, setLaunchPosition] = useState<Point | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openUpdatesRequest, setOpenUpdatesRequest] = useState(0);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
+  const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
+  /** App root outside the canvas transform; overlays portal here to inherit the theme tokens. */
+  const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -350,9 +392,16 @@ export function App(): React.JSX.Element {
   });
 
   const showToast = useCallback((message: string): void => setToast(message), []);
+  const fileSessionOptions = useMemo<FileSessionOption[]>(
+    () => sessions.map((session) => ({ sessionId: session.id, label: session.title })),
+    [sessions]
+  );
   const materials = useMaterials();
   const materialsRef = useRef(materials.materials);
   materialsRef.current = materials.materials;
+  const [handoffRemarkIds, setHandoffRemarkIds] = useState<string[] | null>(null);
+  const [lastHandoffSessionId, setLastHandoffSessionId] = useState<string | null>(null);
+
 
   const openUpdates = useCallback((): void => {
     setSettingsOpen(true);
@@ -392,6 +441,11 @@ export function App(): React.JSX.Element {
       if (live && !eventSeen) setUpdateStatus(status);
     }).catch(() => undefined);
     return () => { live = false; unsubscribe(); };
+  }, []);
+
+  const changeUsageHistoryOpen = useCallback((open: boolean): void => {
+    if (open) setSettingsOpen(false);
+    setUsageHistoryOpen(open);
   }, []);
 
   useEffect(() => {
@@ -597,7 +651,8 @@ export function App(): React.JSX.Element {
     requestedCenter?: Point,
     role: LaunchRole = "agent",
     launchOptions?: Record<string, PluginLaunchValues>,
-    environment?: SessionEnvironmentChoice
+    environment?: SessionEnvironmentChoice,
+    initial?: { initialPrompt: string; initialImagePath: string }
   ): Promise<SessionSnapshot> => {
     const currentSettings = settingsRef.current;
     const pixelSkin = isPixelSkinThemeId(currentSettings.terminalBorderSkin)
@@ -626,7 +681,8 @@ export function App(): React.JSX.Element {
     try {
       const session = await window.canvasTTY.terminal.create({
         provider, profile, cwd, position, role, ...(launchOptions ? { launchOptions } : {}),
-        ...(environment ? { environment } : {})
+        ...(environment ? { environment } : {}),
+        ...(initial ?? {})
       });
       const sizedSession = pixelSkin ? { ...session, size: { ...cardSize } } : session;
       if (pixelSkin) window.canvasTTY.terminal.setBounds(session.id, { position, size: sizedSession.size });
@@ -869,13 +925,18 @@ export function App(): React.JSX.Element {
         const stickyNotes = settingsRef.current.stickyNotes.map((note) => boundsInsideRegion(note, previous)
           ? { ...note, ...translateBounds(note, delta) }
           : note);
+        const fileCards = settingsRef.current.fileCards.map((card) => boundsInsideRegion(card, previous)
+          ? { ...card, ...translateBounds(card, delta) }
+          : card);
         for (const material of materialsRef.current) {
           if (boundsInsideRegion(material, previous)) materials.setBounds(material.id, translateBounds(material, delta));
         }
+
         setSessions(movedSessions);
         patch.pluginCanvas = pluginCanvas;
         patch.browserCanvas = browserCanvas;
         patch.stickyNotes = stickyNotes;
+        patch.fileCards = fileCards;
         browserCanvasRef.current = browserCanvas;
       }
     }
@@ -980,11 +1041,24 @@ export function App(): React.JSX.Element {
     materials.deleteRemark(id)
   ), [materials]);
 
-  const remarkAction = useCallback((remarkId: string, action: "delete"): void => {
+  const remarkAction = useCallback((remarkId: string, action: "delete" | "send"): void => {
     if (action === "delete") {
       void deleteRemark(remarkId).catch(() => showToast(t(settingsRef.current.locale, "materialFailureUnavailable")));
+    } else if (action === "send") {
+      const remark = materials.snapshot.remarks.find((candidate) => candidate.id === remarkId);
+      if (remark && remarkNeedsWork(remark)) setHandoffRemarkIds([remarkId]);
     }
-  }, [deleteRemark, showToast]);
+  }, [deleteRemark, materials.snapshot.remarks, showToast]);
+
+  const sendMaterialRemarks = useCallback((materialId: string): void => {
+    setHandoffRemarkIds(materials.snapshot.remarks
+      .filter((remark) => remark.target.materialId === materialId && remarkNeedsWork(remark))
+      .map((remark) => remark.id));
+  }, [materials.snapshot.remarks]);
+
+  const sendAllRemarks = useCallback((): void => {
+    setHandoffRemarkIds(materials.snapshot.remarks.filter(remarkNeedsWork).map((remark) => remark.id));
+  }, [materials.snapshot.remarks]);
 
   const deleteCanvasRegion = useCallback((id: string): void => {
     const canvasRegions = settingsRef.current.canvasRegions.filter((region) => region.id !== id);
@@ -992,6 +1066,333 @@ export function App(): React.JSX.Element {
     setSettings((current) => ({ ...current, canvasRegions }));
     void saveSettings({ canvasRegions });
   }, [saveSettings]);
+
+  const updateFileCardRuntime = useCallback((
+    id: string,
+    update: (state: FileCardRuntimeState) => Partial<FileCardRuntimeState>
+  ): void => {
+    setFileCardRuntime((current) => {
+      const base = current[id] ?? EMPTY_FILE_CARD_RUNTIME;
+      return { ...current, [id]: { ...base, ...update(base) } };
+    });
+  }, []);
+
+  const writeFileCards = useCallback((fileCards: FileCard[]): void => {
+    settingsRef.current = { ...settingsRef.current, fileCards };
+    setSettings((current) => ({ ...current, fileCards }));
+    void saveSettings({ fileCards });
+  }, [saveSettings]);
+
+  const updateFileCard = useCallback((id: string, patch: Partial<FileCard>): void => {
+    writeFileCards(settingsRef.current.fileCards.map((card) => (
+      card.id === id ? { ...card, ...patch } : card
+    )));
+  }, [writeFileCards]);
+
+  /** Releases a card's currently registered root, if any. Safe to call when none. */
+  const releaseFileCardRoot = useCallback((id: string): void => {
+    const rootId = fileCardRuntimeRef.current[id]?.root?.rootId ?? null;
+    if (rootId) void window.canvasTTY.files.closeRoot(rootId).catch(() => undefined);
+  }, []);
+
+  const loadFileRoot = useCallback(async (id: string, descriptor: FileRootDescriptor): Promise<void> => {
+    updateFileCardRuntime(id, () => ({
+      root: descriptor,
+      rootUnavailable: !descriptor.available,
+      loading: descriptor.available,
+      error: null,
+      entries: [],
+      childrenByDirectory: {},
+      readResult: null,
+      quickOpenQuery: "",
+      quickOpenResults: []
+    }));
+    if (!descriptor.available) return;
+    try {
+      const entries = await window.canvasTTY.files.list(descriptor.rootId, "");
+      updateFileCardRuntime(id, () => ({ entries, loading: false }));
+    } catch (error) {
+      updateFileCardRuntime(id, () => ({ loading: false, error: fileErrorMessage(error) }));
+    }
+  }, [updateFileCardRuntime]);
+
+  const chooseFileFolder = useCallback((id: string): void => {
+    void (async () => {
+      try {
+        const descriptor = await window.canvasTTY.files.openFolder();
+        if (!descriptor) return;
+        // The card may have closed while the native dialog was open; release the
+        // freshly registered root instead of leaking it.
+        if (!settingsRef.current.fileCards.some((card) => card.id === id)) {
+          void window.canvasTTY.files.closeRoot(descriptor.rootId).catch(() => undefined);
+          return;
+        }
+        releaseFileCardRoot(id);
+        fileReadSequence.current[id] = (fileReadSequence.current[id] ?? 0) + 1;
+        updateFileCard(id, {
+          root: { rootType: "folder" },
+          label: descriptor.label,
+          folderPath: descriptor.folderPath ?? null,
+          activeFile: null,
+          expandedFolders: []
+        });
+        await loadFileRoot(id, descriptor);
+      } catch (error) {
+        updateFileCardRuntime(id, () => ({ loading: false, error: fileErrorMessage(error) }));
+      }
+    })();
+  }, [loadFileRoot, releaseFileCardRoot, updateFileCard, updateFileCardRuntime]);
+
+  const registerFileSession = useCallback((id: string, sessionId: string): void => {
+    void (async () => {
+      try {
+        const descriptor = await window.canvasTTY.files.registerRoot({ rootType: "session", sessionId });
+        if (!descriptor) {
+          updateFileCardRuntime(id, () => ({ rootUnavailable: true, loading: false, error: null }));
+          return;
+        }
+        if (!settingsRef.current.fileCards.some((card) => card.id === id)) {
+          void window.canvasTTY.files.closeRoot(descriptor.rootId).catch(() => undefined);
+          return;
+        }
+        releaseFileCardRoot(id);
+        fileReadSequence.current[id] = (fileReadSequence.current[id] ?? 0) + 1;
+        updateFileCard(id, {
+          root: { rootType: "session", sessionId },
+          label: descriptor.label,
+          folderPath: null,
+          activeFile: null,
+          expandedFolders: []
+        });
+        await loadFileRoot(id, descriptor);
+      } catch (error) {
+        updateFileCardRuntime(id, () => ({ loading: false, error: fileErrorMessage(error) }));
+      }
+    })();
+  }, [loadFileRoot, releaseFileCardRoot, updateFileCard, updateFileCardRuntime]);
+
+  const openFileDirectory = useCallback((id: string, relativePath: string): void => {
+    const card = settingsRef.current.fileCards.find((candidate) => candidate.id === id);
+    const runtime = fileCardRuntimeRef.current[id];
+    const root = runtime?.root ?? null;
+    if (!card || !root || runtime?.rootUnavailable) return;
+    const wasExpanded = card.expandedFolders.includes(relativePath);
+    updateFileCard(id, { expandedFolders: toggleExpandedFolder(card.expandedFolders, relativePath) });
+    if (wasExpanded || runtime.childrenByDirectory[relativePath] !== undefined) return;
+    updateFileCardRuntime(id, () => ({ loading: true, error: null }));
+    void window.canvasTTY.files.list(root.rootId, relativePath).then(
+      (entries) => updateFileCardRuntime(id, (state) => ({
+        loading: false,
+        childrenByDirectory: { ...state.childrenByDirectory, [relativePath]: entries }
+      })),
+      (error: unknown) => updateFileCardRuntime(id, () => ({
+        loading: false,
+        error: fileErrorMessage(error)
+      }))
+    );
+  }, [updateFileCard, updateFileCardRuntime]);
+
+  const openFile = useCallback((id: string, relativePath: string): void => {
+    const runtime = fileCardRuntimeRef.current[id];
+    const root = runtime?.root ?? null;
+    if (!root || runtime?.rootUnavailable) return;
+    updateFileCard(id, { activeFile: relativePath });
+    // Clear the binding so a still-in-flight read cannot render the previous file.
+    updateFileCardRuntime(id, () => ({ readResult: null, loading: true, error: null }));
+    const sequence = (fileReadSequence.current[id] ?? 0) + 1;
+    fileReadSequence.current[id] = sequence;
+    void window.canvasTTY.files.read(root.rootId, relativePath).then(
+      (result) => {
+        if (fileReadSequence.current[id] !== sequence) return;
+        updateFileCardRuntime(id, () => ({
+          loading: false,
+          readResult: { relativePath, result }
+        }));
+      },
+      (error: unknown) => {
+        if (fileReadSequence.current[id] !== sequence) return;
+        updateFileCardRuntime(id, () => ({
+          loading: false,
+          readResult: null,
+          error: fileErrorMessage(error)
+        }));
+      }
+    );
+  }, [updateFileCard, updateFileCardRuntime]);
+
+  const quickOpenFiles = useCallback((id: string, query: string): void => {
+    updateFileCardRuntime(id, () => ({ quickOpenQuery: query }));
+    const sequence = (fileSearchSequence.current[id] ?? 0) + 1;
+    fileSearchSequence.current[id] = sequence;
+    const runtime = fileCardRuntimeRef.current[id];
+    const root = runtime?.root ?? null;
+    if (query.trim() === "" || !root || runtime?.rootUnavailable) {
+      updateFileCardRuntime(id, () => ({ quickOpenResults: [], loading: false }));
+      return;
+    }
+    updateFileCardRuntime(id, () => ({ loading: true, quickOpenResults: [], error: null }));
+    void window.canvasTTY.files.search(root.rootId, query).then(
+      (result) => {
+        if (fileSearchSequence.current[id] !== sequence) return;
+        updateFileCardRuntime(id, () => ({
+          loading: false,
+          quickOpenResults: matchQuickOpen(result.relativePaths, query)
+        }));
+      },
+      (error: unknown) => {
+        if (fileSearchSequence.current[id] !== sequence) return;
+        updateFileCardRuntime(id, () => ({ loading: false, error: fileErrorMessage(error) }));
+      }
+    );
+  }, [updateFileCardRuntime]);
+
+  /**
+   * Re-registers one persisted Files card's root on launch. A session root is
+   * resolved through its session id; a folder root is reopened by its persisted
+   * canonical path. A null/unavailable registration shows the explicit
+   * unavailable state and reads nothing; a card that never chose a root stays in
+   * the root-selection state instead.
+   */
+  const restoreFileCard = useCallback(async (card: FileCard): Promise<void> => {
+    const reference = fileCardToRootReference(card);
+    if (!reference) {
+      updateFileCardRuntime(card.id, () => ({ ...EMPTY_FILE_CARD_RUNTIME }));
+      return;
+    }
+    const stillOpen = (): boolean => settingsRef.current.fileCards.some((candidate) => candidate.id === card.id);
+    const releaseRoot = (rootId: string): void => {
+      void window.canvasTTY.files.closeRoot(rootId).catch(() => undefined);
+    };
+    let descriptor: FileRootDescriptor | null = null;
+    try {
+      descriptor = await window.canvasTTY.files.registerRoot(reference);
+    } catch (error) {
+      if (!stillOpen()) return;
+      updateFileCardRuntime(card.id, () => ({
+        ...EMPTY_FILE_CARD_RUNTIME,
+        rootUnavailable: true,
+        error: fileErrorMessage(error)
+      }));
+      return;
+    }
+    if (descriptor !== null && !stillOpen()) {
+      releaseRoot(descriptor.rootId);
+      return;
+    }
+    if (!isFileRootUsable(descriptor)) {
+      updateFileCardRuntime(card.id, () => ({ ...EMPTY_FILE_CARD_RUNTIME, rootUnavailable: true }));
+      return;
+    }
+    const root = descriptor;
+    updateFileCardRuntime(card.id, () => ({ ...EMPTY_FILE_CARD_RUNTIME, root, loading: true }));
+    try {
+      const entries = await window.canvasTTY.files.list(root.rootId, "");
+      if (!stillOpen()) {
+        releaseRoot(root.rootId);
+        return;
+      }
+      updateFileCardRuntime(card.id, () => ({ entries, loading: false }));
+    } catch (error) {
+      if (!stillOpen()) return;
+      updateFileCardRuntime(card.id, () => ({ loading: false, error: fileErrorMessage(error) }));
+      return;
+    }
+    for (const folder of card.expandedFolders) {
+      try {
+        const children = await window.canvasTTY.files.list(root.rootId, folder);
+        if (!stillOpen()) {
+          releaseRoot(root.rootId);
+          return;
+        }
+        updateFileCardRuntime(card.id, (state) => ({
+          childrenByDirectory: { ...state.childrenByDirectory, [folder]: children }
+        }));
+      } catch {
+        // A folder that disappeared stays unloaded; the rest of the tree restores.
+      }
+    }
+    if (card.activeFile) {
+      const relativePath = card.activeFile;
+      updateFileCardRuntime(card.id, () => ({ loading: true }));
+      try {
+        const result = await window.canvasTTY.files.read(root.rootId, relativePath);
+        if (!stillOpen()) {
+          releaseRoot(root.rootId);
+          return;
+        }
+        updateFileCardRuntime(card.id, () => ({
+          loading: false,
+          readResult: { relativePath, result }
+        }));
+      } catch (error) {
+        if (!stillOpen()) return;
+        updateFileCardRuntime(card.id, () => ({
+          loading: false,
+          readResult: null,
+          error: fileErrorMessage(error)
+        }));
+      }
+    }
+  }, [updateFileCardRuntime]);
+
+  const fileCardsRestored = useRef(false);
+  useEffect(() => {
+    if (!ready || fileCardsRestored.current) return;
+    fileCardsRestored.current = true;
+    for (const card of settingsRef.current.fileCards) void restoreFileCard(card);
+  }, [ready, restoreFileCard]);
+
+  const changeFileCardBounds = useCallback((id: string, bounds: SessionBounds): void => {
+    updateFileCard(id, { position: bounds.position, size: bounds.size });
+  }, [updateFileCard]);
+
+  const closeFileCard = useCallback((id: string): void => {
+    const rootId = fileCardRuntimeRef.current[id]?.root?.rootId ?? null;
+    delete fileSearchSequence.current[id];
+    delete fileReadSequence.current[id];
+    setFileCardRuntime((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
+    writeFileCards(settingsRef.current.fileCards.filter((card) => card.id !== id));
+    if (rootId) void window.canvasTTY.files.closeRoot(rootId).catch(() => undefined);
+  }, [writeFileCards]);
+
+  const focusFileCard = useCallback((id: string): void => {
+    const card = settingsRef.current.fileCards.find((candidate) => candidate.id === id);
+    if (!card) return;
+    setActiveSessionId(null);
+    setBrowserSelected(false);
+    isHomeCamera.current = false;
+    setCamera(focusCamera(card.position, card.size, FILE_CARD_FOCUS_ZOOM));
+  }, []);
+
+  const openFilesCard = useCallback((position?: Point): void => {
+    const id = crypto.randomUUID();
+    const size = { width: 780, height: 520 };
+    const index = settingsRef.current.fileCards.length;
+    const homeSize = homeGridPixelSize(settings.homeGridSize);
+    const card: FileCard = {
+      id,
+      root: { rootType: "folder" },
+      label: null,
+      folderPath: null,
+      activeFile: null,
+      expandedFolders: [],
+      position: position
+        ? centeredWindowPosition(position, size)
+        : { x: homeSize.width + 160 + (index % 2) * 820, y: Math.floor(index / 2) * 560 + 20 },
+      size
+    };
+    writeFileCards([...settingsRef.current.fileCards, card]);
+    setFileCardRuntime((current) => ({ ...current, [id]: EMPTY_FILE_CARD_RUNTIME }));
+    setActiveSessionId(null);
+    setBrowserSelected(false);
+    isHomeCamera.current = false;
+    setCamera(focusCamera(card.position, card.size, FILE_CARD_FOCUS_ZOOM));
+  }, [settings.homeGridSize, writeFileCards]);
 
   const disposePluginCanvas = useCallback((id: string): void => {
     void saveSettings({ pluginCanvas: settingsRef.current.pluginCanvas.filter((instance) => instance.id !== id) });
@@ -1037,6 +1438,26 @@ export function App(): React.JSX.Element {
     isHomeCamera.current = false;
     setCamera(focusCamera(browserCanvas.position, browserCanvas.size));
   }, [persistSettings, sessions.length, settings.homeGridSize, settings.locale, settings.pluginCanvas.length]);
+
+  const createMascot = useCallback(async (file: File): Promise<void> => {
+    if (!agentAvailability?.codex) throw new Error(settings.locale === "ru" ? "Codex CLI недоступен." : "Codex CLI is unavailable.");
+    // The creation button explicitly describes its YOLO launch to the person.
+    await acknowledgeDanger("codex");
+    if (!settingsRef.current.browserAgentAccess) await saveSettings({ browserAgentAccess: true });
+    const launch = await window.canvasTTY.mascots.start(new Uint8Array(await file.arrayBuffer()));
+    try {
+      const session = await createSession("codex", "yolo", launch.cwd, undefined, "agent", undefined, undefined,
+        { initialPrompt: launch.prompt, initialImagePath: launch.imagePath });
+      if (session.status === "failed") throw new Error(session.failureDetails ?? "Codex did not start.");
+      await window.canvasTTY.mascots.link(launch.project.id, session.id);
+      setSettingsOpen(false);
+    } catch (cause) {
+      await window.canvasTTY.mascots.fail(launch.project.id, cause instanceof Error ? cause.message : String(cause));
+      throw cause;
+    }
+    try { await openBrowser(launch.previewUrl); }
+    catch (cause) { showToast(cause instanceof Error ? cause.message : String(cause)); }
+  }, [agentAvailability?.codex, acknowledgeDanger, createSession, openBrowser, saveSettings, settings.locale, showToast]);
 
   useEffect(() => {
     return window.canvasTTY.plugins.onBrowserOpenRequested((request) => {
@@ -1390,15 +1811,34 @@ export function App(): React.JSX.Element {
     await openPluginCanvasContribution(plugin, contribution);
   }, [openPluginCanvasContribution, toggleHomeWidget]);
 
-  useEffect(() => window.canvasTTY.plugins.onOpenCanvas((request) => {
-    const plugin = plugins.find((candidate) => candidate.manifest.id === request.pluginId);
-    const contribution = plugin?.manifest.contributions.find((candidate) => candidate.id === request.contributionId);
-    if (!plugin || !contribution || contribution.kind !== "canvas-app" || !plugin.enabled) {
-      showToast(t(settings.locale, "pluginActionFailed"));
+  const openMascot = useCallback(async (project: MascotProjectSummary): Promise<void> => {
+    if (project.status === "ready" && project.pluginId) {
+      const installed = await window.canvasTTY.plugins.list();
+      setPlugins(installed);
+      const plugin = installed.find((item) => item.manifest.id === project.pluginId);
+      const contribution = plugin?.manifest.contributions.find((item) => item.kind === "canvas-app");
+      if (!plugin || !contribution) throw new Error("Mascot plugin is unavailable.");
+      await openPluginCanvasContribution(plugin, contribution);
       return;
     }
-    void openPluginCanvasContribution(plugin, contribution, request.sourceCanvasInstanceId)
-      .catch((error) => showToast(error instanceof Error ? error.message : t(settings.locale, "pluginActionFailed")));
+    const session = sessionsRef.current.find((item) => item.id === project.sessionId);
+    if (!session) throw new Error(settings.locale === "ru" ? "Чат Codex больше не открыт." : "The Codex chat is no longer open.");
+    setSettingsOpen(false);
+    setActiveSessionId(session.id);
+    isHomeCamera.current = false;
+    setCamera(focusCamera(session.position, session.size));
+  }, [openPluginCanvasContribution, settings.locale]);
+
+  useEffect(() => window.canvasTTY.plugins.onOpenCanvas((request) => {
+    void (async () => {
+      const installed = plugins.find((candidate) => candidate.manifest.id === request.pluginId)
+        ? plugins : await window.canvasTTY.plugins.list();
+      if (installed !== plugins) setPlugins(installed);
+      const plugin = installed.find((candidate) => candidate.manifest.id === request.pluginId);
+      const contribution = plugin?.manifest.contributions.find((candidate) => candidate.id === request.contributionId);
+      if (!plugin || !contribution || contribution.kind !== "canvas-app" || !plugin.enabled) throw new Error(t(settings.locale, "pluginActionFailed"));
+      await openPluginCanvasContribution(plugin, contribution, request.sourceCanvasInstanceId);
+    })().catch((error) => showToast(error instanceof Error ? error.message : t(settings.locale, "pluginActionFailed")));
   }), [openPluginCanvasContribution, plugins, settings.locale, showToast]);
 
   const startHomeEditor = useCallback((): void => {
@@ -1425,7 +1865,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const performShortcut = (shortcut: "home" | "renameWindow" | "toggleFullscreen"): void => {
       if (shortcut === "toggleFullscreen") {
-        if (settingsOpen || launchProvider !== null || pendingTerminalUrl !== null || homeEditDraft) return;
+        if (settingsOpen || launchProvider !== null || pendingTerminalUrl !== null || homeEditDraft || handoffRemarkIds !== null) return;
         const id = fullscreenSessionId ?? activeSessionId;
         if (id) toggleSessionFullscreen(id);
         return;
@@ -1443,7 +1883,9 @@ export function App(): React.JSX.Element {
     const handleShortcut = (event: KeyboardEvent): void => {
       if (shortcutReferenceOpen) return;
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
+      if (handoffRemarkIds !== null) return;
       if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
+      if (usageHistoryOpen) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();
@@ -1465,7 +1907,7 @@ export function App(): React.JSX.Element {
     };
 
     const handlePointerShortcut = (event: PointerEvent): void => {
-      if (shortcutReferenceOpen) return;
+      if (shortcutReferenceOpen || usageHistoryOpen || handoffRemarkIds !== null) return;
       if (isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
       const action = matchesPointerShortcut(event, settings.shortcuts.home)
         ? "home"
@@ -1482,11 +1924,15 @@ export function App(): React.JSX.Element {
 
     window.addEventListener("keydown", handleShortcut, true);
     window.addEventListener("pointerdown", handlePointerShortcut, true);
+    const stopTerminalFocus = window.canvasTTY.window.isMacOS
+      ? trackTerminalEditFocus(document, (focused) => window.canvasTTY.canvasNavigation.setTerminalEditFocus(focused))
+      : () => undefined;
     return () => {
       window.removeEventListener("keydown", handleShortcut, true);
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
+      stopTerminalFocus();
     };
-  }, [activeSessionId, fullscreenSessionId, goHome, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, toggleSessionFullscreen]);
+  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, usageHistoryOpen, toggleSessionFullscreen]);
 
   const appearance = resolveAppearanceSettings(settings);
   const rootClasses = useMemo(
@@ -1522,9 +1968,15 @@ export function App(): React.JSX.Element {
   }, [agentAvailability, homeEditDraft, settings]);
 
   return (
-    <div className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
+    <div ref={setOverlayHost} className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
       <TerminalBorderSkinStyleHost skinId={settings.terminalBorderSkin} />
       <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
+      <UsageHistoryPanel
+        locale={settings.locale}
+        open={usageHistoryOpen}
+        container={overlayHost}
+        onOpenChange={changeUsageHistoryOpen}
+      />
       <main className="app__content">
         {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
         {ready && <WorkspaceCanvas
@@ -1536,7 +1988,7 @@ export function App(): React.JSX.Element {
           limitsLoadState={limitsLoadState}
           plugins={plugins}
           browser={browser}
-          browserViewVisible={!settingsOpen && !shortcutReferenceOpen && launchProvider === null && pendingTerminalUrl === null}
+          browserViewVisible={!settingsOpen && !usageHistoryOpen && !shortcutReferenceOpen && launchProvider === null && pendingTerminalUrl === null && handoffRemarkIds === null}
           homeEditing={homeEditDraft !== null}
           camera={cameraStore}
           onCameraChange={changeCamera}
@@ -1592,6 +2044,22 @@ export function App(): React.JSX.Element {
           onStickyNoteBoundsChange={changeStickyNoteBounds}
           onStickyNoteTextChange={changeStickyNoteText}
           onDeleteStickyNote={deleteStickyNote}
+          fileCardState={fileCardRuntime}
+          fileSessionOptions={fileSessionOptions}
+          onOpenFiles={openFilesCard}
+          onFocusFileCard={focusFileCard}
+          onFileCardBoundsChange={changeFileCardBounds}
+          onCloseFileCard={closeFileCard}
+          onChooseFileFolder={chooseFileFolder}
+          onRegisterFileSession={registerFileSession}
+          onOpenFileDirectory={openFileDirectory}
+          onOpenFile={openFile}
+          onFileQuickOpen={quickOpenFiles}
+          onOpenLink={(href) => {
+            void openBrowser(href).catch((error: unknown) => {
+              showToast(error instanceof Error ? error.message : t(settings.locale, "browserActionFailed"));
+            });
+          }}
           materials={materials.materials}
           onAddMaterialFiles={addMaterialFiles}
           onPickMaterials={pickMaterials}
@@ -1601,8 +2069,11 @@ export function App(): React.JSX.Element {
           onRemoveMaterial={removeMaterial}
           onMaterialCommand={runMaterialCommand}
           remarks={materials.remarks}
+          handoffs={materials.snapshot.handoffs}
           onAddRemark={addRemark}
           onRemarkAction={remarkAction}
+          onSendMaterialRemarks={sendMaterialRemarks}
+          onSendAllRemarks={sendAllRemarks}
         />}
       </main>
 
@@ -1666,7 +2137,24 @@ export function App(): React.JSX.Element {
           onToggleHomeWidget={toggleHomeWidget}
           onEditHome={startHomeEditor}
           onOpenBrowser={openBrowser}
+          onCreateMascot={createMascot}
+          mascotProjects={mascotProjects}
+          onOpenMascot={openMascot}
+          onRetryMascot={(projectId) => window.canvasTTY.mascots.retry(projectId)}
+          onOpenMascotLog={(projectId) => window.canvasTTY.mascots.openLog(projectId)}
         />
+        {handoffRemarkIds !== null && <HandoffDialog
+          locale={settings.locale}
+          initialRemarkIds={handoffRemarkIds}
+          sessions={sessions}
+          materials={materials.materials}
+          remarks={materials.remarks}
+          handoffs={materials.snapshot.handoffs}
+          lastSessionId={lastHandoffSessionId}
+          onClose={() => setHandoffRemarkIds(null)}
+          onSent={(handoff) => setLastHandoffSessionId(handoff.sessionId)}
+          onFocusSession={focusSession}
+        />}
       </Suspense>
       {closedGitRisks.length > 0 && (
         <div className="git-risk-panel">
@@ -1695,6 +2183,10 @@ export function App(): React.JSX.Element {
       <Toast message={toast} />
     </div>
   );
+}
+
+function fileErrorMessage(error: unknown): string {
+  return error instanceof Error && error.message.length > 0 ? error.message : String(error);
 }
 
 function centeredWindowPosition(point: Point, size: { width: number; height: number }): Point {

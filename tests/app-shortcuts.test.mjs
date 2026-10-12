@@ -11,6 +11,7 @@ import {
   matchesShortcut,
   shouldKeepNativeKeyboardInput,
   shortcutFromKeyboardEvent,
+  trackTerminalEditFocus,
   shortcutFromPointerEvent
 } from "../src/renderer/src/lib/shortcuts.ts";
 
@@ -145,9 +146,10 @@ test("App restores native Command+A before its native-input guard without interc
   const actions = [];
   const window = { canvasTTY: { window: { isMacOS: true } } };
   const settings = { shortcuts: { toggleFullscreen: "Meta+F", home: "Home", renameWindow: "F2" } };
-  const createHandler = new Function("window", "settings", "performShortcut", "handleMacNativeSelectAll", "shouldKeepNativeKeyboardInput", "isShortcutCaptureTarget", "isRenameInputTarget", "matchesShortcut", "shortcutReferenceOpen", `return (event) => {${body}}`);
-  const handler = createHandler(window, settings, (action) => actions.push(action), handleMacNativeSelectAll,
-    shouldKeepNativeKeyboardInput, isShortcutCaptureTarget, isRenameInputTarget, matchesShortcut, false);
+  const createHandler = new Function("window", "settings", "performShortcut", "handleMacNativeSelectAll", "shouldKeepNativeKeyboardInput", "isShortcutCaptureTarget", "isRenameInputTarget", "matchesShortcut", "shortcutReferenceOpen", "handoffRemarkIds", "usageHistoryOpen", `return (event) => {${body}}`);
+  const handoffHandler = (handoffRemarkIds = null) => createHandler(window, settings, (action) => actions.push(action), handleMacNativeSelectAll,
+    shouldKeepNativeKeyboardInput, isShortcutCaptureTarget, isRenameInputTarget, matchesShortcut, false, handoffRemarkIds, false);
+  const handler = handoffHandler();
   const event = (target, changes = {}) => {
     const state = { prevented: false, stopped: false };
     return { ...keyEvent("ф", { code: "KeyA", metaKey: true }), target, repeat: false, state,
@@ -204,4 +206,44 @@ test("App restores native Command+A before its native-input guard without interc
   const otherPlatform = new InputTarget(); handler(event(otherPlatform));
   assert.equal(otherPlatform.selectionStart, 4);
   assert.deepEqual(actions, []);
+  window.canvasTTY.window.isMacOS = true;
+  const modalHandler = handoffHandler(["remark-1"]);
+  for (const field of [new InputTarget(), new TextareaTarget()]) {
+    const input = event(field);
+    modalHandler(input);
+    assert.deepEqual(input.state, { prevented: true, stopped: true });
+    field.type("ч");
+    assert.equal(field.value, "ч");
+  }
+  for (const changes of [
+    { key: "Home", code: "Home", metaKey: false },
+    { key: "F2", code: "F2", metaKey: false },
+    { key: "f", code: "KeyF" }
+  ]) modalHandler(event(new ElementTarget(), changes));
+  assert.deepEqual(actions, []);
+  handler(event(new ElementTarget(), { key: "Home", code: "Home", metaKey: false }));
+  assert.deepEqual(actions, ["home"]);
+});
+
+test("terminal keyboard focus is reported on change only; a plugin iframe or app field is not a terminal", async (t) => {
+  const previousElement = globalThis.Element;
+  class FakeElement { constructor(selector) { this.selector = selector; } closest(query) { return this.selector && query.includes(this.selector) ? this : null; } }
+  globalThis.Element = FakeElement;
+  t.after(() => { if (previousElement === undefined) delete globalThis.Element; else globalThis.Element = previousElement; });
+  const listeners = new Map();
+  const doc = {
+    activeElement: new FakeElement(null),
+    addEventListener: (type, fn) => listeners.set(type, fn),
+    removeEventListener: (type) => listeners.delete(type),
+    defaultView: { addEventListener() {}, removeEventListener() {} }
+  };
+  const reports = [];
+  const stop = trackTerminalEditFocus(doc, (focused) => reports.push(focused));
+  doc.activeElement = new FakeElement(".xterm"); listeners.get("focusin")();
+  doc.activeElement = new FakeElement(".xterm"); listeners.get("focusin")();
+  doc.activeElement = new FakeElement(null); listeners.get("focusout")();   // e.g. the plugin iframe took focus
+  await new Promise((resolve) => queueMicrotask(resolve));
+  assert.deepEqual(reports, [false, true, false]);
+  stop();
+  assert.equal(listeners.size, 0);
 });

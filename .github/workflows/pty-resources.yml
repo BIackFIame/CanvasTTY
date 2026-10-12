@@ -1,0 +1,106 @@
+name: macOS PTY resources
+
+on:
+  push:
+    paths:
+      - ".github/workflows/pty-resources.yml"
+      - "patches/**"
+      - "package.json"
+      - "package-lock.json"
+      - "electron-builder.yml"
+      - "scripts/smoke-pty-resources.mjs"
+      - "scripts/audit-pty-test-bundle.mjs"
+      - "scripts/fixtures/public-speech-source-path-hashes.json"
+      - "tests/node-pty*"
+  pull_request:
+    paths:
+      - ".github/workflows/pty-resources.yml"
+      - "patches/**"
+      - "package.json"
+      - "package-lock.json"
+      - "electron-builder.yml"
+      - "scripts/smoke-pty-resources.mjs"
+      - "scripts/audit-pty-test-bundle.mjs"
+      - "scripts/fixtures/public-speech-source-path-hashes.json"
+      - "tests/node-pty*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-and-packaged:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CANVASTTY_REQUIRE_NATIVE_HELPERS: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native/canvastty-helper/go.mod
+          cache: false
+      - name: Install locked dependencies without applying the patch yet
+        run: npm ci --ignore-scripts
+      - name: Build the unpatched control for Electron from source
+        run: |
+          npx --no-install install-electron
+          npx --no-install electron-rebuild -f -w node-pty --build-from-source
+      - name: Reproduce the original leak and stop at the first growth
+        run: node scripts/smoke-pty-resources.mjs --cycles 3 --expect-leak --report .pty-results/unpatched.json
+      - name: Apply the tracked patch and rebuild for Electron
+        run: npm run postinstall
+      - name: Check cleanup under injected native failures
+        run: node --test tests/node-pty-patch.test.mjs tests/node-pty-bundle-audit.test.mjs
+      - name: Verify 400 cycles in one persistent Electron parent
+        run: node scripts/smoke-pty-resources.mjs --cycles 400 --report .pty-results/source.json
+      - name: Verify every combination of closed standard descriptors
+        run: |
+          for mask in 1 2 3 4 5 6 7; do
+            node scripts/smoke-pty-resources.mjs --cycles 8 --stdio-mask "$mask" --report ".pty-results/source-stdio-$mask.json"
+          done
+      - name: Build a separate macOS application without publishing it
+        env:
+          # Hosted read-only PR runner; mac.identity is explicitly ad-hoc ("-").
+          # No signing certificate/keychain secrets are provided to this job.
+          CSC_FOR_PULL_REQUEST: "true"
+          SPARKLE_PUBLIC_ED_KEY: "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w="
+        run: npm run package:mac
+      - name: Audit the separate test bundle
+        run: node scripts/audit-pty-test-bundle.mjs release/mac-arm64/CanvasTTY.app
+      - name: Verify the new bundle signature
+        run: codesign --verify --deep --strict release/mac-arm64/CanvasTTY.app
+      - name: Verify 400 cycles using the packaged native addon
+        run: node scripts/smoke-pty-resources.mjs --app release/mac-arm64/CanvasTTY.app --cycles 400 --report .pty-results/packaged.json
+      - name: Verify closed standard descriptors in the packaged addon
+        run: |
+          for mask in 1 2 3 4 5 6 7; do
+            node scripts/smoke-pty-resources.mjs --app release/mac-arm64/CanvasTTY.app --cycles 8 --stdio-mask "$mask" --report ".pty-results/packaged-stdio-$mask.json"
+          done
+      - name: Retain synthetic test evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-pty-resources
+          if-no-files-found: warn
+          retention-days: 14
+          include-hidden-files: true
+          path: |
+            .pty-results/*.json
+      - name: Retain the separate build only after all safety and runtime gates
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-pty-test-build
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            release/*.zip
+            release/*.dmg

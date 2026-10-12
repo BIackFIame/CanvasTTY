@@ -23,8 +23,10 @@ files:
   # node-pty loads build/Release (rebuilt for Electron by npmRebuild) and falls
   # back to prebuilds; its C++ and winpty sources, build scripts and header-only
   # node-addon-api are compile-time only. (A platform-level `files` list would
-  # replace this one, so foreign-OS prebuilds stay.)
+  # replace this one, so other platforms' prebuilds stay.) Darwin must use the
+  # patched source build: a fallback to the pristine npm prebuild leaks PTYs.
   - "!**/node_modules/node-pty/{src,deps,scripts,node-addon-api}/**"
+  - "!**/node_modules/node-pty/prebuilds/darwin-*/**"
   - "!**/node_modules/node-addon-api/**"
   # Browser builds that Node never resolves (yaml's "node" export is dist/,
   # bluebird's main is js/release).
@@ -71,6 +73,12 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableEmbeddedAsarIntegrityValidation: true
 extraResources:
+  - from: assets/mascot-pipeline
+    to: mascot-pipeline
+    filter:
+      - "**/*"
+      - "!**/__pycache__/**"
+      - "!**/*.pyc"
   - from: scripts/canvastty-control.mjs
     to: agent-control/canvastty-control.mjs
   - from: agent/orchestrator
@@ -113,6 +121,9 @@ electronLanguages:
   - zh_CN
   - zh-CN
 npmRebuild: true
+# Rebuild the tracked node-pty source patch for the target Electron/architecture;
+# downloading a pristine prebuild here would silently restore the macOS leak.
+buildDependenciesFromSource: true
 compression: normal
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 

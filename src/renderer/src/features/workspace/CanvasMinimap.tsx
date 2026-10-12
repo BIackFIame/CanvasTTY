@@ -2,7 +2,9 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, RefObject } from "react";
 import type {
   CameraState,
+  FileCard,
   CanvasMaterial,
+
   LocaleId,
   MinimapInteractionMode,
   ProviderId,
@@ -12,13 +14,13 @@ import type {
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { t } from "../../lib/i18n";
 import { useCameraSelector, type CameraStore } from "./cameraStore";
-import { browserLayerId, materialLayerId, noteLayerId, pluginLayerId, terminalLayerId } from "./canvasSelectionGesture";
+import { browserLayerId, filesLayerId, materialLayerId, noteLayerId, pluginLayerId, terminalLayerId } from "./canvasSelectionGesture";
+
 import { minimapContentEqual, type MinimapContent } from "./minimapContent";
 import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
   minimapAreaForBounds,
-  minimapEdgePointForBounds,
   MINIMAP_SURFACE_SIZE,
   minimapWorldBounds,
   minimapWorldPoint
@@ -30,11 +32,13 @@ interface CanvasMinimapProps extends MinimapContent {
   locale: LocaleId;
   interactionMode: MinimapInteractionMode;
   onCameraChange(camera: CameraState): void;
+  fileCards?: readonly FileCard[];
 }
 
 interface MinimapEntity {
   id: string;
-  kind: "terminal" | "plugin" | "browser" | "note" | "material";
+  kind: "terminal" | "plugin" | "browser" | "note" | "files" | "material";
+
   bounds: SessionBounds;
   provider?: ProviderId;
 }
@@ -43,6 +47,7 @@ interface MinimapDragState {
   pointerId: number;
   startClient: { x: number; y: number };
   startCamera: CameraState;
+  worldBounds: SessionBounds;
   moved: boolean;
 }
 
@@ -52,6 +57,7 @@ export const CanvasMinimap = memo(CanvasMinimapView, (previous, next) => (
   && previous.locale === next.locale
   && previous.interactionMode === next.interactionMode
   && previous.onCameraChange === next.onCameraChange
+  && sameFileCards(previous.fileCards, next.fileCards)
   && minimapContentEqual(previous, next)
 ));
 
@@ -64,6 +70,7 @@ function CanvasMinimapView({
   stickyNotes,
   materials,
   pluginCanvas,
+  fileCards = [],
   browserCanvas,
   layerOrder,
   locale,
@@ -73,6 +80,11 @@ function CanvasMinimapView({
   const surface = useRef<HTMLSpanElement>(null);
   const dragState = useRef<MinimapDragState | null>(null);
   const [viewportSize, setViewportSize] = useState<Size>({ width: 1, height: 1 });
+  const currentCamera = useCameraSelector(camera, (value) => value);
+  const worldViewport = useMemo(
+    () => cameraWorldViewport(currentCamera, viewportSize),
+    [currentCamera, viewportSize]
+  );
 
   useEffect(() => {
     const element = viewport.current;
@@ -97,20 +109,23 @@ function CanvasMinimapView({
     ...stickyNotes.map((note) => ({ id: noteLayerId(note.id), kind: "note" as const, bounds: note })),
     ...materials.map((material) => ({ id: materialLayerId(material.id), kind: "material" as const, bounds: material })),
     ...pluginCanvas.map((instance) => ({ id: pluginLayerId(instance.id), kind: "plugin" as const, bounds: instance })),
+    ...fileCards.map((card) => ({ id: filesLayerId(card.id), kind: "files" as const, bounds: card })),
     ...(browserCanvas ? [{ id: browserLayerId, kind: "browser" as const, bounds: browserCanvas }] : [])
-  ], [browserCanvas, materials, pluginCanvas, sessions, stickyNotes]);
+  ], [browserCanvas, fileCards, materials, pluginCanvas, sessions, stickyNotes]);
+
   const layerIndices = useMemo(
     () => new Map(layerOrder.map((id, index) => [id, index + 1])),
     [layerOrder]
   );
   const worldBounds = useMemo(
-    () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds)]),
-    [canvasRegions, entities, homeBounds]
+    () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds), worldViewport]),
+    [canvasRegions, entities, homeBounds, worldViewport]
   );
   const homeArea = useMemo(
     () => minimapAreaForBounds(homeBounds, worldBounds),
     [homeBounds, worldBounds]
   );
+  const viewportArea = minimapAreaForBounds(worldViewport, worldBounds);
 
   const navigate = (clientX: number, clientY: number): void => {
     const element = surface.current;
@@ -148,7 +163,7 @@ function CanvasMinimapView({
       state.startCamera,
       pointerDelta,
       { width: bounds.width, height: bounds.height },
-      worldBounds
+      state.worldBounds
     );
     if (!next) return;
     onCameraChange(next);
@@ -172,6 +187,7 @@ function CanvasMinimapView({
             pointerId: event.pointerId,
             startClient: { x: event.clientX, y: event.clientY },
             startCamera: camera.get(),
+            worldBounds,
             moved: false
           };
         } else {
@@ -247,35 +263,10 @@ function CanvasMinimapView({
             );
           })}
         </span>
-        <MinimapViewport camera={camera} viewportSize={viewportSize} worldBounds={worldBounds} />
+        {viewportArea && <i className="canvas-minimap__viewport" style={areaStyle(viewportArea)} />}
       </span>
     </button>
   );
-}
-
-// Only this layer subscribes to pan/zoom; the workspace rectangles and icons do not render per camera event.
-function MinimapViewport({ camera, viewportSize, worldBounds }: {
-  camera: CameraStore;
-  viewportSize: Size;
-  worldBounds: SessionBounds;
-}): React.JSX.Element {
-  const current = useCameraSelector(camera, (value) => value);
-  const worldViewport = cameraWorldViewport(current, viewportSize);
-  const area = minimapAreaForBounds(worldViewport, worldBounds);
-  const coversOverview = area !== null && area.x <= 0 && area.y <= 0
-    && area.x + area.width >= 1 && area.y + area.height >= 1;
-  const edge = minimapEdgePointForBounds(worldViewport, worldBounds);
-  return (
-    <>
-      {area && <i className="canvas-minimap__viewport" style={areaStyle(area)} />}
-      {coversOverview && <i className="canvas-minimap__viewport canvas-minimap__viewport--covers-overview" />}
-      {edge && <i className="canvas-minimap__viewport-edge" style={pointStyle(edge)} />}
-    </>
-  );
-}
-
-function pointStyle(point: { x: number; y: number }): CSSProperties {
-  return { left: `${point.x * 100}%`, top: `${point.y * 100}%` };
 }
 
 function areaStyle(area: { x: number; y: number; width: number; height: number }): CSSProperties {
@@ -285,4 +276,23 @@ function areaStyle(area: { x: number; y: number; width: number; height: number }
     width: `${area.width * 100}%`,
     height: `${area.height * 100}%`
   };
+}
+
+/** File cards carry no provider, so `minimapContentEqual` does not see them; compare their bounds here. */
+function sameFileCards(
+  previous: readonly FileCard[] | undefined,
+  next: readonly FileCard[] | undefined
+): boolean {
+  const left = previous ?? [];
+  const right = next ?? [];
+  return left === right || (
+    left.length === right.length
+    && left.every((card, index) => (
+      card.id === right[index].id
+      && card.position.x === right[index].position.x
+      && card.position.y === right[index].position.y
+      && card.size.width === right[index].size.width
+      && card.size.height === right[index].size.height
+    ))
+  );
 }

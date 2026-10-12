@@ -1,0 +1,221 @@
+diff --git a/node_modules/node-pty/src/unix/pty.cc b/node_modules/node-pty/src/unix/pty.cc
+index 7b4b9e1..557fdae 100644
+--- a/node_modules/node-pty/src/unix/pty.cc
++++ b/node_modules/node-pty/src/unix/pty.cc
+@@ -167,6 +167,9 @@ void SetupExitCallback(Napi::Env env, Napi::Function cb, pid_t pid) {
+         }
+       }
+     }
++    // The exit watcher owns this kqueue, independently of the returned PTY.
++    if (kq >= 0)
++      close(kq);
+ #else
+     while (true) {
+       errno = 0;
+@@ -370,9 +373,19 @@ Napi::Value PtyFork(const Napi::CallbackInfo& info) {
+   int err = -1;
+   pty_posix_spawn(argv, env, term, &winp, &master, &pid, &err);
+   if (err != 0) {
+-    throw Napi::Error::New(napiEnv, "posix_spawnp failed.");
++    Napi::Error error = Napi::Error::New(napiEnv, "posix_spawnp failed.");
++    error.Value().Set("errno", Napi::Number::New(napiEnv, err));
++    throw error;
+   }
+   if (pty_nonblock(master) == -1) {
++    // No exit callback has been registered yet: close and reap only the child
++    // created by this call before throwing away its native ownership.
++    close(master);
++    if (pid > 0) {
++      kill(pid, SIGKILL);
++      int status;
++      HANDLE_EINTR(waitpid(pid, &status, 0));
++    }
+     throw Napi::Error::New(napiEnv, "Could not set master fd to nonblocking.");
+   }
+ #else
+@@ -485,10 +498,14 @@ Napi::Value PtyOpen(const Napi::CallbackInfo& info) {
+   }
+ 
+   if (pty_nonblock(master) == -1) {
++    close(master);
++    close(slave);
+     throw Napi::Error::New(env, "Could not set master fd to nonblocking.");
+   }
+ 
+   if (pty_nonblock(slave) == -1) {
++    close(master);
++    close(slave);
+     throw Napi::Error::New(env, "Could not set slave fd to nonblocking.");
+   }
+ 
+@@ -691,96 +708,92 @@ pty_posix_spawn(char** argv, char** env,
+                 int* master,
+                 pid_t* pid,
+                 int* err) {
+-  int low_fds[3];
+-  size_t count = 0;
+-
+-  for (; count < 3; count++) {
+-    low_fds[count] = posix_openpt(O_RDWR);
+-    if (low_fds[count] >= STDERR_FILENO)
+-      break;
+-  }
++  // Backport the ownership fixes from node-pty #882. Scope ownership also
++  // covers failed reservations and partially initialized spawn objects; no
++  // counter can skip low_fds[0] or address a nonexistent low_fds[3].
++  struct ScopedFd {
++    int value = -1;
++    ~ScopedFd() { if (value >= 0) close(value); }
++    int release() { int fd = value; value = -1; return fd; }
++  };
++  struct FileActions {
++    posix_spawn_file_actions_t value{};
++    bool initialized = false;
++    ~FileActions() { if (initialized) posix_spawn_file_actions_destroy(&value); }
++  };
++  struct SpawnAttributes {
++    posix_spawnattr_t value{};
++    bool initialized = false;
++    ~SpawnAttributes() { if (initialized) posix_spawnattr_destroy(&value); }
++  };
++
++  *master = -1;
++  *pid = -1;
++  *err = 0;
++  ScopedFd low_fds[3];
++  for (auto& fd : low_fds) {
++    fd.value = posix_openpt(O_RDWR);
++    if (fd.value == -1) { *err = errno; return; }
++    if (fd.value >= STDERR_FILENO) break;
++  }
++
++  ScopedFd owned_master;
++  owned_master.value = posix_openpt(O_RDWR);
++  if (owned_master.value == -1) { *err = errno; return; }
++  if (grantpt(owned_master.value) == -1) { *err = errno; return; }
++  if (unlockpt(owned_master.value) == -1) { *err = errno; return; }
+ 
++  // Use TIOCPTYGNAME instead of ptsname() to avoid threading problems.
++  char slave_pty_name[128];
++  if (ioctl(owned_master.value, TIOCPTYGNAME, slave_pty_name) == -1) { *err = errno; return; }
++  ScopedFd slave;
++  slave.value = open(slave_pty_name, O_RDWR | O_NOCTTY);
++  if (slave.value == -1) { *err = errno; return; }
++  if (termp && tcsetattr(slave.value, TCSANOW, termp) == -1) { *err = errno; return; }
++  if (winp && ioctl(slave.value, TIOCSWINSZ, winp) == -1) { *err = errno; return; }
++
++  FileActions acts;
++  *err = posix_spawn_file_actions_init(&acts.value);
++  if (*err != 0) return;
++  acts.initialized = true;
++  for (int fd = STDIN_FILENO; fd <= STDERR_FILENO; ++fd) {
++    *err = posix_spawn_file_actions_adddup2(&acts.value, slave.value, fd);
++    if (*err != 0) return;
++  }
++  const int child_closes[] = { slave.value, owned_master.value };
++  for (int fd : child_closes) {
++    *err = posix_spawn_file_actions_addclose(&acts.value, fd);
++    if (*err != 0) return;
++  }
++
++  SpawnAttributes attrs;
++  *err = posix_spawnattr_init(&attrs.value);
++  if (*err != 0) return;
++  attrs.initialized = true;
+   int flags = POSIX_SPAWN_CLOEXEC_DEFAULT |
+               POSIX_SPAWN_SETSIGDEF |
+               POSIX_SPAWN_SETSIGMASK |
+               POSIX_SPAWN_SETSID;
+-  *master = posix_openpt(O_RDWR);
+-  if (*master == -1) {
+-    return;
+-  }
+-
+-  int res = grantpt(*master) || unlockpt(*master);
+-  if (res == -1) {
+-    return;
+-  }
+-
+-  // Use TIOCPTYGNAME instead of ptsname() to avoid threading problems.
+-  int slave;
+-  char slave_pty_name[128];
+-  res = ioctl(*master, TIOCPTYGNAME, slave_pty_name);
+-  if (res == -1) {
+-    return;
+-  }
+-
+-  slave = open(slave_pty_name, O_RDWR | O_NOCTTY);
+-  if (slave == -1) {
+-    return;
+-  }
+-
+-  if (termp) {
+-    res = tcsetattr(slave, TCSANOW, termp);
+-    if (res == -1) {
+-      return;
+-    };
+-  }
+-
+-  if (winp) {
+-    res = ioctl(slave, TIOCSWINSZ, winp);
+-    if (res == -1) {
+-      return;
+-    }
+-  }
+-
+-  posix_spawn_file_actions_t acts;
+-  posix_spawn_file_actions_init(&acts);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDIN_FILENO);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDOUT_FILENO);
+-  posix_spawn_file_actions_adddup2(&acts, slave, STDERR_FILENO);
+-  posix_spawn_file_actions_addclose(&acts, slave);
+-  posix_spawn_file_actions_addclose(&acts, *master);
+-
+-  posix_spawnattr_t attrs;
+-  posix_spawnattr_init(&attrs);
+-  *err = posix_spawnattr_setflags(&attrs, flags);
+-  if (*err != 0) {
+-    goto done;
+-  }
+-
++  *err = posix_spawnattr_setflags(&attrs.value, flags);
++  if (*err != 0) return;
+   sigset_t signal_set;
+-  /* Reset all signal the child to their default behavior */
+   sigfillset(&signal_set);
+-  *err = posix_spawnattr_setsigdefault(&attrs, &signal_set);
+-  if (*err != 0) {
+-    goto done;
+-  }
+-
+-  /* Reset the signal mask for all signals */
++  *err = posix_spawnattr_setsigdefault(&attrs.value, &signal_set);
++  if (*err != 0) return;
+   sigemptyset(&signal_set);
+-  *err = posix_spawnattr_setsigmask(&attrs, &signal_set);
+-  if (*err != 0) {
+-    goto done;
+-  }
++  *err = posix_spawnattr_setsigmask(&attrs.value, &signal_set);
++  if (*err != 0) return;
+ 
++  pid_t spawned_pid = -1;
+   do
+-    *err = posix_spawn(pid, argv[0], &acts, &attrs, argv, env);
++    *err = posix_spawn(&spawned_pid, argv[0], &acts.value, &attrs.value, argv, env);
+   while (*err == EINTR);
+-done:
+-  posix_spawn_file_actions_destroy(&acts);
+-  posix_spawnattr_destroy(&attrs);
+-
+-  for (; count > 0; count--) {
+-    close(low_fds[count]);
++  if (*err == 0) {
++    *master = owned_master.release();
++    *pid = spawned_pid;
+   }
++  // Everything except the successfully transferred master is owned here.
++  // Child file-actions close descriptors in the child, NOT in this parent.
+ }
+ #endif
+ 

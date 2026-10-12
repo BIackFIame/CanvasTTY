@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { app, BrowserWindow, clipboard, dialog, shell } from "electron";
-import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions } from "electron";
+import type { IpcMainEvent, IpcMainInvokeEvent, OpenDialogOptions, WebContents } from "electron";
 import type {
   AppSettings,
   AgentChatHistoryProviderId,
@@ -9,6 +9,7 @@ import type {
   CanvasNavigationPointerBindingInput,
   CustomTerminalBorderSkinId,
   CreateSessionRequest,
+  FileRootReference,
   PluginBrowserOpenResponse,
   PluginCanvasRequest,
   PluginLaunchFieldOptions,
@@ -30,14 +31,17 @@ import { isPixelSkinSlot, isPixelTerminalBorderSkinId, type PixelSkinPackRegistr
 import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
 import type { AgentChatHistoryService } from "../services/AgentChatHistoryService";
-import type { LimitsService } from "../services/LimitsService";
+import { withoutAccountScope, type LimitsService } from "../services/LimitsService";
+import type { UsageHistoryService } from "../services/UsageHistoryService";
 import type { PluginManager } from "../services/PluginManager";
+import type { MascotManager } from "../services/MascotManager";
 import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
 import type { PluginCards } from "../services/PluginCards";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
 import type { ProviderSecretsService } from "../services/ProviderSecretsService";
 import type { BrowserService } from "../services/BrowserService";
+import type { FileAccessService } from "../services/FileAccessService";
 import type { IpcRegistrar } from "./IpcReadinessGate";
 import { normalizePluginBrowserUrl } from "../services/browser/PluginBrowserOpenPolicy";
 import { PluginBrowserOpenBroker } from "./PluginBrowserOpenBroker";
@@ -57,11 +61,13 @@ interface CriticalDependencies {
 }
 
 interface Dependencies {
+  mascots: MascotManager;
   settings: SettingsStore;
   recheckProviderClis(): Promise<{ availability: AgentCliAvailability; settings: AppSettings }>;
   terminals: TerminalManager;
   agentChatHistory: AgentChatHistoryService;
   limits: LimitsService;
+  usageHistory: UsageHistoryService;
   plugins: PluginManager;
   pluginServices: PluginServiceSupervisor;
   pluginCards: PluginCards;
@@ -69,12 +75,14 @@ interface Dependencies {
   pluginSecrets: PluginSecretsService;
   providerSecrets: ProviderSecretsService;
   browser: BrowserService;
+  files: FileAccessService;
   githubAuth: GithubAuthService;
   hermesHud: HermesHudService;
   launchFieldOptions(pluginId: string, provider: ProviderId): Promise<PluginLaunchFieldOptions>;
   getMainWindow(): BrowserWindow | null;
   applyBrowserSettings(settings: AppSettings): Promise<void> | void;
   setCanvasNavigationShortcutCapture(active: boolean): void;
+  setCanvasNavigationTerminalEditFocus(contents: WebContents, active: boolean): void;
   setCanvasNavigationPointerBinding(input: CanvasNavigationPointerBindingInput): void;
   openPluginWindow(pluginId: string, contributionId: string): Promise<void>;
   closePluginWindows(pluginId: string): void;
@@ -193,11 +201,13 @@ export function registerCriticalIpc(ipcMain: IpcRegistrar, {
 }
 
 export function registerIpc(ipcMain: IpcRegistrar, {
+  mascots,
   settings,
   recheckProviderClis,
   terminals,
   agentChatHistory,
   limits,
+  usageHistory,
   plugins,
   pluginServices,
   pluginCards,
@@ -205,12 +215,14 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   pluginSecrets,
   providerSecrets,
   browser,
+  files,
   githubAuth,
   hermesHud,
   launchFieldOptions,
   getMainWindow,
   applyBrowserSettings,
   setCanvasNavigationShortcutCapture,
+  setCanvasNavigationTerminalEditFocus,
   setCanvasNavigationPointerBinding,
   openPluginWindow,
   closePluginWindows,
@@ -218,7 +230,33 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   requestPluginCanvas,
   broadcastPluginStorageChange
 }: Dependencies): void {
+  ipcMain.handle(IPC.mascotsList, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return mascots.list();
+  });
+  ipcMain.handle(IPC.mascotsStart, (event, image: Uint8Array) => {
+    assertMainRenderer(event, getMainWindow);
+    return mascots.start(image);
+  });
+  ipcMain.handle(IPC.mascotsLink, (event, projectId: string, sessionId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return mascots.link(projectId, sessionId);
+  });
+  ipcMain.handle(IPC.mascotsFail, (event, projectId: string, message: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof message !== "string") throw new Error("Mascot error is invalid.");
+    return mascots.fail(projectId, message);
+  });
   const pluginBrowserOpenBroker = new PluginBrowserOpenBroker(getMainWindow);
+  ipcMain.handle(IPC.mascotsRetry, (event, projectId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    return mascots.retry(projectId);
+  });
+  ipcMain.handle(IPC.mascotsOpenLog, async (event, projectId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    const error = await shell.openPath(await mascots.errorLog(projectId));
+    if (error) throw new Error(error);
+  });
   // A surface reaches only its own plugin's services: the caller's plugin id is bound by the
   // renderer frame host or by the identity-checked plugin window, never taken from plugin code.
   const requestPluginService = (pluginId: string, values: Record<string, unknown>): Promise<unknown> => {
@@ -260,6 +298,11 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     if (typeof active !== "boolean") return;
     setCanvasNavigationShortcutCapture(active);
+  });
+  ipcMain.on(IPC.canvasNavigationTerminalEditFocus, (event, active: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof active !== "boolean") return;
+    setCanvasNavigationTerminalEditFocus(event.sender, active);
   });
   ipcMain.on(IPC.canvasNavigationPointerBinding, (event, input: unknown) => {
     assertMainRenderer(event, getMainWindow);
@@ -319,6 +362,63 @@ export function registerIpc(ipcMain: IpcRegistrar, {
       console.warn("CanvasTTY media could not be read.", error);
       return null;
     }
+  });
+
+  ipcMain.handle(IPC.filesListRoots, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return files.listRoots();
+  });
+  ipcMain.handle(IPC.filesRegisterRoot, async (event, reference: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    const parsed = fileRootReference(reference);
+    if (!parsed) throw new Error("File root reference is invalid.");
+    try {
+      return await files.registerRoot(parsed);
+    } catch (error) {
+      console.warn("CanvasTTY file root could not be registered.", error);
+      return null;
+    }
+  });
+  ipcMain.handle(IPC.filesOpenFolder, async (event) => {
+    assertMainRenderer(event, getMainWindow);
+    const owner = getMainWindow();
+    const options: OpenDialogOptions = {
+      title: "Choose a folder",
+      properties: ["openDirectory"]
+    };
+    const result = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    const selected = result.filePaths[0];
+    if (result.canceled || !selected) return null;
+    try {
+      return files.registerFolderRoot(selected);
+    } catch (error) {
+      console.warn("CanvasTTY selected folder could not be opened.", error);
+      return null;
+    }
+  });
+  ipcMain.handle(IPC.filesList, async (event, rootId: unknown, relativePath: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return files.list(stringValue(rootId, "rootId"), fileRelativePath(relativePath));
+  });
+  ipcMain.handle(IPC.filesRead, async (event, rootId: unknown, relativePath: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return files.read(stringValue(rootId, "rootId"), fileRelativePath(relativePath));
+  });
+  ipcMain.handle(IPC.filesSearch, async (event, rootId: unknown, query: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return files.search(stringValue(rootId, "rootId"), fileSearchQuery(query));
+  });
+  ipcMain.handle(IPC.filesCloseRoot, (event, rootId: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    files.releaseRoot(stringValue(rootId, "rootId"));
+    return true;
+  });
+
+  ipcMain.handle(IPC.usageHistoryGet, (event) => {
+    assertMainRenderer(event, getMainWindow);
+    return usageHistory.get();
   });
 
   ipcMain.handle(IPC.limitsGet, (event) => {
@@ -642,7 +742,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     }
     if (method === "limits.get") {
       plugins.assertPermission(pluginId, "limits:read");
-      return { state: "ready", snapshot: await limits.get() };
+      return { state: "ready", snapshot: withoutAccountScope(await limits.get()) };
     }
     if (method === "hermesHud.getState") {
       plugins.assertPermission(pluginId, "hermes:hud");
@@ -980,6 +1080,43 @@ function assertPluginWindowSender(
 function stringValue(value: unknown, label: string): string {
   if (typeof value !== "string" || value.length === 0 || value.length > 2_048) {
     throw new Error(`Plugin ${label} parameter is invalid.`);
+  }
+  return value;
+}
+
+function fileRootReference(value: unknown): FileRootReference | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const reference = value as Record<string, unknown>;
+  if (reference.rootType === "session") {
+    if (typeof reference.sessionId !== "string" || reference.sessionId.length === 0 || reference.sessionId.length > 2_048) {
+      return null;
+    }
+    return { rootType: "session", sessionId: reference.sessionId };
+  }
+  if (reference.rootType === "folder") {
+    if (reference.folderPath === undefined) return { rootType: "folder" };
+    if (
+      typeof reference.folderPath !== "string"
+      || reference.folderPath.length === 0
+      || reference.folderPath.length > 4_096
+    ) return null;
+    return { rootType: "folder", folderPath: reference.folderPath };
+  }
+  return null;
+}
+
+function fileRelativePath(value: unknown): string {
+  // An empty relative path addresses the root itself, so unlike stringValue it
+  // is allowed; FileAccessService re-enforces containment on every operation.
+  if (typeof value !== "string" || value.length > 2_048 || value.includes("\0")) {
+    throw new Error("File relative path is invalid.");
+  }
+  return value;
+}
+
+function fileSearchQuery(value: unknown): string {
+  if (typeof value !== "string" || value.length > 512) {
+    throw new Error("File search query is invalid.");
   }
   return value;
 }

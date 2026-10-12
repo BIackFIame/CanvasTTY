@@ -251,6 +251,17 @@ export function MaterialCard({
           {version !== null && (
             <span className="material-card__badge" title={t(locale, "materialVersions")}>v{version}</span>
           )}
+          {openRemarks > 0 && (
+            <button
+              type="button"
+              className="material-card__send"
+              title={t(locale, "handoffSendToAgent")}
+              aria-label={t(locale, "handoffSendToAgent")}
+              onClick={() => remarkActions.send(material.id)}
+            >
+              <UiIcon name="send" size="1.1em" />
+            </button>
+          )}
           {remarkDrawable(material) && (
             <button
               type="button"
