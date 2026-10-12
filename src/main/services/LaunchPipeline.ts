@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, rmdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type {
   LaunchProfileId,
@@ -76,6 +76,8 @@ export type PreparedLaunch =
     envSources: Record<string, string>;
     /** A contributor runs the agent on another model than its vendor's: "auto" becomes accept-edits. */
     thirdPartyModel: boolean;
+    /** This run's own folder below the card's folder; `cleanup` removes it. */
+    runDirectory: string;
     /**
      * Grok/Kimi: the home (`GROK_HOME` / `KIMI_CODE_HOME`) the contributor that set it handed this launch inside its own
      * data folder (contributedHookHome); CanvasTTY writes that CLI's temporary configuration there.
@@ -126,9 +128,25 @@ export class LaunchPipeline {
     return rm(this.dependencies.runsRoot, { recursive: true, force: true });
   }
 
-  /** Removes a closed session's file folders. */
-  forgetSession(sessionId: string): Promise<void> {
-    return rm(join(this.dependencies.runsRoot, safeSegment(sessionId)), { recursive: true, force: true });
+  /**
+   * Removes a closed card's run folders that this pipeline prepared for it, then the card's folder if nothing else
+   * is left in it. A card brought back under the same id may already be writing a new run folder there; it is kept.
+   */
+  async forgetSession(sessionId: string, runDirectories: Iterable<string>): Promise<void> {
+    const parent = join(this.dependencies.runsRoot, safeSegment(sessionId));
+    const errors: unknown[] = [];
+    for (const runDirectory of new Set(runDirectories)) {
+      // Only a run folder directly below this card's folder is ever removed here.
+      if (dirname(resolve(runDirectory)) !== resolve(parent)) continue;
+      try { await removeRunFolder(runDirectory); } catch (error) { errors.push(error); }
+    }
+    try {
+      await rmdir(parent);
+    } catch (error) {
+      // Still in use by a newer run of the same card, or already gone; the startup sweep removes what is left.
+      if (!PARENT_KEPT_CODES.has((error as NodeJS.ErrnoException).code ?? "")) errors.push(error);
+    }
+    if (errors.length) throw new AggregateError(errors, "Launch run folders could not be removed.");
   }
 
   /** Launch policies that apply to this agent: every launch of it asks them, chosen or not. */
@@ -259,7 +277,7 @@ export class LaunchPipeline {
       ...policies.map((contributor) => this.ask(contributor, context, false))
     ]);
     const runDirectory = join(this.dependencies.runsRoot, safeSegment(context.sessionId), randomUUID());
-    const cleanup = (): Promise<void> => rm(runDirectory, { recursive: true, force: true });
+    const cleanup = (): Promise<void> => removeRunFolder(runDirectory);
     const refuse = async (reason: string): Promise<PreparedLaunch> => {
       await cleanup().catch(() => undefined);
       return { ok: false, reason };
@@ -337,7 +355,7 @@ export class LaunchPipeline {
       args.push(...contributedArgs.map(expand));
       thirdPartyModel ||= contribution.thirdPartyModel === true;
     }
-    return { ok: true, env, args, secrets, envSources, thirdPartyModel, ...(accountHome ? { accountHome } : {}), cleanup };
+    return { ok: true, env, args, secrets, envSources, thirdPartyModel, runDirectory, ...(accountHome ? { accountHome } : {}), cleanup };
   }
 
   private async ask(
@@ -570,6 +588,17 @@ export function stringMap(value: unknown, limit: number, field: string): Record<
 
 function unavailableReason(pluginId: string): string {
   return `Needs plugin ${pluginId} for its launch options; it is disabled, removed, or its native code is not trusted.`;
+}
+
+/** Errors that leave a card's folder in place on purpose: another run still uses it, or it is gone. */
+const PARENT_KEPT_CODES = new Set(["ENOENT", "ENOTEMPTY", "EEXIST", "EBUSY", "EPERM"]);
+
+/**
+ * Removes one run folder. On Windows the agent may still hold a file there for a moment after its PTY exits, so
+ * busy/permission errors are retried briefly before giving up.
+ */
+function removeRunFolder(runDirectory: string): Promise<void> {
+  return rm(runDirectory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
 
 function safeSegment(value: string): string {
