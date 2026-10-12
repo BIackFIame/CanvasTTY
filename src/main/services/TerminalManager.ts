@@ -1800,7 +1800,8 @@ export class TerminalManager {
       try {
         spawn = this.wrapIsolated(id, provider, profile, planned, planned, {
           ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
-          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined)
+          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined),
+          taskProjectRoot: this.taskProjectRoot(cwd, parentSessionId)
         });
       } catch (error) {
         planned.cleanup();
@@ -1867,7 +1868,7 @@ export class TerminalManager {
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
   private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
     gateways: Pick<PlannedSpawn, "agentBrowser" | "agentRuntime" | "agentOrchestration" | "controlGrant">,
-    placement: { accountHome?: string; placedProjects: readonly PlacedProject[] }): { command: string; args: string[]; env: Record<string, string> } {
+    placement: { accountHome?: string; placedProjects: readonly PlacedProject[]; taskProjectRoot?: string }): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
     // Only the grant CanvasTTY handed this launch: a CANVASTTY_CONTROL_CONNECTION a plugin set reopens nothing.
@@ -1882,6 +1883,7 @@ export class TerminalManager {
       profile,
       ...(placement.accountHome ? { accountHome: placement.accountHome } : {}),
       placedProjects: placement.placedProjects,
+      ...(placement.taskProjectRoot ? { taskProjectRoot: placement.taskProjectRoot } : {}),
       ...(grant ? { grantedPrivate: [grant] } : {}),
       // Only the sockets CanvasTTY's own gateways prepared; a CANVASTTY_*_ADDRESS from elsewhere is never bound in.
       gatewaySockets: gatewaySocketAddresses(gateways.agentBrowser?.environment, gateways.agentRuntime?.environment,
@@ -2067,6 +2069,21 @@ export class TerminalManager {
       ...(metadata?.model !== undefined ? { model: metadata.model } : {}),
       ...(metadata?.effort !== undefined ? { effort: metadata.effort } : {})
     };
+  }
+
+  /**
+   * The task's original project: the folder of the top-level card a session descends from (its own folder when it has
+   * no parent). A plugin worktree is validated against this repository.
+   */
+  private taskProjectRoot(cwd: string, parentSessionId?: string): string {
+    let root: ManagedSession | undefined;
+    for (let depth = 0, next = parentSessionId; next !== undefined && depth < 64; depth++) {
+      const current = this.sessions.get(next);
+      if (!current) break;
+      root = current;
+      next = current.metadata.parentSessionId;
+    }
+    return root?.metadata.cwd ?? cwd;
   }
 
   /**
@@ -2334,7 +2351,8 @@ export class TerminalManager {
         try {
           spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, {
             ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
-            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment)
+            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment),
+            taskProjectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId)
           }), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
