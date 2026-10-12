@@ -22,6 +22,13 @@ import type { McpToolDefinition } from "../../../agent-browser/orchestration-cat
  * a foreign session id is a protocol error, never a filtered result, so an
  * orchestrator cannot probe sessions it does not own.
  */
+/**
+ * How long spawn_agent (its checks, the launch and the CLI's readiness together) and send_to_agent wait for a prompt
+ * to reach the agent: under the about 60 s after which most MCP clients end a tool call, so the orchestrator gets
+ * the reason (and the session id) instead of a client timeout.
+ */
+export const AGENT_TOOL_DELIVERY_MS = 45_000;
+
 export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   private readonly control: AgentControlService;
   private readonly plugins: Pick<PluginAgentTools, "list" | "call"> | null;
@@ -131,6 +138,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
   }
 
   private async spawn(orchestratorId: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const deadline = Date.now() + AGENT_TOOL_DELIVERY_MS;
     if (!(AGENT_PROVIDERS as readonly unknown[]).includes(args.provider)) {
       throw orchestrationBridgeError("INVALID_REQUEST", unknownProviderMessage(args.provider), false);
     }
@@ -165,7 +173,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
       profile: profile.profile
-    }, signal).catch((error: unknown) => {
+    }, signal, Math.max(0, deadline - Date.now())).catch((error: unknown) => {
       if (signal?.aborted) throw canceledError();
       throw error;
     });
@@ -200,7 +208,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
         args.sessionId as string,
         args.prompt as string,
         args.submit === undefined ? true : Boolean(args.submit),
-        signal
+        signal,
+        AGENT_TOOL_DELIVERY_MS
       );
     } catch (error) {
       if (signal?.aborted) throw canceledError();

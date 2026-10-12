@@ -147,9 +147,10 @@ export class AgentControlService {
   /**
    * Creates the subagent card. With an initial prompt it resolves only once the prompt reached the agent's PTY
    * (after an asynchronous launch has started) and rejects with PromptNotDeliveredError when that launch did not
-   * start; the card stays, so the caller can inspect or cancel it.
+   * start; the card stays, so the caller can inspect or cancel it. `promptWaitMs` bounds that wait (the launch and
+   * the CLI's readiness together; LAUNCH_INPUT_WAIT_MS without it).
    */
-  spawn(request: SpawnAgentRequest, signal?: AbortSignal): Promise<SessionMetadata> {
+  spawn(request: SpawnAgentRequest, signal?: AbortSignal, promptWaitMs?: number): Promise<SessionMetadata> {
     if (!request || typeof request.parentSessionId !== "string") {
       throw new Error("A parent session id is required.");
     }
@@ -201,7 +202,7 @@ export class AgentControlService {
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     const input = request.provider === "codex"
       ? codexPromptInput(request.initialPrompt) : `${request.initialPrompt}\r`;
-    return this.deliver(created.id, input, "prompt", signal)
+    return this.deliver(created.id, input, "prompt", signal, promptWaitMs)
       .then(() => this.terminals.getMetadata(created.id) ?? created, (error: unknown) => {
         // Cancelled while it started: nobody receives its id, so the card is closed instead of left running.
         if (!signal?.aborted) throw error;
@@ -267,7 +268,7 @@ export class AgentControlService {
   }
 
   /** Validates at once (throws); resolves once the text reached the agent, and rejects when it did not. */
-  send(sessionId: string, text: string, submit = true, signal?: AbortSignal): Promise<void> {
+  send(sessionId: string, text: string, submit = true, signal?: AbortSignal, waitMs?: number): Promise<void> {
     const session = this.requireSession(sessionId);
     if (session.provider === "terminal") throw new Error("Plain terminals are not agents.");
     const capabilities = PROVIDER_CAPABILITIES[session.provider as AgentProviderId];
@@ -278,7 +279,7 @@ export class AgentControlService {
     // it now, or the Enter after it, would answer that prompt on the person's behalf.
     if (session.status === "needs_approval") throw new DelegationRefusal(APPROVAL_REFUSAL);
     const input = session.provider === "codex" ? codexPromptInput(text, submit) : submit ? `${text}\r` : text;
-    return this.deliver(sessionId, input, "text", signal);
+    return this.deliver(sessionId, input, "text", signal, waitMs);
   }
 
   status(sessionId: string): SessionMetadata {
@@ -451,8 +452,10 @@ export class AgentControlService {
   }
 
   /** Through the terminal manager's one delivery rule: exactly once, into the launch that is starting now. */
-  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal): Promise<void> {
-    const delivery = await this.terminals.deliverInput(sessionId, data, undefined, signal, this.requireSession(sessionId).provider === "codex");
+  private async deliver(sessionId: string, data: string, what: "prompt" | "text", signal?: AbortSignal, waitMs?: number): Promise<void> {
+    // waitMs (AGENT_TOOL_DELIVERY_MS for the orchestration tools) also caps the wait for Codex's composer.
+    const codex = this.requireSession(sessionId).provider === "codex";
+    const delivery = await this.terminals.deliverInput(sessionId, data, waitMs, signal, codex);
     if (!delivery.delivered) {
       throw new PromptNotDeliveredError(sessionId, `The ${what} for agent ${sessionId} was not delivered: ${delivery.reason}`);
     }
