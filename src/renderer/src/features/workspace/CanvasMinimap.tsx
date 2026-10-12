@@ -271,12 +271,18 @@ function MinimapViewport({ camera, viewportSize, worldBounds }: {
   const current = useCameraSelector(camera, (value) => value);
   const worldViewport = cameraWorldViewport(current, viewportSize);
   const area = minimapAreaForBounds(worldViewport, worldBounds);
+  const visibleArea = area && {
+    x: Math.max(0, area.x),
+    y: Math.max(0, area.y),
+    width: Math.min(1, area.x + area.width) - Math.max(0, area.x),
+    height: Math.min(1, area.y + area.height) - Math.max(0, area.y)
+  };
   const coversOverview = area !== null && area.x <= 0 && area.y <= 0
     && area.x + area.width >= 1 && area.y + area.height >= 1;
   const edge = minimapEdgePointForBounds(worldViewport, worldBounds);
   return (
     <>
-      {area && <i className="canvas-minimap__viewport" style={areaStyle(area)} />}
+      {visibleArea && <i className="canvas-minimap__viewport" style={areaStyle(visibleArea)} />}
       {coversOverview && <i className="canvas-minimap__viewport canvas-minimap__viewport--covers-overview" />}
       {edge && <i className="canvas-minimap__viewport-edge" style={pointStyle(edge)} />}
     </>

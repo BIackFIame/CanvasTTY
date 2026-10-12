@@ -78,8 +78,8 @@ export function minimapAreaForBounds(
 ): NormalizedMinimapArea | null {
   if (!boundsIntersect(bounds, worldBounds)) return null;
 
-  // The surface clips the original rectangle; clipping its bounds here would
-  // draw a false viewport border along the map edge.
+  // Keep object projections proportional; MinimapViewport separately clamps
+  // the camera frame to the visible map surface.
   return {
     x: (bounds.position.x - worldBounds.position.x) / worldBounds.size.width,
     y: (bounds.position.y - worldBounds.position.y) / worldBounds.size.height,
