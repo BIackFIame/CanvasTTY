@@ -567,6 +567,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       permissionGate: helpers.permissionGate,
       wantsDecisions: (provider) => decisionHooks.wanted(provider),
       decisionBudgetMs: (provider) => decisionHooks.budgetMs(provider),
+      decisionReads: () => decisionHooks.checksReads(),
       claudeHttpHooks: (facts) => claudeHttpHookPolicy.verdict(facts),
       pluginHooks: {
         runner: {

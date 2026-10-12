@@ -12,15 +12,19 @@ import { lexShell, shellQuote, type Segment, type Word } from './shellParse.ts';
  * data (its access tokens, secret stores and control sockets).
  */
 
-/** One tool call, source-neutral: a shell command or the files a file tool writes. */
+/** One tool call, source-neutral: a shell command, the files a file tool writes, or the files a read-only tool reads. */
 export interface ToolAction {
-  kind: 'shell' | 'edit' | null;
+  kind: 'shell' | 'edit' | 'read' | null;
   /** The shell command; null when none could be read. */
   command: string | null;
   /** The command's own working directory, if the agent said one. */
   commandCwd: string | null;
-  /** Paths a file tool writes. */
+  /** Paths a file tool writes, or (`read`) the files and glob patterns a read-only tool reads. */
   paths: string[];
+  /** `read` only: folders a search or listing tool walks (Grep's or Glob's `path`). */
+  searched?: string[];
+  /** `read` only: the call names more paths than are checked; it is refused. */
+  tooMany?: boolean;
 }
 
 export type Where = 'inside' | 'outside' | 'unresolved';
@@ -1139,6 +1143,10 @@ export function analyzeAction(action: ToolAction, root: string, options: { home?
   else if (action.kind === 'edit') {
     acc.writes.push(...action.paths.map(path => resolveTarget(path, cwd, ctx)));
     if (action.paths.some(path => { const text = codePath(path, ctx) ?? path; return privateHit(text, cwd, acc, false, false); })) acc.flags.appPrivate = true;
+  } else if (action.kind === 'read') {
+    // A read-only tool is only checked against CanvasTTY's private data: reading elsewhere is not "outside".
+    const hit = (path: string, recursive: boolean): boolean => { const text = codePath(path, ctx) ?? path; return privateHit(text, cwd, acc, recursive); };
+    if (action.paths.some(path => hit(path, false)) || (action.searched ?? []).some(path => hit(path, true))) acc.flags.appPrivate = true;
   }
   const outside = acc.writes.filter(t => t.where === 'outside' && !t.device && !(t.abs && isAgentServicePath(t.abs, ctx)));
   return {
