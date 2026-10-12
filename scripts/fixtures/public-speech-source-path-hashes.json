@@ -1,0 +1,37 @@
+{
+  "source": "https://github.com/handy-computer/transcribe.cpp/releases/download/v0.2.3/transcribe-native-0.2.3-macos-arm64-metal.tar.gz",
+  "sha256": "1cc5e89d442f55c165a3f90e49090cec75cec349071d834c0aa656161afa9543",
+  "files": {
+    "Contents/Resources/companion/speech/libggml-base.dylib": [
+      "079980bb492b3a2c88682d89ac3c0e29147715b7ac0e752a63b4a623c38a1072",
+      "205a5f8dbb08b4191a2c76591ee173d8603e09153c27c842db9c9e39961f0ad3",
+      "3fb8ac559fb2b5f42f21dc96addf21d39121953efbab63e9aca0947360539edf",
+      "74ab16c52939453c80aee0605f80d5a8b16b7c949a518657365e88a6e0849f25",
+      "8010dd609c8ce23b5acb2f93d285e31112c8430c7dfb419c3aeca4aa478be936",
+      "8afad15c0c35e25ff4ff6143a767a30d769ec06e7930246986b97e75ee719e1f",
+      "abc1e980912bf9f52d321b21c9fbe00971ff132523bf7d6c2fc4c541f1083132",
+      "ce3b81d1d1c2b30d5ce2744c248cbf4e671745b50f2f35f61e6a8e6e9608ee9a",
+      "e90f77e1714c788c5d830c3891d9eb62363fe909994460a2cba15af2f7cbf518"
+    ],
+    "Contents/Resources/companion/speech/libggml-cpu.dylib": [
+      "6da1e9805b8ff1961910e72a961ba6c9b5b4879fcc8f74d16ef05cb83725f103",
+      "adfc5cb091dd904a0d0b21c20132160e99cea0f4af4f18f8761059969de47f8c",
+      "6f7192af94486557e4c6a8aa3805489a1f5ffe77f68057316365ccaadf436f4a",
+      "91b19e06b4f573d1423617ae97e2d60d1258e06efe27a4f9035ae97d12247abb",
+      "9d00488a353522963864efd6d79466dbb752ebcea3edbd91592028d0b7d59790",
+      "ca415da52f3a95b953f3d69e41a5e6d1590a684090b6a9e131f1a988d147265a",
+      "f1a8fc96ad5c217ad1144f3bf72944fa205abdaeb5e45effe5e56f1f41dc9b4c"
+    ],
+    "Contents/Resources/companion/speech/libggml-metal.dylib": [
+      "64068d18771c2a4f560610b761ad97a21933113dd226c1991cfa672adb197721",
+      "9062c67e3b330735e54a72f2b2a92f3bc99e8307032db34ac1dd189fba24a2a5",
+      "a1f74b1dc11db84017250efa601043399d0345751a99382b18921e3a3a8b4c21",
+      "aa158335a6c706e1e06feab76ba3480ab20fe6767c18e2bc3f6811c51d87886f",
+      "b41e3d201e535cb775fd1216ca91a3b3f6380d26772535ef7ba3b6b4784ab8f5",
+      "e16592ce309f726e493df9ca1e705d7574c3ce7ed08be21c260bf2e453ba65a5"
+    ],
+    "Contents/Resources/companion/speech/libggml.dylib": [
+      "9ef6e581c6958385e10f7e118f15a21744df7be9d71147b778e8db9680a634c9"
+    ]
+  }
+}

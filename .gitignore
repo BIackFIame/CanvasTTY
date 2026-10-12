@@ -30,6 +30,7 @@ __pycache__/
 *.pyc
 /.mascot-venv/
 settings.json
+.pty-results/
 
 # Local agent and planning context — never publish
 .agents/
