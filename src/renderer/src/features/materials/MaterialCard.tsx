@@ -260,7 +260,6 @@ export function MaterialCard({
               onClick={() => remarkActions.send(material.id)}
             >
               <UiIcon name="send" size="1.1em" />
-              <span>{openRemarks}</span>
             </button>
           )}
           {remarkDrawable(material) && (

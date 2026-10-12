@@ -179,16 +179,16 @@ export function HandoffDialog({
           }
         }}>
         <header className="handoff-dialog__header">
-          <span className="handoff-dialog__icon"><UiIcon name="send" size={22} /></span>
+          <span className="handoff-dialog__icon"><UiIcon name="send" size="1.7em" /></span>
           <h2 id="handoff-dialog-title">{t(locale, "handoffDialogTitle")}</h2>
           <button className="handoff-dialog__close" type="button" onClick={onClose} disabled={sending} aria-label={t(locale, "close")}>
-            <UiIcon name="close" size={18} />
+            <UiIcon name="close" size="1.4em" />
           </button>
         </header>
         {sent ? (
           <HandoffOutcome locale={locale} handoff={sent} recipient={recipient} onClose={onClose} onFocusSession={onFocusSession} />
         ) : (
-          <div className="handoff-dialog__body">
+          <div className="handoff-dialog__body" data-canvas-wheel-priority="local" data-wheel-owner="local">
             <div className="handoff-dialog__form" data-canvas-wheel-priority="local">
               <h3>{t(locale, "handoffRecipient")}</h3>
               {agents.length === 0 ? (
@@ -292,15 +292,19 @@ export function HandoffDialog({
               {sendFailure && (
                 <p className="handoff-dialog__error" role="alert"><UiIcon name="error" size={15} />{t(locale, handoffReasonKey(sendFailure.reason))}</p>
               )}
-              <p className="handoff-dialog__honest">{t(locale, "handoffHonesty")}</p>
-              <div className="handoff-dialog__actions">
-                <button type="button" onClick={onClose} disabled={sending}>{t(locale, "cancel")}</button>
-                <button type="button" className="handoff-dialog__send" disabled={!preview || !draft || previewDraft === null || handoffDraftKey(previewDraft) !== draftKey || sending} onClick={() => void send()}>
-                  <UiIcon name="send" size={17} />{t(locale, sending ? "handoffSending" : "handoffSend")}
-                </button>
-              </div>
             </div>
           </div>
+        )}
+        {!sent && (
+          <footer className="handoff-dialog__footer">
+            <p className="handoff-dialog__honest">{t(locale, "handoffHonesty")}</p>
+            <div className="handoff-dialog__actions">
+              <button type="button" onClick={onClose} disabled={sending}>{t(locale, "cancel")}</button>
+              <button type="button" className="handoff-dialog__send" disabled={!preview || !draft || previewDraft === null || handoffDraftKey(previewDraft) !== draftKey || sending} onClick={() => void send()}>
+                <UiIcon name="send" size="1.3em" />{t(locale, sending ? "handoffSending" : "handoffSend")}
+              </button>
+            </div>
+          </footer>
         )}
       </section>
     </div>
@@ -324,32 +328,36 @@ function HandoffOutcome({
   const tone = delivery.state === "failed" ? "error" : delivery.state === "pasted" ? "warn" : "ok";
   const time = (value: number | null): string => value === null ? "" : new Date(value).toLocaleTimeString(locale, { hour: "2-digit", minute: "2-digit" });
   return (
-    <div className={`handoff-outcome handoff-outcome--${tone}`}>
-      <strong>{t(locale, deliveryKey(delivery))}</strong>
-      <p>{`${t(locale, "handoffTitle")} #${handoff.number} → ${PROVIDERS[handoff.provider]?.label ?? handoff.provider} · ${handoff.sessionTitle}`}</p>
-      {delivery.imagesExpected > 0 && (
-        <p>{handoffAttachesImages(handoff.provider)
-          ? `${t(locale, "handoffImagesAttached")}: ${delivery.imagesAttached} / ${delivery.imagesExpected}`
-          : `${t(locale, "handoffImagePaths")} ${delivery.imagesExpected}`}</p>
-      )}
-      {delivery.turnStartedAt !== null && <p>{`${t(locale, "deliveryTurnStarted")} · ${time(delivery.turnStartedAt)}`}</p>}
-      {delivery.turnEndedAt !== null && <p>{`${t(locale, "deliveryTurnEnded")} · ${time(delivery.turnEndedAt)}`}</p>}
-      {delivery.state === "pasted" && (
-        <p>{t(locale, pasteNoteKey(delivery.note, recipient !== null && (recipient.exitCode !== null || recipient.status === "done" || recipient.status === "failed")))}</p>
-      )}
-      {delivery.stateSaved === false && <p>{t(locale, "handoffStateNotSaved")}</p>}
-      {delivery.error && delivery.state === "failed" && <p>{delivery.error}</p>}
-      <p className="handoff-dialog__honest">{t(locale, "handoffHonesty")}</p>
-      <div className="handoff-dialog__actions">
-        {recipient && (
-          <button type="button" onClick={() => {
-            onFocusSession(recipient);
-            onClose();
-          }}><UiIcon name="terminal" size={17} />{t(locale, "handoffOpenTerminal")}</button>
+    <>
+      <div className={`handoff-outcome handoff-outcome--${tone}`} data-canvas-wheel-priority="local" data-wheel-owner="local">
+        <strong>{t(locale, deliveryKey(delivery))}</strong>
+        <p>{`${t(locale, "handoffTitle")} #${handoff.number} → ${PROVIDERS[handoff.provider]?.label ?? handoff.provider} · ${handoff.sessionTitle}`}</p>
+        {delivery.imagesExpected > 0 && (
+          <p>{handoffAttachesImages(handoff.provider)
+            ? `${t(locale, "handoffImagesAttached")}: ${delivery.imagesAttached} / ${delivery.imagesExpected}`
+            : `${t(locale, "handoffImagePaths")} ${delivery.imagesExpected}`}</p>
         )}
-        <button type="button" className="handoff-dialog__send" onClick={onClose}>{t(locale, "close")}</button>
+        {delivery.turnStartedAt !== null && <p>{`${t(locale, "deliveryTurnStarted")} · ${time(delivery.turnStartedAt)}`}</p>}
+        {delivery.turnEndedAt !== null && <p>{`${t(locale, "deliveryTurnEnded")} · ${time(delivery.turnEndedAt)}`}</p>}
+        {delivery.state === "pasted" && (
+          <p>{t(locale, pasteNoteKey(delivery.note, recipient !== null && (recipient.exitCode !== null || recipient.status === "done" || recipient.status === "failed")))}</p>
+        )}
+        {delivery.stateSaved === false && <p>{t(locale, "handoffStateNotSaved")}</p>}
+        {delivery.error && delivery.state === "failed" && <p>{delivery.error}</p>}
       </div>
-    </div>
+      <footer className="handoff-dialog__footer">
+        <p className="handoff-dialog__honest">{t(locale, "handoffHonesty")}</p>
+        <div className="handoff-dialog__actions">
+          {recipient && (
+            <button type="button" onClick={() => {
+              onFocusSession(recipient);
+              onClose();
+            }}><UiIcon name="terminal" size="1.3em" />{t(locale, "handoffOpenTerminal")}</button>
+          )}
+          <button type="button" className="handoff-dialog__send" onClick={onClose}>{t(locale, "close")}</button>
+        </div>
+      </footer>
+    </>
   );
 }
 
