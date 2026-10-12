@@ -54,6 +54,18 @@ export interface PlacedProject {
 export interface IsolationPaths {
   /** Writable folders (subpaths), every spelling. */
   writable: string[];
+  /**
+   * Read-only as a whole although a writable folder holds it: CanvasTTY's own data folder when the project contains it
+   * (a project at HOME). Its settings and the plugins it runs are not the agent's to change; the writable folders above
+   * that sit inside it (an account home, this launch's own folders) stay writable.
+   */
+  readOnlyFolders: string[];
+  /**
+   * The folders between a writable folder and a read-only folder inside it (`~/.config` for `~/.config/canvastty` in a
+   * project at HOME): what is inside stays writable, but they cannot be renamed or replaced, which would move the
+   * read-only folder out of its protected path and let a different one take its place.
+   */
+  fixedFolders: string[];
   /** Writable single files (with their `.lock` / `.tmp` / backup siblings). */
   writableFiles: string[];
   /** Folders that may be created (empty) on the way to a writable one: `~/.local/state` for `~/.local/state/opencode`. */
@@ -294,13 +306,20 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     join(input.userDataPath, "lifecycle", "runtime"),
     join(input.userDataPath, "orchestration", "runtime")
   ];
+  const writable = all([
+    ...(input.readOnlyProject ? [] : [project]),
+    input.sessionTemp,
+    ...ownFolders,
+    join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
+  ]);
+  const userData = pathSpellings(input.userDataPath);
+  const readOnlyFolders = writable.some((folder) => userData.some((path) => isWithin(path, folder))) ? userData : [];
+  const fixedFolders = readOnlyFolders.flatMap((path) => writable.filter((folder) => folder !== path && isWithin(path, folder))
+    .flatMap((folder) => ancestorsBelow(folder, path)));
   return {
-    writable: all([
-      ...(input.readOnlyProject ? [] : [project]),
-      input.sessionTemp,
-      ...ownFolders,
-      join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
-    ]),
+    writable,
+    readOnlyFolders,
+    fixedFolders: [...new Set(fixedFolders)],
     writableFiles: all(own.files),
     creatableFolders: all([...ownFolders, join(home, ".npm"), join(home, ".bun")].flatMap((folder) => ancestorsBelow(home, folder))),
     protectedWrites: all([
