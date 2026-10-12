@@ -64,8 +64,14 @@ export function seatbeltProfile(paths: IsolationPaths): string {
     lines.push(`(deny file-write*${hookRules.map((pattern) => ` (regex ${regex(pattern)})`).join("")})`);
     lines.push(`(allow file-write*${hookRules.map((pattern) => ` (regex ${regex(`${pattern}[^/]+\\.sample$`)})`).join("")})`);
   }
+  // Also what git reads its config and paths from, existing or not: `commondir`, `config.worktree` and the linked
+  // worktrees' records (`worktrees/`). Objects, refs, the index, logs and HEAD stay writable: add, commit, checkout work.
   if (paths.projectRoots.length > 0) {
-    lines.push(`(deny file-write*${paths.projectRoots.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/(.*/)?\\.git/info/attributes$`)})`).join("")})`);
+    const files = "(info/attributes|commondir|config\\.worktree(\\.lock)?|worktrees(/.*)?)";
+    lines.push(`(deny file-write*${paths.projectRoots.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/(.*/)?\\.git/${files}$`)})`).join("")})`);
+    // These rules match by path: a `.git`, `hooks` or `info` folder renamed away and back would carry changes past
+    // them. They cannot be renamed or removed; entries inside them can still be created where allowed.
+    lines.push(`(deny file-write-unlink${paths.projectRoots.map((path) => ` (regex ${regex(`^${escapeRegex(path)}/(.*/)?\\.git(/hooks|/info)?$`)})`).join("")})`);
   }
   const protectedPaths = [...paths.protectedWrites, ...(paths.protectedDirectories ?? [])];
   if (protectedPaths.length > 0) {
