@@ -467,9 +467,9 @@ test('Collector: byte budget resumes backlog, overlapping calls do not duplicate
   const results = await Promise.all([concurrent.collect(NOW), concurrent.collect(NOW), concurrent.collect(NOW)]);
   assert.deepEqual(results.flatMap((r) => r.events.map((e) => e.id)), reference);
 
+  const locked = rollout(home, randomUUID());
+  await write(locked, [codexMeta('locked', start), ...lineage(start, [[5, 0, 1]])]);
   if (process.platform !== 'win32' && process.getuid?.() !== 0) {
-    const locked = rollout(home, randomUUID());
-    await write(locked, [codexMeta('locked', start), ...lineage(start, [[5, 0, 1]])]);
     await chmod(locked, 0);
     const blocked = await concurrent.collect(NOW);
     assert.deepEqual(blocked.events, []);
