@@ -15,6 +15,7 @@ import type {
   CustomTerminalBorderSkinId,
   CreateSessionRequest,
   FileRootReference,
+  HandoffDraft,
   MaterialsSnapshot,
 
   PluginBrowserOpenRequest,
@@ -31,6 +32,8 @@ import type {
   PixelSkinZipInstallRequest,
   PixelSkinSlot,
   PixelTerminalBorderSkinId,
+  RemarkDraft,
+  RemarkPatch,
   UpdateStatus,
   SessionBounds,
   SessionEvent,
@@ -147,9 +150,12 @@ const api: CanvasTTYApi = {
     reveal: (id: string) => ipcRenderer.invoke(IPC.materialsReveal, id),
     relink: (id: string) => ipcRenderer.invoke(IPC.materialsRelink, id),
     acceptMove: (id: string) => ipcRenderer.invoke(IPC.materialsAcceptMove, id),
-    addRemark: (draft: unknown) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
-    updateRemark: (id: string, patch: unknown) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
+    addRemark: (draft: RemarkDraft) => ipcRenderer.invoke(IPC.materialsAddRemark, draft),
+    updateRemark: (id: string, patch: RemarkPatch) => ipcRenderer.invoke(IPC.materialsUpdateRemark, id, patch),
     deleteRemark: (id: string) => ipcRenderer.invoke(IPC.materialsDeleteRemark, id),
+    previewHandoff: (draft: HandoffDraft) => ipcRenderer.invoke(IPC.materialsPreviewHandoff, draft),
+    sendHandoff: (draft: HandoffDraft) => ipcRenderer.invoke(IPC.materialsSendHandoff, draft),
+    pickResultsFolder: (sessionId: string) => ipcRenderer.invoke(IPC.materialsPickResultsFolder, sessionId),
     onChanged: (listener: (snapshot: MaterialsSnapshot) => void) => subscribe(IPC.materialsChanged, listener)
 
   },
