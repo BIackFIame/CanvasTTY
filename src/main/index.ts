@@ -692,7 +692,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const managedTerminals = terminalManager;
   const agentControlService = new AgentControlService(managedTerminals, {
     limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
-    containment: () => managedTerminals.containment()
+    containment: () => managedTerminals.containment(),
+    userDataPath
   });
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),

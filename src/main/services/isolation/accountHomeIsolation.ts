@@ -6,9 +6,11 @@ import { PLUGIN_DATA_FOLDER, providerHomeVariables } from "./isolationPaths.ts";
 
 /**
  * The CLI home a launch contributor handed this launch inside its own data folder: the value of the provider's own
- * home variable (CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, …) when it is an exact absolute path strictly below the
- * contributor's data folder. `dataDir` comes from the host's contributor record, never from the plugin's answer, so a
- * plugin can only point at a folder of its own data, and only the one the CLI is actually started with.
+ * home variable (providerHomeVariables: CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, HERMES_HOME, KIMI_CODE_HOME,
+ * KIMI_SHARE_DIR, KIMI_HOME, OPENCODE_CONFIG_DIR, QWEN_HOME; never HOME or XDG_*) when it is an exact absolute path strictly below the
+ * contributor's data folder (a trailing separator is dropped: `homes/a/` is `homes/a`). `dataDir` comes from the
+ * host's contributor record, never from the plugin's answer, so a plugin can only point at a folder of its own data,
+ * and only the one the CLI is actually started with.
  */
 export function contributedAccountHome(
   provider: ProviderId,
@@ -17,7 +19,6 @@ export function contributedAccountHome(
   value: string
 ): string | undefined {
   if (!dataDir || !isAbsolute(dataDir) || !providerHomeVariables(provider).includes(key)) return undefined;
-  // A trailing separator is dropped: `homes/a/` names the same folder as `homes/a`.
   const folder = withoutTrailingSeparator(value);
   if (!isAbsolute(folder) || resolve(folder) !== folder) return undefined;
   return segmentsBelow(resolve(dataDir), folder) ? folder : undefined;

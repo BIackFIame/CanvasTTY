@@ -191,20 +191,22 @@ test("AgentIsolation.wrap reopens only a real folder inside one plugin's data, n
   }
 });
 
-test("a project inside plugin data is reopened exactly; all of plugin data or a whole plugin's data is never a project", async (t) => {
+test("a project inside plugin data that CanvasTTY placed there is reopened exactly; all of plugin data or a whole plugin's data is never a project", async (t) => {
   const f = await fixture(t);
   const worktree = join(f.otherData, "worktrees", "one");
   const sibling = join(f.otherData, "worktrees", "two");
   await Promise.all([worktree, sibling].map((path) => mkdir(path, { recursive: true })));
   const base = { provider: "codex", sessionTemp: join(f.temp, "s"), userDataPath: f.userData, sessionId: "s", env: { HOME: f.home } };
-  const paths = isolationPaths({ ...base, cwd: worktree });
+  // An environment of the plugin that owns the folder placed the launch there (TerminalManager.placedProjects).
+  const placed = { placedProjects: [{ folder: worktree, pluginId: OTHER }] };
+  const paths = isolationPaths({ ...base, cwd: worktree, ...placed });
   assert.ok(paths.unreadable.includes(f.pluginData));
   assert.deepEqual(paths.readableAgain.filter((path) => path.startsWith(f.pluginData)), [worktree]);
   assert.ok(paths.writable.includes(worktree));
-  const plan = isolationPaths({ ...base, cwd: worktree, readOnlyProject: true });
+  const plan = isolationPaths({ ...base, cwd: worktree, readOnlyProject: true, ...placed });
   assert.ok(plan.readableAgain.includes(worktree) && !plan.writable.includes(worktree), "plan keeps it read-only");
   for (const cwd of [f.pluginData, f.otherData]) {
-    assert.throws(() => isolationPaths({ ...base, cwd }), /private plugin data/u, cwd);
+    assert.throws(() => isolationPaths({ ...base, cwd, placedProjects: [{ folder: cwd }] }), /private plugin data/u, cwd);
   }
 });
 
