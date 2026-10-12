@@ -42,6 +42,7 @@ import {
   type ProviderCliRegistry
 } from "./services/providerCliRegistry";
 import { PluginManager } from "./services/PluginManager";
+import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
@@ -176,6 +177,7 @@ let agentControl: AgentControlGateway | null = null;
 let limitsService: LimitsService | null = null;
 let usageHistory: UsageHistoryService | null = null;
 let pluginManager: PluginManager | null = null;
+let mascotManager: MascotManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
 let pluginCards: PluginCards | null = null;
@@ -795,6 +797,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   await usageHistory.load();
   usageHistory.start();
   await Promise.all([browserReady, storesLoaded]);
+  mascotManager = new MascotManager(
+    userDataPath,
+    app.isPackaged ? join(process.resourcesPath, "mascot-pipeline") : join(app.getAppPath(), "assets", "mascot-pipeline"),
+    pluginManager,
+    (projects) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(IPC.mascotsChanged, projects); },
+    (pluginId, contributionId) => requestPluginCanvas({ pluginId, contributionId })
+  );
+  await mascotManager.initialize();
   pluginManager.registerTokenProvider(() => githubAuth!.getToken());
   protocol.handle("canvastty-media", (request) => pluginMediaService!.protocolResponse(request));
   // Session roots resolve a sessionId to the terminal's current working
@@ -830,6 +840,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     getMainWindow: () => mainWindow
   });
   registerIpc(ipc, {
+    mascots: mascotManager,
     settings,
     recheckProviderClis: async () => {
       providerClis!.refresh();
@@ -1264,6 +1275,7 @@ void IPC.terminalData;
 
 async function shutdownServices(): Promise<void> {
   diagnostics.record("info", "application", "shutdown.started");
+  mascotManager?.dispose();
   agentChatHistory?.dispose();
   if (agentControl) await Promise.allSettled([agentControl.close()]);
   if (updateTimer) clearTimeout(updateTimer);
