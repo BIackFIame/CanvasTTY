@@ -22,8 +22,7 @@ export interface NormalizedMinimapArea extends NormalizedMinimapPoint {
 }
 
 /**
- * Fit the occupied workspace with one scale for both axes. Camera pan and zoom
- * never enter this calculation, so only layout changes can rescale the overview.
+ * Fit all supplied bounds with one scale for both axes and a padded perimeter.
  */
 export function minimapWorldBounds(content: readonly SessionBounds[]): SessionBounds {
   const contentBounds = boundsUnion(content) ?? {
@@ -78,8 +77,7 @@ export function minimapAreaForBounds(
 ): NormalizedMinimapArea | null {
   if (!boundsIntersect(bounds, worldBounds)) return null;
 
-  // Keep object projections proportional; MinimapViewport separately clamps
-  // the camera frame to the visible map surface.
+  // Keep projections proportional; the overview includes the camera viewport.
   return {
     x: (bounds.position.x - worldBounds.position.x) / worldBounds.size.width,
     y: (bounds.position.y - worldBounds.position.y) / worldBounds.size.height,

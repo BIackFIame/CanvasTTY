@@ -21,7 +21,6 @@ import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
   minimapAreaForBounds,
-  minimapEdgePointForBounds,
   MINIMAP_SURFACE_SIZE,
   minimapWorldBounds,
   minimapWorldPoint
@@ -48,6 +47,7 @@ interface MinimapDragState {
   pointerId: number;
   startClient: { x: number; y: number };
   startCamera: CameraState;
+  worldBounds: SessionBounds;
   moved: boolean;
 }
 
@@ -80,6 +80,11 @@ function CanvasMinimapView({
   const surface = useRef<HTMLSpanElement>(null);
   const dragState = useRef<MinimapDragState | null>(null);
   const [viewportSize, setViewportSize] = useState<Size>({ width: 1, height: 1 });
+  const currentCamera = useCameraSelector(camera, (value) => value);
+  const worldViewport = useMemo(
+    () => cameraWorldViewport(currentCamera, viewportSize),
+    [currentCamera, viewportSize]
+  );
 
   useEffect(() => {
     const element = viewport.current;
@@ -113,13 +118,14 @@ function CanvasMinimapView({
     [layerOrder]
   );
   const worldBounds = useMemo(
-    () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds)]),
-    [canvasRegions, entities, homeBounds]
+    () => minimapWorldBounds([homeBounds, ...canvasRegions, ...entities.map((entity) => entity.bounds), worldViewport]),
+    [canvasRegions, entities, homeBounds, worldViewport]
   );
   const homeArea = useMemo(
     () => minimapAreaForBounds(homeBounds, worldBounds),
     [homeBounds, worldBounds]
   );
+  const viewportArea = minimapAreaForBounds(worldViewport, worldBounds);
 
   const navigate = (clientX: number, clientY: number): void => {
     const element = surface.current;
@@ -157,7 +163,7 @@ function CanvasMinimapView({
       state.startCamera,
       pointerDelta,
       { width: bounds.width, height: bounds.height },
-      worldBounds
+      state.worldBounds
     );
     if (!next) return;
     onCameraChange(next);
@@ -181,6 +187,7 @@ function CanvasMinimapView({
             pointerId: event.pointerId,
             startClient: { x: event.clientX, y: event.clientY },
             startCamera: camera.get(),
+            worldBounds,
             moved: false
           };
         } else {
@@ -256,41 +263,10 @@ function CanvasMinimapView({
             );
           })}
         </span>
-        <MinimapViewport camera={camera} viewportSize={viewportSize} worldBounds={worldBounds} />
+        {viewportArea && <i className="canvas-minimap__viewport" style={areaStyle(viewportArea)} />}
       </span>
     </button>
   );
-}
-
-// Only this layer subscribes to pan/zoom; the workspace rectangles and icons do not render per camera event.
-function MinimapViewport({ camera, viewportSize, worldBounds }: {
-  camera: CameraStore;
-  viewportSize: Size;
-  worldBounds: SessionBounds;
-}): React.JSX.Element {
-  const current = useCameraSelector(camera, (value) => value);
-  const worldViewport = cameraWorldViewport(current, viewportSize);
-  const area = minimapAreaForBounds(worldViewport, worldBounds);
-  const visibleArea = area && {
-    x: Math.max(0, area.x),
-    y: Math.max(0, area.y),
-    width: Math.min(1, area.x + area.width) - Math.max(0, area.x),
-    height: Math.min(1, area.y + area.height) - Math.max(0, area.y)
-  };
-  const coversOverview = area !== null && area.x <= 0 && area.y <= 0
-    && area.x + area.width >= 1 && area.y + area.height >= 1;
-  const edge = minimapEdgePointForBounds(worldViewport, worldBounds);
-  return (
-    <>
-      {visibleArea && <i className="canvas-minimap__viewport" style={areaStyle(visibleArea)} />}
-      {coversOverview && <i className="canvas-minimap__viewport canvas-minimap__viewport--covers-overview" />}
-      {edge && <i className="canvas-minimap__viewport-edge" style={pointStyle(edge)} />}
-    </>
-  );
-}
-
-function pointStyle(point: { x: number; y: number }): CSSProperties {
-  return { left: `${point.x * 100}%`, top: `${point.y * 100}%` };
 }
 
 function areaStyle(area: { x: number; y: number; width: number; height: number }): CSSProperties {
