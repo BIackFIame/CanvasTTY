@@ -8,7 +8,7 @@ import { ScopedOrchestrationHandler } from "../src/main/services/agent-browser/O
 import { LaunchPipeline, modelSettingArgument } from "../src/main/services/LaunchPipeline.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
-import { availableRegistry, fakeSpawner } from "./helpers/terminal.mjs";
+import { availableRegistry, inputReadySpawner } from "./helpers/terminal.mjs";
 
 // A subagent spawned without launch options once ran on its CLI's own default model (for OpenCode the hosted OpenCode
 // Zen model), while its orchestrator ran on a model the person picked through a plugin (a model account). It now keeps
@@ -22,18 +22,6 @@ const EXTRAS = "example-extras";
 const OTHER = "example-other-models";
 const BARE = "example-no-fields";
 
-/** Automated Codex prompts wait for Codex's empty task composer: a Codex card's fake PTY draws one once it starts. */
-function composerSpawner(calls) {
-  const spawn = fakeSpawner(calls);
-  return (command, args, options) => {
-    const process = spawn(command, args, options);
-    if (/(?:^|\/)codex$/u.test(command)) {
-      setTimeout(() => process.emitData("\x1b[2J\x1b[H>_ OpenAI Codex\r\n\r\n› \x1b[2mAsk Codex to do anything\x1b[22m\r\n"), 10);
-    }
-    return process;
-  };
-}
-
 async function setup(t, { delegable = true, extrasDelegable = false, store } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ctty-sub-account-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -41,7 +29,7 @@ async function setup(t, { delegable = true, extrasDelegable = false, store } = {
   const prepared = [];
   // What the person can change while the orchestrator runs: turn a plugin off, or a plugin update changes its fields.
   const state = { gone: new Set(), extrasFields: [{ key: "flavor", label: "Flavor", kind: "text" }] };
-  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, composerSpawner(calls));
+  const terminals = new TerminalManager(() => undefined, availableRegistry(), undefined, undefined, true, inputReadySpawner(calls));
   t.after(() => store ? terminals.shutdown() : terminals.disposeAll());
   terminals.configureLaunchPipeline(new LaunchPipeline({
     contributors: () => [

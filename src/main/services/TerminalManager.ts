@@ -172,6 +172,17 @@ interface ManagedSession {
   hookSignals?: number;
   /** Set after the person answered a hooked Claude prompt; see settleAnsweredPrompt. */
   answeredPromptTimer?: ReturnType<typeof setTimeout>;
+  /** The last deliverInput of this card: the next one waits for it, so sends arrive in order. */
+  inputQueue?: Promise<InputDelivery>;
+  /** This launch's CLI turned its text cursor on in its full-screen view: its input field is up (watchInputReadiness). */
+  inputReady?: boolean;
+  /** While watching for inputReady: this launch's CLI is on its alternate (full-screen) buffer. */
+  alternateScreen?: boolean;
+  /** While watching for inputReady: an escape sequence cut off at the end of the last output chunk. */
+  readinessCarry?: string;
+  /** When this launch's first lifecycle hook stops waiting for inputReady (INPUT_READY_HOOK_GRACE_MS after it). */
+  hookReadyAt?: number;
+  hookReadyTimer?: ReturnType<typeof setTimeout>;
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
@@ -211,6 +222,30 @@ export const PTY_EXIT_WAIT_MS = 2_000;
 export const PTY_KILL_WAIT_MS = 1_000;
 /** Longer than every plugin step of a launch together (prepare, resume, launch options, wrap). */
 export const LAUNCH_INPUT_WAIT_MS = 60_000;
+
+/**
+ * CLIs that drop what is typed before their input field is up. OpenCode's full-screen view throws away every key that
+ * arrives while it starts (a few seconds), so a first prompt typed when the PTY exists is lost and the agent waits at
+ * an empty prompt. Its readiness is structured: a lifecycle hook, or the terminal control sequence that shows its text
+ * cursor on the alternate screen once its prompt has focus (never the human-readable screen text).
+ */
+const WAITS_FOR_INPUT_READY: ReadonlySet<ProviderId> = new Set<ProviderId>(["opencode"]);
+
+/**
+ * Whether input for this CLI waits for its input field. Only on macOS and Linux: Windows' pseudo console (ConPTY,
+ * winpty) may not pass the alternate-screen and cursor sequences through, so there the gate could never open, and
+ * input is typed as soon as the PTY exists, as before.
+ */
+function waitsForInputReady(provider: ProviderId): boolean {
+  return (process.platform === "darwin" || process.platform === "linux") && WAITS_FOR_INPUT_READY.has(provider);
+}
+
+/**
+ * A lifecycle hook alone is not proof that the input field is up: OpenCode's plugin reports (for a resumed session,
+ * idle on session.updated) about 0.6 s before typed keys reach its prompt. The cursor signal decides; a hook counts
+ * only this long after the launch's first one, for a CLI whose cursor sequence never arrives.
+ */
+export const INPUT_READY_HOOK_GRACE_MS = 2_000;
 
 /** What happened to input handed to deliverInput. */
 export type InputDelivery = { delivered: true } | { delivered: false; reason: string };
@@ -924,18 +959,42 @@ export class TerminalManager {
    * The one delivery rule for text another agent, a plugin or a controller sends to a card (spawn_agent's first
    * prompt, send_to_agent, plugin sessions.send). A running card gets it at once. A card whose launch plugins are
    * still preparing (launch options, a launch policy, an environment) or that waits for its grid gets it exactly
-   * once, when that launch has started. A launch that is refused, fails, is cancelled or superseded (closed,
-   * restarted), or does not start within LAUNCH_INPUT_WAIT_MS delivers nothing, says why, and drops the text:
-   * it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing either.
-   * Automated Codex prompts additionally wait for an empty task composer in this launch; a PTY alone is not ready.
+   * once, when that launch has started. A CLI that drops keys typed while it starts (WAITS_FOR_INPUT_READY) gets it
+   * only once its input field is up; automated Codex prompts (`waitForCodexComposer`) wait for an empty task composer
+   * in this launch, since a PTY alone is not ready. A launch that is refused, fails, is cancelled or superseded
+   * (closed, restarted), or does not start or become ready within `waitMs` delivers nothing, says why, and drops the
+   * text: it never reaches a later launch of the card. An aborted `signal` (the sender cancelled) delivers nothing
+   * either. Sends to one card are delivered in the order they were made; the wait of each counts from its own call.
    */
-  async deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal, waitForCodexComposer = false): Promise<InputDelivery> {
-    const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
-    if (signal?.aborted) return canceled;
+  deliverInput(id: string, data: string, waitMs = LAUNCH_INPUT_WAIT_MS, signal?: AbortSignal, waitForCodexComposer = false): Promise<InputDelivery> {
     const session = this.sessions.get(id);
-    if (!session) return { delivered: false, reason: "The session does not exist." };
+    if (!session) return Promise.resolve({ delivered: false, reason: "The session does not exist." });
+    // The launch this call was made for: a send queued behind another never reaches a later launch either.
     const epoch = session.launchEpoch;
     const deadline = Date.now() + waitMs;
+    const previous = session.inputQueue;
+    const run = (): Promise<InputDelivery> =>
+      this.deliverQueuedInput(id, session, epoch, data, waitMs, deadline, signal, waitForCodexComposer);
+    const pending = previous ? previous.then(run, run) : run();
+    session.inputQueue = pending;
+    void pending.finally(() => { if (session.inputQueue === pending) delete session.inputQueue; }).catch(() => undefined);
+    if (!signal || !previous) return pending;
+    // A send cancelled while it waits behind another settles at once; its turn in the queue then types nothing.
+    const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
+    if (signal.aborted) return Promise.resolve(canceled);
+    return new Promise<InputDelivery>((resolve) => {
+      const abort = (): void => resolve(canceled);
+      signal.addEventListener("abort", abort, { once: true });
+      void pending.then(resolve, () => resolve(canceled)).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+
+  private async deliverQueuedInput(
+    id: string, session: ManagedSession, epoch: number, data: string, waitMs: number, deadline: number,
+    signal?: AbortSignal, waitForCodexComposer = false
+  ): Promise<InputDelivery> {
+    const canceled: InputDelivery = { delivered: false, reason: "The delivery was cancelled." };
+    if (signal?.aborted) return canceled;
     const launchOutput = (): TerminalBufferSnapshot => {
       const snapshot = this.readBuffer(id);
       const start = snapshot.outputOffset - snapshot.buffer.length;
@@ -944,31 +1003,44 @@ export class TerminalManager {
     // Build the screen only after this launch has a PTY: a pending restart
     // still has its previous process's scrollback until bindProcess records the new offset.
     let screen: SessionScreen | null = null;
-    let inputReady = !waitForCodexComposer || session.codexDraftEpoch === epoch;
+    // Per call, unlike session.inputReady (OpenCode's cursor signal): checked when this send's turn in the queue
+    // comes, so an automation draft extended by the send before it counts.
+    let codexComposerSeen = !waitForCodexComposer || session.codexDraftEpoch === epoch;
+    // What the text still waits for: the launch to start, or (once its PTY exists) the CLI's input field.
+    const awaiting = (): "launch" | "input" | null => {
+      if (this.sessions.get(id) !== session || session.launchEpoch !== epoch || session.metadata.exitCode !== null) return null;
+      if (!session.process) return "launch";
+      return cliAcceptsInput(session) && codexComposerSeen ? null : "input";
+    };
     try {
-      const waiting = (): boolean => this.sessions.get(id) === session && session.launchEpoch === epoch
-        && session.metadata.exitCode === null && (!session.process || !inputReady);
-      while (waiting() && !signal?.aborted) {
-        if (session.process && !inputReady) {
+      for (let stage = awaiting(); stage && !signal?.aborted; stage = awaiting()) {
+        const composerPending = stage === "input" && !codexComposerSeen;
+        if (composerPending) {
           screen ??= new SessionScreen({ geometry: (id) => this.geometry(id), readBuffer: launchOutput }, id);
           const snapshot = launchOutput();
           screen.feed({ id, data: snapshot.buffer, outputOffset: snapshot.outputOffset });
           if (await screen.inspect((terminal) => codexComposerReady(
             terminalScreenText(terminal, true), codexPlaceholderIsDim(terminal), codexContinuationIsEmpty(terminal)))) {
-            inputReady = true;
-            break;
+            codexComposerSeen = true;
+            continue;
           }
         }
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
-          if (session.process && !inputReady) return { delivered: false, reason: `Codex did not become ready for input within ${Math.round(waitMs / 1000)} s.` };
-          return { delivered: false, reason: `The session did not start within ${Math.round(waitMs / 1000)} s.` };
+          // A caller that does not wait (0) is told the state, not a wait it never made.
+          const within = waitMs <= 0 ? "yet" : waitMs >= 1_000 ? `within ${Math.round(waitMs / 1_000)} s` : `within ${waitMs} ms`;
+          return { delivered: false, reason: stage === "launch"
+            ? `The session did not start ${within}.`
+            : composerPending
+              ? `Codex did not become ready for input ${within}.`
+              : `The agent's CLI did not show its input field ${within}; nothing was typed. Look at the card, then send the prompt again.` };
         }
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(wake, session.process && !inputReady ? Math.min(100, remaining) : remaining);
+          // Codex draws its composer without a structured signal: its screen is polled while the deadline runs.
+          const timer = setTimeout(wake, composerPending ? Math.min(100, remaining) : remaining);
           function wake(): void {
             clearTimeout(timer);
-            session!.launchWaiters.delete(wake);
+            session.launchWaiters.delete(wake);
             signal?.removeEventListener("abort", wake);
             resolve();
           }
@@ -1081,7 +1153,19 @@ export class TerminalManager {
   applyProviderSignal(id: string, signal: ProviderLifecycleSignal, source: "hook" | "title" = "hook"): void {
     const session = this.sessions.get(id);
     if (!this.lifecycleHooksEnabled || !session || session.metadata.status === "done" || session.metadata.status === "failed") return;
-    if (source === "hook") session.hookSignals = (session.hookSignals ?? 0) + 1;
+    if (source === "hook") {
+      session.hookSignals = (session.hookSignals ?? 0) + 1;
+      // The CLI runs, but its input field may not be up yet: input waiting for it (deliverInput) goes on the cursor
+      // signal, or once the grace after this first hook has passed.
+      if (session.hookSignals === 1 && waitsForInputReady(session.metadata.provider) && !session.inputReady) {
+        session.hookReadyAt = Date.now() + INPUT_READY_HOOK_GRACE_MS;
+        session.hookReadyTimer = setTimeout(() => {
+          session.hookReadyTimer = undefined;
+          this.wakeLaunchWaiters(session);
+        }, INPUT_READY_HOOK_GRACE_MS);
+        session.hookReadyTimer.unref?.();
+      }
+    }
 
     const threadId = normalizeThreadId(session.metadata.provider, signal.threadId);
     const threadChanged = Boolean(threadId && threadId !== session.threadId);
@@ -2253,6 +2337,9 @@ export class TerminalManager {
       const current = this.sessions.get(id);
       if (!current || current !== session || current.process !== process) return;
 
+      if (!current.inputReady && waitsForInputReady(current.metadata.provider) && watchInputReadiness(current, data)) {
+        this.wakeLaunchWaiters(current);
+      }
       const lifecycleState = current.lifecycle?.push(data);
       if (lifecycleState) current.titleState = lifecycleState;
       if (lifecycleState && !titleDefersToHooks(current, lifecycleState)) {
@@ -2304,6 +2391,8 @@ export class TerminalManager {
     current.agentOrchestration = null;
     void this.cleanupLaunchFiles(current).catch(() => undefined);
     this.emitSession(current.metadata);
+    // Input waiting for this CLI to become ready learns at once that it never will.
+    this.wakeLaunchWaiters(current);
     // Recorded at the moment of exit, so a finished agent is never relaunched.
     this.schedulePersistence();
   }
@@ -2406,8 +2495,53 @@ function resetLaunchSignals(session: ManagedSession): void {
   delete session.promptTurnMark;
   delete session.hookSignals;
   delete session.titleState;
+  delete session.inputReady;
+  delete session.alternateScreen;
+  delete session.readinessCarry;
+  delete session.hookReadyAt;
+  if (session.hookReadyTimer) clearTimeout(session.hookReadyTimer);
+  session.hookReadyTimer = undefined;
   if (session.answeredPromptTimer) clearTimeout(session.answeredPromptTimer);
   session.answeredPromptTimer = undefined;
+}
+
+/** Whether typed text reaches this launch's CLI now (see WAITS_FOR_INPUT_READY). */
+function cliAcceptsInput(session: ManagedSession): boolean {
+  return !waitsForInputReady(session.metadata.provider) || session.inputReady === true
+    || (session.hookReadyAt !== undefined && Date.now() >= session.hookReadyAt);
+}
+
+/** DEC private modes set or reset (CSI ? Pm h / l): terminal control sequences, not text the CLI shows. */
+const DEC_PRIVATE_MODES = /\x1b\[\?([\d;]+)([hl])/gu;
+/** The longest DEC private mode sequence kept from the end of one chunk for the next. */
+const READINESS_CARRY_CHARS = 32;
+
+/**
+ * Reads only terminal control sequences of one output chunk: the alternate screen (modes 1049, 1047, 47) and the text
+ * cursor (DECTCEM, mode 25). A full-screen CLI hides its cursor while it draws its start-up and shows it once its
+ * input field has focus; that moment is when typed keys start to reach that field. True once that happened; a
+ * sequence cut at the chunk's end is completed by the next chunk.
+ */
+function watchInputReadiness(session: ManagedSession, data: string): boolean {
+  const text = (session.readinessCarry ?? "") + data;
+  let consumed = 0;
+  for (const match of text.matchAll(DEC_PRIVATE_MODES)) {
+    consumed = match.index + match[0].length;
+    const set = match[2] === "h";
+    for (const mode of match[1]!.split(";")) {
+      if (mode === "1049" || mode === "1047" || mode === "47") session.alternateScreen = set;
+      else if (mode === "25" && set && session.alternateScreen) session.inputReady = true;
+    }
+    if (session.inputReady) break;
+  }
+  if (session.inputReady) {
+    delete session.readinessCarry;
+    delete session.alternateScreen;
+    return true;
+  }
+  const escape = text.lastIndexOf("\x1b");
+  session.readinessCarry = escape >= consumed && text.length - escape < READINESS_CARRY_CHARS ? text.slice(escape) : "";
+  return false;
 }
 
 function titleDefersToHooks(session: ManagedSession, state: "idle" | "working" | "needs_approval"): boolean {
