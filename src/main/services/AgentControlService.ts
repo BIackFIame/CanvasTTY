@@ -151,6 +151,8 @@ export class AgentControlService {
     const capabilities = PROVIDER_CAPABILITIES[request.provider];
     if (!capabilities) throw new Error("Unknown agent provider.");
     if (!capabilities.send) throw new Error(`${request.provider} cannot receive prompts.`);
+    const inheritance = this.subagentLaunchOptions(parent.id, request.provider, request.launchOptions, request.model);
+    if (inheritance.launchOptions !== request.launchOptions) request = { ...request, launchOptions: inheritance.launchOptions };
 
     const children = this.children(parent.id);
     if (children.length >= MAX_CHILDREN_PER_PARENT) {
@@ -198,6 +200,57 @@ export class AgentControlService {
         try { this.terminals.dispose(created.id); } catch { /* it already ended */ }
         throw spawnCanceled();
       });
+  }
+
+  /**
+   * The plugin launch options a subagent of this parent starts with. A plugin the spawn does not name keeps the
+   * orchestrator's own values, which the person chose: a subagent never falls back silently to its CLI's default model
+   * and sign-in (for OpenCode that is OpenCode Zen, a third-party service) while its orchestrator runs on a model the
+   * person picked through a plugin. Naming a plugin is an explicit choice (checked by the launch: another value needs
+   * the plugin's delegable declaration). Another CLI cannot inherit a plugin choice that set the orchestrator's model,
+   * and is refused unless the spawn names that plugin. An explicit model next to an inherited choice that sets the model is refused.
+   */
+  subagentLaunchOptions(
+    parentSessionId: string,
+    provider: AgentProviderId,
+    requested: SpawnAgentRequest["launchOptions"],
+    model?: string
+  ): { launchOptions: SpawnAgentRequest["launchOptions"]; sources: Record<string, "inherited" | "explicit"> } {
+    const parent = this.requireSession(parentSessionId);
+    const sources: Record<string, "inherited" | "explicit"> = {};
+    for (const pluginId of Object.keys(requested ?? {})) sources[pluginId] = "explicit";
+    const parentOptions = this.terminals.launchOptionsOf(parent.id);
+    const unnamed = Object.keys(parentOptions ?? {}).filter((pluginId) => !Object.hasOwn(sources, pluginId));
+    if (!parentOptions || unnamed.length === 0) return { launchOptions: requested, sources };
+    const modelSetBy = new Set(this.terminals.modelSetByOf(parent.id));
+    const modelPlugins = unnamed.filter((pluginId) => modelSetBy.has(pluginId));
+    if (parent.provider !== provider) {
+      if (modelPlugins.length === 0) return { launchOptions: requested, sources };
+      const named = modelPlugins.map((pluginId) => pluginId.slice(0, 80)).join(", ");
+      // The person chose those options for this CLI; another CLI would run on its own default model and sign-in.
+      throw new DelegationRefusal(`This orchestrator's model is set by its ${named} launch options, which the person chose for ${parent.provider}; `
+        + `a ${provider} subagent would not get that model. Spawn a ${parent.provider} subagent instead.`);
+    }
+    if (model !== undefined && modelPlugins.length > 0) {
+      const named = modelPlugins.map((pluginId) => pluginId.slice(0, 80)).join(", ");
+      throw new DelegationRefusal(`This subagent inherits its orchestrator's ${named} launch options, which set its model; it cannot also take model ${model.slice(0, 80)}. `
+        + `Omit model, or pass launchOptions for ${named} that choose the model you want.`);
+    }
+    // A plugin turned off since the orchestrator started is left out, unless it set the model: then the subagent would
+    // run on its CLI's own default model and sign-in, so it is refused instead.
+    const gone = new Set(this.terminals.unavailableLaunchPlugins(Object.fromEntries(unnamed.map((pluginId) => [pluginId, parentOptions[pluginId]]))));
+    const goneModel = modelPlugins.filter((pluginId) => gone.has(pluginId));
+    if (goneModel.length > 0) {
+      const named = goneModel.map((pluginId) => pluginId.slice(0, 80)).join(", ");
+      throw new DelegationRefusal(`This orchestrator's model is set by its ${named} launch options, and ${named} is now disabled, removed or not trusted; `
+        + "a subagent would run on its CLI's own default model instead. The person can turn the plugin back on, or start the orchestrator again.");
+    }
+    const launchOptions: NonNullable<SpawnAgentRequest["launchOptions"]> = { ...(requested ?? {}) };
+    for (const pluginId of unnamed.filter((id) => !gone.has(id))) {
+      launchOptions[pluginId] = parentOptions[pluginId]!;
+      sources[pluginId] = "inherited";
+    }
+    return { launchOptions, sources };
   }
 
   /** The profile a subagent of this parent gets for this request (what spawn will use), or why it gets none. */

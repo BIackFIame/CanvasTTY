@@ -146,13 +146,22 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
     }
     if (signal?.aborted) throw canceledError();
+    // A plugin the spawn does not name keeps this session's own options (never silently the CLI's default model).
+    const requested = args.launchOptions as SpawnAgentRequest["launchOptions"];
+    let inheritance: ReturnType<AgentControlService["subagentLaunchOptions"]>;
+    try {
+      inheritance = this.control.subagentLaunchOptions(orchestratorId, provider, requested, args.model as string | undefined);
+    } catch (error) {
+      throw orchestrationBridgeError("INVALID_REQUEST", error instanceof Error ? error.message : String(error), false);
+    }
+    const launchOptions = inheritance.launchOptions;
     const created = await this.control.spawn({
       parentSessionId: orchestratorId,
       provider: args.provider as never,
       cwd: args.cwd as string,
       ...(args.title !== undefined ? { title: args.title as string } : {}),
       ...(args.prompt !== undefined ? { initialPrompt: args.prompt as string } : {}),
-      ...(args.launchOptions !== undefined ? { launchOptions: args.launchOptions as SpawnAgentRequest["launchOptions"] } : {}),
+      ...(launchOptions !== undefined ? { launchOptions } : {}),
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
       profile: profile.profile
@@ -177,7 +186,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       profile: created.profile,
       ...(profile.inherited ? { profileInherited: true } : {}),
       ...(created.model !== undefined ? { model: created.model } : {}),
-      ...(created.effort !== undefined ? { effort: created.effort } : {})
+      ...(created.effort !== undefined ? { effort: created.effort } : {}),
+      // Which CLI serves it, the model it was asked for (null: its launch options or the CLI's own default decide),
+      // and where each plugin's launch options came from.
+      servedBy: { provider: created.provider, model: created.model ?? null, launchOptions: inheritance.sources }
     };
   }
 

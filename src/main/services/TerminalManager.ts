@@ -9,6 +9,7 @@ import type {
   CreateSessionRequest,
   GitRiskReport,
   Point,
+  PluginLaunchValues,
   ProviderId,
   SessionBounds,
   SessionEnvironmentChoice,
@@ -149,6 +150,8 @@ interface ManagedSession {
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
+  /** Plugins whose launch contribution decided this run's model (LaunchPipeline.prepare), once prepared. */
+  modelSetBy?: string[];
   /** Bumped by every launch the person or the app asks for (create, restart, restore); input waits for one. */
   launchEpoch: number;
   /** Input waiting for this launch to start (deliverInput): woken whenever the launch moves on. */
@@ -664,8 +667,15 @@ export class TerminalManager {
     }
 
     const delegated = origin === "subagent" || control.ownerPluginId !== undefined;
+    // The orchestrator's own options are the person's choice: its subagent may repeat them even where the plugin did
+    // not declare its options delegable. Any other choice needs the plugin's delegable declaration.
+    // Only a subagent of the same CLI: the person chose them for that CLI (as AgentControlService.subagentLaunchOptions).
+    const parent = origin === "subagent" && request.parentSessionId !== undefined ? this.sessions.get(request.parentSessionId) : undefined;
+    const parentOptions = parent && parent.metadata.provider === request.provider
+      ? parent.extras.options as Record<string, PluginLaunchValues> | undefined : undefined;
     const launchOptions = this.launchPipeline
-      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions, origin === "subagent" ? { delegated: true } : undefined)
+      ? this.launchPipeline.normalizeOptions(request.provider, request.launchOptions, origin === "subagent"
+        ? { delegated: true, ...(parentOptions ? { inherited: parentOptions } : {}) } : undefined)
       : request.launchOptions === undefined ? undefined : failWith("Plugin launch options are not available.");
     // The isolation layer decides before anything starts: a subagent without it runs in normal, a launch that
     // needs it and cannot have it is refused.
@@ -1845,6 +1855,20 @@ export class TerminalManager {
     }
   }
 
+  /**
+   * The plugin launch options this card was started with (a copy), or undefined without any. A subagent inherits them
+   * unless its spawn names the plugin (AgentControlService.subagentLaunchOptions).
+   */
+  launchOptionsOf(id: string): Record<string, PluginLaunchValues> | undefined {
+    const options = this.sessions.get(id)?.extras.options;
+    return options ? structuredClone(options) as Record<string, PluginLaunchValues> : undefined;
+  }
+
+  /** Plugins whose launch contribution decided this card's model in its current run; empty until it is prepared. */
+  modelSetByOf(id: string): string[] {
+    return [...(this.sessions.get(id)?.modelSetBy ?? [])];
+  }
+
   /** The model and effort this card's launches ask the CLI for. */
   private launchModelOf(id: string): LaunchModelChoice {
     const starting = this.startingModels.get(id);
@@ -1895,7 +1919,8 @@ export class TerminalManager {
     return this.environments?.available(environment) ?? false;
   }
 
-  private unavailableLaunchPlugins(options: Record<string, unknown> | undefined): string[] {
+  /** The plugins among these launch options that are disabled, removed or not trusted now. */
+  unavailableLaunchPlugins(options: Record<string, unknown> | undefined): string[] {
     if (!options) return [];
     return this.launchPipeline ? this.launchPipeline.unavailable(options) : Object.keys(options).sort();
   }
@@ -1915,6 +1940,8 @@ export class TerminalManager {
   ): void {
     const token = ++session.launchToken;
     const { metadata } = session;
+    // Each launch decides its model again; until it is prepared no plugin has.
+    session.modelSetBy = [];
     const tasks = session.launchTasks ??= new Set();
     // Register before invoking plugin code, which may synchronously close or restart its card.
     const task = Promise.resolve().then(() => this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt))
@@ -2019,13 +2046,14 @@ export class TerminalManager {
           options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
           environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
           ...(trustedFolder ? { trustedFolder } : {})
-        });
+        }, { ...(this.launchModelOf(id).model !== undefined ? { model: this.launchModelOf(id).model } : {}) });
         if (prepared.ok) {
           contribution = prepared;
           ownFolders.add(prepared.runDirectory);
         }
         if (!live()) return "superseded";
         if (!prepared.ok) return refuse(prepared.reason);
+        session.modelSetBy = prepared.modelSetBy;
         this.addLaunchSecrets(session, prepared.secrets);
       }
 
