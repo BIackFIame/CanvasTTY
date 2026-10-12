@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { copyFile, open, rename, unlink, type FileHandle } from "node:fs/promises";
+import { copyFile, lstat, open, rename, unlink, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { LimitProviderId, LimitsSnapshot } from "../../shared/contracts.ts";
@@ -117,9 +117,15 @@ export class UsageHistoryService {
     let raw: string;
     let handle: FileHandle | undefined;
     try {
-      // O_NOFOLLOW: a planted symlink is neither read nor, later, written through.
+      // Windows lacks O_NOFOLLOW; check the path before and after opening too.
+      if ((await lstat(this.filePath)).isSymbolicLink()) throw Object.assign(new Error("symlink"), { code: "ELOOP" });
       handle = await open(this.filePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      if (!(await handle.stat()).isFile()) throw Object.assign(new Error("not a file"), { code: "ENOTFILE" });
+      const opened = await handle.stat();
+      const current = await lstat(this.filePath);
+      if (current.isSymbolicLink() || opened.dev !== current.dev || opened.ino !== current.ino) {
+        throw Object.assign(new Error("history path changed"), { code: "ELOOP" });
+      }
+      if (!opened.isFile()) throw Object.assign(new Error("not a file"), { code: "ENOTFILE" });
       raw = await handle.readFile("utf8");
     } catch (error) {
       if (errorCode(error) === "ENOENT") return;

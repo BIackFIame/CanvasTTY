@@ -239,7 +239,7 @@ test("a read backlog defers estimates; the next complete run supplies the late e
   await h.service.dispose();
 });
 
-test("recorded health: an unreadable log blocks estimates until read; a lost record blocks only clusters it may have held", { skip: process.getuid?.() === 0 }, async (t) => {
+test("recorded health: an unreadable log blocks estimates until read; a lost record blocks only clusters it may have held", { skip: process.platform === "win32" || process.getuid?.() === 0 }, async (t) => {
   const home = await temporary(t, "usage-int-home-");
   const directory = await temporary(t, "usage-int-data-");
   const ids = await writeLogs(home);

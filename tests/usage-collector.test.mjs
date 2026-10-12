@@ -193,7 +193,7 @@ test('Hermes queries select accounting columns only, read-only, and never touch 
   }).collect(T0);
   const statements = argumentsSeen.filter((argument) => /^\s*SELECT/i.test(argument));
   assert.equal(statements.length, 2);
-  assert.ok(argumentsSeen.includes('-readonly') && argumentsSeen.includes('-safe') && argumentsSeen.some((a) => /^file:.*\?mode=ro&readonly_shm=1$/.test(a)));
+  assert.ok(argumentsSeen.includes('-readonly') && argumentsSeen.includes('-safe') && argumentsSeen.some((a) => /^file:.*\?mode=ro&immutable=1$/.test(a)));
   for (const statement of statements) {
     assert.doesNotMatch(statement, /\*|system_prompt|title|messages|content|INSERT|UPDATE|DELETE|CREATE|DROP|ATTACH|PRAGMA\s/i);
   }
@@ -467,9 +467,9 @@ test('Collector: byte budget resumes backlog, overlapping calls do not duplicate
   const results = await Promise.all([concurrent.collect(NOW), concurrent.collect(NOW), concurrent.collect(NOW)]);
   assert.deepEqual(results.flatMap((r) => r.events.map((e) => e.id)), reference);
 
-  if (process.getuid?.() !== 0) {
-    const locked = rollout(home, randomUUID());
-    await write(locked, [codexMeta('locked', start), ...lineage(start, [[5, 0, 1]])]);
+  const locked = rollout(home, randomUUID());
+  await write(locked, [codexMeta('locked', start), ...lineage(start, [[5, 0, 1]])]);
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     await chmod(locked, 0);
     const blocked = await concurrent.collect(NOW);
     assert.deepEqual(blocked.events, []);
@@ -523,7 +523,7 @@ test('Collector health: complete only when every discovered log was read to its 
   const after = await collector.collect(NOW);
   assert.deepEqual([after.complete, after.lost], [true, false], 'a loss is reported once, by the run that consumed it');
 
-  if (process.getuid?.() !== 0) {
+  if (process.platform !== 'win32' && process.getuid?.() !== 0) {
     const locked = rollout(home, randomUUID());
     await write(locked, [codexMeta('locked', start), ...lineage(start, [[5, 0, 1]])]);
     await chmod(locked, 0);

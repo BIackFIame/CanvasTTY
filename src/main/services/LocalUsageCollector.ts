@@ -403,6 +403,8 @@ export class LocalUsageCollector {
     const target = (query: string): string => `${pathToFileURL(database).href}?${query}`;
     const [wal, shm] = await Promise.all([sideFile(`${database}-wal`), sideFile(`${database}-shm`)]);
     if (shm === null && wal) throw new SourceProblem('WAL without shared-memory index (writer stopped uncleanly); skipped to avoid a stale read');
+    // A read-only WAL connection can still create side files beside a stopped writer.
+    if (shm === null && !wal) return await this.query(target('mode=ro&immutable=1'), sql);
     try {
       return await this.query(target('mode=ro&readonly_shm=1'), sql);
     } catch (error) {

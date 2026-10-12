@@ -35,7 +35,8 @@ function registry(executables) {
           state: "available",
           provider,
           executable,
-          launcher: "native",
+          launcher: process.platform === "win32" ? "batch" : "native",
+          commandPrompt: process.env.ComSpec,
           environment: Object.freeze({ PATH: process.env.PATH ?? "/usr/bin:/bin" }),
           checked: Object.freeze([])
         })
@@ -78,9 +79,13 @@ createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `);
   await chmod(script, 0o755);
+  const executable = process.platform === "win32" ? join(root, "fake-codex.cmd") : script;
+  if (process.platform === "win32") {
+    await writeFile(executable, `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
+  }
   return {
     codexHome,
-    script,
+    script: executable,
     spawns: async () => (await readFile(join(root, "spawns"), "utf8").catch(() => "")).split("\n").filter(Boolean).length
   };
 }
