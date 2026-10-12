@@ -204,6 +204,14 @@ export class FileAccessService {
       if (!isContainedPath(root.path, resolvedAfterOpen)) {
         return { kind: "unsupported", reason: "not-permitted" };
       }
+      try {
+        const current = await stat(resolvedAfterOpen);
+        if (current.dev !== metadata.dev || current.ino !== metadata.ino) {
+          return { kind: "unsupported", reason: "not-permitted" };
+        }
+      } catch {
+        return { kind: "unsupported", reason: "unavailable" };
+      }
       const descriptorPath = await descriptorRealPath(handle);
       if (descriptorPath !== null && !isContainedPath(root.path, descriptorPath)) {
         return { kind: "unsupported", reason: "not-permitted" };
@@ -387,7 +395,9 @@ function compareEntries(left: FileEntry, right: FileEntry): number {
 async function descriptorRealPath(handle: Awaited<ReturnType<typeof open>>): Promise<string | null> {
   for (const candidate of [`/proc/self/fd/${handle.fd}`, `/dev/fd/${handle.fd}`]) {
     try {
-      return realpathSync(candidate);
+      const real = realpathSync(candidate);
+      // macOS /dev/fd entries are descriptor devices, not links to file paths.
+      if (real !== candidate) return real;
     } catch {
       continue;
     }
