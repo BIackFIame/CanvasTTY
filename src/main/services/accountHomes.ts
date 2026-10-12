@@ -16,7 +16,7 @@ export function withoutTrailingSeparator(path: string): string {
 }
 
 /** The path segments of `path` strictly below `root`, or null when it is not strictly inside. */
-function segmentsBelow(root: string, path: string): string[] | null {
+export function segmentsBelow(root: string, path: string): string[] | null {
   const rest = relative(root, path);
   if (rest === "" || rest.startsWith("..") || isAbsolute(rest)) return null;
   return rest.split(sep);
@@ -30,19 +30,6 @@ export function accountHookHome(provider: ProviderId, contributedEnvironment: Re
   const name = ACCOUNT_HOME_VARIABLES[provider];
   const value = name ? contributedEnvironment?.[name] : undefined;
   return typeof value === "string" && value.length > 0 ? withoutTrailingSeparator(value) : undefined;
-}
-
-/**
- * The account home one contributor handed a Grok/Kimi launch: `value` of the provider's home variable `key` when it is an
- * exact absolute path strictly inside that contributor's own data folder. `dataDir` is the host's record of the
- * contributor (`<userData>/plugin-data/<pluginId>`), never the plugin's answer, so a plugin can only name a folder of
- * its own data.
- */
-export function contributedHookHome(provider: ProviderId, dataDir: string | undefined, key: string, value: string): string | undefined {
-  if (!dataDir || !isAbsolute(dataDir) || ACCOUNT_HOME_VARIABLES[provider] !== key) return undefined;
-  const folder = withoutTrailingSeparator(value);
-  if (!isAbsolute(folder) || resolve(folder) !== folder) return undefined;
-  return segmentsBelow(resolve(dataDir), folder) ? folder : undefined;
 }
 
 /**

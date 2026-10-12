@@ -12,8 +12,8 @@ import type {
 import { claudeCoreSettingsKey, coreOwnedLaunchArgument, parseInlineSettings } from "./terminalLaunch.ts";
 import { MAX_PLUGIN_SLOT_BYTES } from "./TerminalSessionStore.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
-import { contributedHookHome } from "./accountHomes.ts";
 import { MAX_INSPECTED_CONFIG_BYTES, parseJsonc, readInspectedFile } from "./inspectedConfig.ts";
+import { contributedAccountHome } from "./isolation/accountHomeIsolation.ts";
 
 /** A trusted plugin service that declared launch options (PluginManager.launchContributors). */
 export interface LaunchContributor {
@@ -81,8 +81,10 @@ export type PreparedLaunch =
     /** This run's own folder below the card's folder; `cleanup` removes it. */
     runDirectory: string;
     /**
-     * Grok/Kimi: the home (`GROK_HOME` / `KIMI_CODE_HOME`) the contributor that set it handed this launch inside its own
-     * data folder (contributedHookHome); CanvasTTY writes that CLI's temporary configuration there.
+     * The CLI home a chosen contributor started this launch with inside its own data folder (an account it selected,
+     * contributedAccountHome): the one folder of plugin data the isolation layer reopens for this agent, and for Grok/Kimi
+     * (`GROK_HOME` / `KIMI_CODE_HOME`) where CanvasTTY writes that CLI's temporary configuration. Derived by the host,
+     * never a grant a plugin can name.
      */
     accountHome?: string;
     cleanup(): Promise<void>;
@@ -369,7 +371,7 @@ export class LaunchPipeline {
         const conflict = claim(key);
         if (conflict) return refuse(conflict);
         env[key] = expand(value);
-        accountHome = contributedHookHome(context.provider, contributor.dataDir, key, env[key]) ?? accountHome;
+        accountHome = contributedAccountHome(context.provider, contributor.dataDir, key, env[key]) ?? accountHome;
       }
       for (const [key, secretKey] of Object.entries(contribution.secretEnv)) {
         const conflict = claim(key);
