@@ -139,6 +139,15 @@ interface ManagedSession {
   launchToken: number;
   /** Removes the current run's plugin files; called when the process exits. */
   launchCleanup: (() => Promise<void>) | null;
+  /** Cleanup already started by an earlier exit; closing the card must drain it before deleting its parent. */
+  launchCleanupPending?: Promise<void>;
+  /** Whole contributed launches, including asynchronous preparation/wrapping and abandoned-run cleanup. */
+  launchTasks?: Set<Promise<unknown>>;
+  /**
+   * The pipelines that prepared launches for this card, each with the run folders it created for this card object,
+   * retained across host reconfiguration/restart. Closing removes only these, never a later card's under the same id.
+   */
+  launchRunFolders?: Map<Pick<LaunchPipeline, "forgetSession">, Set<string>>;
   /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
@@ -1166,6 +1175,37 @@ export class TerminalManager {
     }
   }
 
+  /** Serializes this card's run cleanup across exit/restart; callbacks retain their specific launch ownership. */
+  private cleanupLaunchFiles(session: ManagedSession): Promise<void> {
+    const cleanup = session.launchCleanup;
+    session.launchCleanup = null;
+    const previous = session.launchCleanupPending;
+    if (!cleanup) return previous ?? Promise.resolve();
+    const pending = (async (): Promise<void> => {
+      if (previous) await previous.catch(() => undefined);
+      await cleanup();
+    })();
+    session.launchCleanupPending = pending;
+    void pending.finally(() => {
+      if (session.launchCleanupPending === pending) delete session.launchCleanupPending;
+    }).catch(() => undefined);
+    return pending;
+  }
+
+  /** Closing a card waits for producers of run files, not just the current process's adopted cleanup. */
+  private async forgetLaunchFiles(session: ManagedSession): Promise<void> {
+    while (session.launchTasks?.size) await Promise.allSettled([...session.launchTasks]);
+    try { await this.cleanupLaunchFiles(session); }
+    finally {
+      const errors: unknown[] = [];
+      // Different pipeline instances may share runsRoot; even their parent deletions must not overlap.
+      for (const [pipeline, runDirectories] of session.launchRunFolders ?? []) {
+        try { await pipeline.forgetSession(session.metadata.id, runDirectories); } catch (error) { errors.push(error); }
+      }
+      if (errors.length) throw new AggregateError(errors, "Launch file folders could not be removed.");
+    }
+  }
+
   /**
    * Closes a card. A card in a plugin environment releases it: `keepEnvironmentData` is the person's
    * answer to "Keep environment data?" (kept unless they said no). Quitting releases nothing.
@@ -1199,9 +1239,11 @@ export class TerminalManager {
     this.redaction.clear(`session:${id}`);
     this.releaseIsolation(id);
     session.launchToken += 1;
-    void session.launchCleanup?.().catch(() => undefined);
-    session.launchCleanup = null;
-    if (session.extras.options) void this.launchPipeline?.forgetSession(id).catch(() => undefined);
+    // launchToken and launch waiters were invalidated above: pending preparation/wrapping can now unwind before
+    // parent removal. Its original pipeline remains the owner even if the host configuration has since changed.
+    void this.forgetLaunchFiles(session).catch((error: unknown) => {
+      console.warn(`CanvasTTY could not remove the launch files of card ${id}.`, error);
+    });
     session.agentBrowser?.cleanup();
     session.agentRuntime?.cleanup();
     session.agentOrchestration?.cleanup();
@@ -1922,7 +1964,9 @@ export class TerminalManager {
   ): void {
     const token = ++session.launchToken;
     const { metadata } = session;
-    void this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt)
+    const tasks = session.launchTasks ??= new Set();
+    // Register before invoking plugin code, which may synchronously close or restart its card.
+    const task = Promise.resolve().then(() => this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt))
       .catch((error: unknown): LaunchOutcome => {
         metadata.failureDetails = this.redactSecrets(`Launch refused: ${error instanceof Error ? error.message : String(error)}`);
         return "failed";
@@ -1936,7 +1980,9 @@ export class TerminalManager {
         this.emitSession(metadata, outcome === "failed" ? failureOrigin : null);
         this.schedulePersistence();
       })
-      .finally(() => this.wakeLaunchWaiters(session));
+      .finally(() => { tasks.delete(task); this.wakeLaunchWaiters(session); });
+    tasks.add(task);
+    void task.catch(() => undefined);
   }
 
   private async runContributedLaunch(
@@ -1955,6 +2001,8 @@ export class TerminalManager {
       return "failed";
     };
     const environments = this.environments;
+    // The launch starts a microtask after it was registered; a card closed or restarted in that same tick is done.
+    if (!live()) return "superseded";
 
     // 1. Place a new session where the person chose. The choice stays saved with the card until the plugin has
     // prepared it, so a card whose preparation was cut short (quit, crash) or failed never restores locally.
@@ -1996,142 +2044,142 @@ export class TerminalManager {
 
     // 3. Chosen launch contributors, and the launch policies that apply.
     let contribution: LaunchContribution | null = null;
-    const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
-    if (session.extras.options || this.policyApplies(metadata.provider)) {
-      const pipeline = this.launchPipeline;
-      if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
-      const placedIn = session.extras.environment;
-      const prepared = await pipeline.prepare({
-        sessionId: id,
-        provider: metadata.provider,
-        profile: metadata.profile,
-        role: metadata.role,
-        cwd: metadata.cwd,
-        ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
-        restoring,
-        resume: resume !== null,
-        options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
-        environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
-        ...(trustedFolder ? { trustedFolder } : {})
-      });
-      if (!live()) {
-        if (prepared.ok) void prepared.cleanup().catch(() => undefined);
-        return "superseded";
-      }
-      if (!prepared.ok) return refuse(prepared.reason);
-      contribution = prepared;
-      this.addLaunchSecrets(session, prepared.secrets);
-    }
-    const dropContribution = (): void => {
-      void contribution?.cleanup().catch(() => undefined);
-    };
-
-    // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
-    const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
-    if (environment && keeps.launch !== true && metadata.profile !== "normal") {
-      dropContribution();
-      return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
-    }
-    const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
-      environment ? { isolated: keeps.isolated === true, label: environment.label } : null);
-    if (decision.refuse) {
-      dropContribution();
-      return refuse(decision.refuse);
-    }
-    if (environment && keeps.launch !== true) {
-      metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
-        reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
-    }
-
-    // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
-    let planned: PlannedSpawn | { failure: LaunchFailure };
+    let adopted = false;
+    let plannedCleanup: (() => void) | undefined;
     try {
-      planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
-        session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
-    } catch (error) {
-      dropContribution();
-      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
-      return "failed";
-    }
-    if ("failure" in planned) {
-      dropContribution();
-      applyLaunchFailure(metadata, planned.failure);
-      return "failed";
-    }
-    const abandon = (): void => {
-      planned.cleanup();
-      dropContribution();
-    };
-    this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
-    let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
-    if (environment && environments) {
-      if (typeof planned.args === "string") {
-        abandon();
-        return refuse("this provider's Windows batch launcher cannot run in a plugin environment.");
+      const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
+      if (session.extras.options || this.policyApplies(metadata.provider)) {
+        const pipeline = this.launchPipeline;
+        if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
+        // This pipeline may write run files for the card, so closing it later removes its folder there.
+        const runFolders = session.launchRunFolders ??= new Map();
+        const ownFolders = runFolders.get(pipeline) ?? new Set<string>();
+        runFolders.set(pipeline, ownFolders);
+        const placedIn = session.extras.environment;
+        const prepared = await pipeline.prepare({
+          sessionId: id,
+          provider: metadata.provider,
+          profile: metadata.profile,
+          role: metadata.role,
+          cwd: metadata.cwd,
+          ...(metadata.parentSessionId !== undefined ? { parentSessionId: metadata.parentSessionId } : {}),
+          restoring,
+          resume: resume !== null,
+          options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
+          environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
+          ...(trustedFolder ? { trustedFolder } : {})
+        });
+        if (prepared.ok) {
+          contribution = prepared;
+          ownFolders.add(prepared.runDirectory);
+        }
+        if (!live()) return "superseded";
+        if (!prepared.ok) return refuse(prepared.reason);
+        this.addLaunchSecrets(session, prepared.secrets);
       }
-      const secretValues = new Set(contribution?.secrets ?? []);
-      const secretEnvNames = Object.keys(contribution?.env ?? {}).filter((key) => secretValues.has(contribution!.env[key]!));
-      // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
-      const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
-        .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
-      const wrapped = await environments.wrap(environment, {
-        sessionId: id,
-        provider: metadata.provider,
-        launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
-        secretEnvNames,
-        takenEnv: new Set(Object.keys(planned.launchEnvironment)),
-        path: launchSearchPath(planned.env)
-      });
-      if (!live()) {
-        abandon();
-        return "superseded";
+
+      // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
+      const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+      if (environment && keeps.launch !== true && metadata.profile !== "normal") {
+        return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
       }
-      if (!wrapped.ok) {
-        abandon();
-        return refuse(wrapped.reason);
+      const decision = this.launchIsolation(id, metadata.provider, metadata.profile, metadata.role,
+        environment ? { isolated: keeps.isolated === true, label: environment.label } : null);
+      if (decision.refuse) {
+        return refuse(decision.refuse);
       }
-      this.addLaunchSecrets(session, wrapped.secrets);
-      spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
-        env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
-    }
-    if (decision.apply) {
+      if (environment && keeps.launch !== true) {
+        metadata.isolation = { ...(metadata.isolation ?? { state: "environment" }),
+          reason: `${metadata.isolation?.reason ? `${metadata.isolation.reason} ` : ""}Base protection and CanvasTTY's hooks do not reach the agent in ${environment.label}.` };
+      }
+
+      // 5. The host spawns the PTY; an environment only rewrites what is spawned, and the isolation layer wraps that.
+      let planned: PlannedSpawn | { failure: LaunchFailure };
       try {
-        spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
+        planned = this.planSpawn(id, metadata.provider, decision.profile, metadata.cwd, resume,
+          session.captureResult, metadata.role, answerCaptureGrantExpiresAt, contribution, trustedFolder, Boolean(environment), decision.apply);
       } catch (error) {
-        abandon();
-        return refuse(error instanceof Error ? error.message : String(error));
+        metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+        return "failed";
+      }
+      if ("failure" in planned) {
+        applyLaunchFailure(metadata, planned.failure);
+        return "failed";
+      }
+      plannedCleanup = planned.cleanup;
+      this.noteConfiguredMode(id, metadata.provider, decision.profile, planned.env, planned.cwd);
+      let spawn: { command: string; args: string[] | string; cwd: string; env: Record<string, string> } = planned;
+      if (environment && environments) {
+        if (typeof planned.args === "string") {
+          return refuse("this provider's Windows batch launcher cannot run in a plugin environment.");
+        }
+        const secretValues = new Set(contribution?.secrets ?? []);
+        const secretEnvNames = Object.keys(contribution?.env ?? {}).filter((key) => secretValues.has(contribution!.env[key]!));
+        // The environment sees the launch's own variables, never CanvasTTY's reserved ones or secret values.
+        const visible = Object.fromEntries(Object.entries(planned.launchEnvironment)
+          .filter(([key]) => !RESERVED_ENV.test(key) && !secretEnvNames.includes(key)));
+        const wrapped = await environments.wrap(environment, {
+          sessionId: id,
+          provider: metadata.provider,
+          launch: { command: planned.command, args: planned.args, env: visible, cwd: planned.cwd },
+          secretEnvNames,
+          takenEnv: new Set(Object.keys(planned.launchEnvironment)),
+          path: launchSearchPath(planned.env)
+        });
+        if (!live()) {
+          return "superseded";
+        }
+        if (!wrapped.ok) {
+          return refuse(wrapped.reason);
+        }
+        this.addLaunchSecrets(session, wrapped.secrets);
+        spawn = { command: wrapped.command, args: wrapped.args, cwd: wrapped.cwd,
+          env: { ...planned.env, ...(wrapped.cwd !== planned.cwd ? { PWD: wrapped.cwd } : {}), ...wrapped.env } };
+      }
+      if (decision.apply) {
+        try {
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
+        } catch (error) {
+          return refuse(error instanceof Error ? error.message : String(error));
+        }
+      }
+      let process: IPty;
+      try {
+        process = this.spawnPty(spawn.command, spawn.args, {
+          name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
+        });
+      } catch (error) {
+        this.releaseIsolation(id);
+        metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
+        return "failed";
+      }
+      session.process = process;
+      if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
+        metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
+      } else {
+        delete metadata.nativeEditor;
+      }
+      this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
+      session.agentBrowser = planned.agentBrowser;
+      session.agentRuntime = planned.agentRuntime;
+      session.agentOrchestration = planned.agentOrchestration;
+      session.launchCleanup = contribution?.cleanup ?? null;
+      adopted = true;
+      metadata.status = initialSessionStatus(metadata.provider);
+      metadata.exitCode = null;
+      metadata.failureDetails = null;
+      this.bindProcess(id, session, process);
+      const runtimeStatus = this.agentRuntime?.currentStatus(id);
+      if (runtimeStatus) metadata.status = runtimeStatus;
+      if (environment) this.describeEnvironment(id, session, environment);
+      return "launched";
+    } finally {
+      // Unadopted resources remain owned by this tracked launch, including throws during plugin wrapping.
+      if (!adopted) {
+        try { plannedCleanup?.(); }
+        finally { await contribution?.cleanup().catch(() => undefined); }
       }
     }
-    let process: IPty;
-    try {
-      process = this.spawnPty(spawn.command, spawn.args, {
-        name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
-      });
-    } catch (error) {
-      abandon();
-      this.releaseIsolation(id);
-      metadata.failureDetails = this.redactSecrets(error instanceof Error ? error.message : String(error));
-      return "failed";
-    }
-    session.process = process;
-    if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
-      metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
-    } else {
-      delete metadata.nativeEditor;
-    }
-    this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
-    session.agentBrowser = planned.agentBrowser;
-    session.agentRuntime = planned.agentRuntime;
-    session.agentOrchestration = planned.agentOrchestration;
-    session.launchCleanup = contribution?.cleanup ?? null;
-    metadata.status = initialSessionStatus(metadata.provider);
-    metadata.exitCode = null;
-    metadata.failureDetails = null;
-    this.bindProcess(id, session, process);
-    const runtimeStatus = this.agentRuntime?.currentStatus(id);
-    if (runtimeStatus) metadata.status = runtimeStatus;
-    if (environment) this.describeEnvironment(id, session, environment);
-    return "launched";
   }
 
   private addLaunchSecrets(session: ManagedSession, secrets: readonly string[]): void {
@@ -2198,8 +2246,7 @@ export class TerminalManager {
     current.agentRuntime = null;
     current.agentOrchestration?.cleanup();
     current.agentOrchestration = null;
-    void current.launchCleanup?.().catch(() => undefined);
-    current.launchCleanup = null;
+    void this.cleanupLaunchFiles(current).catch(() => undefined);
     this.emitSession(current.metadata);
     // Recorded at the moment of exit, so a finished agent is never relaunched.
     this.schedulePersistence();
