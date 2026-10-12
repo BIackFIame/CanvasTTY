@@ -271,10 +271,10 @@ test("Qwen read_many_files: more than 32 paths is refused, and its include globs
   const benign = Array.from({ length: 32 }, (_, i) => `src/f${i}.ts`);
   assert.equal(read({ paths: benign }), null, "32 project paths are checked and allowed");
   const many = read({ paths: [...benign, secrets] });
-  assert.equal(many?.rule, "too-many-paths", "the 33rd path is not skipped");
+  assert.equal(many?.rule, "uncheckable", "the 33rd path is not skipped");
   assert.match(many.message, /at most 32/u);
-  assert.equal(read({ paths: [...benign, "src/g.ts"] })?.rule, "too-many-paths");
-  assert.equal(read({ paths: benign.slice(0, 20), include: benign.slice(0, 13) })?.rule, "too-many-paths", "include counts toward the limit");
+  assert.equal(read({ paths: [...benign, "src/g.ts"] })?.rule, "uncheckable");
+  assert.equal(read({ paths: benign.slice(0, 20), include: benign.slice(0, 13) })?.rule, "uncheckable", "include counts toward the limit");
   assert.equal(read({ paths: ["src/a.ts"], include: [secrets] })?.rule, "app-private");
   assert.equal(read({ paths: ["src/a.ts"], include: [join(userData, "account-homes", "**", "*.json")] })?.rule, "app-private");
   assert.equal(read({ paths: ["src/a.ts"], include: ["**/*.ts"] }), null);
@@ -294,3 +294,107 @@ test("OpenCode's read-only tools reach base protection: a grep without a path se
   assert.equal(check("glob", { pattern: "**/*.ts" }, project), null);
 });
 
+test("globs: ** matches any number of folders and braces are expanded before matching the private data", () => {
+  const secrets = q(join(userData, "provider-secrets.bin")).slice(1, -1);
+  for (const command of [
+    "cat ~/Library/**/provider-secrets.bin",
+    "cat ~/**/provider-secrets.bin",
+    "cat ~/Library/Application\\ Support/canvastty/**",
+    "cat ~/Library/**/account-homes/*/auth.json",
+    `cat '${userData}'/provider-secrets.{bin,}`,
+    `cat '${userData}'/{settings.json,provider-secrets.bin}`,
+    `cat '${userData}'/agent-control/{connection.json,token-*}`,
+    `cp '${userData}'/{provider-secrets,x}.bin ./copy`,
+    // Sequences are brace expansions too: bash and zsh make `provider-secrets.bin` of these.
+    `cat '${userData}'/provider-secrets.bi{n..n}`,
+    `cat '${userData}'/provider-secret{r..t}.bin`,
+    `cat '${userData}'/agent-control/token-{0..1}123abcd`,
+    `cat '${userData}'/agent-control/token-{00..01..1}123abcd`,
+    `cat '${userData}'/agent-control/token-{0..999}123abcd`
+  ]) assert.equal(rule(command), "app-private", command);
+  // Read-only tools: a Glob pattern with braces or ** is matched the same way.
+  const glob = (toolInput, root = project) => checkBaseProtection({ toolName: "Glob", toolInput, root, home, privateData })?.rule ?? null;
+  assert.equal(glob({ pattern: "provider-secrets.{bin,json}", path: userData }), "app-private");
+  assert.equal(glob({ pattern: join(home, "Library", "**", "provider-secrets.bin") }), "app-private");
+  // Ordinary globs stay allowed: in a normal project, and ones that only pass by the app's folder on the way.
+  for (const command of [
+    "ls **/*.ts",
+    "rg todo **/*.ts",
+    "cat src/{a,b}.ts",
+    "cat ~/**/*.ts",
+    "ls ~/Library/**/*.plist",
+    `cat '${secrets}x'.{md,txt}`,
+    "echo {a,b}"
+  ]) assert.equal(rule(command), null, command);
+  assert.equal(glob({ pattern: "**/*.ts" }), null);
+  assert.equal(glob({ pattern: "**/*.ts" }, home), null, "a ** glob that only passes through the app's folder");
+  assert.equal(glob({ pattern: "src/**/*.{ts,tsx}" }), null);
+});
+
+test("macOS and Windows: a glob matches the private data in any letter case", { skip: process.platform !== "darwin" && process.platform !== "win32" }, () => {
+  assert.equal(rule("cat ~/library/application\\ support/CANVASTTY/Provider-Secrets.*"), "app-private");
+  assert.equal(rule("cat ~/LIBRARY/**/PROVIDER-SECRETS.BIN"), "app-private");
+});
+
+test("what base protection cannot check is refused, not skipped: long or odd path fields, too many paths, expansions or nested shells", () => {
+  const secrets = join(userData, "provider-secrets.bin");
+  const check = (toolName, toolInput, root = project) => checkBaseProtection({ toolName, toolInput, root, home, privateData })?.rule ?? null;
+  // Padding that folds away is checked as the path it names.
+  assert.equal(check("Read", { file_path: userData + "/.".repeat(3000) + "/provider-secrets.bin" }), "app-private");
+  assert.equal(check("Read", { file_path: userData + "/x/..".repeat(1500) + "/provider-secrets.bin" }), "app-private");
+  assert.equal(check("Write", { file_path: userData + "/./".repeat(2000) + "provider-secrets.bin", content: "x" }), "app-private");
+  // A path field that cannot be checked: too long after folding, or not a string.
+  const long = "/" + "a".repeat(5000);
+  for (const [toolName, toolInput] of [
+    ["Read", { file_path: long }],
+    ["Read", { file_path: 42 }],
+    ["Grep", { pattern: "x", path: long }],
+    ["Glob", { pattern: { glob: "*" } }],
+    ["read_many_files", { paths: ["src/a.ts", 7] }],
+    ["read_many_files", { paths: ["src/a.ts"], include: long }],
+    ["Write", { file_path: long, content: "x" }],
+    ["Bash", { command: "ls", cwd: long }],
+    ["apply_patch", { command: `*** Begin Patch\n*** Add File: ${"b".repeat(5000)}\n+x\n*** End Patch` }],
+    ["apply_patch", { command: `*** Begin Patch\n${Array.from({ length: 257 }, (_, i) => `*** Add File: f${i}.txt\n+x`).join("\n")}\n*** End Patch` }]
+  ]) assert.equal(check(toolName, toolInput), "uncheckable", `${toolName} ${JSON.stringify(toolInput).slice(0, 80)}`);
+  // A patch longer than one path is still read in full.
+  assert.equal(check("apply_patch", { command: `*** Begin Patch\n*** Add File: notes.md\n+${"x".repeat(5000)}\n*** Add File: ${secrets}\n+x\n*** End Patch` }), "app-private");
+  // More paths, brace expansions or nested shells than are checked.
+  assert.equal(rule(`echo ${"a ".repeat(1100)}; cat ${q(secrets)}`) !== null, true, "the private path after the budget is not let through");
+  assert.equal(rule(`echo ${"a ".repeat(1100)}`), "uncheckable");
+  assert.equal(rule(`cat ${q(userData)}/{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}`), "uncheckable");
+  assert.equal(check("Glob", { pattern: "{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}{m,n}", path: project }), "uncheckable");
+  const sq = (text) => `'${text.replace(/'/gu, "'\\''")}'`;
+  let nested = "ls";
+  for (let i = 0; i < 6; i++) nested = `bash -c ${sq(nested)}`;
+  assert.equal(rule(nested), "uncheckable", "shells nested deeper than are followed");
+  assert.equal(rule("bash -c 'bash -c ls'"), null);
+  // Ordinary large calls stay allowed.
+  assert.equal(rule(`git add ${Array.from({ length: 300 }, (_, i) => `src/f${i}.ts`).join(" ")}`), null);
+  assert.equal(rule("cat src/{a,b,c}/{x,y}.ts"), null);
+  assert.equal(rule("cat src/f{1..9}.ts"), null);
+  assert.equal(rule(`cat ${q(userData)}/x{1..100}`), null, "a long sequence stands for any name there");
+  assert.equal(rule("for i in {1..1000}; do echo $i; done"), null);
+  assert.equal(check("apply_patch", { command: `*** Begin Patch\n${Array.from({ length: 40 }, (_, i) => `*** Add File: f${i}.txt\n+x`).join("\n")}\n*** End Patch` }), null);
+});
+
+test("an analyzer failure refuses a shell, edit or read call as uncheckable; other tools keep no opinion", () => {
+  const throwing = (field) => Object.defineProperty({}, field, { enumerable: true, get() { throw new Error("fixture analyzer failure"); } });
+  const brokenPrivateData = { appRoots: [userData], get paths() { throw new Error("fixture analyzer failure"); }, markers: [] };
+  const check = (toolName, toolInput, data = privateData) => checkBaseProtection({ toolName, toolInput, root: project, home, privateData: data });
+  for (const [toolName, toolInput] of [
+    ["Bash", throwing("command")],
+    ["Read", throwing("file_path")],
+    ["Write", throwing("file_path")],
+    ["apply_patch", throwing("command")]
+  ]) {
+    const verdict = check(toolName, toolInput);
+    assert.equal(verdict?.rule, "uncheckable", toolName);
+    assert.match(verdict.message, /failed while checking it/u);
+    assert.doesNotMatch(verdict.message, /fixture analyzer failure/u, "the error itself stays out of the message");
+  }
+  for (const [toolName, toolInput] of [["Bash", { command: "ls" }], ["Read", { file_path: "src/a.ts" }], ["Edit", { file_path: "src/a.ts" }]]) {
+    assert.equal(check(toolName, toolInput, brokenPrivateData)?.rule, "uncheckable", `${toolName}: a failure inside the analysis`);
+  }
+  assert.equal(check("WebFetch", throwing("url")), null, "a tool base protection does not check stays without an opinion");
+});
