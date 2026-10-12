@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import fs, { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { syncBuiltinESMExports } from "node:module";
 import test from "node:test";
 import { FileAccessService } from "../src/main/services/FileAccessService.ts";
 
@@ -226,6 +227,27 @@ test("reads a small UTF-8 text file", async () => {
       size: 11
     });
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reads a file when descriptor devices do not expose its real path", async () => {
+  const root = await makeTempDir("canvastty-files-fd-device-");
+  const original = fs.realpathSync;
+  fs.realpathSync = (path, ...options) => {
+    if (typeof path === "string" && path.startsWith("/proc/self/fd/")) throw Object.assign(new Error("unavailable"), { code: "ENOENT" });
+    if (typeof path === "string" && path.startsWith("/dev/fd/")) return path;
+    return original(path, ...options);
+  };
+  syncBuiltinESMExports();
+  try {
+    await writeFile(join(root, "notes.txt"), "hello world");
+    const service = createService({ cwd: root });
+    const { rootId } = service.registerSessionRoot("session-1");
+    assert.deepEqual(await service.read(rootId, "notes.txt"), { kind: "text", content: "hello world", truncated: false, size: 11 });
+  } finally {
+    fs.realpathSync = original;
+    syncBuiltinESMExports();
     await rm(root, { recursive: true, force: true });
   }
 });

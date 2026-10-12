@@ -2,7 +2,9 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
-## 1.8.0
+## 1.8.1
+
+- Fixed the Files reader rejecting all regular files on macOS: `/dev/fd` device paths are not treated as resolved file targets, and the opened file's identity is checked against its current path before reading. The 1.8.0 build was not published.
 
 - Added image/material cards, pinned versions, remarks, and handoff to an existing agent session. The handoff icon stays fixed in the card header, and the dialog places its Cancel/Send actions together at the bottom right (#123, #128, #130).
 - Added usage history with measured quota changes, conditional session estimates, local-log token evidence, and source health. Five sections in the left sidebar replace the long report: conditional estimate, quotas, agents, local-log tokens, and source state. Estimates remain explicitly distinct from measured usage (#138).
