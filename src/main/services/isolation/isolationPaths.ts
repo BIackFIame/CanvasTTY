@@ -33,8 +33,22 @@ export interface IsolationPathInput {
    * a CANVASTTY_*_ADDRESS in the launch environment (the person's own or a plugin's) never is.
    */
   gatewaySockets?: readonly string[];
+  /**
+   * Folders the host itself placed this launch in (an environment's worktree, the folder the person chose for the
+   * card the launch descends from). A project inside plugin data is reopened only when it is inside one of them.
+   */
+  placedProjects?: readonly PlacedProject[];
   /** Plan: the project is readable only (the CLI's own folders stay writable). */
   readOnlyProject?: boolean;
+}
+
+/**
+ * A folder the host placed a launch in. `pluginId`: an environment of that plugin placed it, so it counts only inside
+ * that plugin's own data folder; without it, the person chose the folder.
+ */
+export interface PlacedProject {
+  folder: string;
+  pluginId?: string;
 }
 
 export interface IsolationPaths {
@@ -232,12 +246,14 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   const privateData = privateAppData(input.userDataPath);
   const project = input.cwd;
   // A project inside plugin data (a plugin environment's worktree) stays this launch's project: that exact folder is
-  // reopened, never its siblings, its plugin's other data or all plugin data.
-  const pluginData = pathSpellings(join(input.userDataPath, PLUGIN_DATA_FOLDER));
-  const projectDepth = Math.max(-1, ...pathSpellings(project).flatMap((candidate) => pluginData
-    .filter((root) => isWithin(candidate, root))
-    .map((root) => relative(root, candidate).split(/[\\/]+/u).filter(Boolean).length)));
+  // reopened, never its siblings, its plugin's other data or all plugin data. Only when the host placed the launch
+  // there: a folder an agent asked for (a subagent's cwd) could otherwise be a plugin's account homes.
+  const pluginDataRoot = join(input.userDataPath, PLUGIN_DATA_FOLDER);
+  const projectDepth = pluginDataDepth(pathSpellings, pluginDataRoot, project);
   if (projectDepth >= 0 && projectDepth < 2) throw new Error(`The project ${project} is CanvasTTY's private plugin data.`);
+  if (projectDepth >= 2 && !(input.placedProjects ?? []).some((placed) => placesProject(pathSpellings, pluginDataRoot, placed, project))) {
+    throw new Error(`The project ${project} is inside CanvasTTY's private plugin data, and CanvasTTY did not place this launch there. Only a plugin environment's own folder or a folder the person chose is opened inside plugin data.`);
+  }
   const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
     ...(projectDepth >= 2 ? [project] : [])];
   const trustedOwn = providerFolders(input.provider, {}, hostHome);
@@ -306,6 +322,30 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     // CanvasTTY's gateways put their sockets when the userData path is too long for one.
     socketPrefixes: all([dirname(dirname(realish(input.sessionTemp))), "/private/tmp", "/tmp"].map((folder) => join(folder, "ctty-")))
   };
+}
+
+/** How many folders below plugin data `path` is (0: plugin data itself), in any spelling; -1 when it is not inside. */
+function pluginDataDepth(spellingsOf: (path: string) => string[], pluginDataRoot: string, path: string): number {
+  const roots = spellingsOf(pluginDataRoot);
+  return Math.max(-1, ...spellingsOf(path).flatMap((candidate) => roots
+    .filter((root) => isWithin(candidate, root))
+    .map((root) => relative(root, candidate).split(/[\\/]+/u).filter(Boolean).length)));
+}
+
+/**
+ * `project` is inside a folder the host placed the launch in, and that folder is itself a folder inside one plugin's
+ * data (never all of it or a whole plugin's data); an environment's folder counts only inside its own plugin's data.
+ */
+function placesProject(spellingsOf: (path: string) => string[], pluginDataRoot: string, placed: PlacedProject, project: string): boolean {
+  if (!isAbsolute(placed.folder)) return false;
+  if (pluginDataDepth(spellingsOf, pluginDataRoot, placed.folder) < 2) return false;
+  if (placed.pluginId !== undefined) {
+    // One folder name (PluginManager's `<plugin-data>/<pluginId>`), and the placed folder strictly inside it.
+    if (!/^[^/\\.][^/\\]*$/u.test(placed.pluginId)) return false;
+    if (pluginDataDepth(spellingsOf, join(pluginDataRoot, placed.pluginId), placed.folder) < 1) return false;
+  }
+  const folders = spellingsOf(placed.folder);
+  return spellingsOf(project).some((candidate) => folders.some((folder) => isWithin(candidate, folder)));
 }
 
 /** `path` is `folder` or inside it, by the host's path rules (separators, a drive on Windows). */

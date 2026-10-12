@@ -7,7 +7,7 @@ import type {
   SessionSnapshot
 } from "../../shared/contracts.ts";
 import { realpathSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PROVIDER_CAPABILITIES } from "../../shared/contracts.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
 import { isPathInside } from "../../agent-runtime/path-inside.mjs";
@@ -17,6 +17,7 @@ import { LaunchRefusal } from "./launchRefusal.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { renderedTerminalText } from "./renderedTerminalText.ts";
 import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
+import { PLUGIN_DATA_FOLDER, privateAppData } from "./isolation/isolationPaths.ts";
 
 // Cards one parent may have in total, live or exited (the live limit is the person's setting).
 const MAX_CHILDREN_PER_PARENT = 16;
@@ -101,6 +102,8 @@ export interface AgentControlOptions {
   limits?: () => DelegationLimits;
   /** CanvasTTY's isolation layer can contain an agent on this computer now (a "contained" auto needs it). */
   containment?: () => boolean;
+  /** CanvasTTY's userData folder: a subagent never works in its private data (tokens, account homes, plugin data). */
+  userDataPath?: string;
 }
 
 /** The longest wait one call may ask for (wait_for_agent's timeoutSeconds maximum). */
@@ -188,7 +191,7 @@ export class AgentControlService {
     const lineage = this.lineage(parent.id);
     const root = lineage.at(-1)!;
     // What the request asks for first (its folder, its profile), then the person's limits.
-    const cwd = subagentFolder(root.cwd, parent.cwd, request.cwd);
+    const cwd = subagentFolder(root.cwd, parent.cwd, request.cwd, this.options.userDataPath);
     if ("error" in cwd) throw new DelegationRefusal(cwd.error);
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
@@ -627,9 +630,11 @@ export function subagentProfile(
 /**
  * Where a subagent may work: its orchestrator's project folder (the folder the person chose for the agent it
  * descends from) or a folder inside it, compared as real paths in the spelling the disk uses (NFC and NFD name the
- * same folder on macOS). A relative folder is taken from the orchestrator's own folder.
+ * same folder on macOS). A relative folder is taken from the orchestrator's own folder. Never CanvasTTY's private
+ * data under `userDataPath` (a project such as the home folder contains it): a folder inside one plugin's data only
+ * when the project itself is a folder inside that same plugin's data (an environment's worktree).
  */
-export function subagentFolder(projectRoot: string, parentCwd: string, requested: unknown): { cwd: string } | { error: string } {
+export function subagentFolder(projectRoot: string, parentCwd: string, requested: unknown, userDataPath?: string): { cwd: string } | { error: string } {
   if (typeof requested !== "string" || requested.trim().length === 0) return { error: "cwd is required: a folder inside this project." };
   const wanted = onDiskPath(isAbsolute(requested) ? requested : resolve(parentCwd, requested));
   const real = (path: string): string | null => {
@@ -644,7 +649,30 @@ export function subagentFolder(projectRoot: string, parentCwd: string, requested
   if (!root || !(isPathInside(root, folder) || isPathInside(root.normalize("NFC"), folder.normalize("NFC")))) {
     return { error: `A subagent works only inside this project's folder (${projectRoot}); ${requested} is outside it. Only the person can start an agent in another folder.` };
   }
+  if (userDataPath && insidePrivateData(root, folder, userDataPath, real)) {
+    return { error: `A subagent cannot work in ${requested}: it is CanvasTTY's private data (tokens, account homes, plugins' data). Only the person can start an agent there.` };
+  }
   return { cwd: folder };
+}
+
+/**
+ * `folder` (a real path) is inside CanvasTTY's private data, and not inside a project that is itself a folder within
+ * one plugin's data (an environment's worktree; then that plugin folder is the project's own).
+ */
+function insidePrivateData(root: string, folder: string, userDataPath: string, real: (path: string) => string | null): boolean {
+  const inside = (base: string, path: string): boolean => isPathInside(base, path) || isPathInside(base.normalize("NFC"), path.normalize("NFC"));
+  const data = real(resolve(userDataPath)) ?? resolve(userDataPath);
+  for (const hidden of privateAppData(data)) {
+    const base = real(hidden) ?? hidden;
+    if (!inside(base, folder)) continue;
+    if (hidden !== join(data, PLUGIN_DATA_FOLDER)) return true;
+    // <plugin-data>/<pluginId>/…: the project must be strictly inside that same plugin's folder.
+    const plugin = relative(base.normalize("NFC"), folder.normalize("NFC")).split(sep)[0];
+    if (!plugin) return true;
+    const pluginFolder = join(base, plugin);
+    if (!inside(pluginFolder, root) || inside(root, pluginFolder)) return true;
+  }
+  return false;
 }
 
 /** Sleeps, or rejects with an AbortError as soon as `signal` aborts. */
