@@ -325,10 +325,12 @@ test("host validation refuses a linked worktree sharing the primary checkout bra
   assert.equal(worktreeGitAccess(duplicate, fixture.main, w.userData), null);
   const linux = isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true });
   assert.throws(() => linux.wrap({ sessionId: "shared", provider: "codex", cwd: duplicate, taskProjectRoot: fixture.main,
+    placedProjects: placedBy(duplicate),
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u);
   const outsideAlias = join(fixture.worktrees, "outside-alias");
   await symlink(fixture.main, outsideAlias, "dir");
   assert.throws(() => linux.wrap({ sessionId: "alias", provider: "codex", cwd: outsideAlias, taskProjectRoot: fixture.main,
+    placedProjects: placedBy(outsideAlias),
     command: "/usr/bin/codex", args: [], env: w.env }), /could not be verified against the task's original Git repository/u,
   "a lexical plugin-data path that resolves outside is still rejected");
 });

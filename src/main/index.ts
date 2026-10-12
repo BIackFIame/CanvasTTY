@@ -64,6 +64,7 @@ import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
+import { isGitProjectRoot, subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
 import { AgentIsolation } from "./services/isolation/AgentIsolation";
 import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
@@ -691,7 +692,12 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const agentControlService = new AgentControlService(managedTerminals, {
     limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
     containment: () => managedTerminals.containment(),
-    userDataPath
+    userDataPath,
+    // A subagent of a Git project runs in a worktree when a trusted environments plugin provides one.
+    resolveSubagentEnvironment: subagentWorktreeResolver({
+      isGitProject: isGitProjectRoot,
+      providers: () => pluginManager?.environmentProviders() ?? []
+    })
   });
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),

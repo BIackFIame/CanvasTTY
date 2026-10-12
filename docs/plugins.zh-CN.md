@@ -236,13 +236,13 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 
 | 请求 | 参数 | 应答 | 时限 |
 |:--|:--|:--|:--|
-| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` 或 `{ refuse: { reason } }`。`ref` 是不超过 4 KB 的不透明 JSON，随卡片保存；`label`（80 字符）是徽标；`cwd`（已存在的绝对路径文件夹）成为卡片的文件夹 | 15 秒 |
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, projectRoot?, options` | `{ ref, label, cwd? }` 或 `{ refuse: { reason } }`。`ref` 是不超过 4 KB 的不透明 JSON，随卡片保存；`label`（80 字符）是徽标；`cwd`（已存在的绝对路径文件夹）成为卡片的文件夹 | 15 秒 |
 | `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` 或 `{ refuse }` | 5 秒 |
 | `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` 或 `{ stopped: { reason } }` | 10 秒 |
 | `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason`（`closed` 或 `quit`） | 忽略 | 10 秒 |
 | `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }`，用于卡片徽标及其提示 | 3 秒 |
 
-- `prepare` 只在卡片首次启动时调用一次。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
+- `prepare` 只在卡片首次启动时调用一次。`projectRoot` 是用户启动的代理所在的文件夹（任务的项目），用于创建该仓库的 worktree。插件数据中的 worktree 环境文件夹只有在它是该仓库的链接 worktree、且所在分支没有被其他 worktree 检出时，才会在代理隔离下作为代理的项目；Git 元数据对代理只读（不能 `git add` 或 `git commit`），因此由插件自己收集代理的修改。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
 - `wrap` 的输出会被检查：`command` 必须是可执行文件的绝对路径，或由宿主在 `PATH` 中解析的纯程序名；命令行、相对路径或 shell 语法会被拒绝，任何内容都不经过 shell 运行。`args` 是数组（256 项，每项 8 KB，不含 NUL）。`env` 和 `secretEnv` 遵循启动贡献者的规则：保留名称以及 CanvasTTY 或启动选项已为此次启动设置的名称会被拒绝。`secretEnv` 的值来自插件自己的机密（需要 `secrets`），并像启动机密一样被遮蔽。
 - `wrap` 收到此次启动自身的变量（来自 CanvasTTY 和所选启动选项），不含保留的 `CANVASTTY_*` 名称，也不含机密值；`secretEnvNames` 列出进程将从宿主获得值的名称，包装器可以按名称转发它们（`docker exec -e NAME`）。
 - 恢复时先恢复所有保存的环境，再先启动父卡片、后启动子卡片。如果插件被禁用、删除或不受信任，或 `resume` 应答 `stopped`，卡片以停止状态返回并显示原因，记录保留；重启会再次调用 `resume`。卡片绝不会改为在本地启动，超时或错误会拒绝启动，不会回退。
