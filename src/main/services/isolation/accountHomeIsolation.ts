@@ -10,11 +10,19 @@ function segmentsBelow(root: string, path: string): string[] | null {
   return rest.split(sep);
 }
 
+/** A folder path without trailing separators (`/a/b/` names the same folder as `/a/b`); the root stays as it is. */
+function withoutTrailingSeparator(path: string): string {
+  const trimmed = path.replace(/[\\/]+$/u, "");
+  return trimmed === "" || /^[A-Za-z]:$/u.test(trimmed) ? path : trimmed;
+}
+
 /**
  * The CLI home a launch contributor handed this launch inside its own data folder: the value of the provider's own
- * home variable (CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, …) when it is an exact absolute path strictly below the
- * contributor's data folder. `dataDir` comes from the host's contributor record, never from the plugin's answer, so a
- * plugin can only point at a folder of its own data, and only the one the CLI is actually started with.
+ * home variable (providerHomeVariables: CODEX_HOME, CLAUDE_CONFIG_DIR, GROK_HOME, HERMES_HOME, KIMI_HOME,
+ * OPENCODE_CONFIG_DIR, QWEN_HOME; never HOME or XDG_*) when it is an exact absolute path strictly below the
+ * contributor's data folder (a trailing separator is dropped: `homes/a/` is `homes/a`). `dataDir` comes from the
+ * host's contributor record, never from the plugin's answer, so a plugin can only point at a folder of its own data,
+ * and only the one the CLI is actually started with.
  */
 export function contributedAccountHome(
   provider: ProviderId,
@@ -23,8 +31,9 @@ export function contributedAccountHome(
   value: string
 ): string | undefined {
   if (!dataDir || !isAbsolute(dataDir) || !providerHomeVariables(provider).includes(key)) return undefined;
-  if (!isAbsolute(value) || resolve(value) !== value) return undefined;
-  return segmentsBelow(resolve(dataDir), value) ? value : undefined;
+  const folder = withoutTrailingSeparator(value);
+  if (!isAbsolute(folder) || resolve(folder) !== folder) return undefined;
+  return segmentsBelow(resolve(dataDir), folder) ? folder : undefined;
 }
 
 /**
@@ -39,7 +48,8 @@ export function validateAccountHome(
   candidate: string,
   env: Readonly<Record<string, string | undefined>>
 ): string | undefined {
-  if (!providerHomeVariables(provider).some((name) => env[name] === candidate)) return undefined;
+  const started = (value: string | undefined): boolean => typeof value === "string" && withoutTrailingSeparator(value) === candidate;
+  if (!providerHomeVariables(provider).some((name) => started(env[name]))) return undefined;
   if (!isAbsolute(candidate) || resolve(candidate) !== candidate) {
     throw new Error("The selected account home must be an exact absolute folder.");
   }

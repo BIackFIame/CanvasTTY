@@ -93,11 +93,16 @@ export function bubblewrapArguments(
   // gateway socket and bind its own in its place, receiving other agents' requests. This launch's own temporary
   // folder is already bound writable above.
   // A bind takes the host folder as it is, so one over a hidden path would show it again: refused, never mounted.
+  // Over a writable folder (the project, a CLI home) it would make that read-only and undo the throwaway hooks
+  // folder above: refused too. Core gateways use dedicated folders, so neither happens with them.
   const hidden = [...paths.unreadable, ...(launch.runtimeDir ? [launch.runtimeDir] : [])];
+  const writable = [...seen, ...paths.writableFiles];
   for (const path of paths.socketFolders) {
     if (exists(path) !== "directory" || seen.has(path)) continue;
     const covered = hidden.find((secret) => within(secret, path));
     if (covered) throw new Error(`The gateway socket folder ${path} contains ${covered}, which the agent may not read.`);
+    const shadowed = writable.find((folder) => within(folder, path));
+    if (shadowed) throw new Error(`The gateway socket folder ${path} contains ${shadowed}, which the agent writes; it is not mounted over it.`);
     args.push("--ro-bind", path, path);
   }
   args.push("--chdir", launch.cwd, "--", launch.command, ...launch.args);

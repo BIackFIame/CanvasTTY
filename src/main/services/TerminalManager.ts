@@ -68,6 +68,7 @@ import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type L
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
 import { controlGrantFolder, gatewaySocketAddresses } from "./isolation/AgentIsolation.ts";
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
+import type { PlacedProject } from "./isolation/isolationPaths.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
@@ -1793,7 +1794,10 @@ export class TerminalManager {
     let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
     if (decision.apply) {
       try {
-        spawn = this.wrapIsolated(id, provider, profile, planned, planned, contribution?.accountHome);
+        spawn = this.wrapIsolated(id, provider, profile, planned, planned, {
+          ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
+          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined)
+        });
       } catch (error) {
         planned.cleanup();
         return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
@@ -1859,7 +1863,7 @@ export class TerminalManager {
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
   private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
     gateways: Pick<PlannedSpawn, "agentBrowser" | "agentRuntime" | "agentOrchestration" | "controlGrant">,
-    accountHome?: string): { command: string; args: string[]; env: Record<string, string> } {
+    placement: { accountHome?: string; placedProjects: readonly PlacedProject[] }): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
     // Only the grant CanvasTTY handed this launch: a CANVASTTY_CONTROL_CONNECTION a plugin set reopens nothing.
@@ -1872,7 +1876,8 @@ export class TerminalManager {
       args: planned.args,
       env: planned.env,
       profile,
-      ...(accountHome ? { accountHome } : {}),
+      ...(placement.accountHome ? { accountHome: placement.accountHome } : {}),
+      placedProjects: placement.placedProjects,
       ...(grant ? { grantedPrivate: [grant] } : {}),
       // Only the sockets CanvasTTY's own gateways prepared; a CANVASTTY_*_ADDRESS from elsewhere is never bound in.
       gatewaySockets: gatewaySocketAddresses(gateways.agentBrowser?.environment, gateways.agentRuntime?.environment,
@@ -2079,6 +2084,30 @@ export class TerminalManager {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The folders CanvasTTY itself placed a launch in, the only ones the isolation layer opens inside plugin data: the
+   * folder an environment prepared for this card (inside that plugin's own data), or, for a card the person started
+   * and its subagents, the top card's folder (the person's choice, or its environment's). A subagent's own folder is
+   * never one by itself: an agent asked for it. A plugin's own card is placed by nothing but an environment.
+   */
+  private placedProjects(id: string, parentSessionId: string | undefined, cwd: string,
+    environment: { pluginId: string } | undefined): PlacedProject[] {
+    if (environment) return [{ folder: cwd, pluginId: environment.pluginId }];
+    if (parentSessionId === undefined) {
+      return (this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id)) === undefined ? [{ folder: cwd }] : [];
+    }
+    let root: ManagedSession | undefined;
+    let next: string | undefined = parentSessionId;
+    for (let depth = 0; next !== undefined && depth < 64; depth++) {
+      root = this.sessions.get(next);
+      if (!root) return [];
+      next = root.metadata.parentSessionId;
+    }
+    if (!root || next !== undefined) return [];
+    if (root.extras.environment) return [{ folder: root.metadata.cwd, pluginId: root.extras.environment.pluginId }];
+    return root.extras.ownerPluginId === undefined ? [{ folder: root.metadata.cwd }] : [];
   }
 
   private contributed(session: ManagedSession): boolean {
@@ -2299,7 +2328,10 @@ export class TerminalManager {
       }
       if (decision.apply) {
         try {
-          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, contribution?.accountHome), cwd: spawn.cwd };
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, {
+            ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
+            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment)
+          }), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
         }

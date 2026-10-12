@@ -5,7 +5,7 @@ import { delimiter, dirname, isAbsolute, join } from "node:path";
 import type { ProviderId, SessionIsolation } from "../../../shared/contracts.ts";
 import { autoKind, PROFILE_RANK, type LaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
-import { isolationPaths } from "./isolationPaths.ts";
+import { isolationPaths, type PlacedProject } from "./isolationPaths.ts";
 import { validateAccountHome } from "./accountHomeIsolation.ts";
 import { seatbeltProfile } from "./seatbelt.ts";
 import { bubblewrapArguments, projectHooks, type PathKind } from "./bubblewrap.ts";
@@ -80,6 +80,8 @@ export interface IsolationLaunch {
   accountHome?: string;
   /** CanvasTTY's own gateway sockets for this launch (gatewaySocketAddresses), never read from `env`. */
   gatewaySockets?: readonly string[];
+  /** Folders CanvasTTY itself placed this launch in (an environment's worktree, the person's chosen folder). */
+  placedProjects?: readonly PlacedProject[];
   /** The launch profile: in plan the project is not writable. */
   profile?: LaunchProfile;
 }
@@ -203,6 +205,7 @@ export class AgentIsolation {
         sessionId: launch.sessionId,
         ...(granted.length > 0 ? { grantedPrivate: granted } : {}),
         ...(launch.gatewaySockets ? { gatewaySockets: launch.gatewaySockets } : {}),
+        ...(launch.placedProjects ? { placedProjects: launch.placedProjects } : {}),
         ...(launch.profile === "plan" ? { readOnlyProject: true } : {})
       });
       // `git init` and `git clone` copy git's template, sample hooks included: an empty one writes no hooks.
