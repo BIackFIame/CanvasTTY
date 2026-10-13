@@ -5,6 +5,9 @@ const MAX_REVIEW_BYTES = 512 * 1024;
 // Conflict metadata consumes review space, keeping generated actions below the 1 MiB transport frame.
 const MAX_ACTION_BYTES = 2 * MAX_REVIEW_BYTES;
 const MAX_TEXT = 16_384;
+// Bidirectional formatting controls can make a shown diff or file name read differently from what it is (Trojan
+// Source): removed from text, refused in paths.
+const BIDI_CONTROLS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Plugin review data is invalid.");
@@ -34,10 +37,11 @@ export function normalizeCardActionInput(value: unknown): Record<string, unknown
 export function normalizeCardReview(value: unknown, redact: (text: string) => string, actions: ReadonlySet<string>): PluginChangeReview {
   boundedJson(value, MAX_REVIEW_BYTES);
   const review = record(value);
-  const text = (value: unknown, limit = MAX_TEXT): string => {
+  const clean = (value: unknown): string => {
     if (typeof value !== "string") throw new Error("Plugin review text is invalid.");
-    return redact(value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/gu, "")).slice(0, limit);
+    return redact(value.replace(/[\u0000-\u0008\u000B-\u001F\u007F]/gu, "").replace(BIDI_CONTROLS, ""));
   };
+  const text = (value: unknown, limit = MAX_TEXT): string => clean(value).slice(0, limit);
   const page = (value: unknown): PluginReviewTextPage => {
     const source = record(value);
     if (typeof source.hasMore !== "boolean") throw new Error("Plugin review page is invalid.");
@@ -57,16 +61,19 @@ export function normalizeCardReview(value: unknown, redact: (text: string) => st
     if (!Array.isArray(group.files) || (fileCount += group.files.length) > 400) throw new Error("Plugin review files are invalid.");
     const files = group.files.map(value => {
       const file = record(value);
-      if (typeof file.path !== "string" || !file.path || file.path.length > 1000 || /[\u0000-\u001F\u007F]/u.test(file.path)) throw new Error("Plugin review file path is invalid.");
+      if (typeof file.path !== "string" || !file.path || file.path.length > 1000 || /[\u0000-\u001F\u007F]/u.test(file.path)
+        || new RegExp(BIDI_CONTROLS.source, "u").test(file.path)) throw new Error("Plugin review file path is invalid.");
       if (redact(file.path) !== file.path) throw new Error("Plugin review file names contain protected data.");
-      const result: PluginChangeReviewFile = { path: file.path, diff: text(file.diff) };
+      // Cut after masking: what the dialog shows is what is marked truncated.
+      const diff = clean(file.diff);
+      const result: PluginChangeReviewFile = { path: file.path, diff: diff.slice(0, MAX_TEXT) };
       if (file.status !== undefined) result.status = text(file.status, 80);
       if (file.page !== undefined) result.page = integer(file.page);
       if (file.hasMore !== undefined) {
         if (typeof file.hasMore !== "boolean") throw new Error("Plugin review page is invalid.");
         result.hasMore = file.hasMore;
       }
-      result.truncated = file.truncated === true || (typeof file.diff === "string" && file.diff.length > MAX_TEXT);
+      result.truncated = file.truncated === true || diff.length > MAX_TEXT;
       if (file.conflict !== undefined) {
         const conflict = record(file.conflict);
         result.conflict = { current: page(conflict.current), agent: page(conflict.agent) };
@@ -75,7 +82,7 @@ export function normalizeCardReview(value: unknown, redact: (text: string) => st
       return result;
     });
     return { sessionId: group.sessionId, title: text(group.title, 200), files,
-      ...(group.error !== undefined ? { error: text(group.error, 2000) } : {}) };
+      ...(group.error !== undefined ? { error: text(group.error, 2000) } : {}), ...(group.active === true ? { active: true } : {}) };
   });
   const acceptActionId = action(review.acceptActionId), rejectActionId = action(review.rejectActionId);
   const result: PluginChangeReview = {
