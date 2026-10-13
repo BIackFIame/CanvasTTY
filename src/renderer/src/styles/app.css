@@ -421,6 +421,34 @@ button { border: 0; }
 @media (max-width: 760px) { .plugin-review__body, .plugin-review__sides { grid-template-columns: minmax(0, 1fr); } }
 .plugin-review .card-dialog__secondary { align-self: flex-start; }
 /* End of change review. */
+/* Rollback points of a card (CheckpointsDialog): the card dialog frame plus its list and preview. */
+.checkpoints-dialog__body { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(14em, 1fr) minmax(0, 2fr); gap: 1em; }
+.checkpoints-dialog__list { max-height: 55vh; margin: 0; padding: .3em; overflow: auto; list-style: none; border-radius: var(--radius-md); background: color-mix(in srgb, var(--surface-soft) 60%, var(--surface)); }
+.checkpoints-dialog__entry { width: 100%; padding: .6em .75em; display: flex; flex-direction: column; align-items: flex-start; gap: .2em; border-radius: .7em; outline: 0; color: var(--text); background: transparent; cursor: pointer; text-align: left; }
+.checkpoints-dialog__entry span { color: var(--text-muted-on-dark); font-size: .88em; }
+.checkpoints-dialog__entry:hover, .checkpoints-dialog__entry--active { background: var(--surface-soft); }
+.checkpoints-dialog__entry:focus-visible { box-shadow: inset 0 0 0 .15em var(--secondary); }
+.checkpoints-dialog__preview { min-width: 0; max-height: 55vh; display: flex; flex-direction: column; gap: .6em; overflow: auto; }
+.checkpoints-dialog__preview h3 { margin: 0; font-size: 1em; }
+.checkpoints-dialog__files { margin: 0; padding: 0; display: flex; flex-direction: column; gap: .3em; list-style: none; }
+.checkpoints-dialog__files li { display: flex; align-items: center; gap: .5em; color: var(--text-muted-on-dark); }
+.checkpoints-dialog__files code { min-width: 0; overflow-wrap: anywhere; color: var(--text); font: .92em/1.35 var(--font-mono); }
+.checkpoints-dialog__diff { min-height: 4em; max-height: 28em; margin: 0; padding: .8em; overflow: auto; border-radius: var(--radius-sm); color: var(--text); background: color-mix(in srgb, var(--surface) 70%, var(--text-dark)); font: .88em/1.45 var(--font-mono); white-space: pre; }
+.checkpoints-dialog__empty { padding: 1.5em; border-radius: var(--radius-md); background: color-mix(in srgb, var(--surface-soft) 60%, var(--surface)); }
+.checkpoints-dialog__empty p { margin: .4em 0 0; color: var(--text-muted-on-dark); line-height: 1.4; }
+.checkpoints-dialog__status { margin: 0; display: flex; align-items: center; gap: .5em; color: var(--text-muted-on-dark); }
+.checkpoints-dialog__status .ui-icon--working { animation: spin 1.2s linear infinite; }
+.checkpoints-dialog__success { margin: 0; color: var(--success); font-weight: 700; }
+.checkpoints-dialog__diff .checkpoints-dialog__line--add { color: var(--success); background: color-mix(in srgb, var(--success) 12%, transparent); }
+.checkpoints-dialog__diff .checkpoints-dialog__line--del { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.checkpoints-dialog__diff .checkpoints-dialog__line--hunk { color: var(--text-muted-on-dark); font-weight: 700; }
+.checkpoints-dialog__diff .checkpoints-dialog__line--meta { color: var(--text-muted-on-dark); }
+.checkpoints-dialog__more { align-self: flex-start; }
+/* The confirmation takes the same three lines the outcome line reserves: the dialog keeps its height in every language. */
+.checkpoints-dialog .card-dialog__footer--confirm p { min-height: 4.2em; display: flex; align-items: center; }
+.checkpoints-dialog__message { min-width: 0; min-height: 4.2em; margin: 0; flex: 1; display: flex; align-items: center; line-height: 1.4; }
+@media (max-width: 760px) { .checkpoints-dialog__body { grid-template-columns: minmax(0, 1fr); } }
+/* End of rollback points. */
 .shortcut-reference { margin: 0; display: grid; gap: clamp(5px, 1vh, 10px); }
 .shortcut-reference > div { display: grid; align-content: start; gap: 4px; line-height: 1.35; }
 .shortcut-reference dt, .shortcut-reference dd { margin: 0; }

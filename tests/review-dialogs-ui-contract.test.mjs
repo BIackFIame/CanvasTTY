@@ -11,7 +11,10 @@ const CARD_DIALOG_CSS = ["/* Card dialogs: the shared frame", "/* End of card di
 const DIALOGS = [
   { name: "change review", source: "src/renderer/src/features/terminal/PluginChangesReviewDialog.tsx",
     css: ["/* Change review of a plugin card action", "/* End of change review. */"],
-    textModule: "src/renderer/src/features/terminal/pluginReviewText.ts", textFunction: "pluginReviewText" }
+    textModule: "src/renderer/src/features/terminal/pluginReviewText.ts", textFunction: "pluginReviewText" },
+  { name: "rollback points", source: "src/renderer/src/features/terminal/CheckpointsDialog.tsx",
+    css: ["/* Rollback points of a card", "/* End of rollback points. */"],
+    textModule: "src/renderer/src/features/terminal/checkpointsText.ts", textFunction: "checkpointsText" }
 ];
 
 function cssBlock([start, end]) {
@@ -77,8 +80,18 @@ test("a disabled dialog button is quiet: no fill, muted text, not-allowed cursor
 });
 
 test("App renders the card dialogs inside the themed tree, hides the native Browser and blocks canvas shortcuts", () => {
-  assert.match(app, /const modalDialogOpen = shortcutReferenceOpen \|\| pluginReview !== null/u);
+  assert.match(app, /const modalDialogOpen = shortcutReferenceOpen \|\| pluginReview !== null \|\| checkpointsFor !== null/u);
   assert.match(app, /browserViewVisible=\{[^}]*!modalDialogOpen/u);
   assert.equal(app.match(/if \(modalDialogOpen[ )]/gu)?.length, 2, "keyboard and pointer shortcuts");
   assert.match(app, /<PluginReviewHost request=\{pluginReview\}/u);
+  assert.match(app, /<CheckpointsHost request=\{checkpointsFor\}/u);
+});
+
+test("every rollback point error code has a localized text, and the card menu label is in ru and en", async () => {
+  const [source, contracts] = await Promise.all([read("src/renderer/src/features/terminal/CheckpointsDialog.tsx"), read("src/shared/contracts.ts")]);
+  const union = contracts.slice(contracts.indexOf("export type CheckpointErrorCode"), contracts.indexOf(";", contracts.indexOf("export type CheckpointErrorCode")));
+  const codes = [...union.matchAll(/"([a-z-]+)"/gu)].map((match) => match[1]);
+  assert.ok(codes.length >= 8);
+  for (const code of codes) assert.match(source, new RegExp(`"?${code}"?: "error[A-Za-z]+"`, "u"), code);
+  assert.equal(i18n.match(/^  checkpointsMenu: "/gmu)?.length, 2, "checkpointsMenu exists in ru and en");
 });
