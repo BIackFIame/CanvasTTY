@@ -95,9 +95,9 @@ for (const provider of ["codex", "opencode"]) {
     // Turning status hooks off revokes the lease: this launch has no hooks any more, and the result says so.
     f.setStatusHooks(false);
     assert.equal(f.gateway.currentStatus(worker.id), null);
-    assert.equal(f.control.result(worker.id).answer?.text, "worker final answer", "an answer captured earlier stays");
+    assert.equal((await f.control.result(worker.id)).answer?.text, "worker final answer", "an answer captured earlier stays");
     await f.terminals.deliverInput(worker.id, "next task\r");
-    const after = f.control.result(worker.id);
+    const after = await f.control.result(worker.id);
     assert.equal(after.answer, undefined);
     assert.equal(after.answerUnavailable?.reason, "status_hooks_off");
   });
@@ -118,12 +118,12 @@ for (const provider of ["codex", "opencode"]) {
 
     // Turning them on applies to agents started or restarted afterwards.
     f.setStatusHooks(true);
-    assert.equal(f.control.result(worker.id).answerUnavailable?.reason, "status_hooks_off");
+    assert.equal((await f.control.result(worker.id)).answerUnavailable?.reason, "status_hooks_off");
     launch.process.emitExit(0);
     f.terminals.restart(worker.id);
     const restarted = f.calls.at(-1);
     assert.notEqual(restarted, launch);
     assert.ok(restarted.options.env[AGENT_RUNTIME_ENV.capabilityToken], "the restarted launch has its hooks");
-    assert.equal(f.control.result(worker.id).answerUnavailable, undefined);
+    assert.equal((await f.control.result(worker.id)).answerUnavailable, undefined);
   });
 }
