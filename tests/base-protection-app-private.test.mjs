@@ -62,6 +62,8 @@ const DENY = [
   "echo $CANVASTTY_RUNTIME_CAPABILITY",
   // Interpreter one-liners and heredocs.
   `python3 -c "print(open('${token}').read())"`,
+  `cat ${q(join(userData, "checkpoints", "checkpoints.json"))}`,
+  `python3 -c "print(open('${join(userData, "checkpoints", "checkpoints.json")}').read())"`,
   "python3 -c \"import os;p=os.path.join(os.path.expanduser('~'),'Library','Application Support','canvastty','agent-control');print(os.listdir(p))\"",
   "node -e \"console.log(require('fs').readFileSync(process.env.HOME + '/Library/Application Support/canvastty/plugin-secrets/x', 'utf8'))\"",
   `python3 - <<'EOF'\nprint(open("${token}").read())\nEOF`,
@@ -96,7 +98,10 @@ const ALLOW = [
   "cat ~/.config/other/token",
   "node -e \"console.log(1)\"",
   "curl https://example.com/agent-control/token-1",
-  "echo hi > out.txt"
+  "echo hi > out.txt",
+  // Ordinary work in a project that mentions the app and "checkpoints" (CanvasTTY's own repository among them).
+  "node -e \"require('./src/canvastty/checkpoints/index.js')\"",
+  "python3 -c \"import os;print(os.path.join('canvastty','checkpoints','README'))\""
 ];
 
 test("CanvasTTY's own tokens, secret stores and sockets are refused for every reader and client", () => {

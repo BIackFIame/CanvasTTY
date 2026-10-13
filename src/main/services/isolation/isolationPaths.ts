@@ -191,7 +191,9 @@ export const PLUGIN_DATA_FOLDER = "plugin-data";
  * runtime folders stay readable: they hold token-authenticated sockets and per-run hook settings the CLI must read.
  */
 export function privateAppData(userDataPath: string): string[] {
-  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER]
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER,
+    // Rollback points live in "checkpoints"; the two older names stay private in case an earlier build left them.
+    "checkpoints", "checkpoints.json", "checkpoint-objects"]
     .map((name) => join(userDataPath, name));
 }
 

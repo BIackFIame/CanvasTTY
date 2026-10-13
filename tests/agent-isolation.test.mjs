@@ -46,6 +46,14 @@ async function world(t) {
   await writeFile(join(userData, "agent-control", "token-app"), "APP-TOKEN");
   await writeFile(join(userData, "agent-control", "sessions", "own", "connection.json"), "{}");
   await writeFile(join(userData, "provider-secrets.bin"), "SECRETS");
+  await mkdir(join(userData, "checkpoints", "checkpoint-objects", "fixture"), { recursive: true });
+  await writeFile(join(userData, "checkpoints", "checkpoints.json"), "IMMUTABLE-CHECKPOINT-REGISTRY");
+  await writeFile(join(userData, "checkpoints", "checkpoints.json.quarantined"), "SET-ASIDE-CHECKPOINT-REGISTRY");
+  await writeFile(join(userData, "checkpoints", "checkpoint-objects", "fixture", "pack.pack"), "HOST-SNAPSHOT-OBJECTS");
+  // Names an earlier build used, directly in userData.
+  await writeFile(join(userData, "checkpoints.json"), "LEGACY-CHECKPOINT-REGISTRY");
+  await mkdir(join(userData, "checkpoint-objects"), { recursive: true });
+  await writeFile(join(userData, "checkpoint-objects", "pack.pack"), "LEGACY-SNAPSHOT-OBJECTS");
   const env = { HOME: home, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", LANG: "en_US.UTF-8" };
   return { base, home, userData, project, temp, env };
 }
@@ -186,7 +194,7 @@ test("the paths: the project and the CLI's own folders writable; other CLIs' cre
   assert.ok(paths.writable.includes(join(w.home, ".codex")));
   assert.ok(!paths.writable.includes(join(w.home, ".claude")));
   for (const secret of [join(w.home, ".ssh"), join(w.home, ".aws"), join(w.home, ".claude"), join(w.home, ".local", "share", "opencode"),
-    join(w.home, ".grok"), join(w.userData, "agent-control"), join(w.userData, "provider-secrets.bin"), join(w.userData, "account-homes")]) {
+    join(w.home, ".grok"), join(w.userData, "agent-control"), join(w.userData, "provider-secrets.bin"), join(w.userData, "account-homes"), join(w.userData, "checkpoints"), join(w.userData, "checkpoints.json"), join(w.userData, "checkpoint-objects")]) {
     assert.ok(paths.unreadable.includes(secret), secret);
   }
   assert.ok(!paths.unreadable.includes(join(w.home, ".codex")), "its own folder stays readable");
@@ -675,6 +683,10 @@ test("seatbelt, for real: writes stay in the project, secrets stay unread, nothi
     'cat "$HOME/.claude/.credentials.json" 2>/dev/null || echo R-other-cli-denied',
     `cat "${join(w.userData, "agent-control", "token-app")}" 2>/dev/null || echo R-app-token-denied`,
     `cat "${join(w.userData, "provider-secrets.bin")}" 2>/dev/null || echo R-secret-store-denied`,
+    `cat "${join(w.userData, "checkpoints", "checkpoints.json")}" 2>/dev/null || echo R-checkpoints-denied`,
+    `cat "${join(w.userData, "checkpoints", "checkpoints.json.quarantined")}" 2>/dev/null || echo R-checkpoints-aside-denied`,
+    `cat "${join(w.userData, "checkpoints", "checkpoint-objects", "fixture", "pack.pack")}" 2>/dev/null || echo R-checkpoint-pack-denied`,
+    `cat "${join(w.userData, "checkpoints.json")}" "${join(w.userData, "checkpoint-objects", "pack.pack")}" 2>/dev/null || echo R-legacy-checkpoints-denied`,
     `cat "${join(own, "connection.json")}" >/dev/null && echo R-own-grant-ok`,
     'echo t > "$TMPDIR/t" && echo W-session-tmp-ok',
     'echo c > "$HOME/.codex/state" && echo W-own-cli-ok',
@@ -687,7 +699,7 @@ test("seatbelt, for real: writes stay in the project, secrets stay unread, nothi
     'launchctl submit -l ctty.isolation.probe -- /usr/bin/true 2>/dev/null || echo LAUNCHD-denied'
   ].join("; "), { granted: [own] });
   assert.deepEqual(lines, ["W-project-ok", "W-subfolder-ok", "W-home-denied", "W-tmp-denied", "W-usr-local-denied", "RM-home-denied", "R-ssh-denied",
-    "R-aws-denied", "R-other-cli-denied", "R-app-token-denied", "R-secret-store-denied", "R-own-grant-ok", "W-session-tmp-ok", "W-own-cli-ok",
+    "R-aws-denied", "R-other-cli-denied", "R-app-token-denied", "R-secret-store-denied", "R-checkpoints-denied", "R-checkpoints-aside-denied", "R-checkpoint-pack-denied", "R-legacy-checkpoints-denied", "R-own-grant-ok", "W-session-tmp-ok", "W-own-cli-ok",
     "W-own-cli-config-denied", "GIT-ok", "W-git-hook-denied", "SIGNAL-denied", "PREFS-denied", "APPLE-EVENTS-denied", "LAUNCHD-denied"]);
   assert.equal(await readFile(join(w.home, "victim", "deep", "file"), "utf8"), "keep me");
   assert.equal(existsSync(join(w.home, "outside")), false);

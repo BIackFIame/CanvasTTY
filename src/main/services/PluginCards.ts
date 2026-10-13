@@ -23,6 +23,8 @@ export interface PluginCardsDependencies {
   trustedPlugins(): ReadonlySet<string>;
   call(pluginId: string, serviceId: string, method: "canvastty.cards.invoke", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): PluginSessionSummary | null;
+  /** A rollback point restore is writing files in (or above, or below) this folder. */
+  restoring?(folder: string): boolean;
   redact(text: string): string;
   /** Pushes the new decorations to the window. */
   changed(decorations: PluginCardDecorations): void;
@@ -141,6 +143,10 @@ export class PluginCards {
     const session = this.deps.session(sessionId);
     if (!session) throw new Error("No card has that session id.");
     if (!cardActionMatches(action.when, session)) throw new Error("That action does not apply to this card.");
+    // A card action may change the card's files (apply a worktree, discard changes): never while a restore writes them.
+    if (this.deps.restoring && [session.cwd, session.workingDirectory].some((folder) => this.deps.restoring!(folder))) {
+      throw new Error("Workspace rollback point restoration is in progress. Try the action again after it finishes.");
+    }
     const normalizedInput = normalizeCardActionInput(input);
     if (action.menu === false && normalizedInput === undefined) throw new Error("That action runs only from a change review.");
     const timeoutMs = this.deps.timeoutMs ?? CARD_ACTION_TIMEOUT_MS;
