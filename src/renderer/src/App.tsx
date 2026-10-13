@@ -72,7 +72,7 @@ import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
 import { UsageHistoryPanel } from "./features/usage/UsageHistoryPanel";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import type { PluginReviewRequest } from "./features/terminal/pluginReviewUiState";
-import { pluginReviewHostSurface } from "./features/terminal/cardDialogSurfaces";
+import { checkpointsHostSurface, pluginReviewHostSurface } from "./features/terminal/cardDialogSurfaces";
 import { preloadWhenIdle, usePreloadedSurface } from "./lib/preloadedSurface";
 import { createCameraStore } from "./features/workspace/cameraStore";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
@@ -371,11 +371,14 @@ export function App(): React.JSX.Element {
   const [overlayHost, setOverlayHost] = useState<HTMLDivElement | null>(null);
   // The change review a card action answered with (rendered here, inside the themed tree, as a modal dialog).
   const [pluginReview, setPluginReview] = useState<PluginReviewRequest | null>(null);
+  // A card's rollback points dialog (its "Rollback points…" menu item).
+  const [checkpointsFor, setCheckpointsFor] = useState<{ sessionId: string; cardTitle: string } | null>(null);
   // Out of the startup bundle, preloaded once the app is idle, rendered without a Suspense wait (see preloadedSurface).
   const PluginReviewHost = usePreloadedSurface(pluginReviewHostSurface, pluginReview !== null);
-  useEffect(() => preloadWhenIdle([pluginReviewHostSurface]), []);
+  const CheckpointsHost = usePreloadedSurface(checkpointsHostSurface, checkpointsFor !== null);
+  useEffect(() => preloadWhenIdle([pluginReviewHostSurface, checkpointsHostSurface]), []);
   // A modal dialog owns the keyboard: no canvas shortcut fires underneath it and the native Browser is hidden.
-  const modalDialogOpen = shortcutReferenceOpen || pluginReview !== null;
+  const modalDialogOpen = shortcutReferenceOpen || pluginReview !== null || checkpointsFor !== null;
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -2010,6 +2013,7 @@ export function App(): React.JSX.Element {
           onOpenBrowser={openBrowserFromUi}
           onOpenTerminalUrl={(url) => void openTerminalUrl(url)}
           onPluginReview={setPluginReview}
+          onOpenCheckpoints={(sessionId, cardTitle) => setCheckpointsFor({ sessionId, cardTitle })}
           onRequestMedia={requestMedia}
           onRemoveMedia={removeMedia}
           onHomeLayoutChange={changeHomeLayout}
@@ -2091,6 +2095,7 @@ export function App(): React.JSX.Element {
       <Suspense fallback={null}>
         {shortcutReferenceOpen && <ShortcutReference settings={settings}
           onClose={() => setShortcutReferenceOpen(false)} />}
+        {checkpointsFor && CheckpointsHost && <CheckpointsHost request={checkpointsFor} locale={settings.locale} onClose={() => setCheckpointsFor(null)} />}
         {pluginReview && PluginReviewHost && <PluginReviewHost request={pluginReview} locale={settings.locale}
           setRequest={setPluginReview} showToast={showToast} />}
         <AgentLaunchDialog

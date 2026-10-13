@@ -147,6 +147,7 @@ interface TerminalCardHandlers {
   dispose(id: string, keepEnvironmentData?: boolean): void;
   openUrl(url: string): void;
   pluginReview(request: PluginReviewRequest): void;
+  openCheckpoints(sessionId: string, cardTitle: string): void;
 }
 
 /** A group drag's commit basis, frozen once when the press activates: the pressed layer's start
@@ -217,6 +218,8 @@ interface WorkspaceCanvasProps {
   onOpenTerminalUrl(url: string): void;
   /** A card action answered with a change review. */
   onPluginReview(request: PluginReviewRequest): void;
+  /** An agent card's "Rollback points…" menu item. */
+  onOpenCheckpoints(sessionId: string, cardTitle: string): void;
   onFocusSession(session: SessionSnapshot): void;
   onResumeHistory(item: AgentChatHistoryItem, position: Point): Promise<SessionSnapshot>;
   activeSessionId: string | null;
@@ -290,7 +293,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
   const {
     settings, mediaData, sessions, limits, limitsLoadState, plugins, browser,
     browserViewVisible, homeEditing, camera, onCameraChange, onGoHome,
-    onOpenSettings, onOpenAgent, onOpenTerminal, onOpenBrowser, onOpenTerminalUrl, onPluginReview, onFocusSession,
+    onOpenSettings, onOpenAgent, onOpenTerminal, onOpenBrowser, onOpenTerminalUrl, onPluginReview, onOpenCheckpoints, onFocusSession,
     activeSessionId, browserSelected, renamingSessionId, fullscreenSessionId, onToggleFullscreen, onSelectSession,
     onSelectBrowser, onClearCanvasSelection, onRenameSession, onRenameEnd,
     onRequestMedia, onRemoveMedia, onHomeLayoutChange, onHomeGridSizeChange,
@@ -731,7 +734,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     restart: onRestartSession,
     dispose: onDisposeSession,
     openUrl: onOpenTerminalUrl,
-    pluginReview: onPluginReview
+    pluginReview: onPluginReview,
+    openCheckpoints: onOpenCheckpoints
   };
   const terminalCardCallbacks = useMemo(() => {
     const latest = terminalCardHandlers;
@@ -741,7 +745,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       onRestart: (id: string, resume?: boolean) => latest.current!.restart(id, resume),
       onDispose: (id: string, keepEnvironmentData?: boolean) => latest.current!.dispose(id, keepEnvironmentData),
       onOpenUrl: (url: string) => latest.current!.openUrl(url),
-      onPluginReview: (request: PluginReviewRequest) => latest.current!.pluginReview(request)
+      onPluginReview: (request: PluginReviewRequest) => latest.current!.pluginReview(request),
+      onOpenCheckpoints: (sessionId: string, cardTitle: string) => latest.current!.openCheckpoints(sessionId, cardTitle)
     };
     return {
       canvas: {

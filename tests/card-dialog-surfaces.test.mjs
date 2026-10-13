@@ -19,6 +19,9 @@ const SURFACES = [
     request: { pluginId: "plugin", actionId: "review", sessionId: "card", cardTitle: "Card", review: {
       acceptActionId: "accept", rejectActionId: "reject", groups: [{ sessionId: "worker", title: "Worker", files: [{ path: "a.txt", diff: "+a", page: 0 }] }]
     } }
+  } },
+  { name: "rollback points", surface: "checkpointsHostSurface", chunk: /CheckpointsDialog-/u, props: {
+    locale: "en", onClose: () => undefined, request: { sessionId: "card", cardTitle: "Card" }
   } }
 ];
 
