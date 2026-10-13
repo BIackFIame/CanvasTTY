@@ -66,3 +66,88 @@ test("human card action input is a bounded JSON object and is copied before plug
   const cycle = {}; cycle.self = cycle;
   assert.throws(() => normalizeCardActionInput(cycle), /must be JSON/u);
 });
+
+test("review-only actions (menu: false) stay out of the card menu and never run without the review's input", async () => {
+  const { validatePluginManifest } = await import("../src/main/services/PluginManager.ts");
+  const { readFile } = await import("node:fs/promises");
+  const example = JSON.parse(await readFile(new URL("../examples/plugins/collect-demo/canvastty.plugin.json", import.meta.url), "utf8"));
+  const manifest = (cardActions) => ({ ...example, services: [{ ...example.services[0], cardActions }] });
+  const validated = validatePluginManifest(manifest([{ id: "review", title: "Review" }, { id: "accept", title: "Accept", menu: false }]));
+  assert.deepEqual(validated.services[0].cardActions, [{ id: "review", title: "Review" }, { id: "accept", title: "Accept", menu: false }]);
+  assert.throws(() => validatePluginManifest(manifest([{ id: "accept", title: "Accept", menu: true }])), /menu must be false/u);
+
+  const calls = [];
+  const cards = new PluginCards({
+    locale: () => "en",
+    providers: () => [{ pluginId: "reviews", pluginName: "Reviews", serviceId: "results", actions: validated.services[0].cardActions }],
+    trustedPlugins: () => new Set(["reviews"]),
+    session: (id) => id === "root" ? { id: "root", role: "orchestrator", provider: "codex" } : null,
+    call: async (_plugin, _service, _method, params) => { calls.push(params); return { tone: "info" }; },
+    redact: (text) => text, changed() {}
+  });
+  assert.deepEqual(cards.decorations().actions.map((action) => action.actionId), ["review"], "only the menu action is listed");
+  await assert.rejects(cards.invoke("reviews", "accept", "root"), /only from a change review/u);
+  assert.equal(calls.length, 0);
+  await cards.invoke("reviews", "accept", "root", { files: ["a.txt"] });
+  await cards.invoke("reviews", "accept", "root", {});
+  assert.deepEqual(calls.map((call) => call.input), [{ files: ["a.txt"] }, {}]);
+});
+
+test("card action titles may be localized like the manifest description; the card menu shows the UI language's", async () => {
+  const { validatePluginManifest } = await import("../src/main/services/PluginManager.ts");
+  const { cardActionTitle } = await import("../src/shared/pluginCardActions.ts");
+  const { readFile } = await import("node:fs/promises");
+  const example = JSON.parse(await readFile(new URL("../examples/plugins/collect-demo/canvastty.plugin.json", import.meta.url), "utf8"));
+  const manifest = (cardActions) => ({ ...example, services: [{ ...example.services[0], cardActions }] });
+  const localized = { id: "review", title: "Review changes", "title.ru": "Проверить изменения", "title.en": "Review changes" };
+  const validated = validatePluginManifest(manifest([localized, { id: "plain", title: "Plain" }]));
+  assert.deepEqual(validated.services[0].cardActions, [localized, { id: "plain", title: "Plain" }]);
+  assert.throws(() => validatePluginManifest(manifest([{ ...localized, "title.ru": "ж".repeat(41) }])), /title\.ru/u, "40 characters, like title");
+  assert.throws(() => validatePluginManifest(manifest([{ ...localized, "title.ru": "" }])), /title\.ru/u);
+  assert.throws(() => validatePluginManifest(manifest([{ ...localized, "title.de": "Prüfen" }])), /title\.de/u, "only the app's languages");
+
+  const cards = new PluginCards({
+    locale: () => "en",
+    providers: () => [{ pluginId: "reviews", pluginName: "Reviews", serviceId: "results", actions: validated.services[0].cardActions }],
+    trustedPlugins: () => new Set(["reviews"]), session: () => null, call: async () => null, redact: (text) => text, changed() {}
+  });
+  const [entry, plain] = cards.decorations().actions;
+  assert.equal(entry["title.ru"], "Проверить изменения", "the decorations carry the localized titles to the renderer");
+  assert.equal(cardActionTitle(entry, "ru"), "Проверить изменения");
+  assert.equal(cardActionTitle(entry, "en"), "Review changes");
+  assert.equal(cardActionTitle(plain, "ru"), "Plain", "without a title for the language: title");
+  assert.equal(cardActionTitle({ title: "Review", "title.en": "Review EN" }, "ru"), "Review");
+
+  // The card's options menu and its "done" toast show the localized title.
+  const card = await readFile(new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url), "utf8");
+  assert.match(card, /const pluginActions = pluginDecorations\.actions\.map\(\(action\) => \(\{ \.\.\.action, title: cardActionTitle\(action, locale\) \}\)\);/u);
+  assert.match(card, /\{pluginActions\.map\(\(action, index\) => \(/u);
+  assert.match(card, /`\$\{cardActionTitle\(action, locale\)\}: \$\{t\(locale, "cardActionDone"\)\}`/u);
+  assert.doesNotMatch(card, /\{pluginDecorations\.actions\.map\(/u, "the menu never lists the unlocalized actions");
+});
+
+test("bidirectional controls are removed from review text and refused in file names", () => {
+  const actions = new Set(["accept", "reject"]);
+  const value = review();
+  value.title = "Res\u202Eults\u2066";
+  value.groups[0].files[0].diff = "+ ok\u202E // tricky\u2069";
+  const normalized = normalizeCardReview(value, mask, actions);
+  assert.equal(normalized.title, "Results");
+  assert.equal(normalized.groups[0].files[0].diff, "+ ok // tricky");
+  const named = review();
+  named.groups[0].files[0].path = "src/\u202Etxt.exe";
+  assert.throws(() => normalizeCardReview(named, mask, actions), /file path is invalid/u);
+});
+
+test("a diff is marked truncated exactly when its shown text was cut", () => {
+  const one = (diff, redact = text => text) => normalizeCardReview({ title: "T",
+    groups: [{ sessionId: "worker", title: "W", files: [{ path: "a.txt", diff }] }] }, redact, actions).groups[0].files[0];
+  // Masking can make the text longer than the cut: the shown diff is cut, so it is marked.
+  const masked = one(`${"x".repeat(16_000)}${"PRIVATE_KEY_VALUE".repeat(20)}`, text => text.replaceAll("PRIVATE_KEY_VALUE", "[MASKED-LONGER-VALUE]"));
+  assert.equal(masked.diff.length, 16_384);
+  assert.equal(masked.truncated, true);
+  // Control characters removed before the cut: nothing of the shown text was cut.
+  const stripped = one(`${"y".repeat(16_380)}${"\u0001".repeat(10)}`);
+  assert.equal(stripped.diff.length, 16_380);
+  assert.equal(stripped.truncated, false);
+});

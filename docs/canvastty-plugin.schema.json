@@ -193,6 +193,12 @@
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$" },
         "title": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "title.ru": { "description": "The title when the app is in Russian (like description.ru); title otherwise.", "type": "string", "minLength": 1, "maxLength": 40 },
+        "title.en": { "description": "The title when the app is in English (like description.en); title otherwise.", "type": "string", "minLength": 1, "maxLength": 40 },
+        "menu": {
+          "description": "false: not listed in the card menu; only a change review calls it, as its accept or reject action, always with input.",
+          "const": false
+        },
         "when": {
           "description": "Cards the action shows on; every listed key must match. A card outside an environment never matches environmentKinds.",
           "type": "object",

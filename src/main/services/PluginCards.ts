@@ -118,11 +118,14 @@ export class PluginCards {
     }
     return {
       badges,
-      actions: this.providers().flatMap((provider) => provider.actions.map((action) => ({
+      // A review-only action (`menu: false`) is never listed: from the menu it would run without its review input.
+      actions: this.providers().flatMap((provider) => provider.actions.filter((action) => action.menu !== false).map((action) => ({
         pluginId: provider.pluginId,
         pluginName: provider.pluginName,
         actionId: action.id,
         title: action.title,
+        ...(action["title.ru"] ? { "title.ru": action["title.ru"] } : {}),
+        ...(action["title.en"] ? { "title.en": action["title.en"] } : {}),
         ...(action.when ? { when: structuredClone(action.when) } : {})
       })))
     };
@@ -139,6 +142,7 @@ export class PluginCards {
     if (!session) throw new Error("No card has that session id.");
     if (!cardActionMatches(action.when, session)) throw new Error("That action does not apply to this card.");
     const normalizedInput = normalizeCardActionInput(input);
+    if (action.menu === false && normalizedInput === undefined) throw new Error("That action runs only from a change review.");
     const timeoutMs = this.deps.timeoutMs ?? CARD_ACTION_TIMEOUT_MS;
     const params: CardActionInvocation = { actionId, sessionId, session };
     let timer: NodeJS.Timeout | undefined;
