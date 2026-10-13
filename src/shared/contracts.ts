@@ -914,7 +914,12 @@ export interface PluginCardActionFilter {
 export interface PluginCardAction {
   id: string;
   title: string;
+  /** The title in that UI language (like the manifest's `description.ru`); `title` otherwise. */
+  "title.ru"?: string;
+  "title.en"?: string;
   when?: PluginCardActionFilter;
+  /** False: not listed in the card menu; only a change review calls it (as its accept or reject action). */
+  menu?: false;
 }
 
 export type PluginCardTone = "neutral" | "info" | "warn" | "error";
@@ -932,6 +937,8 @@ export interface PluginCardActionEntry {
   pluginName: string;
   actionId: string;
   title: string;
+  "title.ru"?: string;
+  "title.en"?: string;
   when?: PluginCardActionFilter;
 }
 
@@ -964,6 +971,8 @@ export interface PluginChangeReviewGroup {
   title: string;
   files: PluginChangeReviewFile[];
   error?: string;
+  /** The group's agent is still working: accepting all of its files, rejecting it and the task-wide actions wait. */
+  active?: boolean;
 }
 
 /** Plain-text review supplied by an existing plugin; actions still require a human click. */

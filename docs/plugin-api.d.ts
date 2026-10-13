@@ -251,8 +251,13 @@ export interface CanvasTTYCardAction {
   id: string;
   /** Up to 40 characters, shown in the card's options menu. */
   title: string;
+  /** The title when the app is in Russian / English (up to 40 characters, like `description.ru`); `title` otherwise. */
+  "title.ru"?: string;
+  "title.en"?: string;
   /** Every listed key must match; a card outside an environment never matches `environmentKinds`. */
   when?: { providers?: CanvasTTYProviderId[]; environmentKinds?: string[]; roles?: CanvasTTYSessionRole[] };
+  /** `false`: not listed in the card menu; only a change review calls it, always with `input` (accept/reject). */
+  menu?: false;
 }
 
 /** Params of the host request `canvastty.cards.invoke` (15 s). */
