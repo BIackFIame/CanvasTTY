@@ -79,7 +79,7 @@ test("a subagent whose CLI is killed by SIGKILL is failed (128+9) with the signa
   assert.equal(waited.reason, "failed");
   assert.equal(waited.status, "failed");
   assert.equal(waited.exitCode, 137);
-  const result = s.control.result(child.id);
+  const result = await s.control.result(child.id);
   assert.equal(result.state, "failed");
   assert.equal(result.exitCode, 137);
   // The saved session restores as failed, and HOME's failure summary shows the exit code with the signal line.
@@ -113,6 +113,6 @@ test("a clean exit stays done", { skip }, async (t) => {
   assert.equal(ended.exitCode, 0);
   assert.equal(ended.failureDetails, null);
   assert.equal((await s.control.waitFor(child.id, { timeoutMs: 1_000 })).reason, "done");
-  assert.equal(s.control.result(child.id).state, "done");
+  assert.equal((await s.control.result(child.id)).state, "done");
   assert.equal(persistedTerminalSession(ended).lastState, "exited");
 });
