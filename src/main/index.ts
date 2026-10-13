@@ -649,6 +649,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   draftEditor.removeLeftovers();
   terminalManager.configureDraftEditor(draftEditor);
+  terminalManager.configureDraftKeys(() => settings.get().claudeDraftKeysEnabled);
   const terminalSessionStore = new TerminalSessionStore(userDataPath);
   terminalManager.configureSessionPersistence(terminalSessionStore, settings.get().sessionRestoreMode);
   agentChatHistory = new AgentChatHistoryService(settings, providerClis, terminalManager, hermesHomeDirectory);
