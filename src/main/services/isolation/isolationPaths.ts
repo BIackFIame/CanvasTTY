@@ -26,6 +26,8 @@ export interface IsolationPathInput {
   sessionId: string;
   /** Folders under CanvasTTY's private data this launch was handed (its own control grant, its account home). */
   grantedPrivate?: readonly string[];
+  /** Folders under CanvasTTY's private data this launch may also write (its Claude draft folder); read again too. */
+  ownWritable?: readonly string[];
   /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
   socketFolders?: readonly string[];
   /**
@@ -183,7 +185,7 @@ export const PLUGIN_DATA_FOLDER = "plugin-data";
  * runtime folders stay readable: they hold token-authenticated sockets and per-run hook settings the CLI must read.
  */
 export function privateAppData(userDataPath: string): string[] {
-  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER]
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER, "claude-draft"]
     .map((name) => join(userDataPath, name));
 }
 
@@ -251,6 +253,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     // variable pointing at HOME or above the project would hide them, so it is not followed.
     .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
+  const ownWritable = input.ownWritable ?? [];
   const project = input.cwd;
   // A project inside plugin data (a plugin environment's worktree) stays this launch's project: that exact folder is
   // reopened, never its siblings, its plugin's other data or all plugin data. Only when the host placed the launch
@@ -261,7 +264,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   if (projectDepth >= 2 && !(input.placedProjects ?? []).some((placed) => placesProject(pathSpellings, pluginDataRoot, placed, project))) {
     throw new Error(`The project ${project} is inside CanvasTTY's private plugin data, and CanvasTTY did not place this launch there. Only a plugin environment's own folder or a folder the person chose is opened inside plugin data.`);
   }
-  const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
+  const grants = [...(input.grantedPrivate ?? []), ...ownWritable, join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
     ...(projectDepth >= 2 ? [project] : [])];
   const trustedOwn = providerFolders(input.provider, {}, hostHome);
   const trustedOthers = AGENT_PROVIDERS.filter((provider) => provider !== input.provider).flatMap((provider) => {
@@ -307,6 +310,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     ...(input.readOnlyProject ? [] : [project]),
     input.sessionTemp,
     ...ownFolders,
+    ...ownWritable,
     join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
   ]);
   const userData = pathSpellings(input.userDataPath);
