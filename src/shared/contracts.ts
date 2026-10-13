@@ -984,6 +984,37 @@ export interface PluginChangeReview {
   nextOffset?: number;
 }
 
+/**
+ * Why a rollback point could not be listed, shown or restored: a stable code the renderer localizes (main-process text
+ * never reaches the dialog).
+ */
+export type CheckpointErrorCode =
+  | "not-git-root"
+  | "unknown-checkpoint"
+  | "submodules"
+  | "filters"
+  | "worktree-conflict"
+  | "no-safety-point"
+  | "restore-in-progress"
+  | "agent-running"
+  | "pending-launch"
+  | "isolated-environment"
+  | "missing-session"
+  | "failed";
+
+/** A rollback point taken before an agent turn ("before-turn") or before a restore ("before-restore"). */
+export interface CheckpointEntry {
+  id: string;
+  at: number;
+  kind: "before-turn" | "before-restore";
+}
+
+export type CheckpointListResult = { ok: true; checkpoints: CheckpointEntry[] } | { ok: false; code: CheckpointErrorCode };
+export type CheckpointPreviewResult =
+  | { ok: true; text: string; changedFiles: string[]; truncated: boolean }
+  | { ok: false; code: CheckpointErrorCode };
+export type CheckpointRestoreResult = { ok: true } | { ok: false; code: CheckpointErrorCode };
+
 /** What a card action answered, shown as a toast or a structured review on the card. */
 export interface PluginCardActionResult {
   message?: string;
@@ -2108,6 +2139,14 @@ export interface CanvasTTYApi {
     setBounds(id: string, bounds: SessionBounds): void;
     rename(id: string, title: string): Promise<SessionMetadata>;
     setRestore(id: string, restore: boolean): Promise<SessionMetadata>;
+    /** The card's rollback points (its folder must be a Git project root), newest first. */
+    checkpoints(id: string): Promise<CheckpointListResult>;
+    previewCheckpoint(id: string, checkpointId: string): Promise<CheckpointPreviewResult>;
+    /**
+     * Refused while any card in the folder still runs; the current work is saved as another rollback point first. Files
+     * and the index go back; HEAD and the branch stay where they are.
+     */
+    restoreCheckpoint(id: string, checkpointId: string): Promise<CheckpointRestoreResult>;
     /** `keepEnvironmentData` answers "Keep environment data?" for a card that runs in a plugin environment. */
     dispose(id: string, options?: { keepEnvironmentData?: boolean }): Promise<void>;
     /** Report whether the card renders live output; hidden cards keep history but skip streaming. */
@@ -2304,6 +2343,9 @@ export const IPC = {
   terminalBounds: "terminal:bounds",
   terminalRename: "terminal:rename",
   terminalSetRestore: "terminal:set-restore",
+  terminalCheckpoints: "terminal:checkpoints",
+  terminalCheckpointPreview: "terminal:checkpoint-preview",
+  terminalCheckpointRestore: "terminal:checkpoint-restore",
   terminalDispose: "terminal:dispose",
   terminalData: "terminal:data",
   /** Main -> renderer: the TerminalDataEvents of one output flush, in order (see TerminalRendererOutbox). */
