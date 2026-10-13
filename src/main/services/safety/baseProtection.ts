@@ -166,10 +166,12 @@ function readAction(toolName: string, raw: Record<string, unknown> | null, previ
  */
 export function canvasTtyPrivateData(userDataPath: string): PrivateData {
   const names = ['agent-control', join('browser', 'runtime'), join('lifecycle', 'runtime'), join('orchestration', 'runtime'),
-    'provider-secrets.bin', 'plugin-secrets', 'account-homes', 'github-oauth.json', 'launch-runs', 'claude-draft', 'plugin-data'];
+    'provider-secrets.bin', 'plugin-secrets', 'account-homes', 'github-oauth.json', 'launch-runs', 'claude-draft', 'plugin-data', 'checkpoints', 'checkpoints.json', 'checkpoint-objects'];
   return {
     appRoots: [userDataPath],
     paths: names.map(name => join(userDataPath, name)),
+    // Rollback point storage is matched by its real path above only: "checkpoints" is a common word in projects
+    // (CanvasTTY's own among them), so it is no marker for code that builds a path from pieces.
     markers: ['agent-control', 'provider-secrets', 'plugin-secrets', 'account-homes', 'github-oauth', 'claude-draft']
   };
 }
