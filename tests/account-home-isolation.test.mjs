@@ -10,6 +10,8 @@ import { AgentIsolation, SANDBOX_EXEC } from "../src/main/services/isolation/Age
 import { isolationPaths } from "../src/main/services/isolation/isolationPaths.ts";
 import { bubblewrapArguments } from "../src/main/services/isolation/bubblewrap.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
+import { DecisionHooks } from "../src/main/services/DecisionHooks.ts";
+import { canvasTtyPrivateData } from "../src/main/services/safety/baseProtection.ts";
 
 // Any plugin id: the host treats every plugin's data the same way.
 const PLUGIN = "com.example.accounts";
@@ -315,4 +317,55 @@ test("a launch hands the isolation layer the account home its contributor select
   assert.equal(wraps[0].accountHome, selected);
   assert.equal(wraps[0].env.CODEX_HOME, selected);
   assert.equal(calls.at(-1).command, SANDBOX_EXEC);
+});
+
+test("base protection: a card's own selected account home is its own; other accounts' homes and the rest of plugin data stay private", async (t) => {
+  const f = await fixture(t);
+  const selected = join(f.homes, "claude-alternate");
+  const neighbour = join(f.homes, "claude-other");
+  await Promise.all([selected, neighbour].map((path) => mkdir(path)));
+  const pipeline = new LaunchPipeline({
+    contributors: () => [{ pluginId: PLUGIN, pluginName: "Accounts", serviceId: "accounts", dataDir: f.accountData, secrets: false,
+      launch: { fields: [{ key: "account", label: "Account", kind: "text", default: "" }] } }],
+    call: async (_pluginId, _serviceId, _method, params) => ({ env: params.provider === "codex" ? { CODEX_HOME: `${selected}/` } : { CLAUDE_CONFIG_DIR: selected } }),
+    secret: async () => null,
+    runsRoot: join(f.userData, "launch-runs")
+  });
+  const spawned = [];
+  const spawner = (command) => {
+    spawned.push(command);
+    return { pid: 42_000 + spawned.length, process: command, write() {}, resize() {}, kill() {}, pause() {}, resume() {},
+      onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; } };
+  };
+  const registry = {
+    get: (provider) => ({ state: "available", provider, executable: `/resolved/${provider}`, launcher: "native", environment: { PATH: "/usr/bin" }, checked: [] }),
+    snapshot: () => ({})
+  };
+  const terminals = new TerminalManager(() => undefined, registry, undefined, undefined, true, spawner);
+  t.after(() => terminals.shutdown());
+  terminals.configureLaunchPipeline(pipeline);
+  const hooks = new DecisionHooks({ baseProtection: () => true, services: () => [], call: async () => null, home: f.home,
+    privateData: canvasTtyPrivateData(f.userData), session: (id) => terminals.decisionContext(id) });
+  const decide = async (id, toolName, toolInput) =>
+    (await hooks.decide(id, { toolName, toolInput, toolInputPreview: null, cwd: null, truncated: false }, new AbortController().signal)).behavior;
+  // Person-launched (no isolation layer): base protection is the guard here.
+  const withAccount = (provider) => terminals.create({ provider, profile: "auto", cwd: f.project, position: { x: 0, y: 0 },
+    launchOptions: { [PLUGIN]: { account: "alternate" } } }).id;
+  const plain = terminals.create({ provider: "claude", profile: "auto", cwd: f.project, position: { x: 0, y: 0 } }).id;
+  const cards = [withAccount("claude"), withAccount("codex")];
+  const deadline = Date.now() + 5_000;
+  while (spawned.length < 3 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(spawned.length, 3);
+  for (const id of cards) {
+    assert.ok(terminals.decisionContext(id).configDirs.includes(selected), id);
+    assert.equal(await decide(id, "Read", { file_path: join(selected, "auth.json") }), "none", "own home");
+    assert.equal(await decide(id, "Bash", { command: `cat '${join(selected, "auth.json")}'` }), "none", "own home");
+    assert.equal(await decide(id, "Read", { file_path: join(neighbour, "auth.json") }), "deny", "another account's home");
+    assert.equal(await decide(id, "Bash", { command: `cat '${join(neighbour, "auth.json")}'` }), "deny", "another account's home");
+    assert.equal(await decide(id, "Read", { file_path: join(f.otherData, "state.json") }), "deny", "another plugin's data");
+    assert.equal(await decide(id, "Read", { file_path: join(f.project, "a.ts") }), "none", "the project");
+  }
+  assert.equal(terminals.decisionContext(plain).configDirs.includes(selected), false);
+  assert.equal(await decide(plain, "Read", { file_path: join(selected, "auth.json") }), "deny", "not this card's home");
+  assert.equal(await decide(plain, "Bash", { command: "cat a.ts && grep -r todo ." }), "none", "a normal project is unaffected");
 });

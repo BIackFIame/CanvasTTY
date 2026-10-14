@@ -25,7 +25,10 @@ export interface DecisionSession {
   role: SessionRole;
   /** The session's working folder: "outside" is measured from here. */
   cwd: string;
-  /** The agent's own config folders (CLAUDE_CONFIG_DIR of this run), whose plans and memory are not "outside". */
+  /**
+   * The agent's own config folders (CLAUDE_CONFIG_DIR of this run, and the account home a launch contributor selected
+   * for it): their plans and memory are not "outside", and CanvasTTY's private data does not include them.
+   */
   configDirs: string[];
   /** The profile the card runs in. */
   profile?: LaunchProfileId;
