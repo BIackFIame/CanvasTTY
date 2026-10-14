@@ -16,6 +16,8 @@ On macOS, the adapter caches the archive before starting Sparkle; Sparkle 2 veri
 
 ## Process boundaries
 
+Windows PTYs use the ConPTY 1.23 runtime bundled by the locked node-pty dependency. The package hook restores its DLL and host beside the rebuilt native module. Visible and headless xterm instances use the same modern ConPTY compatibility mode, without a legacy Windows build number or cursor-line reflow (which requires newer ConPTY). Windows sessions start after the renderer reports measured geometry; resize bursts and renderer transitions settle for 250 ms before xterm and the PTY resize together. The renderer answers ConPTY's startup DA1 query explicitly. Other platforms retain their existing startup and resize behavior.
+
 CanvasTTY follows Electron's three-layer model:
 
 ```text

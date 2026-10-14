@@ -64,6 +64,7 @@ import { SecretRedactionRegistry } from "./safety/SecretRedaction.ts";
 import type { ClaudeDraftEditor, ClaudeDraftPaste } from "./ClaudeDraftEditor.ts";
 import type { DecisionSession } from "./DecisionHooks.ts";
 import { tryPtyOperation } from "./ptySafety.ts";
+import { terminalPtyOptions } from "../../shared/terminalCompatibility.ts";
 import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, parseInlineSettings, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
@@ -125,6 +126,8 @@ interface ManagedSession {
   /** The provider's own conversation id, once its hook reported it (or from the saved record). */
   threadId?: string;
   captureResult: boolean;
+  /** A one-shot grant waiting for the first measured grid; never carried into a restart. */
+  pendingAnswerCaptureGrantExpiresAt?: number;
   /** Turns the agent started (its status became working) since launch. */
   turnStarts?: number;
   /** turnStarts when the last submitted prompt was delivered; undefined while none was. */
@@ -163,7 +166,7 @@ interface ManagedSession {
    * retained across host reconfiguration/restart. Closing removes only these, never a later card's under the same id.
    */
   launchRunFolders?: Map<Pick<LaunchPipeline, "forgetSession">, Set<string>>;
-  /** A restored grok card waits for its grid before launching; plugins still learn it is a restore. */
+  /** A restored card waiting for its grid still tells plugins it is a restore. */
   restoringLaunch: boolean;
   /** The environment was prepared or resumed in this run of the app, so it can be wrapped now. */
   environmentReady: boolean;
@@ -291,6 +294,7 @@ export class TerminalManager {
   private readonly agentBrowser?: AgentBrowserLaunchCoordinator;
   private readonly agentRuntime?: AgentRuntimeLaunchCoordinator;
   private readonly spawnPty: typeof pty.spawn;
+  private measuredStartup = false;
   // Renderer-reported card visibility, keyed by session and holding the
   // outputOffset at the moment it was hidden: the last offset the card saw.
   // Output keeps flowing through emit while hidden, addressed to the observers
@@ -379,6 +383,15 @@ export class TerminalManager {
   /** The operating-system isolation layer around delegated and non-manual agents (isolation/AgentIsolation.ts). */
   configureIsolation(isolation: Pick<AgentIsolation, "decide" | "wrap" | "containment"> | null): void {
     this.isolation = isolation;
+  }
+
+  /** Windows ConPTY must not paint the first screen at a placeholder 80x24 size. */
+  configureMeasuredStartup(enabled: boolean): void {
+    this.measuredStartup = enabled;
+  }
+
+  private needsMeasuredGrid(provider: ProviderId): boolean {
+    return provider === "grok" || this.measuredStartup;
   }
 
   /** The layer can contain an agent here now (what a "contained" auto needs). */
@@ -777,8 +790,8 @@ export class TerminalManager {
       ...modelChoice,
       ...(decision.isolation ? { isolation: decision.isolation } : {})
     };
-    const awaitMeasuredGrid = request.provider === "grok"
-      && this.providerClis.get(request.provider).state === "available";
+    const awaitMeasuredGrid = this.needsMeasuredGrid(request.provider)
+      && (request.provider === "terminal" || this.providerClis.get(request.provider).state === "available");
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
     const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
     this.startingModels.set(id, modelChoice);
@@ -825,6 +838,7 @@ export class TerminalManager {
       resumeOnLaunch: resume,
       ...(threadId ? { threadId } : {}),
       captureResult: control.captureResult === true,
+      ...(awaitMeasuredGrid ? { pendingAnswerCaptureGrantExpiresAt: control.answerCaptureGrantExpiresAt } : {}),
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
         ...(environmentChoice ? { environmentChoice } : {}),
@@ -876,6 +890,7 @@ export class TerminalManager {
     delete session.metadata.restoreNote;
     // Input queued for the launch that ended never reaches this one.
     session.launchEpoch += 1;
+    delete session.pendingAnswerCaptureGrantExpiresAt;
     this.wakeLaunchWaiters(session);
     // What the ended process's hooks and title said is not about the new one: its title counts until its own hooks report.
     resetLaunchSignals(session);
@@ -892,7 +907,7 @@ export class TerminalManager {
       delete session.threadId;
     }
 
-    if (session.metadata.provider === "grok") {
+    if (this.needsMeasuredGrid(session.metadata.provider)) {
       session.agentBrowser?.cleanup();
       session.agentRuntime?.cleanup();
       session.agentOrchestration?.cleanup();
@@ -1548,8 +1563,8 @@ export class TerminalManager {
     }
     const resume: ResumeRequest = step.launch === "stopped" ? null : step.launch;
     const awaitMeasuredGrid = directoryReady
-      && descriptor.provider === "grok"
-      && this.providerClis.get(descriptor.provider).state === "available";
+      && this.needsMeasuredGrid(descriptor.provider)
+      && (descriptor.provider === "terminal" || this.providerClis.get(descriptor.provider).state === "available");
 
     const contributed = directoryReady && !awaitMeasuredGrid
       && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
@@ -1753,8 +1768,10 @@ export class TerminalManager {
     session.awaitingInitialResize = false;
     const resume = session.resumeOnLaunch;
     session.resumeOnLaunch = null;
+    const answerCaptureGrantExpiresAt = session.pendingAnswerCaptureGrantExpiresAt;
+    delete session.pendingAnswerCaptureGrantExpiresAt;
     if (this.contributed(session)) {
-      this.launchContributed(id, session, resume, null, undefined, session.restoringLaunch);
+      this.launchContributed(id, session, resume, null, answerCaptureGrantExpiresAt, session.restoringLaunch);
       session.restoringLaunch = false;
       return;
     }
@@ -1769,7 +1786,7 @@ export class TerminalManager {
         resume,
         session.captureResult,
         session.metadata.role,
-        undefined,
+        answerCaptureGrantExpiresAt,
         null,
         session.metadata.parentSessionId
       );
@@ -1847,6 +1864,7 @@ export class TerminalManager {
     }
     try {
       const process = this.spawnPty(spawn.command, spawn.args, {
+        ...terminalPtyOptions(globalThis.process.platform),
         name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
       this.launchContexts.set(id, launchContext(planned.cwd, provider, planned.env, contribution?.accountHome));
@@ -2421,6 +2439,7 @@ export class TerminalManager {
       let process: IPty;
       try {
         process = this.spawnPty(spawn.command, spawn.args, {
+          ...terminalPtyOptions(globalThis.process.platform),
           name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
         });
       } catch (error) {

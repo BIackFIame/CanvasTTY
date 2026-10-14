@@ -5,6 +5,8 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { clearPreservedWebglFrames } from "./terminalWebglFrames";
+import { terminalFitScheduler } from "./terminalFitScheduler";
+import { CONPTY_DEVICE_ATTRIBUTES, terminalEmulatorOptions } from "../../../../shared/terminalCompatibility";
 import { Terminal } from "@xterm/xterm";
 import {
   INITIAL_TERMINAL_COLS,
@@ -424,6 +426,7 @@ function TerminalCardView({
     };
 
     const terminal = new Terminal({
+      ...terminalEmulatorOptions(window.canvasTTY.window.platform),
       cols: INITIAL_TERMINAL_COLS,
       rows: INITIAL_TERMINAL_ROWS,
       cursorBlink: true,
@@ -472,6 +475,12 @@ function TerminalCardView({
     terminal.loadAddon(webLinksAddon);
     const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
+    const conptyReports = window.canvasTTY.window.platform === "win32"
+      ? terminal.parser.registerCsiHandler({ final: "c" }, (params) => {
+        if (params.length !== 0 && !(params.length === 1 && params[0] === 0)) return false;
+        window.canvasTTY.terminal.input(session.id, CONPTY_DEVICE_ATTRIBUTES);
+        return true;
+      }) : null;
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
     pinnedInput.className = "terminal-card__pinned-input";
@@ -559,14 +568,17 @@ function TerminalCardView({
       // Same locale capture as the notice above: this effect is scoped to the session.
       (missing) => t(locale, "terminalReplayTrimmed").replace("{count}", String(missing))
     );
-    const fit = (): void => {
+    const fitNow = (): void => {
       try {
+        if (!fitAddon.proposeDimensions()) return;
         fitTerminalPreservingViewport(terminal, () => fitAddon.fit());
         reportGrid(terminal.cols, terminal.rows);
       } catch {
         // A hidden semantic-zoom surface has no measurable rows yet.
       }
     };
+    const fitScheduler = terminalFitScheduler(fitNow, window.canvasTTY.window.platform === "win32" ? 250 : 0);
+    const fit = fitScheduler.request;
     fitRef.current = fit;
     const pasteClipboard = (withImages: boolean): void => {
       const pasteStartedAt = sessionStartedAt.current;
@@ -813,6 +825,8 @@ function TerminalCardView({
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
       fitRef.current = null;
+      fitScheduler.dispose();
+      conptyReports?.dispose();
       restoreRendererTransition();
       unregisterWebgl();
       cancelAnimationFrame(frame);

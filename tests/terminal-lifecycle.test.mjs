@@ -575,16 +575,17 @@ test("Grok waits for the measured xterm grid before its first TUI draw", async (
 
   assert.match(contracts, /INITIAL_TERMINAL_COLS = 80/);
   assert.match(contracts, /INITIAL_TERMINAL_ROWS = 24/);
-  assert.match(card, /new Terminal\(\{\s*cols: INITIAL_TERMINAL_COLS,\s*rows: INITIAL_TERMINAL_ROWS/);
+  assert.match(card, /new Terminal\(\{\s*\.\.\.terminalEmulatorOptions\(window\.canvasTTY\.window\.platform\),\s*cols: INITIAL_TERMINAL_COLS,\s*rows: INITIAL_TERMINAL_ROWS/);
   assert.match(card, /fitTerminalPreservingViewport[\s\S]*?reportGrid\(terminal\.cols, terminal\.rows\)/);
   assert.match(card, /terminal-card--\$\{session\.provider\}/);
   assert.match(card, /attachTerminalOutput\([\s\S]*?session\.id/);
   assert.match(manager, /this\.spawnPty\([\s\S]*?cols,\s*rows,\s*cwd/);
   assert.match(manager, /session\.cols = safeCols;\s*session\.rows = safeRows/);
-  assert.match(manager, /request\.provider === "grok"[\s\S]*?awaitingInitialResize: awaitMeasuredGrid/);
+  assert.match(manager, /return provider === "grok" \|\| this\.measuredStartup/);
+  assert.match(manager, /this\.needsMeasuredGrid\(request\.provider\)[\s\S]*?awaitingInitialResize: awaitMeasuredGrid/);
   assert.match(manager, /if \(session\.awaitingInitialResize\) \{\s*this\.launchAwaitingSession\(id, session\)/);
   assert.match(manager, /session\.metadata\.cwd,\s*session\.cols,\s*session\.rows/);
-  assert.match(manager, /session\.metadata\.provider === "grok"[\s\S]*?session\.awaitingInitialResize = true/);
+  assert.match(manager, /this\.needsMeasuredGrid\(session\.metadata\.provider\)[\s\S]*?session\.awaitingInitialResize = true/);
   assert.match(styles, /\.terminal-card--grok \.terminal-card__surface \{ padding: 6px 8px 8px; \}/);
 });
 

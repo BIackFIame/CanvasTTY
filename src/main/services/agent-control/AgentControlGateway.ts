@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { terminalEmulatorOptions } from "../../../shared/terminalCompatibility.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
 import type { AgentProviderId, AppSettings, CreateSessionRequest, PixelSkinApertures, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
@@ -554,7 +555,7 @@ export class AgentControlGateway {
         throw error;
       }
       try {
-        const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+        const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
         const snapshot = this.options.terminals.readBuffer(session.id);
         const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
           ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
@@ -697,7 +698,7 @@ export class AgentControlGateway {
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
     const capabilities = controlCapabilities(provider);
     try {
-      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+      const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
       this.sessions.set(session.id, { owner, startedAt: session.startedAt, terminal,
         ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),

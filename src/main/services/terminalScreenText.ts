@@ -1,4 +1,5 @@
 import { lazyRequire } from "../lazyRequire.ts";
+import { terminalEmulatorOptions } from "../../shared/terminalCompatibility.ts";
 
 const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
 
@@ -14,7 +15,7 @@ const DEFAULT_GEOMETRY = { cols: 120, rows: 40 };
  */
 export async function terminalScreenText(data: string, geometry: { cols: number; rows: number } | null): Promise<string> {
   const { cols, rows } = geometry && geometry.cols > 0 && geometry.rows > 0 ? geometry : DEFAULT_GEOMETRY;
-  const terminal = new (xterm().Terminal)({ cols, rows, scrollback: SCROLLBACK_ROWS, allowProposedApi: true });
+  const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), cols, rows, scrollback: SCROLLBACK_ROWS, allowProposedApi: true });
   try {
     await new Promise<void>((resolve) => terminal.write(data, resolve));
     const buffer = terminal.buffer.active;

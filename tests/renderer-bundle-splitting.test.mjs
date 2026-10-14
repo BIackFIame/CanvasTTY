@@ -77,9 +77,9 @@ test("Settings and the launch/link dialogs are split out of the app's static imp
   assert.ok(settingsBytes > 100_000, `SettingsPanel chunk should carry real weight, got ${settingsBytes} bytes`);
 
   // Before this change, App.tsx bundled to a single ~1.6 MB chunk with no on-demand chunk for
-  // Settings, materials, and Files have on-demand UI, so first-paint code stays bounded.
+  // Settings, materials, and Files have on-demand UI; the budget includes Windows terminal compatibility (~1.5 KB).
   assert.ok(
-    eagerBytes < 1_700_000,
+    eagerBytes < 1_702_000,
     `code statically reachable from App.js should stay bounded now that heavy UI loads on demand, got ${eagerBytes} bytes`
 
   );

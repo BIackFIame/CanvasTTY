@@ -92,7 +92,7 @@ test("only explicit stop signals mark a provider turn complete", () => {
   manager.disposeAll();
 });
 
-test("answer-capture grants are passed only to the explicitly granted session generation", () => {
+for (const measured of [false, true]) test(`answer-capture grants belong only to the granted generation (measured startup: ${measured})`, () => {
   const calls = [];
   const grants = [];
   const runtime = {
@@ -110,6 +110,7 @@ test("answer-capture grants are passed only to the explicitly granted session ge
     true,
     fakeSpawner(calls, { pidBase: 10_000 })
   );
+  manager.configureMeasuredStartup(measured);
   const expiresAt = Date.now() + 60_000;
   const session = manager.create({
     provider: "codex",
@@ -117,10 +118,15 @@ test("answer-capture grants are passed only to the explicitly granted session ge
     profile: "normal",
     position: { x: 0, y: 0 }
   }, { answerCaptureGrantExpiresAt: expiresAt });
+  if (measured) {
+    assert.deepEqual(grants, []);
+    manager.resize(session.id, 90, 30);
+  }
   assert.deepEqual(grants, [expiresAt]);
 
   calls[0].process.emitExit(0);
   manager.restart(session.id);
+  if (measured) manager.resize(session.id, 90, 30);
   assert.deepEqual(grants, [expiresAt, undefined]);
   manager.disposeAll();
 });
