@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+      # Test releases use manually built artifacts and are published explicitly as prereleases.
+      - "!v*-test.*"
   workflow_dispatch:
 
 permissions:
