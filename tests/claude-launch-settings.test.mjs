@@ -11,9 +11,23 @@ import { join } from "node:path";
 import test from "node:test";
 import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
-import { coreOwnedLaunchArgument, mergeClaudeInlineSettings } from "../src/main/services/terminalLaunch.ts";
+import { coreOwnedLaunchArgument, mergeClaudeInlineSettings, resolveTerminalLaunch } from "../src/main/services/terminalLaunch.ts";
 
 const CLAUDE_HAS_SANDBOX = process.platform === "darwin" || process.platform === "linux";
+
+test("every managed Claude profile keeps agent view disabled while hooks and per-launch settings survive", () => {
+  for (const profile of ["normal", "auto", "acceptEdits", "plan", "yolo"]) {
+    const launch = resolveTerminalLaunch("claude", profile, ["--settings", JSON.stringify({
+      disableAgentView: false, hooks: { Stop: [{ hooks: [{ type: "command", command: "/fixture/hook" }] }] }
+    })], { platform: "linux", environment: { CLAUDE_CODE_DISABLE_AGENT_VIEW: "0" },
+      providerCli: { state: "available", provider: "claude", executable: "/fixture/claude", launcher: "native", environment: {}, checked: [] } });
+    const values = launch.args.flatMap((arg, index) => launch.args[index - 1] === "--settings" ? [JSON.parse(arg)] : []);
+    assert.equal(values.length, 1);
+    assert.equal(values[0].disableAgentView, true, profile);
+    assert.equal(values[0].hooks.Stop[0].hooks[0].command, "/fixture/hook");
+    assert.equal(launch.environment.CLAUDE_CODE_DISABLE_AGENT_VIEW, "1");
+  }
+});
 
 const cwd = process.cwd();
 const at = { x: 0, y: 0 };

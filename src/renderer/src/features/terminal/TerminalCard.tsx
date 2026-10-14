@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
+import { clearPreservedWebglFrames } from "./terminalWebglFrames";
 import { Terminal } from "@xterm/xterm";
 import {
   INITIAL_TERMINAL_COLS,
@@ -878,6 +879,7 @@ function TerminalCardView({
     });
     try {
       terminal.loadAddon(webgl);
+      if (!clearPreservedWebglFrames(webgl)) throw new Error("Unsupported WebGL renderer.");
     } catch {
       // WebGL2 unavailable — stay on the DOM renderer.
       webgl.dispose();

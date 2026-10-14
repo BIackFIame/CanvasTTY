@@ -98,7 +98,11 @@ export function resolveTerminalLaunch(
     // Claude Code keeps only the last inline --settings: a plugin's (after the hooks') would silently drop the hooks.
     // Its sandbox joins the same one.
     ...(provider === "claude"
-      ? mergeClaudeInlineSettings(claudeSandbox ? [...agentBrowserArgs, "--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : agentBrowserArgs)
+      ? mergeClaudeInlineSettings([
+        ...agentBrowserArgs,
+        ...(claudeSandbox ? ["--settings", JSON.stringify({ sandbox: CLAUDE_SANDBOX_SETTINGS })] : []),
+        "--settings", JSON.stringify({ disableAgentView: true })
+      ])
       : agentBrowserArgs),
     ...providerModelArguments(provider, options.model),
     ...providerEffortArguments(provider, options.effort),
@@ -108,7 +112,9 @@ export function resolveTerminalLaunch(
   ];
   const combinedEnvironment = {
     ...providerCli.environment,
-    ...launchEnvironment
+    ...launchEnvironment,
+    // Shared daemon workers cannot inherit this card's OS sandbox or private gateway identity.
+    ...(provider === "claude" ? { CLAUDE_CODE_DISABLE_AGENT_VIEW: "1" } : {})
   };
   const resourcesPath = options.resourcesPath ?? process.resourcesPath;
   const bundledDirectory = provider === "codex" && (platform === "darwin" || platform === "linux") && resourcesPath
@@ -421,7 +427,7 @@ const CORE_OWNED_SUBCOMMANDS: Partial<Record<ProviderId, string[]>> = {
 
 /** Claude settings keys that decide approvals, the hooks or the sandbox; a plugin's settings may carry e.g. `env` only. */
 // `allowedHttpHookUrls` and `httpHookAllowedEnvVars` would silently switch off CanvasTTY's HTTP lifecycle hooks.
-const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "sandbox", "defaultMode", "apiKeyHelper",
+const CLAUDE_CORE_SETTINGS = ["permissions", "hooks", "disableAllHooks", "disableAgentView", "sandbox", "defaultMode", "apiKeyHelper",
   "allowedHttpHookUrls", "httpHookAllowedEnvVars"];
 // Claude 2.1.281 --help: `--bare` and `--safe-mode` skip hooks; `--allowedTools` approves tools without asking;
 // `--permission-prompt-tool` / `--permission-prompts` decide who answers permission prompts.

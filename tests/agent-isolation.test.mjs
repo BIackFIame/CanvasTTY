@@ -576,7 +576,7 @@ test("an isolated Claude keeps its Bash and editor files in the launch's own tem
     ["seatbelt", isolation(w, { platform: "darwin", exists: () => true })],
     ["bubblewrap", isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true })]
   ];
-  for (const [layer, isolated] of layers) {
+  for (const [layer, isolated] of layers.filter(([layer]) => process.platform !== "win32" || layer !== "seatbelt")) {
     // A CLAUDE_CODE_TMPDIR from the person's environment would point Claude back at a shared folder: replaced.
     const claude = isolated.wrap({ sessionId: "c", provider: "claude", cwd: w.project, command: "/usr/bin/claude", args: [], env: { ...w.env, CLAUDE_CODE_TMPDIR: "/tmp" } });
     const codex = isolated.wrap({ sessionId: "x", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });

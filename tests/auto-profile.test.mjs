@@ -93,13 +93,13 @@ test("auto exists only where the CLI has a native auto mode (OpenCode: a per-run
   assert.deepEqual(launch("codex", "acceptEdits"), ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"]);
   assert.deepEqual(launch("codex", "plan"), ["--sandbox", "read-only", "--ask-for-approval", "on-request"]);
   assert.deepEqual(launch("grok", "plan"), ["--permission-mode", "plan"]);
-  assert.deepEqual(launch("claude", "plan"), ["--permission-mode", "plan"]);
+  assert.deepEqual(launch("claude", "plan"), ["--permission-mode", "plan", "--settings", '{"disableAgentView":true}']);
   assert.deepEqual(launch("cursor", "plan"), ["--mode", "plan"]);
   assert.deepEqual(launch("opencode", "plan"), ["--agent", "plan"]);
   assert.deepEqual(launch("cursor", "yolo"), ["--force"], "cursor-agent's bypass is --force");
   // Normal adds no permission flag and no sandbox.
   assert.deepEqual(launch("codex", "normal", ["-c", "x=1"]), ["--no-daemon", "-c", "x=1"]);
-  assert.deepEqual(launch("claude", "normal"), []);
+  assert.deepEqual(launch("claude", "normal"), ["--settings", '{"disableAgentView":true}']);
   assert.deepEqual(launch("codex", "yolo"), ["--dangerously-bypass-approvals-and-sandbox"]);
 });
 
@@ -116,13 +116,13 @@ test("auto: Codex --approve-for-me (its workspace-write sandbox), Claude auto wi
   assert.equal(settings.hooks.Stop[0].hooks[0].command, "/hook", "CanvasTTY's hooks survive");
   assert.equal(settings.env.ANTHROPIC_BASE_URL, "http://127.0.0.1:11434");
   // Without other settings the sandbox is its own inline --settings.
-  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false } }]);
+  assert.deepEqual(settingsOf(launch("claude", "auto")), [{ sandbox: { enabled: true, autoAllowBashIfSandboxed: false, allowUnsandboxedCommands: false }, disableAgentView: true }]);
   assert.deepEqual(settingsOf(launch("claude", "auto", [], { platform: "darwin" })), settingsOf(launch("claude", "auto")), "macOS: the same sandbox");
   // Claude Code has no sandbox on Windows: auto there is its auto mode alone.
-  assert.deepEqual(launch("claude", "auto", [], { platform: "win32" }), ["--permission-mode", "auto"]);
+  assert.deepEqual(launch("claude", "auto", [], { platform: "win32" }), ["--permission-mode", "auto", "--settings", '{"disableAgentView":true}']);
   // Inside CanvasTTY's isolation layer Claude's own sandbox cannot start (macOS refuses a sandbox in a sandbox): left out.
-  assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), []);
-  assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto"]);
+  assert.deepEqual(settingsOf(launch("claude", "auto", [], { isolated: true })), [{ disableAgentView: true }]);
+  assert.deepEqual(launch("claude", "auto", [], { isolated: true }), ["--permission-mode", "auto", "--settings", '{"disableAgentView":true}']);
   // Codex inside the layer: its own seatbelt cannot start in ours, so it is off, never bypassed; approvals stay.
   assert.deepEqual(launch("codex", "auto", [], { isolated: true }),
     ["--sandbox", "danger-full-access", "--ask-for-approval", "on-request", "-c", 'approvals_reviewer="auto_review"']);

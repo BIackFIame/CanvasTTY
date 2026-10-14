@@ -1114,10 +1114,8 @@ export class TerminalManager {
     if (!this.draftEditor || !this.draftKeysOn() || !session || !process || session.metadata.exitCode !== null
       || session.metadata.provider !== "claude" || !session.metadata.claudeDraft) return Promise.resolve(false);
     return this.draftEditor.run(id, action, followUp, (data) => {
-      const written = this.sessions.get(id) === session && session.process === process
-        && tryPtyOperation(() => process.write(data));
-      if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
-      return written;
+      if (this.sessions.get(id) !== session || session.process !== process) return false;
+      return data === "\u0007" ? tryPtyOperation(() => process.write(data)) : this.writeInput(id, session, process, data);
     }, paste);
   }
 
@@ -2431,6 +2429,8 @@ export class TerminalManager {
         return "failed";
       }
       session.process = process;
+      if (planned.launchEnvironment.CANVASTTY_DRAFT_DIR) metadata.claudeDraft = true;
+      else delete metadata.claudeDraft;
       if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
         metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
       } else {

@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ClaudeDraftAction } from "../../shared/contracts.ts";
 
@@ -69,8 +69,7 @@ export class ClaudeDraftEditor {
 
   /**
    * Launch variables for one Claude session, or none when the helper cannot be used safely. They are given to
-   * Claude twice: in its environment and in its --settings env, which is what a background session (/bg,
-   * /resume, agent view) gets: such a session runs under Claude's own supervisor, not under this process.
+   * Claude's launch environment. Managed launches disable agent view so the helper stays with its card.
    */
   environment(sessionId: string, source: Readonly<Record<string, string | undefined>>): Record<string, string> {
     this.forget(sessionId);
@@ -79,6 +78,8 @@ export class ClaudeDraftEditor {
     // A new Claude process has no Ctrl+G outstanding from an earlier one.
     try {
       rmSync(this.directory(sessionId), { recursive: true, force: true });
+      mkdirSync(this.options.root, { recursive: true, mode: 0o700 });
+      mkdirSync(this.directory(sessionId), { mode: 0o700 });
     } catch {
       return {};
     }
@@ -188,7 +189,7 @@ export class ClaudeDraftEditor {
     const request = join(directory, `req.${id}`);
     const done = join(directory, `done.${id}`);
     const draft = join(directory, `draft.${id}`);
-    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (!ownFolder(directory)) return false;
     // Written aside and renamed in, so the helper never sees a half-written request.
     const staged = join(directory, `staged.${id}`);
     rmSync(staged, { force: true });
@@ -210,8 +211,7 @@ export class ClaudeDraftEditor {
         }
       }
       if (action !== "clear") {
-        const stat = lstatSync(draft, { throwIfNoEntry: false });
-        const text = stat?.isFile() ? readFileSync(draft, "utf8") : "";
+        const text = readDraft(draft);
         if (text) this.options.writeClipboard(text);
       }
       return true;
@@ -233,6 +233,23 @@ export class ClaudeDraftEditor {
   private directory(sessionId: string): string {
     return join(this.options.root, sessionId);
   }
+}
+
+function ownFolder(directory: string): boolean {
+  const stat = lstatSync(directory, { throwIfNoEntry: false });
+  return !!stat?.isDirectory() && !stat.isSymbolicLink()
+    && (typeof process.getuid !== "function" || stat.uid === process.getuid());
+}
+
+function readDraft(path: string): string {
+  let fd: number;
+  try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
+  catch { return ""; }
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16 * 1024 * 1024) return "";
+    return readFileSync(fd, "utf8");
+  } finally { closeSync(fd); }
 }
 
 function isSafeId(sessionId: string): boolean {

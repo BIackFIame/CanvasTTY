@@ -320,7 +320,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   return {
     writable,
     readOnlyFolders,
-    fixedFolders: [...new Set(fixedFolders)],
+    fixedFolders: [...new Set([...fixedFolders, ...all(ownWritable)])],
     writableFiles: all(own.files),
     creatableFolders: all([...ownFolders, join(home, ".npm"), join(home, ".bun")].flatMap((folder) => ancestorsBelow(home, folder))),
     protectedWrites: all([

@@ -155,7 +155,7 @@ test("an isolated agent's paths hide all plugin data and reopen only the selecte
   assert.ok(!text.includes(sibling));
 });
 
-test("AgentIsolation.wrap reopens only a real folder inside one plugin's data, never through a symbolic link", async (t) => {
+test("AgentIsolation.wrap reopens only a real folder inside one plugin's data, never through a symbolic link", { skip: process.platform === "win32" ? "seatbelt profiles require POSIX paths" : false }, async (t) => {
   const f = await fixture(t);
   const sandbox = isolation(f, fakeSeatbelt);
   const wrap = (home, env = { CODEX_HOME: home }) => sandbox.wrap({ sessionId: "a", provider: "codex", cwd: f.project, command: "/bin/sh",

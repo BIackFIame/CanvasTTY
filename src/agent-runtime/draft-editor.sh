@@ -6,10 +6,7 @@
 # is waiting, one is used up and nothing changes, so a late Ctrl+G opens no editor.
 # With neither, this is an ordinary Ctrl+G and the person's own editor opens.
 #
-# A background Claude session may be shown by another card than the one that started it,
-# so after this card's own folder the other cards' folders are looked at for a request
-# (inside agent isolation they are hidden, and only the own folder is seen). A cancel is
-# only ever this card's own: another card's never costs a Ctrl+G here.
+# Each helper consumes only its own launch's requests. Agent view is disabled for managed launches.
 file=$1
 dir=$CANVASTTY_DRAFT_DIR
 # Only Claude's own prompt file: a program Claude runs (git commit, crontab -e) gets the person's editor.
@@ -29,7 +26,7 @@ find_oldest() {
   return 1
 }
 if [ -n "$dir" ]; then
-  while find_oldest req "$dir" "${dir%/*}"/*; do
+  while find_oldest req "$dir"; do
     # Renaming is atomic: CanvasTTY cancels a request the same way, so only one side gets it.
     if ! mv "$found/req.$id" "$found/claimed.$id" 2>/dev/null; then
       { [ -e "$found/req.$id" ] || [ -L "$found/req.$id" ]; } && exit 1

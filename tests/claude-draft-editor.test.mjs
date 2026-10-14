@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -160,7 +160,7 @@ test("a Ctrl+G Claude never handles costs one later Ctrl+G, never the following 
     assert.deepEqual(files(join(root, "card-4")), [], "the next manual Ctrl+G uses it up");
     assert.equal(claude.draft, "черновик");
     editor.environment("card-4", {});
-    assert.equal(existsSync(join(root, "card-4")), false, "a new Claude launch starts clean");
+    assert.deepEqual(files(join(root, "card-4")), [], "a new Claude launch starts with an empty pinned folder");
     assert.equal(await editor.run("card-4", "cut", "", () => false), false, "an unsent Ctrl+G is not queued");
     assert.deepEqual(files(join(root, "card-4")), []);
   } finally {
@@ -228,7 +228,7 @@ test("only Claude's own prompt file is acted on: a program Claude runs gets the 
   rmSync(scratch, { recursive: true, force: true });
 });
 
-test("a background session shown by another card answers that card's request; its own come first", POSIX, () => {
+test("a helper never consumes another card's cut, copy or cancel request", POSIX, () => {
   const scratch = mkdtempSync(join(tmpdir(), "claude-draft-cards-"));
   const started = join(scratch, "card-a");
   const showing = join(scratch, "card-b");
@@ -238,11 +238,10 @@ test("a background session shown by another card answers that card's request; it
   writeFileSync(file, "черновик");
   // card-b sent the Ctrl+G; the session's helper names card-a's folder, where it was started.
   writeFileSync(join(showing, "req.7"), "copy\n");
-  assert.equal(runHelper(file, started), 0);
-  assert.deepEqual(files(showing), ["done.7", "draft.7"]);
-  assert.equal(readFileSync(join(showing, "draft.7"), "utf8"), "черновик");
-  rmSync(join(showing, "done.7"));
-  rmSync(join(showing, "draft.7"));
+  assert.equal(runHelper(file, started), 1, "its own editor opens when its own folder has no request");
+  assert.deepEqual(files(showing), ["req.7"]);
+  assert.equal(readFileSync(file, "utf8"), "черновик");
+  rmSync(join(showing, "req.7"));
   writeFileSync(join(showing, "req.3"), "cut\n");
   writeFileSync(join(started, "req.9"), "copy\n");
   assert.equal(runHelper(file, started), 0);
@@ -254,6 +253,36 @@ test("a background session shown by another card answers that card's request; it
   assert.equal(runHelper(file, started), 1, "another card's cancel does not cost this Ctrl+G: the editor opens");
   assert.deepEqual(files(showing), ["cancel.4"]);
   rmSync(scratch, { recursive: true, force: true });
+});
+
+test("a replaced draft directory cannot redirect the main process's request writes", POSIX, async () => {
+  const { root, editor } = editorFixture();
+  const environment = editor.environment("card", {});
+  const target = join(root, "outside");
+  mkdirSync(target);
+  rmSync(environment.CANVASTTY_DRAFT_DIR, { recursive: true });
+  symlinkSync(target, environment.CANVASTTY_DRAFT_DIR);
+  assert.equal(await editor.run("card", "copy", "", () => true), false);
+  assert.deepEqual(files(target), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a symlink draft is never read into the clipboard", POSIX, async () => {
+  const { root, clipboard, editor } = editorFixture();
+  const environment = editor.environment("card", {});
+  const secret = join(root, "secret");
+  writeFileSync(secret, "private fixture");
+  await editor.run("card", "copy", "", () => {
+    const directory = environment.CANVASTTY_DRAFT_DIR;
+    const id = files(directory).find((name) => name.startsWith("req.")).slice(4);
+    rmSync(join(directory, `req.${id}`));
+    symlinkSync(secret, join(directory, `draft.${id}`));
+    writeFileSync(join(directory, `done.${id}`), "");
+    return true;
+  });
+  assert.deepEqual(clipboard, []);
+  assert.equal(readFileSync(secret, "utf8"), "private fixture");
+  rmSync(root, { recursive: true, force: true });
 });
 
 test("a cancel the helper cannot remove is not used up: that Ctrl+G opens the editor", { skip: POSIX.skip || (process.getuid?.() === 0 && "root ignores permissions") }, () => {
