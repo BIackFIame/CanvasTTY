@@ -212,7 +212,10 @@ export class AgentIsolation {
       const gitTemplate = join(folder, "git-template");
       mkdirSync(gitTemplate, { mode: 0o500 });
       // An agent that meets "Operation not permitted" can read why here, instead of trying other ways around it.
-      const env = { ...launch.env, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: ISOLATION_NOTE };
+      const env: Record<string, string> = { ...launch.env, TMPDIR: `${temp}/`, TMP: temp, TEMP: temp, GIT_TEMPLATE_DIR: gitTemplate, [ISOLATION_ENV]: ISOLATION_NOTE };
+      // Claude Code ignores TMPDIR for its Bash tool and editor files: `${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>`, which
+      // all of the person's Claude sessions share and the layer keeps read-only. Its own folder is the launch's temp.
+      if (launch.provider === "claude") env.CLAUDE_CODE_TMPDIR = temp;
       if (available.layer === "seatbelt") {
         const profilePath = join(folder, "profile.sb");
         writeFileSync(profilePath, seatbeltProfile(paths), { mode: 0o600, flag: "wx" });
