@@ -506,21 +506,23 @@ test("seatbelt, for real: Claude's draft helper answers in its own card's folder
   await mkdir(other, { recursive: true });
   const prompt = join(w.project, "claude-prompt-t.md");
   await writeFile(prompt, "черновик");
-  await writeFile(join(own, "req.1"), "cut\n");
+  await writeFile(join(own, "req.1"), "copy\n");
   await writeFile(join(other, "req.2"), "copy\n");
   await writeFile(join(other, "draft.3"), "другая карточка");
   const { lines } = run(w, [
     `/bin/sh "${helper}" "${prompt}" && echo own`,
+    `printf 'clear\\n' > "${own}/req.2" && /bin/sh "${helper}" "${prompt}" && echo cleared`,
     // Another card's request is hidden: with none of its own, this Ctrl+G opens the person's editor.
     `/bin/sh "${helper}" "${prompt}"`,
     `: > "${other}/req.9" 2>/dev/null && echo other-write`,
     `cat "${other}/draft.3" 2>/dev/null && echo other-read`,
     `ls "${drafts}" 2>/dev/null && echo listed`
   ].join("; "), { provider: "claude", ownWritable: [own], env: { CANVASTTY_DRAFT_DIR: own, CANVASTTY_DRAFT_EDITOR: "echo editor" } });
-  assert.deepEqual(lines, ["own", `editor ${prompt}`]);
-  assert.deepEqual((await readdir(own)).sort(), ["done.1", "draft.1"]);
+  assert.deepEqual(lines, ["own", "cleared", `editor ${prompt}`]);
+  assert.deepEqual((await readdir(own)).sort(), ["done.1", "done.2", "draft.1", "draft.2"]);
   assert.equal(await readFile(join(own, "draft.1"), "utf8"), "черновик");
-  assert.equal(await readFile(prompt, "utf8"), "", "cut empties Claude's prompt file");
+  assert.equal(await readFile(join(own, "draft.2"), "utf8"), "черновик");
+  assert.equal(await readFile(prompt, "utf8"), "", "clear empties Claude's prompt file after copying");
   assert.deepEqual((await readdir(other)).sort(), ["draft.3", "req.2"]);
 });
 
@@ -583,7 +585,7 @@ test("an isolated Claude keeps its Bash and editor files in the launch's own tem
     try {
       assert.equal(claude.env.CLAUDE_CODE_TMPDIR, claude.env.TMP, layer);
       assert.equal(`${claude.env.CLAUDE_CODE_TMPDIR}/`, claude.env.TMPDIR, layer);
-      assert.match(claude.env.TMP, new RegExp(`^${w.temp}/${ISOLATION_FOLDER_PREFIX}`, "u"), layer);
+      assert.ok(claude.env.TMP.startsWith(join(w.temp, ISOLATION_FOLDER_PREFIX)), layer);
       assert.equal(codex.env.CLAUDE_CODE_TMPDIR, undefined, `${layer}: only Claude reads it`);
       // The folder all of the person's Claude sessions share is not opened for writing.
       const text = layer === "seatbelt" ? readFileSync(claude.args[1], "utf8") : claude.args.join(" ");
