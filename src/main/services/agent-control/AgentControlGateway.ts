@@ -15,6 +15,7 @@ import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-brow
 import { CONTROL_PROVIDERS, controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { isLaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
+import { DelegationRefusal } from "../AgentControlService.ts";
 import { MAX_PIXEL_SKIN_ARCHIVE_BYTES, type PixelSkinPackRegistry } from "../PixelSkinPackRegistry.ts";
 import type { SettingsStore } from "../SettingsStore.ts";
 import { listProviderDirectory, type ProviderDirectory } from "../providerDirectory.ts";
@@ -688,7 +689,8 @@ export class AgentControlGateway {
         ...(params.model !== undefined ? { model: params.model as string } : {}),
         ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}) });
     } catch (error) {
-      throw new ControlError("REFUSED", error instanceof Error ? error.message : "The subagent was not created.");
+      throw new ControlError(error instanceof DelegationRefusal ? error.code : "REFUSED",
+        error instanceof Error ? error.message : "The subagent was not created.");
     } finally {
       this.startingSubagents -= 1;
     }

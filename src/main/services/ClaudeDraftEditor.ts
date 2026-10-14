@@ -45,6 +45,7 @@ interface SessionQueue {
  * request is either claimed or cancelled, never both. A Ctrl+G Claude has not picked up
  * by the deadline turns its request into cancel.<n>: a Ctrl+G that finds no request uses
  * up one cancel and changes nothing, so a late one opens no editor.
+ * Cut runs copy first and clears in a second round trip only after the clipboard accepted the text.
  */
 export class ClaudeDraftEditor {
   private readonly queues = new Map<string, SessionQueue>();
@@ -156,7 +157,9 @@ export class ClaudeDraftEditor {
         queue.write(step.data);
         continue;
       }
-      const done = await this.roundTrip(sessionId, step.action, queue.write, live).catch(() => false);
+      // Cut clears only after the main process has read the draft and saved it to the clipboard.
+      let done = await this.roundTrip(sessionId, step.action === "cut" ? "copy" : step.action, queue.write, live).catch(() => false);
+      if (done && step.action === "cut") done = await this.roundTrip(sessionId, "clear", queue.write, live).catch(() => false);
       // A paste reads the clipboard only now, so keys typed after it still come after it.
       const followUp = step.paste ? this.pasteData(step.paste) : step.followUp;
       if (live() && followUp) queue.write(followUp);
@@ -180,7 +183,7 @@ export class ClaudeDraftEditor {
 
   private async roundTrip(
     sessionId: string,
-    action: ClaudeDraftAction,
+    action: Exclude<ClaudeDraftAction, "cut">,
     write: (data: string) => boolean,
     live: () => boolean
   ): Promise<boolean> {
@@ -212,6 +215,7 @@ export class ClaudeDraftEditor {
       }
       if (action !== "clear") {
         const text = readDraft(draft);
+        if (text === null) return false;
         if (text) this.options.writeClipboard(text);
       }
       return true;
@@ -241,13 +245,13 @@ function ownFolder(directory: string): boolean {
     && (typeof process.getuid !== "function" || stat.uid === process.getuid());
 }
 
-function readDraft(path: string): string {
+function readDraft(path: string): string | null {
   let fd: number;
   try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch { return ""; }
+  catch { return null; }
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16 * 1024 * 1024) return "";
+    if (!stat.isFile() || stat.nlink !== 1 || stat.size > 16 * 1024 * 1024) return null;
     return readFileSync(fd, "utf8");
   } finally { closeSync(fd); }
 }

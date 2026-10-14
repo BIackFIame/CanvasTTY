@@ -44,7 +44,7 @@ with a Linux-enabled frontend and Ctrl-based draft editing keys.
 
 **Stock Codex 0.159.2 does not implement whole-draft selection.** The renderer
 bridge alone cannot provide it. The demonstrated implementation is a separate
-[Codex TUI frontend](https://github.com/mrcertis/codex-macos-tui/tree/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos)
+[Codex TUI frontend](https://github.com/mrcertis/codex-macos-tui/tree/5fce773389a726c11e6441bacaa421856af62fc3/macos)
 based on official Codex `rust-v0.159.2`. Its launcher requires official
 `codex-cli 0.159.2` as the backend and refuses other backend versions.
 
@@ -61,10 +61,21 @@ Contents/Resources/codex-native-tui/
 Both frontend and launcher must be present; a partial bundle gives an explicit
 launch error. With neither resource present, the usual CLI launch is used. The
 standard build does not download or include the external frontend automatically.
-The [build and packaging recipe](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos/README.md#canvastty-170-integration)
+The [build and packaging recipe](https://github.com/mrcertis/codex-macos-tui/blob/5fce773389a726c11e6441bacaa421856af62fc3/macos/README.md#canvastty-170-integration)
 uses adjacent CanvasTTY and Codex checkouts. On this branch, skip its `git apply`
 steps because the integration is already applied. The recipe has been exercised
 on Apple Silicon; Intel packaging remains unverified.
+
+For CanvasTTY 1.8.2, build the frontend and launcher together from the pinned
+`5fce773389a726c11e6441bacaa421856af62fc3` revision in a separate clean checkout.
+Its [`canvastty_keyboard.rs`](https://github.com/mrcertis/codex-macos-tui/blob/5fce773389a726c11e6441bacaa421856af62fc3/codex-rs/tui/src/canvastty_keyboard.rs)
+implements `newlineAlternate`, copy, cut and clear in addition to submit and
+select-all; older local frontends may silently ignore those bindings. Rebuild
+the binary before using the packaging recipe, which copies a debug build from
+`codex-rs/target/debug/`. Do not copy a previously built binary into a new source
+checkout and assume it gained that checkout's keyboard support. This optional
+pair still requires backend 0.159.2; it is not a verified frontend for 0.162.1.
+Ordinary CLI launches do not use this fork and keep their own editor keymaps.
 
 For local development, `CANVASTTY_CODEX_TUI_QA` and
 `CANVASTTY_CODEX_TUI_LAUNCHER_QA` accept absolute frontend and launcher paths on
@@ -113,8 +124,8 @@ version gate. That does not establish compatibility of this fork with a newer
 backend. The Alt+arrow and modified-Enter bridge changes work independently of
 this optional bundle.
 
-Source references: [frontend entry point](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/codex-rs/tui/src/canvastty_main.rs),
-[launcher and version check](https://github.com/mrcertis/codex-macos-tui/blob/f532966e68688bda6816ea2b6ae2bf921a5f53f5/macos/codex-tui-launch.mjs),
+Source references: [frontend entry point](https://github.com/mrcertis/codex-macos-tui/blob/5fce773389a726c11e6441bacaa421856af62fc3/codex-rs/tui/src/canvastty_main.rs),
+[launcher and version check](https://github.com/mrcertis/codex-macos-tui/blob/5fce773389a726c11e6441bacaa421856af62fc3/macos/codex-tui-launch.mjs),
 and [upstream server-version notice](https://github.com/openai/codex/blob/rust-v0.159.2/codex-rs/tui/src/app/startup.rs#L282).
 
 ## Launch-scoped browser configuration

@@ -117,6 +117,24 @@ test("a session's actions run one after another, and input typed meanwhile keeps
   rmSync(root, { recursive: true, force: true });
 });
 
+test("cut keeps the draft when it exceeds the read limit or the clipboard rejects it", POSIX, async () => {
+  for (const oversized of [true, false]) {
+    const root = mkdtempSync(join(tmpdir(), "claude-cut-safe-"));
+    let clipboard = "previous clipboard";
+    const editor = new ClaudeDraftEditor({ root, helperPath,
+      readClipboard: () => ({ image: false, text: clipboard }),
+      writeClipboard(text) { if (!oversized) throw new Error("clipboard unavailable"); clipboard = text; } });
+    const draft = oversized ? "x".repeat(16 * 1024 * 1024 + 1) : "keep this draft";
+    const claude = fakeClaude(editor.environment("card", {}), draft);
+    try {
+      assert.equal(await editor.run("card", "cut", "", claude.write), false);
+      assert.equal(claude.draft, draft);
+      assert.equal(clipboard, "previous clipboard");
+      assert.equal(claude.editorRuns, 1, "no clearing pass before a successful clipboard write");
+    } finally { claude.cleanup(); rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test("a Ctrl+G Claude picks up late opens no editor and changes nothing, even after a newer action", POSIX, async () => {
   const { root, clipboard, editor } = editorFixture(60);
   const environment = editor.environment("card-3", {});
@@ -185,7 +203,7 @@ test("a request is either claimed by the helper or cancelled, never both", async
     }, 30);
     return true;
   };
-  assert.equal(await editor.run("card-5", "cut", "", write), true, "a claimed request is waited for, not cancelled");
+  assert.equal(await editor.run("card-5", "copy", "", write), true, "a claimed request is waited for, not cancelled");
   clearTimeout(claim);
   assert.deepEqual(clipboard, ["вырезано"], "cut text reaches the clipboard");
   assert.deepEqual(files(directory), []);
@@ -202,7 +220,7 @@ test("the helper leaves the draft alone when it cannot save a copy, and ignores 
   writeFileSync(join(directory, "req.1"), "rm\n");
   assert.equal(run(), 0);
   assert.equal(readFileSync(file, "utf8"), "draft");
-  writeFileSync(join(directory, "req.2"), "cut\n");
+  writeFileSync(join(directory, "req.2"), "clear\n");
   chmodSync(file, 0o200);
   assert.notEqual(run(), 0);
   chmodSync(file, 0o600);
@@ -426,7 +444,7 @@ test("TerminalManager gives local macOS Claude cards the helper and holds their 
     const running = terminals.draftAction(claude.id, "cut", "");
     terminals.input(claude.id, "после");
     assert.equal(await running, true);
-    assert.deepEqual(writes, ["\u0007", "после"], "typing during the round trip arrives after it");
+    assert.deepEqual(writes, ["\u0007", "\u0007", "после"], "typing waits for copying and clearing");
     assert.deepEqual(clipboard, ["весь черновик"]);
   } finally {
     for (const session of terminals.list()) terminals.dispose(session.id);

@@ -164,6 +164,8 @@ test("a subagent with an explicit model next to launch options that set the mode
   await s.settle();
   await assert.rejects(s.spawn(accounts, { model: "zai/glm-5.3" }),
     new RegExp(`inherits its orchestrator's ${MODELS} launch options, which set its model; it cannot also take model zai/glm-5\\.3`, "u"));
+  assert.throws(() => s.control.subagentLaunchOptions(accounts.id, "opencode", undefined, "jev/auto"),
+    { code: "MODEL_INHERITED" });
 });
 
 test("a subagent whose launch options come from two plugins that both set the model is refused", async (t) => {

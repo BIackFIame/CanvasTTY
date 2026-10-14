@@ -35,14 +35,14 @@ if [ -n "$dir" ]; then
     action=$(head -n 1 "$found/claimed.$id")
     rm -f "$found/claimed.$id"
     case "$action" in
-      copy|cut|clear) ;;
+      copy|clear) ;;
       *) exit 0 ;;
     esac
     rm -f "$found/draft.$id"
     # Without a saved copy the draft is left as it was.
     cp "$file" "$found/draft.$id" || exit 1
     case "$action" in
-      cut|clear) : > "$file" ;;
+      clear) : > "$file" ;;
     esac
     : > "$found/done.$id"
     exit 0
