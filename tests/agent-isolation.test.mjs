@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -549,6 +549,52 @@ test("an isolated launch gets an empty git template, so git init writes no hooks
     assert.ok(wrapped.env.GIT_TEMPLATE_DIR);
     assert.deepEqual(await readdir(wrapped.env.GIT_TEMPLATE_DIR), []);
   } finally { wrapped.cleanup(); }
+});
+
+test("an isolated Claude keeps its Bash and editor files in the launch's own temp folder, on both layers; other CLIs are untouched", async (t) => {
+  const w = await world(t);
+  const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+  const layers = [
+    ["seatbelt", isolation(w, { platform: "darwin", exists: () => true })],
+    ["bubblewrap", isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true })]
+  ];
+  for (const [layer, isolated] of layers) {
+    // A CLAUDE_CODE_TMPDIR from the person's environment would point Claude back at a shared folder: replaced.
+    const claude = isolated.wrap({ sessionId: "c", provider: "claude", cwd: w.project, command: "/usr/bin/claude", args: [], env: { ...w.env, CLAUDE_CODE_TMPDIR: "/tmp" } });
+    const codex = isolated.wrap({ sessionId: "x", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });
+    try {
+      assert.equal(claude.env.CLAUDE_CODE_TMPDIR, claude.env.TMP, layer);
+      assert.equal(`${claude.env.CLAUDE_CODE_TMPDIR}/`, claude.env.TMPDIR, layer);
+      assert.match(claude.env.TMP, new RegExp(`^${w.temp}/${ISOLATION_FOLDER_PREFIX}`, "u"), layer);
+      assert.equal(codex.env.CLAUDE_CODE_TMPDIR, undefined, `${layer}: only Claude reads it`);
+      // The folder all of the person's Claude sessions share is not opened for writing.
+      const text = layer === "seatbelt" ? readFileSync(claude.args[1], "utf8") : claude.args.join(" ");
+      assert.ok(!text.includes(`claude-${uid}`), `${layer}: no grant of the shared /tmp/claude-${uid}`);
+    } finally {
+      claude.cleanup();
+      codex.cleanup();
+    }
+  }
+});
+
+test("seatbelt, for real: Claude's scratch folder is in its own temp folder; the shared /tmp/claude-<uid> stays read-only", onMac, async (t) => {
+  const w = await world(t);
+  const shared = `/private/tmp/claude-${process.getuid()}/ctty-iso-probe-${process.pid}`;
+  await mkdir(shared, { recursive: true });
+  await writeFile(join(shared, "other-session.output"), "another session's output");
+  t.after(() => rm(shared, { recursive: true, force: true }));
+  t.after(() => rm(`/private/tmp/claude-${process.getuid()}/ctty-iso-new-${process.pid}`, { recursive: true, force: true }));
+  const { lines, env } = run(w, [
+    // What Claude Code does for its Bash tool: ${CLAUDE_CODE_TMPDIR:-/tmp}/claude-<uid>/<project>/<session>/tasks.
+    'd="${CLAUDE_CODE_TMPDIR:-/tmp}/claude-$(id -u)/p/s/tasks"; mkdir -p "$d" && echo out > "$d/b.output" && cat "$d/b.output" >/dev/null && echo SCRATCH-ok || echo SCRATCH-denied',
+    `echo x >> "${shared}/other-session.output" 2>/dev/null && echo SHARED-WRITE-ok || echo SHARED-WRITE-denied`,
+    `: > "${shared}/planted" 2>/dev/null && echo SHARED-CREATE-ok || echo SHARED-CREATE-denied`,
+    `mkdir "/private/tmp/claude-$(id -u)/ctty-iso-new-${process.pid}" 2>/dev/null && echo SHARED-MKDIR-ok || echo SHARED-MKDIR-denied`
+  ].join("; "), { provider: "claude" });
+  assert.deepEqual(lines, ["SCRATCH-ok", "SHARED-WRITE-denied", "SHARED-CREATE-denied", "SHARED-MKDIR-denied"]);
+  assert.equal(env.CLAUDE_CODE_TMPDIR, env.TMP);
+  assert.equal(await readFile(join(shared, "other-session.output"), "utf8"), "another session's output");
+  assert.equal(existsSync(join(shared, "planted")), false);
 });
 
 test("seatbelt, for real: Claude saves a refreshed sign-in in the login keychain; nothing else there; plan is read-only", onMac, async (t) => {
