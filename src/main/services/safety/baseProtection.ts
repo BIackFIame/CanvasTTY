@@ -158,12 +158,15 @@ function readAction(toolName: string, raw: Record<string, unknown> | null, previ
 /**
  * CanvasTTY's own private data under its userData folder (the app passes `app.getPath('userData')`; tests pass a
  * temporary folder): the control token and descriptor, the gateways' connection records and sockets, the secret
- * stores, the per-account homes, the prepared launch runs and the per-card Claude Code draft folders (claude-draft, where
- * the app and one card exchange that card's prompt draft). Its settings and layouts are not listed.
+ * stores, the per-account homes, the prepared launch runs, the per-card Claude Code draft folders (claude-draft, where
+ * the app and one card exchange that card's prompt draft) and the plugins' data (plugin-data: an accounts plugin keeps
+ * every account's sign-in there). Its settings and layouts are not listed. A card's own account home or project inside
+ * them stays its own (agentRoots, the project). plugin-data is not a marker: a project or account home inside it names
+ * that folder in its own paths.
  */
 export function canvasTtyPrivateData(userDataPath: string): PrivateData {
   const names = ['agent-control', join('browser', 'runtime'), join('lifecycle', 'runtime'), join('orchestration', 'runtime'),
-    'provider-secrets.bin', 'plugin-secrets', 'account-homes', 'github-oauth.json', 'launch-runs', 'claude-draft'];
+    'provider-secrets.bin', 'plugin-secrets', 'account-homes', 'github-oauth.json', 'launch-runs', 'claude-draft', 'plugin-data'];
   return {
     appRoots: [userDataPath],
     paths: names.map(name => join(userDataPath, name)),

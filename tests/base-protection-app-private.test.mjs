@@ -175,6 +175,41 @@ test("a project inside the app's private data keeps its own files, not its neigh
   assert.equal(inside(`cat ${q(join(userData, "provider-secrets.bin"))}`), "app-private");
 });
 
+test("plugin data is private: another account's home is refused; the card's own selected home and a project placed there stay its own", () => {
+  const pluginData = join(userData, "plugin-data");
+  const own = join(pluginData, "com.example.accounts", "homes", "acct-1");
+  const other = join(pluginData, "com.example.accounts", "homes", "acct-2");
+  const check = (toolName, toolInput, extra = {}) => checkBaseProtection({ toolName, toolInput, root: project, home, privateData, ...extra })?.rule ?? null;
+  const ownRoots = { agentRoots: [join(home, ".claude"), own] };
+  for (const extra of [{}, ownRoots]) {
+    assert.equal(check("Bash", { command: `cat ${q(join(other, "auth.json"))}` }, extra), "app-private");
+    assert.equal(check("Read", { file_path: join(other, "auth.json") }, extra), "app-private");
+    assert.equal(check("Bash", { command: `cat ${q(join(pluginData, "com.example.accounts", "state.json"))}` }, extra), "app-private");
+    assert.equal(check("LS", { path: pluginData }, extra), "app-private");
+    assert.equal(check("Grep", { pattern: "token", path: join(pluginData, "com.example.accounts") }, extra), "app-private");
+    assert.equal(check("Bash", { command: "cat ~/Library/Application\\ Support/canvastty/plugin-data/*/homes/*/auth.json" }, extra), "app-private");
+    assert.equal(check("Bash", { command: `cat ${q(join(pluginData, "com.example.other", "data.json"))}` }, extra), "app-private");
+  }
+  // Without the launch's record the selected home is plugin data like any other.
+  assert.equal(check("Read", { file_path: join(own, "auth.json") }), "app-private");
+  assert.equal(check("Read", { file_path: join(own, "auth.json") }, ownRoots), null);
+  assert.equal(check("Bash", { command: `cat ${q(join(own, "auth.json"))} && echo x > ${q(join(own, "plans", "p.md"))}` }, ownRoots), null);
+  assert.equal(check("Grep", { pattern: "x", path: own }, ownRoots), null);
+  // A whole plugin's data folder is never one card's own.
+  assert.equal(check("Read", { file_path: join(other, "auth.json") }, { agentRoots: [pluginData] }), "app-private");
+  // A project CanvasTTY placed inside plugin data (an environment's worktree) keeps its own files, code naming them too.
+  const worktree = join(pluginData, "com.example.environments", "worktrees", "w1");
+  const inWorktree = (command) => denyRule(analyzeAction(shell(command), worktree, { home, privateData }));
+  assert.equal(inWorktree("cat src/a.ts && git status"), null);
+  assert.equal(inWorktree(`python3 -c "open(${JSON.stringify(join(worktree, "src", "a.ts"))}).read()"`), null);
+  assert.equal(inWorktree(`cat ${q(join(pluginData, "com.example.environments", "worktrees", "w2", "a.ts"))}`), "app-private");
+  // A normal project is unaffected.
+  for (const command of ["cat src/a.ts", "grep -r todo .", `ls ${q(userData)}`, `cat ${q(join(project, "plugin-data", "x.json"))}`]) {
+    assert.equal(check("Bash", { command }), null, command);
+  }
+  assert.equal(check("Read", { file_path: join(project, "src", "a.ts") }), null);
+});
+
 test("file tools that name private data are refused; the agent's own account home is its own", () => {
   const check = (toolName, toolInput, extra = {}) => checkBaseProtection({ toolName, toolInput, root: project, home, privateData, ...extra });
   assert.equal(check("Write", { file_path: join(control, "token-x"), content: "x" })?.rule, "app-private");

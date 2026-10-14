@@ -68,7 +68,7 @@ import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type L
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
 import { controlGrantFolder, gatewaySocketAddresses } from "./isolation/AgentIsolation.ts";
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
-import type { PlacedProject } from "./isolation/isolationPaths.ts";
+import { providerHomeVariables, type PlacedProject } from "./isolation/isolationPaths.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
@@ -311,7 +311,11 @@ export class TerminalManager {
   // Every text an agent reads from another card passes through it (EP-8).
   private redaction = new SecretRedactionRegistry();
   // Where each running card was actually started (an environment may move it) and its agent config folder.
-  private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  /**
+   * Where each running card was started: its folder, and its own config folders (CLAUDE_CONFIG_DIR, and the account
+   * home a launch contributor selected inside its plugin data), which base protection treats as the agent's own.
+   */
+  private readonly launchContexts = new Map<string, { cwd: string; configDirs: string[] }>();
   private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
   // Whether base protection is on (Settings → Agents); OpenCode's auto profile lets shell commands run without asking
   // only then. Unknown counts as off.
@@ -427,7 +431,7 @@ export class TerminalManager {
       provider: session.metadata.provider,
       role: session.metadata.role ?? "agent",
       cwd: launched?.cwd ?? session.metadata.cwd,
-      configDirs: launched?.configDir ? [launched.configDir] : [],
+      configDirs: launched ? [...launched.configDirs] : [],
       profile: session.metadata.profile
     };
   }
@@ -1807,7 +1811,7 @@ export class TerminalManager {
       const process = this.spawnPty(spawn.command, spawn.args, {
         name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
-      this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
+      this.launchContexts.set(id, launchContext(planned.cwd, provider, planned.env, contribution?.accountHome));
       return {
         process,
         agentBrowser: planned.agentBrowser,
@@ -2352,7 +2356,7 @@ export class TerminalManager {
       } else {
         delete metadata.nativeEditor;
       }
-      this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
+      this.launchContexts.set(id, launchContext(spawn.cwd, metadata.provider, spawn.env, contribution?.accountHome));
       session.agentBrowser = planned.agentBrowser;
       session.agentRuntime = planned.agentRuntime;
       session.agentOrchestration = planned.agentOrchestration;
@@ -2839,4 +2843,16 @@ function appendScrollback(session: ManagedSession, data: string): void {
 function signalExitText(signal: number): string {
   const name = Object.entries(osConstants.signals).find(([, value]) => value === signal)?.[0];
   return `The process was killed by signal ${name ? `${name} (${signal})` : signal}.`;
+}
+
+/**
+ * A started card's folder and own config folders. The selected account home counts only while the CLI is still
+ * started with it (an environment may have replaced the variable): then it is that card's, and only that one's.
+ */
+function launchContext(cwd: string, provider: ProviderId, env: Readonly<Record<string, string>>, accountHome: string | undefined): { cwd: string; configDirs: string[] } {
+  const configDirs = env.CLAUDE_CONFIG_DIR ? [env.CLAUDE_CONFIG_DIR] : [];
+  const started = accountHome !== undefined && providerHomeVariables(provider)
+    .some((name) => typeof env[name] === "string" && env[name]!.replace(/[\\/]+$/u, "") === accountHome);
+  if (started && !configDirs.includes(accountHome)) configDirs.push(accountHome);
+  return { cwd, configDirs };
 }
