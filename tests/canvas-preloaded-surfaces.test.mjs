@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { importWithFakeReact } from "./helpers/fake-react.mjs";
 
 // The context menu and the command palette are kept out of the startup bundle (renderer-bundle-splitting), but a
 // lazy() behind <Suspense> made their first open wait about 300 ms (React holds a suspended boundary's reveal that
@@ -123,4 +124,20 @@ test("the canvas renders the menu and the palette through the preloaded surfaces
   assert.match(source, /preloadWhenIdle\(\[canvasContextMenuSurface, canvasCommandPaletteSurface\]\)/u);
   assert.match(source, /\{contextMenu && CanvasContextMenu && \(\n\s*<CanvasContextMenu\n/u);
   assert.match(source, /\{commandPaletteOpen && CanvasCommandPalette && \(\n\s*<CanvasCommandPalette\n/u);
+});
+
+test("an open re-renders when the preload finishes between its render and its effect", async (t) => {
+  const hook = await importWithFakeReact("src/renderer/src/lib/preloadedSurface.ts", "usePreloadedSurface");
+  hook.__reset();
+  t.after(() => hook.__unmount());
+  // The idle preload settles after the render read the surface and before the effect ran.
+  let reads = 0, loads = 0;
+  const surface = { loaded: () => (reads++ === 0 ? null : "menu"), load: async () => { loads++; return "menu"; } };
+  const Host = () => hook.usePreloadedSurface(surface, true);
+  assert.equal(hook.__render(Host), null, "the first render had nothing to show");
+  assert.equal(hook.__pending(), 1, "the effect asks for another render");
+  assert.equal(loads, 0, "and does not load it again");
+  hook.__flush();
+  assert.equal(hook.__render(Host), "menu", "which shows the surface");
+  assert.equal(hook.__pending(), 0, "once shown, nothing more is asked for");
 });

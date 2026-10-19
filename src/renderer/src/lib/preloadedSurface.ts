@@ -38,14 +38,20 @@ export function preloadedSurface<T>(load: () => Promise<T>): PreloadedSurface<T>
 export function usePreloadedSurface<T>(surface: PreloadedSurface<T>, wanted: boolean): T | null {
   const [, setLoaded] = useState(0);
   const value = surface.loaded();
+  const renderedLoaded = value !== null;
   useEffect(() => {
-    if (!wanted || surface.loaded() !== null) return;
+    if (!wanted) return;
+    if (surface.loaded() !== null) {
+      // A preload that finished after this render read it: nothing else re-renders, so this does.
+      if (!renderedLoaded) setLoaded((count) => count + 1);
+      return;
+    }
     let live = true;
     surface.load().then(() => {
       if (live) setLoaded((count) => count + 1);
     }, (error: unknown) => console.error("CanvasTTY could not load a menu", error));
     return () => { live = false; };
-  }, [surface, wanted]);
+  }, [surface, wanted, renderedLoaded]);
   return wanted ? value : null;
 }
 
