@@ -375,6 +375,38 @@ test("the Tools submenu body loads while the empty-canvas menu is open, so Tools
   assert.ok(ui.tools(), "the first render after Tools already shows the submenu");
 });
 
+test("a menu that first rendered before the Tools body loaded still shows the submenu once it has", async (t) => {
+  // A fresh copy of the menu module with nothing loaded yet: a distinct bundle, since identical ones share one module.
+  const fresh = await importWithFakeReact("src/renderer/src/features/workspace/CanvasContextMenu.tsx",
+    "CanvasContextMenu, CanvasContextMenu as LateLoadCopy");
+  const oldWindow = globalThis.window;
+  globalThis.window = { canvasTTY: { window: { isMacOS: false } }, getComputedStyle: () => ({ fontSize: "13px" }) };
+  t.after(() => { fresh.__unmount(); globalThis.window = oldWindow; });
+  const noop = () => undefined;
+  const props = (kind) => new Proxy({
+    kind, position: { x: 0, y: 0 }, locale: "en", launcherItems: [], currentRegionColor: null,
+    materialHasLocation: false, onSendMaterial: null, onSendRemarks: null, autoSort: host([]).value
+  }, { get: (target, key) => (key in target ? target[key] : noop) });
+  let tree;
+  const render = (kind) => { fresh.__flush(); tree = fresh.__render(fresh.CanvasContextMenu, props(kind)); };
+  const row = (label) => findAll(tree, (node) => node.props?.role === "menuitem" && node.props.children === label)[0];
+  const tools = () => findAll(tree, (node) => node.type?.name === "CanvasAutoSortMenu")[0];
+
+  // An empty-canvas menu starts the load and is closed before it settles.
+  fresh.__reset();
+  render("empty");
+  fresh.__unmount();
+  // The next menu is first rendered (as a region menu) while the load is still pending, so it starts with no body.
+  render("region");
+  for (let i = 0; i < 3; i += 1) await tick();
+  // It becomes the empty-canvas menu after the body has loaded: nothing re-renders it for the load itself.
+  render("empty");
+  row("Tools").props.onClick({ currentTarget: { getBoundingClientRect: () => ({ top: 0 }) } });
+  render("empty");
+  assert.equal(row("Tools").props["aria-expanded"], true);
+  assert.ok(tools(), "Tools shows the already-loaded submenu");
+});
+
 test("opening Tools closes the launcher submenu and the other way round", async (t) => {
   const ui = menuHarness(t);
   await ui.openTools();

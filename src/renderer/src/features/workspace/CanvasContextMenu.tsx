@@ -118,7 +118,12 @@ export function CanvasContextMenu({
 
   // Tools is opened from this menu: its body loads while the menu is open, so the submenu shows at once.
   useEffect(() => {
-    if (kind !== "empty" || loadedToolsMenu) return;
+    if (kind !== "empty") return;
+    // Loaded since this menu's first render (by an earlier menu): copy it in, nothing else will.
+    if (loadedToolsMenu) {
+      setToolsMenu(() => loadedToolsMenu);
+      return;
+    }
     let live = true;
     loadToolsMenu().then((loaded) => { if (live) setToolsMenu(() => loaded); }, () => undefined);
     return () => { live = false; };
@@ -193,7 +198,9 @@ export function CanvasContextMenu({
     }
     setLauncherOpen(false);
     setToolsOpen(true);
-    if (!loadedToolsMenu) {
+    if (loadedToolsMenu) {
+      setToolsMenu(() => loadedToolsMenu);
+    } else {
       loadToolsMenu().then((loaded) => {
         setToolsMenu(() => loaded);
       }).catch((error: unknown) => {
