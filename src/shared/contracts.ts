@@ -1772,7 +1772,8 @@ export type LimitUnavailableReason =
   | "subscription-required"
   | "unsupported-protocol"
   | "timeout"
-  | "protocol-error";
+  | "protocol-error"
+  | "api-profile";
 
 export interface LimitWindow {
   id: string;

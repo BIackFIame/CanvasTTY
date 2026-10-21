@@ -591,6 +591,8 @@ function limitReasonLabel(reason: HomeLimitReason | null, locale: LocaleId): str
         ? "limitUnsupported"
         : reason === "timeout"
           ? "limitTimeout"
+        : reason === "api-profile"
+          ? "limitApiProfile"
           : reason === "protocol-error"
             ? "limitProtocolError"
             : reason === "percentage-unavailable"

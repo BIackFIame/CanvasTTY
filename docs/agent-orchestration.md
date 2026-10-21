@@ -123,6 +123,10 @@ The default private controller file is next to the connection descriptor. Use a 
 
 Human changes to an owned window still matter. Do not submit work while someone is editing its composer. The first version recognizes the Codex empty composer, not arbitrary provider TUIs.
 
+Automated Codex delivery waits for the current launch's empty composer, including
+multiline draft checks, and sends task text with explicit paste boundaries before
+Enter. It does not treat startup output or a previous launch's screen as readiness.
+
 For a visible numbered menu, `screen` returns `interaction.options`, the selected option and a screen revision. After inspecting the choices and confirming the action is within the task's authorization, use `choose SESSION_ID --choice N --revision HASH`. To close an idle menu that explicitly offers Escape, use `dismiss SESSION_ID --revision HASH`. Both commands reject a changed screen, act only on the owned PTY and return delivery receipts; inspect the next screen to confirm the outcome. They do not automatically approve anything.
 
 Codex may show **Hooks need review** on first launch or after the bundled lifecycle helpers change. Review the listed commands before trusting them through the observed menu. This is a separate startup step from selecting YOLO and is never dismissed by submitting a task. Controlled launches disable Codex's terminal animations for stable composer detection; ordinary sessions keep their configuration.

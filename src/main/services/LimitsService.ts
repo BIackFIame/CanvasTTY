@@ -73,6 +73,11 @@ interface GrokCredential {
   sessionExpired: boolean;
 }
 
+async function codexConfigurationFingerprint(home: string): Promise<string | null> {
+  return readFile(join(home, "config.toml"))
+    .then(contents => createHash("sha256").update(contents).digest("hex")).catch(() => null);
+}
+
 export class LimitsService {
   private codex: CodexAppServerClient;
   private kimi: KimiWebUsageClient;
@@ -87,6 +92,7 @@ export class LimitsService {
   private readonly providerLoads = new Map<LimitProviderId, Promise<ProviderLimitsSnapshot>>();
   // undefined until the first Codex read; null when that read found no account.
   private lastCodexScope: string | null | undefined = undefined;
+  private lastCodexConfiguration: string | null | undefined = undefined;
   private lastGoodCodex: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
   private lastGoodClaude: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
   private lastGoodKimi: Extract<ProviderLimitsSnapshot, { state: "available" }> | null = null;
@@ -164,6 +170,7 @@ export class LimitsService {
     this.cache = null;
     this.providerCache.clear();
     this.lastCodexScope = undefined;
+    this.lastCodexConfiguration = undefined;
     this.lastGoodCodex = null;
     this.lastGoodClaude = null;
     this.lastGoodKimi = null;
@@ -219,16 +226,29 @@ export class LimitsService {
       return unavailable("codex", "codex-app-server", "protocol-error", checkedAt);
     }
 
+    let requestScope: string | null | undefined;
+    let requestConfiguration: string | null | undefined;
     try {
       // The account is bound around the request: a login change before, during or since
       // the previous read cannot be attributed, so that observation stays account-unknown.
       const before = await readCodexAccountScope(this.codexHome);
+      requestScope = before;
       const accountChanged = this.lastCodexScope !== undefined && before !== this.lastCodexScope;
       this.lastCodexScope = before;
-      // The long-lived app-server may still hold the previous login; start a fresh one.
-      if (accountChanged) this.codex.restart();
+      // The app-server captures the provider/profile configuration at startup too.
+      // Keep only a fingerprint: configuration can contain private provider settings.
+      const configuration = await codexConfigurationFingerprint(this.codexHome);
+      requestConfiguration = configuration;
+      const configurationChanged = this.lastCodexConfiguration !== undefined && configuration !== this.lastCodexConfiguration;
+      this.lastCodexConfiguration = configuration;
+      if (accountChanged || configurationChanged) this.codex.restart();
+      if (accountChanged || configurationChanged) this.lastGoodCodex = null;
       const raw = await this.codex.readRateLimits();
       const after = await readCodexAccountScope(this.codexHome);
+      if (configuration !== await codexConfigurationFingerprint(this.codexHome)) {
+        this.lastGoodCodex = null;
+        throw new LimitsAdapterError("protocol-error");
+      }
       const windows = normalizeCodexLimits(raw);
       if (windows.length === 0) throw new LimitsAdapterError("not-authenticated");
 
@@ -240,10 +260,18 @@ export class LimitsService {
         windows,
         accountScope: !accountChanged && before !== null && before === after ? before : null
       };
-      this.lastGoodCodex = available;
+      // A response spanning a login change is unscoped and cannot seed the stale cache.
+      this.lastGoodCodex = before === after ? available : null;
       return available;
     } catch (error) {
+      if ((requestScope !== undefined && requestScope !== await readCodexAccountScope(this.codexHome))
+        || (requestConfiguration !== undefined && requestConfiguration !== await codexConfigurationFingerprint(this.codexHome))) {
+        this.lastGoodCodex = null;
+        return unavailable("codex", "codex-app-server", "protocol-error", checkedAt);
+      }
       const reason = adapterReason(error);
+      // API-backed profiles cannot retain subscription quotas from an earlier configuration.
+      if (reason === "api-profile") this.lastGoodCodex = null;
       if (this.lastGoodCodex) {
         return {
           ...this.lastGoodCodex,
@@ -840,6 +868,15 @@ class CodexAppServerClient {
     this.clearIdleTimer();
     try {
       await this.ensureConnected();
+      const auth = await this.request("account/read", { refreshToken: false });
+      if (!isRecord(auth) || typeof auth.requiresOpenaiAuth !== "boolean"
+        || !(auth.account === null || isRecord(auth.account) && typeof auth.account.type === "string")) {
+        throw new LimitsAdapterError("protocol-error");
+      }
+      if (!auth.requiresOpenaiAuth || isRecord(auth.account) && auth.account.type === "apiKey") {
+        throw new LimitsAdapterError("api-profile");
+      }
+      if (auth.account === null) throw new LimitsAdapterError("not-authenticated");
       return await this.request("account/rateLimits/read");
     } finally {
       this.scheduleIdleStop();
