@@ -5,6 +5,7 @@ import { t } from "../../lib/i18n";
 import { planCanvasAutoSort } from "./canvasAutoSort";
 import {
   CANVAS_AUTO_SORT_MODES,
+  canvasAutoSortMoves,
   canvasAutoSortScope,
   canvasAutoSortUndoTargets,
   type CanvasAutoSortCandidate,
@@ -37,13 +38,20 @@ export function canvasAutoSortIds(host: CanvasAutoSortHost): string[] {
   return canvasAutoSortScope(candidates, host.selection, host.regions);
 }
 
-/** Sort by `mode` and remember the step for undo; the criterion is kept only once a sort happened. */
+/**
+ * Sort by `mode` and remember the step for undo; the criterion is kept only once a sort happened.
+ * A sort that moves nothing (the layout already follows the criterion) keeps the earlier undo step.
+ */
 export function runCanvasAutoSort(host: CanvasAutoSortHost, mode: CanvasAutoSortMode): void {
   const plan = planCanvasAutoSort(canvasAutoSortIds(host), host.bounds, host.sessions, terminalLayerId, mode, {
     avoid: [host.home, ...host.regions],
     snapToGrid: host.snapToGrid
   });
   if (!plan) return;
+  if (!canvasAutoSortMoves(plan)) {
+    if (mode !== host.state.mode) host.setState({ mode, undo: host.state.undo });
+    return;
+  }
   host.commit(plan.after);
   host.setState({ mode, undo: { mode, ...plan } });
   host.mark(new Set(plan.after.keys()));

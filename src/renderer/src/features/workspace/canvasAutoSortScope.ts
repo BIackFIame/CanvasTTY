@@ -94,6 +94,15 @@ export function canvasAutoSortUndoTargets(
   return result;
 }
 
+/** Whether a sort step moves or resizes anything; sorting an already sorted layout does not. */
+export function canvasAutoSortMoves(step: Pick<CanvasAutoSortUndo, "before" | "after">): boolean {
+  for (const [id, placed] of step.after) {
+    const before = step.before.get(id);
+    if (!before || !sameBounds(before, placed)) return true;
+  }
+  return false;
+}
+
 function contains(outer: SessionBounds, inner: SessionBounds): boolean {
   return inner.position.x >= outer.position.x
     && inner.position.y >= outer.position.y

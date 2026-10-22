@@ -457,6 +457,30 @@ test("the Tools submenu lists the criteria as radio rows and sorts, outlines and
   assert.deepEqual(after.calls.state, [{ mode: "grid", undo: null }]);
 });
 
+test("sorting again by a criterion that moves nothing keeps the earlier undo step", () => {
+  const { value, calls } = host([terminal("a", 3_000, 0), terminal("b", 3_000, 900), terminal("c", 5_000, 400)]);
+  toolsMenu(value).row("Grid").props.onClick();
+  const first = calls.state[0];
+  const moved = calls.commit[0];
+
+  const again = host([...moved].map(([id, bounds]) => [id, bounds]), { state: first });
+  toolsMenu(again.value).row("Grid").props.onClick();
+  assert.deepEqual(again.calls.commit, [], "nothing moves, so nothing is committed");
+  assert.deepEqual(again.calls.mark, [], "nothing moves, so nothing is outlined");
+  assert.deepEqual(again.calls.state, [], "the first sort's criterion and undo step stay as they were");
+  const next = toolsMenu(again.value);
+  assert.ok(next.row("Undo auto-sort"), "Undo auto-sort is still offered");
+  next.row("Undo auto-sort").props.onClick();
+  assert.deepEqual(again.calls.commit[0], new Map([["terminal:b", card(3_000, 900)], ["terminal:c", card(5_000, 400)]]),
+    "undo still puts back the first sort's windows");
+
+  // A criterion the layout already follows becomes the checked one without losing the undo step.
+  const other = host([...moved].map(([id, bounds]) => [id, bounds]), { state: { mode: "task", undo: first.undo } });
+  toolsMenu(other.value).row("Grid").props.onClick();
+  assert.deepEqual(other.calls.commit, []);
+  assert.deepEqual(other.calls.state, [{ mode: "grid", undo: first.undo }]);
+});
+
 test("a selection without two windows does not narrow the sort, and too few windows disable it with a hint", () => {
   const windows = [terminal("a", 3_000, 0), terminal("b", 3_000, 900)];
   const notes = [["note:1", card(9_000, 0)], ["note:2", card(9_000, 900)]];
