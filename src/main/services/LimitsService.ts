@@ -1,7 +1,6 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { lstat, open, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
+import { lstat, readFile, realpath, stat, type FileHandle } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { createServer } from "node:net";
 import { homedir, userInfo } from "node:os";
@@ -20,6 +19,9 @@ import {
   type ProviderCliRegistry
 } from "./providerCliRegistry.ts";
 import { NdjsonLineReader } from "../../agent-runtime/ndjson.mjs";
+import { immutableSqliteTarget, openPlainFile } from "./plainFile.ts";
+
+export { openPlainFile };
 
 const CACHE_TTL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -889,9 +891,6 @@ async function fileSize(path: string): Promise<number | null> {
   }
 }
 
-/** Platforms where `/dev/fd/<n>` names an already open file. */
-const DEV_FD = process.platform === "darwin" || process.platform === "linux";
-
 /**
  * The OpenCode Go key in an OpenCode V2 database, read without changing anything beside it. The database is opened
  * first as a file (O_NOFOLLOW for an account home) and checked to be a regular file; the read-only SQLite connection
@@ -931,10 +930,7 @@ export async function readOpenCodeGoKeyFromDatabase(
     const frames = wal !== null && wal > 0;
     let result: string | null | undefined;
     if (!frames) {
-      const target = DEV_FD
-        ? `file:/dev/fd/${opened.handle.fd}?mode=ro&immutable=1`
-        : `${pathToFileURL(database).href}?mode=ro&immutable=1`;
-      result = await queryOpenCodeGoKey(target);
+      result = await queryOpenCodeGoKey(immutableSqliteTarget(opened.handle, database));
     } else if (shm !== null) {
       result = await queryOpenCodeGoKey(`${pathToFileURL(database).href}?mode=ro`);
     } else {
@@ -1103,32 +1099,6 @@ export function withoutAccountScope(snapshot: LimitsSnapshot): LimitsSnapshot {
       return rest;
     })
   };
-}
-
-/**
- * Opens a regular file for reading. With `noFollow` the last step may not be a symbolic link: it is checked with lstat,
- * opened with O_NOFOLLOW where the platform has it, and the open file must be the one checked (same device and inode),
- * so a path swapped in between is refused. Errors carry ENOENT for anything that is not a plain file.
- */
-export async function openPlainFile(
-  path: string,
-  noFollow: boolean,
-  /** Tests only: runs between the check and the open. */
-  afterCheck?: () => Promise<void>
-): Promise<{ handle: FileHandle; dev: number; ino: number }> {
-  const notPlain = (): Error => Object.assign(new Error("not a plain file"), { code: "ENOENT" });
-  const checked = noFollow ? await lstat(path) : null;
-  if (checked && !checked.isFile()) throw notPlain();
-  await afterCheck?.();
-  const handle = await open(path, fsConstants.O_RDONLY | (noFollow ? fsConstants.O_NOFOLLOW ?? 0 : 0));
-  try {
-    const info = await handle.stat();
-    if (!info.isFile() || (checked && (checked.dev !== info.dev || checked.ino !== info.ino))) throw notPlain();
-    return { handle, dev: info.dev, ino: info.ino };
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
-  }
 }
 
 /** A text file; with `noFollow` only a plain file, never through a symbolic link at its last step (openPlainFile). */

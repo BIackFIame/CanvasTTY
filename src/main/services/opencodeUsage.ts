@@ -1,10 +1,10 @@
 import { Worker } from 'node:worker_threads';
-import { constants as fsConstants } from 'node:fs';
-import { lstat, open, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { lstat, readdir, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { UsageEvent } from '../../shared/usageHistory.ts';
 import { fingerprint, identifier, record, tokens, usageModel } from './usageReaders.ts';
+import { immutableSqliteTarget, openPlainFile } from './plainFile.ts';
 
 /*
  * OpenCode keeps one record per model response, rewritten in place while it streams:
@@ -41,8 +41,6 @@ const MAX_JSON_BYTES = 1024 * 1024;
 const MAX_DEPTH = 3;
 /** A row updated this long before the last read is read again: OpenCode writes `time_updated` from its own clock. */
 const OVERLAP = 10 * 60_000;
-/** Platforms where `/dev/fd/<n>` in a child names the file the parent opened and passed as descriptor <n>. */
-const DEV_FD = process.platform === 'darwin' || process.platform === 'linux';
 
 class StoreProblem extends Error {}
 
@@ -94,27 +92,6 @@ export function sqliteUriSupported(query: SqliteQuery = workerSqliteQuery): Prom
     uriSupport.set(query, known);
   }
   return known;
-}
-
-/**
- * Opens a regular file for reading. With `noFollow` the last step may not be a symbolic link: it is checked with
- * lstat, opened with O_NOFOLLOW where the platform has it, and the open file must be the one checked (same device and
- * inode), so a path swapped in between is refused (the same rule as account-home credential reads).
- */
-export async function openPlainFile(path: string, noFollow: boolean, afterCheck?: () => Promise<void>): Promise<{ handle: FileHandle; dev: number; ino: number }> {
-  const notPlain = (): Error => Object.assign(new Error('not a plain file'), { code: 'ENOENT' });
-  const checked = noFollow ? await lstat(path) : null;
-  if (checked && !checked.isFile()) throw notPlain();
-  await afterCheck?.();
-  const handle = await open(path, fsConstants.O_RDONLY | (noFollow ? fsConstants.O_NOFOLLOW ?? 0 : 0));
-  try {
-    const info = await handle.stat();
-    if (!info.isFile() || (checked && (checked.dev !== info.dev || checked.ino !== info.ino))) throw notPlain();
-    return { handle, dev: info.dev, ino: info.ino };
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    throw error;
-  }
 }
 
 function eventFrom(
@@ -351,7 +328,7 @@ async function readDatabase(
     const since = Math.floor(cursor && cursor.node === node ? Math.max(cursor.at - OVERLAP, now - retention) : now - retention);
     // Without WAL frames: immutable through the descriptor opened above (no lock, no side file, bound to that file).
     const target = frames ? `${pathToFileURL(database).href}?mode=ro&readonly_shm=1`
-      : DEV_FD ? `file:/dev/fd/${opened.handle.fd}?mode=ro&immutable=1` : `${pathToFileURL(database).href}?mode=ro&immutable=1`;
+      : immutableSqliteTarget(opened.handle, database);
     const run = async (sql: string): Promise<Record<string, unknown>[]> => {
       try {
         const [rows] = await query(target, [sql]);

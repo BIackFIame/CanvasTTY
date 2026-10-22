@@ -1,7 +1,6 @@
-import { lstatSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { LimitProviderId, LimitsSnapshot, PluginPermission } from "../../shared/contracts.ts";
 import { LIMIT_PROVIDERS } from "../../shared/contracts.ts";
+import { MAX_PLUGIN_HOMES, validatePluginHome } from "./pluginHomes.ts";
 import { pluginLimitsResult, type LimitEarlyReset, type LimitsChange } from "./LimitsService.ts";
 
 /** The part of LimitsService plugin services reach. */
@@ -45,9 +44,7 @@ const FRESH_MS = 60_000;
 const DEFAULT_DEBOUNCE_MS = 2_000;
 const DEFAULT_SERVICE_REFRESH_MS = 5 * 60_000;
 /** Account homes one plugin may ask about (a pool of subscription accounts); unknown or removed homes free a place. */
-export const MAX_LIMIT_HOMES_PER_PLUGIN = 32;
-const MAX_HOME_LENGTH = 4_096;
-const UNKNOWN_HOME = "The home is not an account home in this plugin's data folder.";
+export const MAX_LIMIT_HOMES_PER_PLUGIN = MAX_PLUGIN_HOMES;
 
 interface Subscriber {
   pluginId: string;
@@ -229,40 +226,11 @@ function mergeEarlyResets(earlier: readonly LimitEarlyReset[], later: readonly L
   return [...merged.values()];
 }
 
-/** A folder path without trailing separators (`/a/b/` names the same folder as `/a/b`). */
-function withoutTrailingSeparator(path: string): string {
-  const trimmed = path.replace(/[\\/]+$/u, "");
-  return trimmed === "" || /^[A-Za-z]:$/u.test(trimmed) ? path : trimmed;
-}
-
 /**
- * An account home a service may ask limits for: an exact absolute path (no `..`, no relative part) strictly inside
- * `dataDir` (the host's record of the calling plugin's data folder, never a value from the plugin), where the data
- * folder and every folder below it down to the home is a real directory, not a symbolic link, and resolves to the
- * same place. Returns the home; anything else throws one generic refusal, so the answer reveals nothing about paths.
+ * An account home a service may ask limits for: the same rule as every plugin-named account home (validatePluginHome),
+ * an exact absolute folder strictly inside the plugin's own data folder reached without a symbolic link. Returns the
+ * home; anything else throws one generic refusal, so the answer reveals nothing about paths.
  */
 export function validateLimitsHome(dataDir: string, candidate: unknown): string {
-  if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_HOME_LENGTH || candidate.includes("\u0000")) {
-    throw new Error(UNKNOWN_HOME);
-  }
-  const home = withoutTrailingSeparator(candidate);
-  if (!isAbsolute(dataDir) || !isAbsolute(home) || resolve(home) !== home) throw new Error(UNKNOWN_HOME);
-  const root = resolve(dataDir);
-  const rest = relative(root, home);
-  if (rest === "" || rest.startsWith("..") || isAbsolute(rest)) throw new Error(UNKNOWN_HOME);
-  try {
-    const rootInfo = lstatSync(root);
-    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) throw new Error("not a real folder");
-    let path = root;
-    let canonical = realpathSync.native(root);
-    for (const segment of rest.split(sep)) {
-      path = join(path, segment);
-      canonical = join(canonical, segment);
-      const info = lstatSync(path);
-      if (!info.isDirectory() || info.isSymbolicLink() || realpathSync.native(path) !== canonical) throw new Error("not a real folder");
-    }
-  } catch {
-    throw new Error(UNKNOWN_HOME);
-  }
-  return home;
+  return validatePluginHome(dataDir, candidate).home;
 }
