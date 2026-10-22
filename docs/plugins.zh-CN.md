@@ -139,6 +139,7 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `sessions.create` | 请求 | `sessions:launch` | 启动一张归插件所有的卡片 |
 | `sessions.send` / `sessions.stop` | 请求 | `sessions:control` | 仅限该插件启动的卡片 |
 | `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
+| `providers.list` `{}` | 请求 | `providers:read` | CanvasTTY 可以启动的智能体 CLI，与 `list_providers` 提供给编排器的内容完全相同：`{ providers, note }`，每个提供方包含 `id`、`name`、`installed`、`available`、`signIn`（`ok`、`signed_out`、`expired`、`unknown`）和 `signInCheckedAt`、`subagent`、`orchestrator`、`model`（`supported`、`format`，以及其 CLI 列出模型时的 `known`）、`efforts`、`profiles`，以及将其设为 `delegable` 的插件的启动选项。只读取 CanvasTTY 已有的信息（CLI 检查、最近一次额度读取、缓存的模型列表）；不启动任何读取，也不等待。不含令牌、邮箱、账户 ID 或路径 |
 
 宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件或读取其他插件的机密，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
@@ -405,6 +406,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
+| `providers:read` | `providers.list`（服务） | 哪些智能体 CLI 已安装并已登录、模型格式与列出的模型、可委派的启动选项：即 `list_providers` 提供给编排器的内容。不含令牌、邮箱、账户 ID 或路径 |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
 | `browser:open` | `browser.open` | 仅在 CanvasTTY 内置 Browser 卡片及其共享浏览器会话中打开明确的 HTTP(S) URL，包括 localhost |

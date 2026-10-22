@@ -160,6 +160,7 @@ A service may call back this host API (the base that later extension points add 
 | `sessions.create` | request | `sessions:launch` | Starts a card the plugin owns |
 | `sessions.send` / `sessions.stop` | request | `sessions:control` | Only for cards the plugin started |
 | `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
+| `providers.list` `{}` | request | `providers:read` | The agent CLIs CanvasTTY can launch, exactly as `list_providers` gives them to an orchestrator: `{ providers, note }`, each provider with `id`, `name`, `installed`, `available`, `signIn` (`ok`, `signed_out`, `expired`, `unknown`) and `signInCheckedAt`, `subagent`, `orchestrator`, `model` (`supported`, `format`, `known` when its CLI listed them), `efforts`, `profiles`, and the launch options of plugins that made them `delegable`. Read from what CanvasTTY already holds (the CLI check, the last limits read, the cached model listing); it starts no read and waits for nothing. No tokens, e-mails, account ids or paths |
 
 The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
@@ -429,6 +430,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
+| `providers:read` | `providers.list` (services) | Which agent CLIs are installed and signed in, their model format and listed models, and delegable launch options: what `list_providers` gives an orchestrator. No tokens, e-mails, account ids or paths |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |
 | `browser:open` | `browser.open` | Opens only an explicit HTTP(S) URL in CanvasTTY's embedded Browser card and its shared browser session, including localhost |

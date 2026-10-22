@@ -141,6 +141,7 @@ Script запускается отдельным процессом из кат�
 | `sessions.create` | запрос | `sessions:launch` | Запускает окно, которым владеет плагин |
 | `sessions.send` / `sessions.stop` | запрос | `sessions:control` | Только для окон, запущенных этим плагином |
 | `cards.setBadge` `{ sessionId, badge }` | запрос | `cards:decorate` | Короткая текстовая метка на любом окне (см. «Метки и действия на окнах») |
+| `providers.list` `{}` | запрос | `providers:read` | CLI агентов, которые CanvasTTY может запустить, ровно так, как `list_providers` отдаёт их оркестратору: `{ providers, note }`, у каждого провайдера `id`, `name`, `installed`, `available`, `signIn` (`ok`, `signed_out`, `expired`, `unknown`) и `signInCheckedAt`, `subagent`, `orchestrator`, `model` (`supported`, `format`, `known`, если CLI их перечислил), `efforts`, `profiles` и параметры запуска плагинов, сделавших их `delegable`. Берётся из того, что CanvasTTY уже знает (проверка CLI, последнее чтение лимитов, кэш списка моделей); ничего не запускает и ничего не ждёт. Без токенов, почты, идентификаторов аккаунтов и путей |
 
 Хост привязывает каждый вызов к плагину самого сервиса: сервис не может назвать другой плагин или прочитать секреты другого плагина, а к сессиям обращается только через разрешения `sessions:*` ниже. Пример [`service-echo`](../examples/plugins/service-echo) сохраняет токен со своей страницы через `host.secrets.set`, а его сервис читает его через `secrets.get` и отвечает только, задан ли он.
 
@@ -407,6 +408,7 @@ host.onStorageChange(listener) сообщает всем открытым пов
 | `cards:decorate` | `cards.setBadge`, `cardActions` сервиса, `canvastty.cards.invoke` | Текстовые метки на окнах и действия в их меню |
 | `browser:engine` | `browserEngine` сервиса и `canvastty.browserEngine.*` | Получает URL фоновых вкладок агентов и открывает их в своём движке; без cookies, профиля и учётных данных |
 | `limits:read` | `limits.get` | Тот же очищенный `LimitsSnapshot`, который использует HOME |
+| `providers:read` | `providers.list` (сервисы) | Какие CLI агентов установлены и выполнен ли в них вход, формат и перечисленные модели, делегируемые параметры запуска: то, что `list_providers` отдаёт оркестратору. Без токенов, почты, идентификаторов аккаунтов и путей |
 | `launcher:open` | `launcher.open` | Открывает штатную Focus Card или запуск терминала; не обходит пользовательский выбор |
 | `external:open` | `external.open` | Передаёт ОС только явную HTTP(S)-ссылку |
 | `browser:open` | `browser.open` | Открывает только явную HTTP(S)-ссылку во встроенной карточке Browser и её общей browser-сессии, включая localhost |
