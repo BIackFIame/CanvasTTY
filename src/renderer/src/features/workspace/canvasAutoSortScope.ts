@@ -61,7 +61,8 @@ const MOVABLE_KINDS: ReadonlySet<CanvasAutoSortKind> = new Set(["terminal", "plu
  * limits the sort to them. Otherwise (no selection, or one holding only notes, materials, Files
  * cards or a single window) every terminal, plugin and Browser window that is not completely
  * inside a canvas region moves: regions hold the person's own grouping, and moving a window out
- * of one silently changes its membership.
+ * of one silently changes its membership. Mascots stay out of that default scope unless the
+ * person selected them.
  */
 export function canvasAutoSortScope(
   candidates: readonly CanvasAutoSortCandidate[],
@@ -72,7 +73,7 @@ export function canvasAutoSortScope(
   const selected = movable.filter((candidate) => selection.has(candidate.id));
   if (selected.length >= 2) return selected.map((candidate) => candidate.id);
   return movable
-    .filter((candidate) => !candidate.decorative)
+    .filter((candidate) => !candidate.decorative || selection.has(candidate.id))
     .filter((candidate) => !regions.some((region) => contains(region, candidate.bounds)))
     .map((candidate) => candidate.id);
 }

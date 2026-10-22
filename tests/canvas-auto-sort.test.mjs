@@ -253,6 +253,10 @@ test("scope: a selection limits the sort; otherwise windows outside regions, nev
     "a selection without two windows (two notes) falls back to the default scope");
   assert.deepEqual(canvasAutoSortScope(candidates, new Set(["terminal:in-region", "note:n", "material:m"]), [region]), fallback,
     "one selected window plus annotations falls back too");
+  assert.deepEqual(canvasAutoSortScope(candidates, new Set(["plugin:mascot"]), [region]), ["terminal:a", "plugin:app", "plugin:mascot", "browser"],
+    "a single selected mascot is not a group, but the fallback still takes it along");
+  assert.deepEqual(canvasAutoSortScope(candidates, new Set(["plugin:mascot", "note:n", "files:f"]), [region]),
+    ["terminal:a", "plugin:app", "plugin:mascot", "browser"], "a selected mascot plus annotations falls back and keeps the mascot");
 });
 
 test("undo restores only windows still where the sort put them", () => {
@@ -489,6 +493,17 @@ test("a selection without two windows does not narrow the sort, and too few wind
   assert.ok(menu.radios.every((node) => !node.props.disabled), "two selected notes fall back to the default scope");
   menu.row("By task").props.onClick();
   assert.deepEqual([...selectedNotes.calls.commit[0].keys()].sort(), ["terminal:a", "terminal:b"]);
+
+  const mascot = host([terminal("a", 3_000, 0)], {
+    layers: [["plugin:buddy", card(9_000, 2_000, 200, 200)]],
+    selection: new Set(["plugin:buddy"]),
+    pluginCanvas: [{ id: "buddy", pluginId: "pet" }],
+    plugins: [{ manifest: { id: "pet" }, sourceUrl: "mascot:pet" }]
+  });
+  const withMascot = toolsMenu(mascot.value);
+  assert.ok(withMascot.radios.every((node) => !node.props.disabled), "a selected mascot counts with the one regular window");
+  withMascot.row("Grid").props.onClick();
+  assert.deepEqual([...mascot.calls.commit[0].keys()].sort(), ["plugin:buddy", "terminal:a"]);
 
   const lonely = host([terminal("a", 3_000, 0)], { layers: notes });
   const ru = toolsMenu(lonely.value, "ru");
