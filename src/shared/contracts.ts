@@ -881,6 +881,44 @@ export interface PluginService {
   cardActions?: PluginCardAction[];
   /** A browser engine (`browser:engine`) for agents' background tabs; the host calls `canvastty.browserEngine.*`. */
   browserEngine?: PluginBrowserEngine;
+  /** Read-only data this service answers for other plugins' services (`canvastty.shares.read`), pair by pair. */
+  shares?: PluginShare[];
+}
+
+/** Data classes a share may be labelled with (the same D0–D3 scale plugins use for their own data rules). */
+export type PluginDataClass = "D0" | "D1" | "D2" | "D3";
+
+/** One read-only method a service answers for other plugins once the person approved the pair. */
+export interface PluginShare {
+  /** `[a-z][a-z0-9_]*` parts joined by dots, at most 64 characters, e.g. `accounts.routes`. */
+  method: string;
+  /** Shown to the person when they approve a plugin reading it. */
+  description: string;
+  dataClass?: PluginDataClass;
+}
+
+/** A shared read one plugin's services ask to make from another plugin. */
+export interface PluginUse {
+  plugin: string;
+  method: string;
+}
+
+/** How one declared `uses` pair stands, as the host sees it now. */
+export interface PluginSharedReadStatus {
+  plugin: string;
+  method: string;
+  /** The provider's name, or null when it is not installed. */
+  providerName: string | null;
+  /** The provider's description of the data, or null when it does not share the method (any more). */
+  description: string | null;
+  dataClass?: PluginDataClass;
+  /**
+   * `approved` (works while both plugins run), `needs-approval`, `changed` (approved before, but the provider's
+   * description, data class or source changed), `not-shared` (the provider is missing or does not share it).
+   */
+  state: "approved" | "needs-approval" | "changed" | "not-shared";
+  /** Both plugins are enabled with native code trusted. */
+  providerReady: boolean;
 }
 
 /** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */
@@ -1114,6 +1152,8 @@ export interface PluginManifest {
   settingsContribution?: string;
   coreFiles?: PluginModuleAsset[];
   modules?: PluginModule[];
+  /** Other plugins' shared reads this plugin's services call (`plugins.request`), each approved by the person. */
+  uses?: PluginUse[];
 }
 
 export interface GithubPluginSearchResult {
@@ -1158,6 +1198,8 @@ export interface InstalledPlugin {
   nativeCodeTrusted: boolean;
   /** Its decision service may allow tool calls (a second confirmation); revoked with native code trust. */
   decisionsMayAllow: boolean;
+  /** Its declared `uses`, each with the person's approval state; revoked with native code trust. */
+  sharedReads?: PluginSharedReadStatus[];
 }
 
 export interface PluginInstallPreview {
@@ -1979,6 +2021,7 @@ export interface CanvasTTYApi {
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
     setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
+    setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin>;
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
@@ -2165,6 +2208,7 @@ export const IPC = {
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
   pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
+  pluginsSetSharedReadApproved: "plugins:set-shared-read-approved",
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",

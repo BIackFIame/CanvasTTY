@@ -37,6 +37,10 @@ import type {
   PluginAgentTool,
   PluginCardAction,
   PluginBrowserEngine,
+  PluginDataClass,
+  PluginShare,
+  PluginSharedReadStatus,
+  PluginUse,
   PluginCardActionFilter,
   PluginUpdateStatus,
   Size
@@ -162,7 +166,14 @@ interface StoredPluginRecord {
   trustedServices?: Record<string, string>;
   /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
   decisionsMayAllow?: boolean;
+  /** Shared reads the person approved: `<provider> <method>` -> fingerprint (kept only with trustedServices). */
+  approvedShares?: Record<string, string>;
 }
+
+/** The host's answer to where a shared read goes (see PluginManager.sharedReadRoute). */
+export type SharedReadRoute =
+  | { ok: true; serviceId: string; providerName: string; dataClass?: PluginDataClass }
+  | { ok: false; reason: "consumer_unavailable" | "not_declared" | "not_shared" | "not_approved" | "approval_changed" | "provider_unavailable" };
 
 export interface RuntimePluginHookRegistration {
   key: string;
@@ -214,6 +225,8 @@ export class PluginManager {
   private readonly plugins = new Map<string, InstalledPlugin>();
   /** Plugin id -> service id -> trusted entry SHA-256. Present only while native code is trusted. */
   private readonly serviceTrust = new Map<string, Record<string, string>>();
+  /** Consumer plugin id -> approved `<provider> <method>` -> fingerprint. Present only while native code is trusted. */
+  private readonly shareApprovals = new Map<string, Record<string, string>>();
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
@@ -283,6 +296,7 @@ export class PluginManager {
 
     this.plugins.clear();
     this.serviceTrust.clear();
+    this.shareApprovals.clear();
     for (const [pluginId, record] of Object.entries(registry)) {
       if (!isStoredRecord(record) || !isPluginId(pluginId)) continue;
       try {
@@ -317,6 +331,7 @@ export class PluginManager {
             const plugin = this.plugins.get(pluginId)!;
             plugin.nativeCodeTrusted = true;
             plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
+            if (record.approvedShares) this.shareApprovals.set(pluginId, { ...record.approvedShares });
           }
         }
       } catch (error) {
@@ -331,7 +346,14 @@ export class PluginManager {
   list(): InstalledPlugin[] {
     return [...this.plugins.values()]
       .sort((left, right) => left.manifest.name.localeCompare(right.manifest.name))
-      .map((plugin) => structuredClone(activePlugin(plugin)));
+      .map((plugin) => this.view(plugin));
+  }
+
+  /** What the renderer and callers see: the active manifest plus the state of each declared shared read. */
+  private view(plugin: InstalledPlugin): InstalledPlugin {
+    const active = activePlugin(plugin);
+    const sharedReads = this.sharedReadStatus(plugin);
+    return structuredClone({ ...active, ...(sharedReads.length ? { sharedReads } : {}) });
   }
 
   async previewInstall(sourceUrl: string): Promise<PluginInstallPreview> {
@@ -499,7 +521,7 @@ export class PluginManager {
       };
       this.plugins.set(installed.manifest.id, installed);
       await this.persistRegistry();
-      return structuredClone(activePlugin(installed));
+      return this.view(installed);
     } catch (error) {
       if (installed && this.plugins.get(preview.manifest.id) === installed) this.plugins.delete(preview.manifest.id);
       await rm(destination, { recursive: true, force: true });
@@ -533,7 +555,7 @@ export class PluginManager {
       await this.persistRegistry().catch(() => undefined);
       throw error;
     }
-    return structuredClone(activePlugin(plugin));
+    return this.view(plugin);
   }
 
   async setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin> {
@@ -555,7 +577,7 @@ export class PluginManager {
       await this.persistRegistry().catch(() => undefined);
       throw error;
     }
-    return structuredClone(activePlugin(plugin));
+    return this.view(plugin);
   }
 
   /**
@@ -584,7 +606,7 @@ export class PluginManager {
       await this.persistRegistry().catch(() => undefined);
       throw error;
     }
-    return structuredClone(activePlugin(plugin));
+    return this.view(plugin);
   }
 
   /**
@@ -608,7 +630,103 @@ export class PluginManager {
       await this.persistRegistry().catch(() => undefined);
       throw error;
     }
-    return structuredClone(activePlugin(plugin));
+    return this.view(plugin);
+  }
+
+  /**
+   * The person's approval of one shared read: `pluginId`'s services may read `method` from `provider`. Needs the
+   * consumer's native code trust (and is revoked with it), its declared use, and the provider declaring the share.
+   * The approval pins the provider's source, description and data class; a change suspends it.
+   */
+  async setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    const key = sharedReadKey(provider, method);
+    const previous = this.shareApprovals.get(pluginId);
+    const next = { ...(previous ?? {}) };
+    if (approved) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!plugin.manifest.uses?.some((use) => use.plugin === provider && use.method === method)) {
+        throw new Error("Plugin does not declare this shared read.");
+      }
+      const share = this.declaredShare(provider, method);
+      if (!share) throw new Error("The other plugin does not share this data.");
+      next[key] = sharedReadFingerprint(share.sourceUrl, share.share);
+    } else {
+      delete next[key];
+    }
+    this.shareApprovals.set(pluginId, next);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      if (previous) this.shareApprovals.set(pluginId, previous);
+      else this.shareApprovals.delete(pluginId);
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return this.view(plugin);
+  }
+
+  /**
+   * Where a consumer's `plugins.request` goes, decided from the host's own registry at the moment of the call:
+   * the consumer is enabled and trusted, declares the use and holds a current approval; the provider is enabled
+   * and trusted and shares the method on a trusted service. Otherwise the reason it is refused.
+   */
+  sharedReadRoute(consumerId: string, provider: string, method: string): SharedReadRoute {
+    const consumer = this.plugins.get(consumerId);
+    if (!consumer || !consumer.enabled || !consumer.nativeCodeTrusted || !this.serviceTrust.has(consumerId)) {
+      return { ok: false, reason: "consumer_unavailable" };
+    }
+    if (!consumer.manifest.uses?.some((use) => use.plugin === provider && use.method === method)) {
+      return { ok: false, reason: "not_declared" };
+    }
+    const share = this.declaredShare(provider, method);
+    if (!share) return { ok: false, reason: "not_shared" };
+    const approval = this.shareApprovals.get(consumerId)?.[sharedReadKey(provider, method)];
+    if (!approval) return { ok: false, reason: "not_approved" };
+    if (approval !== sharedReadFingerprint(share.sourceUrl, share.share)) return { ok: false, reason: "approval_changed" };
+    const providerPlugin = this.plugins.get(provider)!;
+    const trust = this.serviceTrust.get(provider);
+    if (!providerPlugin.enabled || !providerPlugin.nativeCodeTrusted || !trust?.[share.serviceId]) {
+      return { ok: false, reason: "provider_unavailable" };
+    }
+    return {
+      ok: true,
+      serviceId: share.serviceId,
+      providerName: providerPlugin.manifest.name,
+      ...(share.share.dataClass ? { dataClass: share.share.dataClass } : {})
+    };
+  }
+
+  /** The provider's active share for `method`, with the service that answers it; null when not declared. */
+  private declaredShare(provider: string, method: string): { sourceUrl: string; serviceId: string; share: PluginShare } | null {
+    const plugin = this.plugins.get(provider);
+    if (!plugin) return null;
+    for (const service of activeManifest(plugin.manifest, plugin.selectedModules).services ?? []) {
+      const share = service.shares?.find((candidate) => candidate.method === method);
+      if (share) return { sourceUrl: plugin.sourceUrl, serviceId: service.id, share };
+    }
+    return null;
+  }
+
+  private sharedReadStatus(plugin: InstalledPlugin): PluginSharedReadStatus[] {
+    const approvals = this.shareApprovals.get(plugin.manifest.id) ?? {};
+    return (plugin.manifest.uses ?? []).map((use): PluginSharedReadStatus => {
+      const provider = this.plugins.get(use.plugin);
+      const share = this.declaredShare(use.plugin, use.method);
+      const approval = approvals[sharedReadKey(use.plugin, use.method)];
+      const state: PluginSharedReadStatus["state"] = !share ? "not-shared"
+        : !approval ? "needs-approval"
+          : approval === sharedReadFingerprint(share.sourceUrl, share.share) ? "approved" : "changed";
+      return {
+        plugin: use.plugin,
+        method: use.method,
+        providerName: provider?.manifest.name ?? null,
+        description: share?.share.description ?? null,
+        ...(share?.share.dataClass ? { dataClass: share.share.dataClass } : {}),
+        state,
+        providerReady: Boolean(provider?.enabled && provider.nativeCodeTrusted)
+      };
+    });
   }
 
   /** Called with the trusted services after every registry change (the supervisor's desired set). */
@@ -797,7 +915,7 @@ export class PluginManager {
       // Module replacement downloads executable hook files again, so trust must be renewed.
       plugin.enabledHooks = [];
       await this.persistRegistry();
-      return structuredClone(activePlugin(plugin));
+      return this.view(plugin);
     } catch (error) {
       if (swapped) {
         plugin.selectedModules = previousSelection;
@@ -829,9 +947,19 @@ export class PluginManager {
       }
     }
     this.plugins.delete(plugin.manifest.id);
+    // Approvals other plugins hold for this provider's shares end with it; a reinstall asks again.
+    const droppedApprovals = new Map<string, Record<string, string>>();
+    for (const [consumer, approvals] of this.shareApprovals) {
+      const kept = Object.fromEntries(Object.entries(approvals).filter(([key]) => !key.startsWith(`${plugin.manifest.id} `)));
+      if (Object.keys(kept).length !== Object.keys(approvals).length) {
+        droppedApprovals.set(consumer, approvals);
+        this.shareApprovals.set(consumer, kept);
+      }
+    }
     try {
       await this.persistRegistry();
     } catch (error) {
+      for (const [consumer, approvals] of droppedApprovals) this.shareApprovals.set(consumer, approvals);
       this.plugins.set(plugin.manifest.id, plugin);
       await this.persistRegistry().catch(() => undefined);
       throw error;
@@ -1118,7 +1246,7 @@ export class PluginManager {
           checkedAt: Date.now()
         };
       });
-      return structuredClone(activePlugin(updated));
+      return this.view(updated);
     } catch (error) {
       if (currentBackedUp) {
         this.plugins.set(pluginId, plugin);
@@ -1392,7 +1520,11 @@ export class PluginManager {
       selectedModules: plugin.selectedModules,
       enabledHooks: plugin.enabledHooks,
       ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
-        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
+        ? {
+          trustedServices: { ...this.serviceTrust.get(id)! },
+          ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}),
+          ...(Object.keys(this.shareApprovals.get(id) ?? {}).length ? { approvedShares: { ...this.shareApprovals.get(id)! } } : {})
+        }
         : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
@@ -1431,6 +1563,8 @@ export class PluginManager {
     plugin.nativeCodeTrusted = false;
     plugin.decisionsMayAllow = false;
     this.serviceTrust.delete(plugin.manifest.id);
+    // Shared-read approvals are a second confirmation on top of native code trust and go with it.
+    this.shareApprovals.delete(plugin.manifest.id);
   }
 
   private async currentServiceTrust(pluginId: string, manifest: PluginManifest): Promise<Record<string, string>> {
@@ -1504,7 +1638,7 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   assertOnlyKeys(candidate, [
     "apiVersion", "id", "name", "version", "description", "description.ru", "description.en",
     "icon", "author", "homepage", "settingsContribution", "coreFiles", "modules", "permissions",
-    "contributions", "hooks", "services", "platforms", "minHostVersion"
+    "contributions", "hooks", "services", "platforms", "minHostVersion", "uses"
   ], "Plugin manifest");
   if (candidate.apiVersion !== 1 && candidate.apiVersion !== PLUGIN_API_VERSION) {
     throw new Error(`Plugin apiVersion must be 1 or ${PLUGIN_API_VERSION}.`);
@@ -1564,6 +1698,9 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   const moduleIds = new Set(modules.map((module) => module.id));
   const hooks = validateAgentHooks(candidate.hooks, moduleIds);
   const services = validateServices(candidate.services, moduleIds);
+  if (candidate.uses !== undefined && apiVersion === 1) throw new Error(`Plugin uses require apiVersion ${PLUGIN_API_VERSION}.`);
+  const uses = candidate.uses === undefined ? [] : validateUses(candidate.uses, id);
+  if (uses.length > 0 && services.length === 0) throw new Error("Plugin uses need a service that makes the reads.");
   for (const service of services) {
     const granted = service.module
       ? modules.find((module) => module.id === service.module)?.permissions
@@ -1642,8 +1779,72 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     ...(services.length ? { services } : {}),
     ...(settingsContribution ? { settingsContribution } : {}),
     ...(coreFiles.length ? { coreFiles } : {}),
-    ...(modules.length ? { modules } : {})
+    ...(modules.length ? { modules } : {}),
+    ...(uses.length ? { uses } : {})
   };
+}
+
+const MAX_SHARES = 16;
+const MAX_USES = 16;
+/** `accounts.routes`: lowercase parts joined by dots; never the host's `canvastty.` namespace. */
+const SHARE_METHOD = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}$/;
+const DATA_CLASSES = new Set<PluginDataClass>(["D0", "D1", "D2", "D3"]);
+
+function shareMethod(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length > 64 || !SHARE_METHOD.test(value) || value.startsWith("canvastty.")) {
+    throw new Error(`${label} method must be lowercase words joined by dots (at most 64 characters).`);
+  }
+  return value;
+}
+
+function validateShares(value: unknown): PluginShare[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SHARES) {
+    throw new Error(`Plugin service shares must contain between 1 and ${MAX_SHARES} items.`);
+  }
+  return value.map((candidate): PluginShare => {
+    if (!isRecord(candidate)) throw new Error("Every plugin share must be an object.");
+    assertOnlyKeys(candidate, ["method", "description", "dataClass"], "Plugin share");
+    const method = shareMethod(candidate.method, "Plugin share");
+    const description = requiredString(candidate.description, "share description", 200);
+    if (candidate.dataClass !== undefined && !DATA_CLASSES.has(candidate.dataClass as PluginDataClass)) {
+      throw new Error("Plugin share dataClass must be D0, D1, D2 or D3.");
+    }
+    return { method, description, ...(candidate.dataClass !== undefined ? { dataClass: candidate.dataClass as PluginDataClass } : {}) };
+  });
+}
+
+function validateUses(value: unknown, ownId: string): PluginUse[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_USES) {
+    throw new Error(`Plugin uses must contain between 1 and ${MAX_USES} items.`);
+  }
+  const keys = new Set<string>();
+  return value.map((candidate): PluginUse => {
+    if (!isRecord(candidate)) throw new Error("Every plugin use must be an object.");
+    assertOnlyKeys(candidate, ["plugin", "method"], "Plugin use");
+    const plugin = candidate.plugin;
+    if (!isPluginId(plugin) || plugin === "host") throw new Error("Plugin use must name another plugin by its id.");
+    if (plugin === ownId) throw new Error("A plugin cannot declare a use of its own shares.");
+    const method = shareMethod(candidate.method, "Plugin use");
+    const key = sharedReadKey(plugin, method);
+    if (keys.has(key)) throw new Error(`Plugin use is duplicated: ${plugin} ${method}.`);
+    keys.add(key);
+    return { plugin, method };
+  });
+}
+
+/** The key of one consumer → provider method pair in the approval record. */
+export function sharedReadKey(provider: string, method: string): string {
+  return `${provider} ${method}`;
+}
+
+/**
+ * What the person approved for a pair: the provider's source, method, description and data class. Any change to
+ * them (an update that says something else, a reinstall from another repository) suspends the approval.
+ */
+export function sharedReadFingerprint(providerSourceUrl: string, share: PluginShare): string {
+  return createHash("sha256")
+    .update(JSON.stringify(["shared-read-v1", providerSourceUrl, share.method, share.description, share.dataClass ?? null]))
+    .digest("hex");
 }
 
 function validateAgentHooks(value: unknown, moduleIds: ReadonlySet<string>): PluginAgentHook[] {
@@ -1717,7 +1918,8 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
     assertOnlyKeys(candidate, [
-      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine"
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine",
+      "shares"
     ], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
@@ -1738,6 +1940,7 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
     const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
     const browserEngine = candidate.browserEngine === undefined ? undefined : validateBrowserEngine(candidate.browserEngine);
+    const shares = candidate.shares === undefined ? undefined : validateShares(candidate.shares);
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
@@ -1745,9 +1948,14 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
       ...(decide ? { decide } : {}),
       ...(tools ? { tools } : {}),
       ...(cardActions ? { cardActions } : {}),
-      ...(browserEngine ? { browserEngine } : {})
+      ...(browserEngine ? { browserEngine } : {}),
+      ...(shares ? { shares } : {})
     };
   });
+  // Consumers name a share by plugin and method, so one service answers for each method.
+  const shareMethods = services.flatMap((service) => service.shares ?? []).map((share) => share.method);
+  if (new Set(shareMethods).size !== shareMethods.length) throw new Error("Plugin share methods must be unique across its services.");
+  if (shareMethods.length > MAX_SHARES) throw new Error(`A plugin may share at most ${MAX_SHARES} methods.`);
   // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
   const toolNames = services.flatMap((service) => service.tools ?? []).map((tool) => tool.name);
   if (new Set(toolNames).size !== toolNames.length) throw new Error("Plugin agent tool names must be unique.");
@@ -3189,6 +3397,11 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
     && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
+    && (value.approvedShares === undefined || (
+      isRecord(value.approvedShares)
+      && Object.keys(value.approvedShares).length <= MAX_USES
+      && Object.values(value.approvedShares).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
+    ))
   );
 }
 

@@ -3,8 +3,10 @@ import type {
   InstalledPlugin,
   LocaleId,
   PluginServiceReport,
+  PluginSharedReadStatus,
   PluginServiceState
 } from "../../../../shared/contracts";
+import { sharedReadText } from "./sharedReadText";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { pollWhileOpen } from "./settingsPolling";
 
@@ -14,6 +16,7 @@ interface PluginServicesSettingsProps {
   open?: boolean;
   onSetNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
+  onSetSharedReadApproved?(pluginId: string, provider: string, method: string, approved: boolean): Promise<void>;
 }
 
 /**
@@ -26,7 +29,8 @@ export function PluginServicesSettings({
   plugins,
   open = true,
   onSetNativeCodeTrusted,
-  onSetDecisionsMayAllow
+  onSetDecisionsMayAllow,
+  onSetSharedReadApproved
 }: PluginServicesSettingsProps): React.JSX.Element | null {
   const rows = plugins.filter((plugin) => plugin.manifest.services?.length);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -70,6 +74,20 @@ export function PluginServicesSettings({
     setError(null);
     try {
       await onSetDecisionsMayAllow(plugin.manifest.id, allowed);
+      setConfirming(null);
+    } catch {
+      setError(t(locale, "pluginHookChangeFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const setSharedRead = async (plugin: InstalledPlugin, read: PluginSharedReadStatus, approved: boolean): Promise<void> => {
+    if (!onSetSharedReadApproved) return;
+    setBusy(plugin.manifest.id);
+    setError(null);
+    try {
+      await onSetSharedReadApproved(plugin.manifest.id, read.plugin, read.method, approved);
       setConfirming(null);
     } catch {
       setError(t(locale, "pluginHookChangeFailed"));
@@ -161,6 +179,64 @@ export function PluginServicesSettings({
                       onClick={() => void setMayAllow(plugin, true)}
                     >{t(locale, "pluginDecisionsMayAllowEnable")}</button>
                   </div>
+                </div>
+              )}
+              {trusted && onSetSharedReadApproved && (plugin.sharedReads ?? []).length > 0 && (
+                <div className="plugin-shared-reads">
+                  <span className="agent-hooks__copy">
+                    <strong>{sharedReadText(locale, "title")}</strong>
+                    <small>{sharedReadText(locale, "description")}</small>
+                  </span>
+                  {(plugin.sharedReads ?? []).map((read) => {
+                    const key = `${pluginId}:read:${read.plugin} ${read.method}`;
+                    const approved = read.state === "approved";
+                    const note = read.state === "not-shared" ? sharedReadText(locale, "notShared")
+                      : read.state === "changed" ? sharedReadText(locale, "changed")
+                        : !read.providerReady ? sharedReadText(locale, "providerOff") : null;
+                    return (
+                      <div key={key}>
+                        <div className="agent-hooks__row-main">
+                          <span className="agent-hooks__copy">
+                            <strong>{read.providerName ?? read.plugin} · <code>{read.method}</code></strong>
+                            <small>{[
+                              read.description,
+                              read.dataClass ? `${sharedReadText(locale, "dataClass")} ${read.dataClass}` : null,
+                              note
+                            ].filter(Boolean).join(" · ")}</small>
+                          </span>
+                          <button
+                            className={`agent-hooks__toggle${approved ? " agent-hooks__toggle--on" : ""}`}
+                            type="button"
+                            role="switch"
+                            aria-checked={approved}
+                            aria-label={`${sharedReadText(locale, "title")}: ${read.providerName ?? read.plugin} ${read.method}`}
+                            disabled={busy !== null || (!approved && read.state === "not-shared")}
+                            onClick={() => {
+                              if (approved) void setSharedRead(plugin, read, false);
+                              else if (read.state !== "not-shared") setConfirming(key);
+                            }}
+                          >
+                            <span aria-hidden="true" />
+                            {t(locale, approved ? "on" : "off")}
+                          </button>
+                        </div>
+                        {confirming === key && (
+                          <div className="agent-hooks__confirm">
+                            <p>{sharedReadText(locale, "confirm")}</p>
+                            <div>
+                              <button type="button" onClick={() => setConfirming(null)}>{t(locale, "cancel")}</button>
+                              <button
+                                className="agent-hooks__trust"
+                                type="button"
+                                disabled={busy !== null}
+                                onClick={() => void setSharedRead(plugin, read, true)}
+                              >{sharedReadText(locale, "allow")}</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
               {!plugin.enabled && <p className="agent-hooks__disabled">{t(locale, "pluginHookDisabledPlugin")}</p>}

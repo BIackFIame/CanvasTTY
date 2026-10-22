@@ -1649,6 +1649,8 @@ export function App(): React.JSX.Element {
     try {
       const updated = await window.canvasTTY.plugins.setEnabled(pluginId, enabled);
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+      // Other plugins' shared reads of this one (their state and approvals) changed with it.
+      void refreshPlugins().catch(() => undefined);
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
       throw error;
@@ -1673,6 +1675,8 @@ export function App(): React.JSX.Element {
     try {
       const updated = await window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted);
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+      // Other plugins' shared reads of this one (their state and approvals) changed with it.
+      void refreshPlugins().catch(() => undefined);
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
       throw error;
@@ -1682,6 +1686,16 @@ export function App(): React.JSX.Element {
   const setPluginDecisionsMayAllow = useCallback(async (pluginId: string, allowed: boolean): Promise<void> => {
     try {
       const updated = await window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed);
+      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+    } catch (error) {
+      await refreshPlugins().catch(() => undefined);
+      throw error;
+    }
+  }, [refreshPlugins]);
+
+  const setPluginSharedReadApproved = useCallback(async (pluginId: string, provider: string, method: string, approved: boolean): Promise<void> => {
+    try {
+      const updated = await window.canvasTTY.plugins.setSharedReadApproved(pluginId, provider, method, approved);
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
@@ -1718,6 +1732,7 @@ export function App(): React.JSX.Element {
       throw error;
     }
     setPlugins((current) => current.filter((plugin) => plugin.manifest.id !== pluginId));
+    void refreshPlugins().catch(() => undefined);
     await saveSettings({
       homeLayout: settings.homeLayout.filter((placement) => !placement.widgetId.startsWith(`plugin:${pluginId}:`)),
       pluginCanvas: settings.pluginCanvas.filter((instance) => instance.pluginId !== pluginId)
@@ -2132,6 +2147,7 @@ export function App(): React.JSX.Element {
           onSetPluginHookEnabled={setPluginHookEnabled}
           onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
           onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
+          onSetPluginSharedReadApproved={setPluginSharedReadApproved}
           onUninstallPlugin={uninstallPlugin}
           onOpenPluginContribution={openPluginContribution}
           onToggleHomeWidget={toggleHomeWidget}

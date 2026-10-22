@@ -513,6 +513,13 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
     return plugins.setDecisionsMayAllow(pluginId, allowed);
   });
+  ipcMain.handle(IPC.pluginsSetSharedReadApproved, (event, pluginId: string, provider: string, method: string, approved: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof provider !== "string" || typeof method !== "string" || typeof approved !== "boolean") {
+      throw new Error("Plugin shared read state is invalid.");
+    }
+    return plugins.setSharedReadApproved(pluginId, provider, method, approved);
+  });
   ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");

@@ -177,6 +177,59 @@ export interface CanvasTTYPluginServiceManifestEntry {
   cardActions?: CanvasTTYCardAction[];
   /** A browser engine for agents' background tabs; needs `browser:engine`. Ids unique within the plugin. */
   browserEngine?: CanvasTTYBrowserEngine;
+  /** Read-only data other plugins' services may read (`canvastty.shares.read`) once the person allowed the pair. */
+  shares?: CanvasTTYShare[];
+}
+
+/** One shared read. Methods are unique across the plugin's services; at most 16 per plugin. */
+export interface CanvasTTYShare {
+  /** `^[a-z][a-z0-9_]{0,31}(\.[a-z][a-z0-9_]{0,31}){0,3}$`, at most 64 characters, never `canvastty.…`. */
+  method: string;
+  /** Up to 200 characters; shown to the person when they allow a plugin to read it. */
+  description: string;
+  dataClass?: CanvasTTYDataClass;
+}
+
+/** D0 (public) … D3 (most sensitive): a label the person sees and the reader receives; the host does not interpret it. */
+export type CanvasTTYDataClass = "D0" | "D1" | "D2" | "D3";
+
+/** Manifest top-level `uses` (apiVersion 2, with a service): one entry per other plugin's method read. Up to 16. */
+export interface CanvasTTYPluginUse {
+  plugin: string;
+  method: string;
+}
+
+/** What `plugins.request` answers. `data` is the provider's answer as it sent it (JSON, at most 256 KB). */
+export interface CanvasTTYSharedReadResult {
+  plugin: string;
+  method: string;
+  dataClass?: CanvasTTYDataClass;
+  data: unknown;
+}
+
+/** `error.data.reason` of a refused `plugins.request`. */
+export type CanvasTTYSharedReadRefusal =
+  | "invalid_request" | "consumer_unavailable" | "not_declared" | "not_shared" | "not_approved" | "approval_changed"
+  | "provider_unavailable" | "rate_limited" | "busy" | "timeout" | "provider_error" | "not_json" | "too_large"
+  | "secret_in_response";
+
+/** `canvastty.shares.read` params. Answer with any JSON (at most 256 KB, within 5 s) or an error; never a secret. */
+export interface CanvasTTYShareReadRequest {
+  /** The reading plugin, from the host's own record. */
+  caller: { pluginId: string };
+  method: string;
+  params: unknown;
+}
+
+/** `canvastty.activity` to services of plugins with `limits:read`: a provider's default-login allowance is used up. */
+export interface CanvasTTYLimitExhaustedActivity {
+  type: "limit.exhausted";
+  at: number;
+  provider: string;
+  accountId: "default";
+  window: { id: string; label: string | null; windowMinutes: number | null };
+  /** Epoch ms of the announced reset, when the provider gave one. */
+  resetAt?: number;
 }
 
 /**
@@ -520,7 +573,8 @@ export interface CanvasTTYServiceContext {
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
   | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> }
-  | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent };
+  | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent }
+  | { jsonrpc: "2.0"; method: "canvastty.activity"; params: CanvasTTYLimitExhaustedActivity };
 
 /** Requests the host sends to a service, which plugin surfaces cannot send. */
 export type CanvasTTYServiceHostRequest =
@@ -534,7 +588,8 @@ export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.tools.call"; params: CanvasTTYToolCall }
-  | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation };
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.shares.read"; params: CanvasTTYShareReadRequest };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {
@@ -579,6 +634,12 @@ export interface CanvasTTYServiceHostApi {
   "limits.unsubscribe"(params: Record<string, never>): null;
   /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */
   "cards.setBadge"(params: { sessionId: string; badge: { text: string; tone?: CanvasTTYCardTone; tooltip?: string } | null }): null;
+  /**
+   * Reads another plugin's share. Needs the pair in the manifest's `uses` and the person's approval; both plugins
+   * enabled with native code trusted. 5 s, 16 KB params, 60 per minute and 4 at once per pair. Refusals carry
+   * `error.data.reason` (CanvasTTYSharedReadRefusal).
+   */
+  "plugins.request"(params: { plugin: string; method: string; params?: unknown }): CanvasTTYSharedReadResult;
   /**
    * Needs `usage:read` (`homes` also `launch:contribute`). Measured usage of a card this plugin started or whose
    * launch options include this plugin's; an unknown or foreign id is refused. 30 calls a minute per plugin.

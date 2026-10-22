@@ -11,7 +11,7 @@
     { "required": ["services"], "properties": { "services": { "minItems": 1 } } }
   ],
   "if": { "properties": { "apiVersion": { "const": 1 } } },
-  "then": { "not": { "required": ["services"] } },
+  "then": { "allOf": [{ "not": { "required": ["services"] } }, { "not": { "required": ["uses"] } }] },
   "properties": {
     "apiVersion": { "enum": [1, 2] },
     "id": { "type": "string", "minLength": 3, "maxLength": 80, "pattern": "^(?!.*\\.\\.)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$" },
@@ -57,6 +57,21 @@
       "minItems": 1,
       "maxItems": 8,
       "items": { "$ref": "#/$defs/service" }
+    },
+    "uses": {
+      "description": "apiVersion 2 with a service: other plugins' shares this plugin's services read with plugins.request. Each pair works only after the person allows it under Extension native code; never this plugin's own id.",
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["plugin", "method"],
+        "properties": {
+          "plugin": { "type": "string", "minLength": 3, "maxLength": 80, "pattern": "^(?!.*\\.\\.)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$" },
+          "method": { "$ref": "#/$defs/shareMethod" }
+        }
+      }
     }
   },
   "$defs": {
@@ -152,8 +167,27 @@
           "type": "array", "minItems": 1, "maxItems": 8,
           "items": { "$ref": "#/$defs/cardAction" }
         },
-        "browserEngine": { "$ref": "#/$defs/browserEngine" }
+        "browserEngine": { "$ref": "#/$defs/browserEngine" },
+        "shares": {
+          "description": "Read-only data this service answers for other plugins' services (canvastty.shares.read), once the person allowed the pair. Methods unique across the plugin's services, at most 16 per plugin. Answers are JSON of at most 256 KB within 5 s; one holding a known secret is refused.",
+          "type": "array", "minItems": 1, "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["method", "description"],
+            "properties": {
+              "method": { "$ref": "#/$defs/shareMethod" },
+              "description": { "description": "Shown to the person when they allow a plugin to read it.", "type": "string", "minLength": 1, "maxLength": 200 },
+              "dataClass": { "description": "D0 (public) to D3 (most sensitive), shown with the approval and passed to the reader.", "enum": ["D0", "D1", "D2", "D3"] }
+            }
+          }
+        }
       }
+    },
+    "shareMethod": {
+      "type": "string", "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9_]{0,31}(?:\\.[a-z][a-z0-9_]{0,31}){0,3}$",
+      "not": { "pattern": "^canvastty\\." }
     },
     "browserEngine": {
       "description": "A browser engine for agents' background tabs (needs browser:engine; ids unique within the plugin). For each such tab the host calls canvastty.browserEngine.openTab { engineId, tabId } and expects { webSocketUrl } (a ws:// CDP endpoint on 127.0.0.1, [::1] or localhost with a port); canvastty.browserEngine.closeTab { engineId, tabId } is a notification. The core decides which tabs use it (only agents' new tabs, never shown, no cookies or profile) and moves a tab to Chromium on screenshots, bot walls, thin text, missing CDP methods, a disconnect, or when the tab is shown.",

@@ -46,6 +46,8 @@ import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { PluginLimits } from "./services/PluginLimits";
 import { PluginUsage } from "./services/PluginUsage";
+import { PluginSharedReads } from "./services/PluginSharedReads";
+import { PluginLimitActivity } from "./services/PluginLimitActivity";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
@@ -380,6 +382,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     sessions: terminalManager?.list().map(({ provider, status, exitCode }) => ({ provider, status, exitCode })) ?? [],
     plugins: pluginManager?.list().map(({ manifest, enabled }) => ({ id: manifest.id, version: manifest.version, enabled })) ?? []
   });
+  // Shared reads between plugins: pair by pair, approved by the person, routed and checked by the host.
+  const sharedReads = new PluginSharedReads({
+    route: (consumerId, provider, method) => pluginManager!.sharedReadRoute(consumerId, provider, method),
+    running: (pluginId, serviceId) => pluginServices!.running(pluginId, serviceId),
+    call: (pluginId, serviceId, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, "canvastty.shares.read", params, timeoutMs),
+    containsSecret: (text) => redaction.redact(text) !== text,
+    audit: (pluginId, serviceId, level, message) => pluginServices!.audit(pluginId, serviceId, level, message)
+  });
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
@@ -403,6 +413,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       limits: (pluginId, serviceId, method, params, permissions, dataDir) =>
         pluginLimits?.handle(pluginId, serviceId, method, params, permissions, dataDir),
       usage: (pluginId, method, params, permissions, dataDir) => pluginUsage?.handle(pluginId, method, params, permissions, dataDir),
+      plugins: (pluginId, serviceId, method, params) => sharedReads.handle(pluginId, serviceId, method, params),
       setBadge: (pluginId, params) => {
         if (!pluginCards) throw new Error("Cards are not ready yet.");
         return pluginCards.setBadge(pluginId, params);
@@ -695,6 +706,13 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       }
     }
   });
+  // A provider's default-login allowance used up: services of plugins with limits:read hear it (limit.exhausted).
+  const limitActivity = new PluginLimitActivity({
+    services: () => pluginManager?.trustedServiceSpecs() ?? [],
+    allowed: (pluginId) => pluginManager!.hasPermission(pluginId, "limits:read"),
+    notify: (pluginId, serviceId, method, params) => pluginServices?.notify(pluginId, serviceId, method, params) ?? false
+  });
+  limitsService.onProviderRead((snapshot) => limitActivity.observe(snapshot));
   // Plugin tools in canvastty_agents (EP-6), for sessions whose role a tool lists.
   const pluginTools = new PluginAgentTools({
     providers: () => pluginManager!.agentToolProviders()

@@ -185,6 +185,7 @@ export class LimitsService {
   private homeReadsRunning = 0;
   private readonly homeReadQueue: Array<() => void> = [];
   private readonly homeCacheTtlMs: number;
+  private readonly providerReadListeners = new Set<(snapshot: ProviderLimitsSnapshot) => void>();
 
   private readonly codexIdleMs: number;
 
@@ -265,6 +266,15 @@ export class LimitsService {
   peekHome(provider: LimitProviderId, home: string): LimitsSnapshot | null {
     const entry = this.homes.get(homeKey(provider, home));
     return entry ? structuredClone({ fetchedAt: entry.cachedAt, providers: [entry.value] }) : null;
+  }
+
+  /**
+   * Called with every provider snapshot a read produced (not for cached answers). Starts no read by itself. A
+   * listener that throws is ignored. Returns the function that removes it.
+   */
+  onProviderRead(listener: (snapshot: ProviderLimitsSnapshot) => void): () => void {
+    this.providerReadListeners.add(listener);
+    return () => { this.providerReadListeners.delete(listener); };
   }
 
   dispose(): void {
@@ -445,6 +455,13 @@ export class LimitsService {
     if (!load) {
       load = this.loadProvider(provider, checkedAt).then((value) => {
         this.providerCache.set(provider, { cachedAt: Date.now(), value });
+        for (const listener of this.providerReadListeners) {
+          try {
+            listener(structuredClone(value));
+          } catch {
+            // A listener never breaks a read.
+          }
+        }
         return value;
       }).finally(() => {
         this.providerLoads.delete(provider);
