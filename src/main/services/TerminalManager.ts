@@ -53,6 +53,7 @@ import {
   type ControlConnection
 } from "./agent-control/controlCapabilities.ts";
 import { codexTrustArguments, mergeOpenCodeLaunchEnvironment } from "./agent-runtime/ProviderRuntimeLaunch.ts";
+import { accountHookHome } from "./accountHomes.ts";
 import { openCodeProjectFolderEnvironment } from "./openCodeConfig.ts";
 import { onDiskPath } from "./onDiskPath.ts";
 import { RESULT_CAPTURE_PROVIDERS } from "./resultCapture.ts";
@@ -1730,10 +1731,15 @@ export class TerminalManager {
       args: contribution?.args ?? [],
       cwd
     } : undefined;
+    // Grok and Kimi read their hooks (Kimi also its MCP servers) from their home: the launch's own account home (inside
+    // the data folder of the plugin that set it) gets CanvasTTY's temporary configuration there.
+    const hookHome = accountHookHome(provider, contribution?.env);
+    const accountHome = hookHome !== undefined && hookHome === contribution?.accountHome ? hookHome : undefined;
     const agentRuntime = provider === "terminal"
       ? null
       : this.agentRuntime?.prepareLaunch({ terminalSessionId: id, provider, cwd,
         ...(captureResult ? { captureResult: true } : {}),
+        ...(accountHome ? { accountHome } : {}),
         ...(claudeHttp ? { claudeHttp } : {}),
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
     let pluginTools: string[] = [];
@@ -1765,6 +1771,7 @@ export class TerminalManager {
           terminalSessionId: id,
           provider,
           cwd,
+          ...(accountHome ? { accountHome } : {}),
           ...(bridged ? {
             includeOrchestration: true,
             orchestrationTools: [...(role === "orchestrator" ? ORCHESTRATION_TOOL_NAMES : []), ...pluginTools]
