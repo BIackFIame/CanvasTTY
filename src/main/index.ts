@@ -44,6 +44,7 @@ import {
 import { PluginManager } from "./services/PluginManager";
 import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
+import { PluginLimits } from "./services/PluginLimits";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
@@ -180,6 +181,7 @@ let pluginManager: PluginManager | null = null;
 let mascotManager: MascotManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
+let pluginLimits: PluginLimits | null = null;
 let pluginCards: PluginCards | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
@@ -396,11 +398,16 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         return pluginSecretsService.get(pluginId, key);
       },
       sessions: (pluginId, serviceId, method, params, permissions) => pluginSessions?.handle(pluginId, serviceId, method, params, permissions),
+      limits: (pluginId, serviceId, method, params, permissions, dataDir) =>
+        pluginLimits?.handle(pluginId, serviceId, method, params, permissions, dataDir),
       setBadge: (pluginId, params) => {
         if (!pluginCards) throw new Error("Cards are not ready yet.");
         return pluginCards.setBadge(pluginId, params);
       },
-      stopped: (pluginId, serviceId) => pluginSessions?.serviceStopped(pluginId, serviceId)
+      stopped: (pluginId, serviceId) => {
+        pluginSessions?.serviceStopped(pluginId, serviceId);
+        pluginLimits?.serviceStopped(pluginId, serviceId);
+      }
     }
   });
   // Base protection runs first; then trusted plugin decision services (EP-5).
@@ -652,6 +659,20 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
   });
   pluginSessions = sessionsForPlugins;
+  // Services read the same subscription limits plugin surfaces read (limits:read), from LimitsService's cache. Created
+  // here, before services start; constructing it starts no read.
+  limitsService = new LimitsService(providerClis, app.getVersion());
+  pluginLimits = new PluginLimits({
+    limits: limitsService,
+    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params),
+    allowed: (pluginId, permission) => {
+      try {
+        return pluginManager!.hasPermission(pluginId, permission);
+      } catch {
+        return false;
+      }
+    }
+  });
   // Plugin tools in canvastty_agents (EP-6), for sessions whose role a tool lists.
   const pluginTools = new PluginAgentTools({
     providers: () => pluginManager!.agentToolProviders()
@@ -787,7 +808,6 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     return agentControlTransition;
   };
   await applyAgentControlSetting(settings.get().agentControlEnabled);
-  limitsService = new LimitsService(providerClis, app.getVersion());
   // Read-only accounting collection; history is stored in the normal app userData directory.
   usageHistory = new UsageHistoryService({
     directory: userDataPath,
@@ -1290,6 +1310,7 @@ async function shutdownServices(): Promise<void> {
   });
   // Stop the timer first, then abort in-flight limit requests so the final save is prompt.
   const usageHistoryClosed = usageHistory?.dispose();
+  pluginLimits?.dispose();
   limitsService?.dispose();
   await usageHistoryClosed;
   if (agentGateway) await Promise.allSettled([agentGateway.close()]);

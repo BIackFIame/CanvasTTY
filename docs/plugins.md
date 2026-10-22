@@ -160,6 +160,7 @@ A service may call back this host API (the base that later extension points add 
 | `sessions.create` | request | `sessions:launch` | Starts a card the plugin owns |
 | `sessions.send` / `sessions.stop` | request | `sessions:control` | Only for cards the plugin started |
 | `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
+| `limits.get` / `limits.subscribe` / `limits.unsubscribe` | request | `limits:read` (an account home also `launch:contribute`) | The subscription limits plugin surfaces get, from the host's cache (see [Subscription limits](#subscription-limits-limitsread)) |
 
 The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
@@ -385,6 +386,34 @@ A service with `cards:decorate` can put a badge on any card and declare up to 8 
 
 The full example is [`examples/plugins/collect-demo`](../examples/plugins/collect-demo): the card action **Show changes** on cards in the `worktree` environment (from `env-worktree`) shows `git diff --stat` of the worktree and sets a "N changed" badge, and the tool `collect-demo__diffstat` gives orchestrators the same for their own folder or a subagent's, which it learns about from session events.
 
+### Subscription limits (`limits:read`)
+
+A service with `limits:read` reads the same subscription limits the plugin's surfaces read with `host.request("limits.get")`: the same `{ state: "ready", snapshot }` answer, built by the same code, with the same `LimitsSnapshot` HOME uses (usage windows, reset times, the provider's state; no token, e-mail, account id or account fingerprint). Use it to route work to the person's own subscriptions while they have room.
+
+| Method | Gate | Result |
+|:--|:--|:--|
+| `limits.get` `{}` | `limits:read` | The default login's limits. A snapshot under 60 s old is answered as it is; an older one is refreshed at most once per 5 minutes for all services together, and in between the last snapshot is answered with its `fetchedAt` |
+| `limits.get` `{ provider, home }` | `limits:read` + `launch:contribute` | One provider's limits for an account home the plugin keeps (see below), `snapshot.providers` holding that provider only |
+| `limits.subscribe` `{}` | `limits:read` | The last snapshot without starting a read (`{ state: "loading", snapshot: null }` before the first one); then `canvastty.limits.changed` notifications. Call again after every start |
+| `limits.unsubscribe` `{}` | none | Stops the notifications |
+
+`canvastty.limits.changed` is sent when LimitsService reads a snapshot that differs from the previous one (for the person's HOME or any service), at most once per 2 s: `{ state: "ready", snapshot, earlyReset, earlyResets, provider?, home? }`. `earlyReset` is true when a window's allowance came back before the reset time the previous snapshot announced: its used share dropped by at least 5 points and at least half of what was used (55% → 27% or less), or down to 5% or less by more than 2 points, while that time was still more than 5 minutes ahead. What the provider reports as the next reset afterwards does not matter: some report a fresh window, some keep the old reset time. A reset time that only moves, earlier or later, without such a drop is not a reset; neither are small fluctuations, nor a drop at or after the announced time. After an early reset whose old reset time was kept, that time arriving is a normal reset, flagged only if the share drops substantially again before it. Every window of the snapshot is compared on its own (5-hour, daily, weekly, monthly, model windows), per provider and per home. `earlyResets` lists them as `{ provider, home?, windowId, slot, windowLabel, windowMinutes, usedBefore, usedAfter, announcedResetAt, reportedResetAtAfter, resetTimeKept }` (shares in percent, times in epoch milliseconds; `resetTimeKept` is true when the provider still reports the old reset time). A change of an account home has `provider` and `home` and goes only to the plugin that asked about that home.
+
+An account home is a CLI home folder that an accounts plugin keeps in its own data folder and hands to its cards' launches. The host reads it with its own readers, as it reads the default login, so the plugin never reads the sign-in itself. `home` must be an exact absolute path of an existing folder strictly inside the plugin's data folder (`dataDir` of `canvastty.initialize`), reached without a symbolic link; anything else (another plugin's data, `..`, a link, a missing folder, the data folder itself) is refused with one error that says nothing about the path. At most 32 homes per plugin (homes that no longer exist free their place), each read at most once per 3 minutes and at most two at a time for all plugins. Per provider, the home is:
+
+| Provider | The home is | Read |
+|:--|:--|:--|
+| Codex | `CODEX_HOME` | one `codex app-server` started with it, stopped after the read |
+| Claude Code | `CLAUDE_CONFIG_DIR` | its `.credentials.json`, on macOS the Keychain entry Claude Code keeps for that folder |
+| Grok | `GROK_HOME` | its `auth.json` |
+| Kimi Code | `KIMI_CODE_HOME` (`KIMI_SHARE_DIR` for older releases) | one `kimi web` started with it, stopped after the read |
+| OpenCode Go | OpenCode's data folder, or the `XDG_DATA_HOME` it runs with (`opencode/` inside) | the active OpenCode Go key in OpenCode V2's `opencode.db` (opened read-only, creating no `-wal` or `-shm`), or the legacy `auth.json` when there is no such database |
+| Qwen Code | `QWEN_HOME` | passively, without a request: Qwen Code exposes no quota (below) |
+
+Qwen Code has no command or endpoint that reports what is left: `/stats` counts the current session only, and a request to add a quota command was closed ([QwenLM/qwen-code#3302](https://github.com/QwenLM/qwen-code/issues/3302)). Qwen OAuth's free tier ended on 2026-04-15 ([authentication docs](https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/auth.md)). Alibaba Coding Plan usage is shown only in the Model Studio console and by Alibaba's separate `bl usage coding-plan` CLI ([Usage & Quota](https://www.alibabacloud.com/help/en/model-studio/cli/usage-quota)), under an Alibaba Cloud sign-in that is not in the Qwen home, and the plan's terms forbid using its key from scripts ([Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan)). So a Qwen home always answers `unavailable`, with a reason from the sign-in it holds: `not-authenticated` (none), `subscription-required` (Qwen OAuth only), or `unsupported-protocol` (an API key, Token Plan or Coding Plan). Only the auth type in `settings.json` and whether `oauth_creds.json` exists are read. In an account home the host never follows a symbolic link to a credential file or database.
+
+Disabling the plugin, revoking its trust or removing the permission stops its services, which ends the subscription; the host also checks the plugin's permission before every notification. Nothing changes on any screen: this is a service API only.
+
 ### Browser engines (`browser:engine`)
 
 A service may run another browser engine for agents' background tabs, for example a headless engine that reads pages with far less CPU and memory than Chromium. It declares one `browserEngine`:
@@ -428,7 +457,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
-| `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
+| `limits:read` | `limits.get`; a service's `limits.get`, `limits.subscribe` | The same sanitized `LimitsSnapshot` used by HOME; with `launch:contribute`, a service's account homes in its own data folder |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |
 | `browser:open` | `browser.open` | Opens only an explicit HTTP(S) URL in CanvasTTY's embedded Browser card and its shared browser session, including localhost |

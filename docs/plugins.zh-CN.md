@@ -139,6 +139,7 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `sessions.create` | 请求 | `sessions:launch` | 启动一张归插件所有的卡片 |
 | `sessions.send` / `sessions.stop` | 请求 | `sessions:control` | 仅限该插件启动的卡片 |
 | `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
+| `limits.get` / `limits.subscribe` / `limits.unsubscribe` | 请求 | `limits:read`（账号主目录还需 `launch:contribute`） | 插件页面所得的订阅额度，来自主机缓存（见“订阅额度”） |
 
 宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件或读取其他插件的机密，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
@@ -361,6 +362,34 @@ interface PluginSessionEvent {
 
 完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。
 
+### 订阅额度（`limits:read`）
+
+拥有 `limits:read` 的服务读取的订阅额度，与插件页面通过 `host.request("limits.get")` 读取的完全相同：同样的 `{ state: "ready", snapshot }` 应答，由同一段代码生成，使用 HOME 所用的同一个 `LimitsSnapshot`（用量窗口、重置时间、提供方状态；不含令牌、邮箱、账号 id 或账号指纹）。服务可据此在用户自己的订阅仍有余量时把工作路由过去。
+
+| 方法 | 条件 | 结果 |
+|:--|:--|:--|
+| `limits.get` `{}` | `limits:read` | 默认登录的额度。不足 60 秒的快照原样返回；更旧的快照对所有服务合计每 5 分钟最多刷新一次，其间返回上一份快照及其 `fetchedAt` |
+| `limits.get` `{ provider, home }` | `limits:read` + `launch:contribute` | 插件保存的某个账号主目录（见下文）中一个提供方的额度，`snapshot.providers` 只含该提供方 |
+| `limits.subscribe` `{}` | `limits:read` | 上一份快照，不触发读取（首次之前为 `{ state: "loading", snapshot: null }`）；之后发送 `canvastty.limits.changed` 通知。每次启动后需再次调用 |
+| `limits.unsubscribe` `{}` | 无 | 停止通知 |
+
+当 LimitsService 读到与上一份不同的快照时（由用户的 HOME 或任一服务触发），发送 `canvastty.limits.changed`，最多每 2 秒一次：`{ state: "ready", snapshot, earlyReset, earlyResets, provider?, home? }`。当某个窗口的额度在上一份快照公布的重置时间之前就恢复时，`earlyReset` 为 true：在距公布时间仍超过 5 分钟时，已用比例下降至少 5 个百分点且至少减半（55% → 27% 或更低），或降到 5% 或以下且降幅超过 2 个百分点。之后提供方报告的下次重置时间无关紧要：有的给出新窗口，有的保留旧时间。仅仅提前或推后的重置时间、没有这种下降时不算重置；小幅波动以及在公布时间当时或之后的下降也不算。若提前重置后仍保留旧时间，该时间到来时属于正常重置，只有在此之前比例再次明显下降才会再次标记。快照中的每个窗口单独比较（5 小时、每日、每周、每月、模型窗口），按提供方和主目录分别跟踪。`earlyResets` 以 `{ provider, home?, windowId, slot, windowLabel, windowMinutes, usedBefore, usedAfter, announcedResetAt, reportedResetAtAfter, resetTimeKept }` 列出这些窗口（比例为百分数，时间为纪元毫秒；提供方仍报告旧重置时间时 `resetTimeKept` 为 true）。账号主目录的变化带有 `provider` 和 `home`，只发给询问过该目录的插件。
+
+账号主目录是账号类插件保存在自己数据目录中、并交给其卡片启动使用的 CLI 主目录。主机用自己的读取器读取它，与读取默认登录相同，插件本身不读取登录凭据。`home` 必须是插件数据目录（`canvastty.initialize` 中的 `dataDir`）内部、不经过符号链接即可到达的已存在文件夹的精确绝对路径；其他任何情况（其他插件的数据、`..`、链接、不存在的文件夹、数据目录本身）都以同一个不透露路径信息的错误拒绝。每个插件最多 32 个目录（已不存在的目录会释放名额），每个目录最多每 3 分钟读取一次，所有插件合计同时最多读取两个。各提供方的主目录为：
+
+| 提供方 | 主目录 | 读取方式 |
+|:--|:--|:--|
+| Codex | `CODEX_HOME` | 以它启动一个 `codex app-server`，读取后停止 |
+| Claude Code | `CLAUDE_CONFIG_DIR` | 其中的 `.credentials.json`，macOS 上为 Claude Code 为该目录保存的 Keychain 条目 |
+| Grok | `GROK_HOME` | 其中的 `auth.json` |
+| Kimi Code | `KIMI_CODE_HOME`（旧版本为 `KIMI_SHARE_DIR`） | 以它启动一个 `kimi web`，读取后停止 |
+| OpenCode Go | OpenCode 的数据目录，或其运行时的 `XDG_DATA_HOME`（其中的 `opencode/`） | OpenCode V2 的 `opencode.db` 中当前启用的 OpenCode Go 密钥（只读打开，不创建 `-wal` 或 `-shm`），没有该数据库时读取旧的 `auth.json` |
+| Qwen Code | `QWEN_HOME` | 被动读取，不发请求：Qwen Code 不提供额度（见下文） |
+
+Qwen Code 没有任何报告剩余额度的命令或接口：`/stats` 只统计当前会话，新增额度命令的请求已被关闭（[QwenLM/qwen-code#3302](https://github.com/QwenLM/qwen-code/issues/3302)）。Qwen OAuth 免费额度已于 2026-04-15 结束（[认证文档](https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/auth.md)）。阿里云 Coding Plan 的用量只在百炼控制台和阿里云独立的 `bl usage coding-plan` CLI 中显示（[Usage & Quota](https://www.alibabacloud.com/help/en/model-studio/cli/usage-quota)），需要不在 Qwen 主目录中的阿里云登录，且该套餐条款禁止在脚本中使用其密钥（[Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan)）。因此 Qwen 主目录总是返回 `unavailable`，原因取决于其中的登录：`not-authenticated`（无登录）、`subscription-required`（仅 Qwen OAuth）或 `unsupported-protocol`（API 密钥、Token Plan 或 Coding Plan）。只读取 `settings.json` 中的认证类型以及 `oauth_creds.json` 是否存在。在账号主目录中，主机从不沿符号链接读取凭据文件或数据库。
+
+停用插件、撤销信任或移除权限都会停止其服务，订阅随之结束；每次通知前主机还会再次检查插件的权限。界面没有任何变化：这只是服务 API。
+
 ### 浏览器引擎（`browser:engine`）
 
 服务可以为 agent 的后台标签页运行另一种浏览器引擎，例如以远低于 Chromium 的 CPU 和内存读取页面的无头引擎。它声明一个 `browserEngine`：
@@ -404,7 +433,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `sessions:control` | `sessions.send`、`sessions.stop` | 只能向本插件启动的卡片输入文本并关闭它们 |
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
-| `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
+| `limits:read` | `limits.get`；服务的 `limits.get`、`limits.subscribe` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot`；配合 `launch:contribute` 时还包括服务在自己数据目录中的账号主目录 |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
 | `browser:open` | `browser.open` | 仅在 CanvasTTY 内置 Browser 卡片及其共享浏览器会话中打开明确的 HTTP(S) URL，包括 localhost |

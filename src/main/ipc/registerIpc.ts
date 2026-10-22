@@ -31,7 +31,7 @@ import { isPixelSkinSlot, isPixelTerminalBorderSkinId, type PixelSkinPackRegistr
 import { providerCliAvailability, type ProviderCliRegistry } from "../services/providerCliRegistry";
 import type { TerminalManager } from "../services/TerminalManager";
 import type { AgentChatHistoryService } from "../services/AgentChatHistoryService";
-import { withoutAccountScope, type LimitsService } from "../services/LimitsService";
+import { pluginLimitsResult, type LimitsService } from "../services/LimitsService";
 import type { UsageHistoryService } from "../services/UsageHistoryService";
 import type { PluginManager } from "../services/PluginManager";
 import type { MascotManager } from "../services/MascotManager";
@@ -742,7 +742,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     }
     if (method === "limits.get") {
       plugins.assertPermission(pluginId, "limits:read");
-      return { state: "ready", snapshot: withoutAccountScope(await limits.get()) };
+      return pluginLimitsResult(await limits.get());
     }
     if (method === "hermesHud.getState") {
       plugins.assertPermission(pluginId, "hermes:hud");

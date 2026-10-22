@@ -769,7 +769,10 @@ test("usage history is exposed only to the trusted main renderer and wired into 
   assert.match(contracts, /accountScope\?: string \| null;/);
   assert.match(preload, /usageHistory: \{\s*get: \(\) => ipcRenderer\.invoke\(IPC\.usageHistoryGet\)\s*\}/);
   assert.match(ipc, /ipcMain\.handle\(IPC\.usageHistoryGet, \(event\) => \{\s*assertMainRenderer\(event, getMainWindow\);\s*return usageHistory\.get\(\);/);
-  assert.match(ipc, /method === "limits\.get"[\s\S]{0,200}withoutAccountScope\(await limits\.get\(\)\)/);
+  // Plugin surfaces and services get limits through one builder that removes the account scope.
+  assert.match(ipc, /method === "limits\.get"[\s\S]{0,200}pluginLimitsResult\(await limits\.get\(\)\)/);
+  const limitsSource = await readFile(new URL("../src/main/services/LimitsService.ts", import.meta.url), "utf8");
+  assert.match(limitsSource, /export function pluginLimitsResult\([\s\S]{0,160}\{\s*return \{ state: "ready", snapshot: withoutAccountScope\(snapshot\) \};/);
 
   const initialize = main.slice(main.indexOf("async function initializeServices"), main.indexOf("async function loadApplication"));
   assert.match(initialize, /new UsageHistoryService\(\{\s*directory: userDataPath,/);
