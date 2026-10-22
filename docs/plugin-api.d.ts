@@ -79,7 +79,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "accounts:broker" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
     modules: string[];
   };
   contribution: {
@@ -177,7 +177,67 @@ export interface CanvasTTYPluginServiceManifestEntry {
   cardActions?: CanvasTTYCardAction[];
   /** A browser engine for agents' background tabs; needs `browser:engine`. Ids unique within the plugin. */
   browserEngine?: CanvasTTYBrowserEngine;
+  /** Offers accounts for other plugins' brokered model requests (`canvastty.broker.*`); needs `secrets`; one service per plugin. */
+  brokerable?: boolean;
 }
+
+/** One account a brokerable service offers (`canvastty.broker.offer` answers up to 32). Only accounts the person marked. */
+export interface CanvasTTYBrokerOffer {
+  /** `^[a-z0-9][a-z0-9._-]{0,63}$`, stable: grants name it. */
+  id: string;
+  label: string;
+  protocol: "openai" | "anthropic";
+  /** https; http only on 127.0.0.1 or [::1] and only for a keyless account. No user, query or fragment. Requests go to `baseUrl + path` only. */
+  baseUrl: string;
+  paths: Array<"/chat/completions" | "/responses" | "/messages" | "/models">;
+  /** 1–64 model names; a request for another model is refused. */
+  models: string[];
+  /** The owner's own secret holding the key; the host reads it, the caller never sees it or its name. Omitted (with `auth`) for a keyless account. */
+  secretKey?: string;
+  auth?: "bearer" | "x-api-key";
+  flatRate?: boolean;
+}
+
+/** `accounts.list` answers these: granted, currently offered accounts. Never a key or its secret's name. */
+export interface CanvasTTYBrokerAccount {
+  /** `<owner plugin id>:<account id>`, passed to `accounts.request`. */
+  ref: string;
+  owner: string;
+  ownerName: string;
+  id: string;
+  label: string;
+  protocol: "openai" | "anthropic";
+  origin: string;
+  paths: string[];
+  models: string[];
+  flatRate: boolean;
+}
+
+/** `accounts.request` params; nothing else is accepted (no headers, query, method or URL). */
+export interface CanvasTTYBrokerRequest {
+  /** `^[A-Za-z0-9_.:-]{1,64}$`, chosen by the caller; the notifications carry it. */
+  requestId: string;
+  ref: string;
+  path: "/chat/completions" | "/responses" | "/messages" | "/models";
+  /** A JSON object with `model` (POST); omitted for `/models` or when sent before with `accounts.body`. */
+  body?: Record<string, unknown>;
+  stream?: boolean;
+}
+
+/** `canvastty.accounts.end`: always the last notification of an accepted request. */
+export interface CanvasTTYBrokerEnd {
+  requestId: string;
+  /** The provider's HTTP status, 0 when none arrived. */
+  status: number;
+  usage: { input: number; output: number; cached: number };
+  error?: { reason: CanvasTTYBrokerRefusal; status?: number; retryAfter?: number; message: string };
+}
+
+/** `error.data.reason` of a refused `accounts.*` call, or `end.error.reason`. */
+export type CanvasTTYBrokerRefusal =
+  | "invalid_request" | "caller_unavailable" | "not_granted" | "grant_changed" | "owner_unavailable" | "account_unknown"
+  | "path_refused" | "model_refused" | "too_large" | "rate_limited" | "budget_refused" | "upstream" | "network" | "timeout"
+  | "cancelled";
 
 /**
  * The host calls `canvastty.browserEngine.openTab` `{ engineId, tabId }` for each agent background tab and expects
@@ -459,7 +519,11 @@ export interface CanvasTTYServiceContext {
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
   | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> }
-  | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent };
+  | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent }
+  /** Brokered requests (`accounts:broker`): the provider's status and content type, then chunks, then the end. */
+  | { jsonrpc: "2.0"; method: "canvastty.accounts.head"; params: { requestId: string; status: number; contentType: string; retryAfter?: number } }
+  | { jsonrpc: "2.0"; method: "canvastty.accounts.chunk"; params: { requestId: string; data: string } }
+  | { jsonrpc: "2.0"; method: "canvastty.accounts.end"; params: CanvasTTYBrokerEnd };
 
 /** Requests the host sends to a service, which plugin surfaces cannot send. */
 export type CanvasTTYServiceHostRequest =
@@ -473,7 +537,13 @@ export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.tools.call"; params: CanvasTTYToolCall }
-  | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation };
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation }
+  /** Brokerable services: answer `CanvasTTYBrokerOffer[]` within 3 s. */
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.broker.offer"; params: Record<string, never> }
+  /** Answer `{ ok: true }` within 1 s to let the request go; anything else (or no answer) refuses it as budget_refused. */
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.broker.admit"; params: { ref: string; caller: { pluginId: string }; model: string; estimate: { bodyBytes: number } } }
+  /** After the request: what it used. */
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.broker.settle"; params: { ref: string; caller: { pluginId: string }; model: string; status: string; httpStatus: number; retryAfter?: number; usage: { input: number; output: number; cached: number } } };
 
 /** Methods a service may call on the host. Every other method is answered with error -32601. */
 export interface CanvasTTYServiceHostApi {
@@ -506,5 +576,16 @@ export interface CanvasTTYServiceHostApi {
   /** Needs `sessions:control`; only cards this plugin created. Closes the card, keeps its environment data. */
   "sessions.stop"(params: { sessionId: string }): { sessionId: string; stopped: true };
   /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */
+  /** Needs `accounts:broker`. The granted, currently offered accounts of other plugins. */
+  "accounts.list"(params: Record<string, never>): { accounts: CanvasTTYBrokerAccount[] };
+  /**
+   * Needs `accounts:broker` and the person's grant for the pair. Answers `{ requestId, accepted: true }` once the
+   * owner admitted it; the answer follows as `canvastty.accounts.head|chunk|end`. Refusals carry `error.data.reason`.
+   */
+  "accounts.request"(params: CanvasTTYBrokerRequest): { requestId: string; accepted: true };
+  /** A body part (at most 768 K characters) for a request over the message limit; up to 8 MB in all, held 60 s. */
+  "accounts.body"(params: { requestId: string; data: string }): { received: number };
+  /** Aborts the request; `end` follows with `cancelled`. */
+  "accounts.cancel"(params: { requestId: string }): { cancelled: boolean };
   "cards.setBadge"(params: { sessionId: string; badge: { text: string; tone?: CanvasTTYCardTone; tooltip?: string } | null }): null;
 }

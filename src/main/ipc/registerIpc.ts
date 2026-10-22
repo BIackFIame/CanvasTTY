@@ -36,6 +36,7 @@ import type { UsageHistoryService } from "../services/UsageHistoryService";
 import type { PluginManager } from "../services/PluginManager";
 import type { MascotManager } from "../services/MascotManager";
 import type { PluginServiceSupervisor } from "../services/PluginServiceSupervisor";
+import type { PluginAccountBroker } from "../services/PluginAccountBroker";
 import type { PluginCards } from "../services/PluginCards";
 import type { PluginMediaService } from "../services/PluginMediaService";
 import type { PluginSecretsService } from "../services/PluginSecretsService";
@@ -70,6 +71,8 @@ interface Dependencies {
   usageHistory: UsageHistoryService;
   plugins: PluginManager;
   pluginServices: PluginServiceSupervisor;
+  /** Brokered model requests: owners' offers and the person's grants (B6). */
+  pluginBroker: PluginAccountBroker;
   pluginCards: PluginCards;
   pluginMedia: PluginMediaService;
   pluginSecrets: PluginSecretsService;
@@ -210,6 +213,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   usageHistory,
   plugins,
   pluginServices,
+  pluginBroker,
   pluginCards,
   pluginMedia,
   pluginSecrets,
@@ -512,6 +516,19 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
     return plugins.setDecisionsMayAllow(pluginId, allowed);
+  });
+  ipcMain.handle(IPC.pluginsBrokerAccounts, (event, ownerId: string) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof ownerId !== "string") throw new Error("Plugin identifier is required.");
+    return pluginBroker.ownerAccounts(ownerId);
+  });
+  ipcMain.handle(IPC.pluginsSetBrokerGrant, async (event, callerId: string, ownerId: string, accountId: string, granted: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof callerId !== "string" || typeof ownerId !== "string" || typeof accountId !== "string" || typeof granted !== "boolean") {
+      throw new Error("Plugin account grant is invalid.");
+    }
+    await pluginBroker.setGrant(callerId, ownerId, accountId, granted);
+    return pluginBroker.ownerAccounts(ownerId);
   });
   ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
     assertMainRenderer(event, getMainWindow);

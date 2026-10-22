@@ -104,6 +104,8 @@ const MAX_MANIFEST_BYTES = 128 * 1024;
 const MAX_RUNTIME_HOOK_REGISTRY_BYTES = 1024 * 1024;
 const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
 const MAX_PLUGIN_SERVICES = 8;
+/** Grants one caller may hold (owners offer at most 32 accounts each). */
+const MAX_BROKER_GRANTS = 128;
 const PLUGIN_DATA_DIR = "plugin-data";
 const PLUGIN_INPUT_BRIDGE_URL = "canvastty-plugin://host/input-bridge.js";
 const AGENT_PROVIDER_SET = new Set<AgentProviderId>(AGENT_PROVIDERS);
@@ -131,6 +133,7 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "secrets",
   "sessions:read",
   "limits:read",
+  "accounts:broker",
   "launcher:open",
   "external:open",
   "browser:open",
@@ -161,6 +164,8 @@ interface StoredPluginRecord {
   trustedServices?: Record<string, string>;
   /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
   decisionsMayAllow?: boolean;
+  /** Brokered accounts the person granted: `<owner> <account>` -> fingerprint (kept only with trustedServices). */
+  brokerGrants?: Record<string, string>;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -213,6 +218,8 @@ export class PluginManager {
   private readonly plugins = new Map<string, InstalledPlugin>();
   /** Plugin id -> service id -> trusted entry SHA-256. Present only while native code is trusted. */
   private readonly serviceTrust = new Map<string, Record<string, string>>();
+  /** Caller plugin id -> granted `<owner> <account>` -> fingerprint. Present only while native code is trusted. */
+  private readonly brokerGrants = new Map<string, Record<string, string>>();
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
@@ -282,6 +289,7 @@ export class PluginManager {
 
     this.plugins.clear();
     this.serviceTrust.clear();
+    this.brokerGrants.clear();
     for (const [pluginId, record] of Object.entries(registry)) {
       if (!isStoredRecord(record) || !isPluginId(pluginId)) continue;
       try {
@@ -316,6 +324,7 @@ export class PluginManager {
             const plugin = this.plugins.get(pluginId)!;
             plugin.nativeCodeTrusted = true;
             plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
+            if (record.brokerGrants && active.permissions.includes("accounts:broker")) this.brokerGrants.set(pluginId, { ...record.brokerGrants });
           }
         }
       } catch (error) {
@@ -828,9 +837,12 @@ export class PluginManager {
       }
     }
     this.plugins.delete(plugin.manifest.id);
+    // Grants other plugins hold for this owner's accounts end with it; a reinstall asks again.
+    const droppedGrants = this.dropBrokerGrantsFor(plugin.manifest.id);
     try {
       await this.persistRegistry();
     } catch (error) {
+      for (const [caller, grants] of droppedGrants) this.brokerGrants.set(caller, grants);
       this.plugins.set(plugin.manifest.id, plugin);
       await this.persistRegistry().catch(() => undefined);
       throw error;
@@ -1210,6 +1222,87 @@ export class PluginManager {
     }
   }
 
+  /**
+   * Owners whose brokerable service may offer accounts now: enabled, native code trusted (that service included) and
+   * holding `secrets`. The broker asks each one's offer; nothing here is cached.
+   */
+  brokerOwners(): Array<{ pluginId: string; serviceId: string; name: string; sourceUrl: string }> {
+    const owners: Array<{ pluginId: string; serviceId: string; name: string; sourceUrl: string }> = [];
+    for (const plugin of this.plugins.values()) {
+      const trust = this.serviceTrust.get(plugin.manifest.id);
+      if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
+      const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+      if (!manifest.permissions.includes("secrets")) continue;
+      const service = manifest.services?.find((candidate) => candidate.brokerable && trust[candidate.id]);
+      if (service) owners.push({ pluginId: plugin.manifest.id, serviceId: service.id, name: plugin.manifest.name, sourceUrl: plugin.sourceUrl });
+    }
+    return owners;
+  }
+
+  /** Installed plugins that declare `accounts:broker`, and whether they may send brokered requests now. */
+  brokerCallers(): Array<{ pluginId: string; name: string; ready: boolean }> {
+    return [...this.plugins.values()]
+      .filter((plugin) => activeManifest(plugin.manifest, plugin.selectedModules).permissions.includes("accounts:broker"))
+      .map((plugin) => ({
+        pluginId: plugin.manifest.id,
+        name: plugin.manifest.name,
+        ready: plugin.enabled && plugin.nativeCodeTrusted && this.serviceTrust.has(plugin.manifest.id)
+      }));
+  }
+
+  /** The stored pin of a caller's grant for one owner's account, if the person granted it. */
+  brokerGrant(callerId: string, ownerId: string, accountId: string): string | undefined {
+    return this.brokerGrants.get(callerId)?.[`${ownerId} ${accountId}`];
+  }
+
+  /**
+   * The person's grant of one caller -> account pair (or its withdrawal with null). Needs the caller's native code
+   * trust (and goes with it) and `accounts:broker`, and an owner with a brokerable service. The fingerprint is the
+   * broker's pin of the offer as the person saw it.
+   */
+  async setBrokerGrant(callerId: string, ownerId: string, accountId: string, fingerprint: string | null): Promise<InstalledPlugin> {
+    const caller = this.requireEnabledPlugin(callerId);
+    const key = `${ownerId} ${accountId}`;
+    const previous = this.brokerGrants.get(callerId);
+    const next = { ...(previous ?? {}) };
+    if (fingerprint !== null) {
+      if (!caller.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!activeManifest(caller.manifest, caller.selectedModules).permissions.includes("accounts:broker")) {
+        throw new Error("Plugin does not have the accounts:broker permission.");
+      }
+      if (callerId === ownerId) throw new Error("A plugin uses its own accounts directly.");
+      if (!this.brokerOwners().some((owner) => owner.pluginId === ownerId)) throw new Error("The other plugin does not offer accounts now.");
+      if (!/^[a-f0-9]{64}$/.test(fingerprint) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(accountId)) throw new Error("The grant is invalid.");
+      if (!(key in next) && Object.keys(next).length >= MAX_BROKER_GRANTS) throw new Error(`At most ${MAX_BROKER_GRANTS} accounts per plugin.`);
+      next[key] = fingerprint;
+    } else {
+      delete next[key];
+    }
+    this.brokerGrants.set(callerId, next);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      if (previous) this.brokerGrants.set(callerId, previous);
+      else this.brokerGrants.delete(callerId);
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(caller));
+  }
+
+  /** Removes every grant other plugins hold for this owner's accounts; returns what each held before. */
+  private dropBrokerGrantsFor(ownerId: string): Map<string, Record<string, string>> {
+    const dropped = new Map<string, Record<string, string>>();
+    for (const [caller, grants] of this.brokerGrants) {
+      const kept = Object.fromEntries(Object.entries(grants).filter(([key]) => !key.startsWith(`${ownerId} `)));
+      if (Object.keys(kept).length !== Object.keys(grants).length) {
+        dropped.set(caller, grants);
+        this.brokerGrants.set(caller, kept);
+      }
+    }
+    return dropped;
+  }
+
   hasPermission(pluginId: string, permission: PluginPermission): boolean {
     const plugin = activePlugin(this.requireEnabledPlugin(pluginId));
     return plugin.manifest.permissions.includes(permission);
@@ -1391,7 +1484,11 @@ export class PluginManager {
       selectedModules: plugin.selectedModules,
       enabledHooks: plugin.enabledHooks,
       ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
-        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
+        ? {
+          trustedServices: { ...this.serviceTrust.get(id)! },
+          ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}),
+          ...(Object.keys(this.brokerGrants.get(id) ?? {}).length ? { brokerGrants: { ...this.brokerGrants.get(id)! } } : {})
+        }
         : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
@@ -1430,6 +1527,8 @@ export class PluginManager {
     plugin.nativeCodeTrusted = false;
     plugin.decisionsMayAllow = false;
     this.serviceTrust.delete(plugin.manifest.id);
+    // Broker grants are a second confirmation on top of native code trust and go with it.
+    this.brokerGrants.delete(plugin.manifest.id);
   }
 
   private async currentServiceTrust(pluginId: string, manifest: PluginManifest): Promise<Record<string, string>> {
@@ -1585,6 +1684,9 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     if (service.browserEngine && !permissions.includes("browser:engine") && !granted?.includes("browser:engine")) {
       throw new Error(`Plugin service ${service.id} contributes a browser engine and needs the browser:engine permission.`);
     }
+    if (service.brokerable && !permissions.includes("secrets") && !granted?.includes("secrets")) {
+      throw new Error(`Plugin service ${service.id} offers brokered accounts and needs the secrets permission.`);
+    }
   }
   const coreFiles = candidate.coreFiles === undefined ? [] : validateModuleFiles(candidate.coreFiles, "coreFiles");
   if (modules.length > 0 && coreFiles.length === 0) {
@@ -1716,7 +1818,8 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   const services = value.map((candidate): PluginService => {
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
     assertOnlyKeys(candidate, [
-      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine"
+      "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine",
+      "brokerable"
     ], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
@@ -1737,6 +1840,9 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     const tools = candidate.tools === undefined ? undefined : validateServiceTools(candidate.tools);
     const cardActions = candidate.cardActions === undefined ? undefined : validateCardActions(candidate.cardActions);
     const browserEngine = candidate.browserEngine === undefined ? undefined : validateBrowserEngine(candidate.browserEngine);
+    if (candidate.brokerable !== undefined && typeof candidate.brokerable !== "boolean") {
+      throw new Error("Plugin service brokerable must be true or false.");
+    }
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
@@ -1744,7 +1850,8 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
       ...(decide ? { decide } : {}),
       ...(tools ? { tools } : {}),
       ...(cardActions ? { cardActions } : {}),
-      ...(browserEngine ? { browserEngine } : {})
+      ...(browserEngine ? { browserEngine } : {}),
+      ...(candidate.brokerable === true ? { brokerable: true } : {})
     };
   });
   // Agents see `<pluginId>__<name>` and cards `<pluginId>` + action id, so both are unique per plugin.
@@ -1755,6 +1862,8 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
   // Agents name an engine by its id, so a plugin declares each id once.
   const engineIds = services.flatMap((service) => service.browserEngine ? [service.browserEngine.id] : []);
   if (new Set(engineIds).size !== engineIds.length) throw new Error("Plugin browser engine ids must be unique.");
+  // Grants name an owner plugin and an account, so one service per plugin offers accounts.
+  if (services.filter((service) => service.brokerable).length > 1) throw new Error("Only one plugin service may offer brokered accounts.");
   // "Allow decisions" is confirmed per plugin, so one service per plugin answers.
   if (services.filter((service) => service.decide).length > 1) {
     throw new Error("At most one plugin service may decide on tool calls.");
@@ -3188,6 +3297,11 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
     && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
+    && (value.brokerGrants === undefined || (
+      isRecord(value.brokerGrants)
+      && Object.keys(value.brokerGrants).length <= MAX_BROKER_GRANTS
+      && Object.values(value.brokerGrants).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
+    ))
   );
 }
 

@@ -203,6 +203,10 @@ const api: CanvasTTYApi = {
     setDecisionsMayAllow: (pluginId: string, allowed: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetDecisionsMayAllow, pluginId, allowed)
     ),
+    brokerAccounts: (ownerId: string) => ipcRenderer.invoke(IPC.pluginsBrokerAccounts, ownerId),
+    setBrokerGrant: (callerId: string, ownerId: string, accountId: string, granted: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetBrokerGrant, callerId, ownerId, accountId, granted)
+    ),
     serviceReport: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsServiceReport, pluginId),
     serviceRequest: (pluginId: string, serviceId: string, method: string, params: unknown) => (
       ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)

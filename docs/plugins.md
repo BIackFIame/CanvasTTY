@@ -160,6 +160,7 @@ A service may call back this host API (the base that later extension points add 
 | `sessions.create` | request | `sessions:launch` | Starts a card the plugin owns |
 | `sessions.send` / `sessions.stop` | request | `sessions:control` | Only for cards the plugin started |
 | `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
+| `accounts.list` `{}` / `accounts.request` / `accounts.body` / `accounts.cancel` | request | `accounts:broker`, each account granted by the person | A model request through another plugin's account, without its key (see [Brokered model requests](#brokered-model-requests-accountsbroker-and-brokerable)) |
 
 The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
@@ -367,6 +368,22 @@ Control follows the agent-control gateway's model: the service is one controller
 
 A foreign or unknown id gets the same error, so a plugin cannot probe other cards. There is no delete and no screen-reading control call.
 
+### Brokered model requests (`accounts:broker` and `brokerable`)
+
+One plugin's service (the caller) can send a model request through an account another plugin keeps (the owner), for example a router using the person's flat-rate plan accounts from an accounts plugin, without ever seeing the account's key. The host builds and sends the request itself.
+
+- **Owner.** A service with `"brokerable": true` (needs `secrets`; one per plugin) answers the host-only `canvastty.broker.offer {}` within 3 s with up to 32 accounts: `{ id, label, protocol: "openai" | "anthropic", baseUrl, paths, models, secretKey, auth: "bearer" | "x-api-key", flatRate? }`. `baseUrl` is https (http only for 127.0.0.1 or [::1]) without user, query or fragment; `paths` are a subset of `/chat/completions`, `/responses`, `/messages`, `/models`; `secretKey` names one of the owner's own secrets. A key goes over https only: an account with `secretKey` and `auth` must be https, and http on 127.0.0.1/[::1] is accepted only for a keyless account (no `secretKey`, no `auth`, such as a local model server), so a process that takes over a loopback port never receives a credential. Offer only accounts the person marked for this on the owner's page; the host asks again before every request, so an account no longer offered ends at once.
+- **Grant.** `accounts:broker` grants nothing by itself. The person allows each caller → account pair under the owner in **Settings → Agents → Extension native code**, after trusting both plugins' native code; the dialog shows the account's label, address and models. The grant pins the owner's source and the account's origin, protocol and auth scheme: a change suspends it until the person allows it again (a changed model list does not). Turning the caller's native code off, updating it or disabling it removes its grants; uninstalling the owner removes every grant for it; while the owner is disabled, untrusted or not running, requests are refused.
+- **Caller.** `accounts.list {}` returns the granted, currently offered accounts `{ ref, owner, ownerName, id, label, protocol, origin, paths, models, flatRate }`; never a key or the secret's name. `accounts.request { requestId, ref, path, body?, stream? }` (nothing else is accepted: no headers, query, method or URL) answers `{ requestId, accepted: true }` once the owner admitted it; then `canvastty.accounts.head { requestId, status, contentType }`, `canvastty.accounts.chunk { requestId, data }` (text) and always `canvastty.accounts.end { requestId, status, usage: { input, output, cached }, error? }` arrive. A body over the 1 MB message limit is sent first in parts with `accounts.body { requestId, data }` (at most 8 MB in all). `accounts.cancel { requestId }` aborts it.
+- **The request.** POST (GET for `/models`) to `baseUrl + path` and nowhere else, with only `content-type`, `accept`, the auth header and, for Anthropic, `anthropic-version: 2023-06-01`; the key is read in the main process. The body's `model` must be one the offer lists. No redirect is followed, TLS is checked, the address connected to must be public (loopback only for a keyless loopback offer), and no proxy setting applies.
+- **The answer.** Response headers are dropped except the content type and `retry-after`. The key is masked in every chunk (also when it is cut between two) and in error text, which is cut to 300 characters; an upstream error arrives as `end.error { reason: "upstream", status, retryAfter?, message }` with no chunks. `usage` is read by the host from the OpenAI (Chat Completions or Responses) or Anthropic answer.
+- **Quota stays with the owner.** Before sending, the host asks `canvastty.broker.admit { ref, caller, model, estimate: { bodyBytes } }` (1 s; anything but `{ ok: true }`, an error or no answer refuses with `budget_refused`); after it, `canvastty.broker.settle { ref, caller, model, status, httpStatus, retryAfter?, usage }`.
+- **Limits.** 4 open and 60 per minute per caller and account; no data for 120 s or 30 min in all ends a request (`timeout`); an answer over 64 MB ends it (`too_large`).
+- **Refusals** carry `error.data.reason` (or `end.error.reason`): `invalid_request`, `caller_unavailable`, `not_granted`, `grant_changed`, `owner_unavailable`, `account_unknown`, `path_refused`, `model_refused`, `too_large`, `rate_limited`, `budget_refused`, `upstream`, `network`, `timeout`, `cancelled`. A withdrawn grant, an untrusted or disabled plugin, or a stopped service ends open requests at once.
+- **Audit.** Each request is logged under both plugins with the account, path, model, outcome, time, sizes, usage and a SHA-256 prefix of the body; never its text.
+
+CLI subscriptions (an agent's own sign-in) are not brokered: they stay reachable as whole cards through launch options.
+
 ### Card badges and actions (`cards:decorate`)
 
 A service with `cards:decorate` can put a badge on any card and declare up to 8 `cardActions`:
@@ -429,6 +446,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
 | `limits:read` | `limits.get` | The same sanitized `LimitsSnapshot` used by HOME |
+| `accounts:broker` | `accounts.*` (services) | Model requests through other plugins' accounts the person granted, pair by pair; never their keys. Requests use those accounts' quota or money |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
 | `external:open` | `external.open` | Opens only an explicit HTTP(S) URL through the OS |
 | `browser:open` | `browser.open` | Opens only an explicit HTTP(S) URL in CanvasTTY's embedded Browser card and its shared browser session, including localhost |

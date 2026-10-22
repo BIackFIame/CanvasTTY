@@ -43,6 +43,11 @@ export interface PluginServiceHost {
   sessions?(pluginId: string, serviceId: string, method: string, params: unknown, permissions: readonly PluginPermission[]): unknown;
   /** `cards.setBadge` (EP-7), already checked for `cards:decorate`. */
   setBadge?(pluginId: string, params: unknown): unknown;
+  /**
+   * Brokered model requests (`accounts.*`), already checked against the manifest for `accounts:broker`. Returns
+   * undefined for a method it does not know. The handler checks the registry and the person's grants on every call.
+   */
+  accounts?(pluginId: string, serviceId: string, method: string, params: unknown): unknown;
   /** The service process ended (stopped, crashed or removed): its subscriptions end with it. */
   stopped?(pluginId: string, serviceId: string): void;
 }
@@ -343,6 +348,12 @@ export class PluginServiceSupervisor {
     return { services, log: structuredClone(this.logs.get(pluginId) ?? []) };
   }
 
+  /** A host line in the plugin's bounded log (brokered-request audit); ignored for a service the supervisor does not run. */
+  audit(pluginId: string, serviceId: string, level: PluginServiceLogEntry["level"], message: string): void {
+    const record = this.services.get(serviceKey(pluginId, serviceId));
+    if (record) this.log(record.spec, "host", level, message);
+  }
+
   /** Drops the in-memory log of an uninstalled plugin. */
   forget(pluginId: string): void {
     this.logs.delete(pluginId);
@@ -557,7 +568,11 @@ export class PluginServiceSupervisor {
           (error: unknown) => reply(JSON.stringify({
             jsonrpc: "2.0",
             id,
-            error: { code: error instanceof UnknownMethodError ? -32601 : -32000, message: errorText(error) }
+            error: {
+              code: error instanceof UnknownMethodError ? -32601 : -32000,
+              message: errorText(error),
+              ...(reasonOf(error) ? { data: { reason: reasonOf(error) } } : {})
+            }
           }))
         );
       } else {
@@ -615,6 +630,11 @@ export class PluginServiceSupervisor {
       if (!spec.permissions.includes("cards:decorate")) throw new Error("Plugin does not have the cards:decorate permission.");
       return this.options.host.setBadge(spec.pluginId, params);
     }
+    if (method.startsWith("accounts.") && this.options.host.accounts) {
+      if (!spec.permissions.includes("accounts:broker")) throw new Error("Plugin does not have the accounts:broker permission.");
+      const result = this.options.host.accounts(spec.pluginId, spec.serviceId, method, params);
+      if (result !== undefined) return result;
+    }
     if (method.startsWith("sessions.") && this.options.host.sessions) {
       const result = this.options.host.sessions(spec.pluginId, spec.serviceId, method, params, spec.permissions);
       if (result !== undefined) return result;
@@ -653,6 +673,12 @@ export class PluginServiceSupervisor {
 }
 
 class UnknownMethodError extends Error {}
+
+/** A machine-readable refusal reason a host handler attached to its error (`[a-z_]`, at most 40 characters). */
+function reasonOf(error: unknown): string | null {
+  const reason = error && typeof error === "object" ? (error as { reason?: unknown }).reason : undefined;
+  return typeof reason === "string" && /^[a-z_]{1,40}$/.test(reason) ? reason : null;
+}
 
 function serviceKey(pluginId: string, serviceId: string): string {
   return `${pluginId}:${serviceId}`;

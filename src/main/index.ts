@@ -44,6 +44,7 @@ import {
 import { PluginManager } from "./services/PluginManager";
 import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
+import { PluginAccountBroker } from "./services/PluginAccountBroker";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
@@ -376,6 +377,26 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     sessions: terminalManager?.list().map(({ provider, status, exitCode }) => ({ provider, status, exitCode })) ?? [],
     plugins: pluginManager?.list().map(({ manifest, enabled }) => ({ id: manifest.id, version: manifest.version, enabled })) ?? []
   });
+  // Brokered model requests (B6): a caller's request through another plugin's account, the key read and sent only
+  // here. Pairs are granted by the person; the registry and the owner's offer decide on every call.
+  const pluginBroker = new PluginAccountBroker({
+    owners: () => pluginManager!.brokerOwners(),
+    callers: () => pluginManager!.brokerCallers(),
+    grant: (callerId, ownerId, accountId) => pluginManager!.brokerGrant(callerId, ownerId, accountId),
+    saveGrant: async (callerId, ownerId, accountId, fingerprint) => {
+      await pluginManager!.setBrokerGrant(callerId, ownerId, accountId, fingerprint);
+    },
+    running: (pluginId, serviceId) => pluginServices!.running(pluginId, serviceId),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params),
+    secret: (ownerId, key) => {
+      if (!pluginSecretsService) throw new Error("Plugin secrets are not ready yet.");
+      return pluginSecretsService.get(ownerId, key);
+    },
+    registerSecret: (ownerId, value) => redaction.add(`plugin:${ownerId}`, [value]),
+    redact: (text) => redaction.redact(text),
+    audit: (pluginId, serviceId, level, message) => pluginServices!.audit(pluginId, serviceId, level, message)
+  });
   // Trusted plugin services run as separate processes, started the way plugin hooks are.
   // Services start only once the host APIs they may call on initialize exist (hostReady below).
   pluginServices = new PluginServiceSupervisor({
@@ -400,7 +421,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         if (!pluginCards) throw new Error("Cards are not ready yet.");
         return pluginCards.setBadge(pluginId, params);
       },
-      stopped: (pluginId, serviceId) => pluginSessions?.serviceStopped(pluginId, serviceId)
+      accounts: (pluginId, serviceId, method, params) => pluginBroker.handle(pluginId, serviceId, method, params),
+      stopped: (pluginId, serviceId) => {
+        pluginSessions?.serviceStopped(pluginId, serviceId);
+        pluginBroker.serviceStopped(pluginId, serviceId);
+      }
     }
   });
   // Base protection runs first; then trusted plugin decision services (EP-5).
@@ -412,6 +437,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     privateData: canvasTtyPrivateData(userDataPath)
   });
   pluginManager.setServiceObserver(async (specs) => {
+    // A withdrawn grant, an untrusted or disabled plugin ends its open brokered requests at once.
+    pluginBroker.recheck();
     await pluginServices!.sync(specs);
     // Trust changes add or remove card actions and badges.
     pluginCards?.refresh();
@@ -857,6 +884,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     usageHistory,
     plugins: pluginManager,
     pluginServices,
+    pluginBroker,
     pluginCards,
     pluginMedia: pluginMediaService,
     pluginSecrets: pluginSecretsService,

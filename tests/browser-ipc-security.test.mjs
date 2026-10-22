@@ -38,6 +38,8 @@ test("channels that change settings, plugins, secrets or terminals accept only t
     "pluginsPreviewInstall",
     "pluginsInstall",
     "pluginsSetModules",
+    "pluginsSetBrokerGrant",
+    "pluginsBrokerAccounts",
     "pluginsSetEnabled",
     "pluginsUninstall",
     "pluginsOpenExternal",

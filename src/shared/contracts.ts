@@ -785,6 +785,7 @@ export type PluginPermission =
   | "secrets"
   | "sessions:read"
   | "limits:read"
+  | "accounts:broker"
   | "launcher:open"
   | "external:open"
   | "browser:open"
@@ -880,6 +881,35 @@ export interface PluginService {
   cardActions?: PluginCardAction[];
   /** A browser engine (`browser:engine`) for agents' background tabs; the host calls `canvastty.browserEngine.*`. */
   browserEngine?: PluginBrowserEngine;
+  /**
+   * The service offers accounts other plugins may send model requests through (`canvastty.broker.*`) without seeing
+   * their keys; each caller -> account pair needs the person's grant. Needs `secrets`.
+   */
+  brokerable?: boolean;
+}
+
+/** One account a plugin offers for other plugins' brokered model requests, as the person sees it (never its key). */
+export interface PluginBrokerAccount {
+  ref: string;
+  owner: string;
+  ownerName: string;
+  id: string;
+  label: string;
+  protocol: "openai" | "anthropic";
+  origin: string;
+  paths: string[];
+  models: string[];
+  flatRate: boolean;
+}
+
+/** An owner's offered accounts, the plugins that may ask for them, and each granted pair's state. */
+export interface PluginBrokerAccounts {
+  /** The owner's service is running and answered its offer. */
+  available: boolean;
+  accounts: PluginBrokerAccount[];
+  callers: Array<{ pluginId: string; name: string; ready: boolean }>;
+  /** `changed`: granted before, but the account's origin, protocol or auth scheme (or the owner's source) changed. */
+  grants: Array<{ caller: string; account: string; state: "granted" | "changed" }>;
 }
 
 /** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */
@@ -1978,6 +2008,9 @@ export interface CanvasTTYApi {
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
     setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
+    /** What an owner offers to other plugins' brokered requests now, and the person's grants (no keys). */
+    brokerAccounts(ownerId: string): Promise<PluginBrokerAccounts>;
+    setBrokerGrant(callerId: string, ownerId: string, accountId: string, granted: boolean): Promise<PluginBrokerAccounts>;
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
@@ -2164,6 +2197,8 @@ export const IPC = {
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
   pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
+  pluginsBrokerAccounts: "plugins:broker-accounts",
+  pluginsSetBrokerGrant: "plugins:set-broker-grant",
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",

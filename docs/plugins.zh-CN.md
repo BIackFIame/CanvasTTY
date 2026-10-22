@@ -139,6 +139,7 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `sessions.create` | 请求 | `sessions:launch` | 启动一张归插件所有的卡片 |
 | `sessions.send` / `sessions.stop` | 请求 | `sessions:control` | 仅限该插件启动的卡片 |
 | `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
+| `accounts.list` `{}` / `accounts.request` / `accounts.body` / `accounts.cancel` | 请求 | `accounts:broker`，每个账户经用户允许 | 通过另一个插件的账户发送模型请求，看不到其密钥（见“通过其他插件账户的模型请求”） |
 
 宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件或读取其他插件的机密，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
@@ -343,6 +344,18 @@ interface PluginSessionEvent {
 
 他人的或未知的 id 得到相同的错误，因此插件无法探测其他卡片。没有删除操作，也没有读取屏幕的控制调用。
 
+### 通过其他插件账户的模型请求（`accounts:broker` 与 `brokerable`）
+
+一个插件的服务（调用方）可以通过另一个插件（所有者）保存的账户发送模型请求，例如路由器使用账户插件中用户的包月账户，而始终看不到该账户的密钥。请求由宿主自己构建并发送。
+
+- **所有者。** 带 `"brokerable": true` 的服务（需要 `secrets`；每个插件一个）在 3 秒内回答仅宿主可发的 `canvastty.broker.offer {}`，最多 32 个账户：`{ id, label, protocol: "openai" | "anthropic", baseUrl, paths, models, secretKey, auth: "bearer" | "x-api-key", flatRate? }`。`baseUrl` 为 https（http 仅限 127.0.0.1 或 [::1]），不含用户、查询或片段；`paths` 取自 `/chat/completions`、`/responses`、`/messages`、`/models`；`secretKey` 指所有者自己的密钥。密钥只通过 https 发送：带 `secretKey` 与 `auth` 的账户必须是 https；127.0.0.1/[::1] 上的 http 只接受无密钥账户（如本机模型服务器），因此占用回环端口的进程永远拿不到凭据。只提供用户在所有者页面上标记的账户；宿主在每次请求前重新询问。
+- **授权。** `accounts:broker` 本身不授予任何东西。用户在 **设置 → 智能体 → 扩展原生代码** 中所有者下方逐对允许“调用方 → 账户”。授权固定所有者的来源以及账户的 origin、协议和认证方式，变更后暂停直至再次允许（模型列表变化不影响）。关闭调用方的原生代码、更新或禁用它会移除其授权；卸载所有者会移除对它的所有授权。
+- **调用方。** `accounts.list {}` 返回已授权且当前提供的账户（不含密钥及其名称）。`accounts.request { requestId, ref, path, body?, stream? }`（不接受其他字段）在所有者放行后返回 `{ requestId, accepted: true }`，随后依次收到 `canvastty.accounts.head`、`canvastty.accounts.chunk` 和总会到达的 `canvastty.accounts.end { requestId, status, usage, error? }`。超过 1 MB 的请求体先用 `accounts.body` 分段发送（总计最多 8 MB）。`accounts.cancel { requestId }` 中止请求。
+- **请求与回答。** 只发往 `baseUrl + path`，仅带 `content-type`、`accept`、认证头及（Anthropic）`anthropic-version`；不跟随重定向，检查 TLS，连接地址须为公网（无密钥的 loopback 账户除外）。响应头只保留内容类型和 `retry-after`；密钥在每个分块和错误文本中被遮蔽，错误文本截断为 300 字符。
+- **额度归所有者。** 发送前宿主询问 `canvastty.broker.admit`（1 秒；非 `{ ok: true }` 即以 `budget_refused` 拒绝），结束后发送 `canvastty.broker.settle`。
+- **限制。** 每对调用方与账户最多 4 个并发、每分钟 60 个；120 秒无数据或总计 30 分钟结束请求；回答超过 64 MB 即结束。
+- **日志。** 每个请求在两个插件的日志中记录账户、路径、模型、结果、耗时、大小、用量和请求体 SHA-256 前缀，不含文本。
+
 ### 卡片标记与动作（`cards:decorate`）
 
 具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 8 个 `cardActions`：
@@ -405,6 +418,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
 | `limits:read` | `limits.get` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot` |
+| `accounts:broker` | `accounts.*`（服务） | 通过用户逐对授权的其他插件账户发送模型请求；看不到其密钥。请求消耗这些账户的额度或费用 |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
 | `browser:open` | `browser.open` | 仅在 CanvasTTY 内置 Browser 卡片及其共享浏览器会话中打开明确的 HTTP(S) URL，包括 localhost |
