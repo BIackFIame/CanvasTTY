@@ -61,6 +61,7 @@ import { UpdateNotice } from "./components/UpdateNotice";
 import { resolveAppearanceSettings } from "./features/settings/appearanceSettings";
 import { persistSettingsUpdate } from "./features/settings/persistSettings";
 import { PluginBrowserOpenQueue } from "./features/plugins/PluginBrowserOpenQueue";
+import { setPluginNames } from "./features/plugins/pluginNames";
 import {
   EMPTY_FILE_CARD_RUNTIME,
   type FileCardRuntimeState
@@ -320,6 +321,8 @@ export function App(): React.JSX.Element {
   const [agentAvailability, setAgentAvailability] = useState<AgentCliAvailability | null>(null);
   const [mediaData, setMediaData] = useState<string | null>(null);
   const [plugins, setPlugins] = useState<InstalledPlugin[]>([]);
+  // Cards that show a plugin by id ("Started by") read its display name from here.
+  useEffect(() => { setPluginNames(plugins); }, [plugins]);
   const [mascotProjects, setMascotProjects] = useState<MascotProjectSummary[]>([]);
 
   useEffect(() => {
@@ -1645,49 +1648,26 @@ export function App(): React.JSX.Element {
     setPlugins(await window.canvasTTY.plugins.list());
   }, []);
 
-  const setPluginEnabled = useCallback(async (pluginId: string, enabled: boolean): Promise<void> => {
+  /** One plugin record changed in main: show the answer, or the registry again when the change failed. */
+  const applyPluginChange = useCallback(async (pluginId: string, change: Promise<InstalledPlugin>): Promise<void> => {
     try {
-      const updated = await window.canvasTTY.plugins.setEnabled(pluginId, enabled);
+      const updated = await change;
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
       throw error;
     }
   }, [refreshPlugins]);
-
-  const setPluginHookEnabled = useCallback(async (
-    pluginId: string,
-    hookId: string,
-    enabled: boolean
-  ): Promise<void> => {
-    try {
-      const updated = await window.canvasTTY.plugins.setHookEnabled(pluginId, hookId, enabled);
-      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
-    } catch (error) {
-      await refreshPlugins().catch(() => undefined);
-      throw error;
-    }
-  }, [refreshPlugins]);
-
-  const setPluginNativeCodeTrusted = useCallback(async (pluginId: string, trusted: boolean): Promise<void> => {
-    try {
-      const updated = await window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted);
-      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
-    } catch (error) {
-      await refreshPlugins().catch(() => undefined);
-      throw error;
-    }
-  }, [refreshPlugins]);
-
-  const setPluginDecisionsMayAllow = useCallback(async (pluginId: string, allowed: boolean): Promise<void> => {
-    try {
-      const updated = await window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed);
-      setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
-    } catch (error) {
-      await refreshPlugins().catch(() => undefined);
-      throw error;
-    }
-  }, [refreshPlugins]);
+  const setPluginEnabled = useCallback((pluginId: string, enabled: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setEnabled(pluginId, enabled))), [applyPluginChange]);
+  const setPluginHookEnabled = useCallback((pluginId: string, hookId: string, enabled: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setHookEnabled(pluginId, hookId, enabled))), [applyPluginChange]);
+  const setPluginNativeCodeTrusted = useCallback((pluginId: string, trusted: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted))), [applyPluginChange]);
+  const setPluginDecisionsMayAllow = useCallback((pluginId: string, allowed: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed))), [applyPluginChange]);
+  const setPluginMayStartOrchestrators = useCallback((pluginId: string, allowed: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setMayStartOrchestrators(pluginId, allowed))), [applyPluginChange]);
 
   const setPluginModules = useCallback(async (pluginId: string, selectedModules: string[]): Promise<void> => {
     let updated: InstalledPlugin;
@@ -2132,6 +2112,7 @@ export function App(): React.JSX.Element {
           onSetPluginHookEnabled={setPluginHookEnabled}
           onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
           onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
+          onSetPluginMayStartOrchestrators={setPluginMayStartOrchestrators}
           onUninstallPlugin={uninstallPlugin}
           onOpenPluginContribution={openPluginContribution}
           onToggleHomeWidget={toggleHomeWidget}

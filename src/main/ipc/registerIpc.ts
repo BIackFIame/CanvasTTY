@@ -513,6 +513,11 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
     return plugins.setDecisionsMayAllow(pluginId, allowed);
   });
+  ipcMain.handle(IPC.pluginsSetMayStartOrchestrators, (event, pluginId: string, allowed: boolean) => {
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin orchestrator state is invalid.");
+    return plugins.setMayStartOrchestrators(pluginId, allowed);
+  });
   ipcMain.handle(IPC.pluginsServiceReport, (event, pluginId: string) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string") throw new Error("Plugin identifier is required.");

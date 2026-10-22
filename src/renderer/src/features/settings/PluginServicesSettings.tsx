@@ -14,7 +14,24 @@ interface PluginServicesSettingsProps {
   open?: boolean;
   onSetNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
+  onSetMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<void>;
 }
+
+/** The orchestrator consent's text lives with this lazily loaded settings chunk, not in the startup bundle. */
+const ORCHESTRATOR_TEXT = {
+  ru: {
+    title: "Может запускать оркестраторов",
+    description: "Без этого расширение запускает только обычные окна агентов.",
+    confirm: "Расширение сможет открывать окна оркестраторов, которые сами запускают субагентов, на выбранных им CLI, папке и среде. Окно помечено как запущенное расширением, YOLO недоступен; базовая защита, изоляция и ваши правила запуска действуют.",
+    enable: "Разрешить"
+  },
+  en: {
+    title: "May start orchestrators",
+    description: "Without this the extension starts only plain agent cards.",
+    confirm: "The extension can open orchestrator cards, which start subagents of their own, on the CLI, folder and environment it chooses. The card is marked as started by the extension and never gets YOLO; base protection, isolation and your launch rules still apply.",
+    enable: "Let it start"
+  }
+} as const;
 
 /**
  * "Native code": the separate trust confirmation for plugin services. Installing a plugin never
@@ -26,7 +43,8 @@ export function PluginServicesSettings({
   plugins,
   open = true,
   onSetNativeCodeTrusted,
-  onSetDecisionsMayAllow
+  onSetDecisionsMayAllow,
+  onSetMayStartOrchestrators
 }: PluginServicesSettingsProps): React.JSX.Element | null {
   const rows = plugins.filter((plugin) => plugin.manifest.services?.length);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -70,6 +88,20 @@ export function PluginServicesSettings({
     setError(null);
     try {
       await onSetDecisionsMayAllow(plugin.manifest.id, allowed);
+      setConfirming(null);
+    } catch {
+      setError(t(locale, "pluginHookChangeFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const orchestratorText = ORCHESTRATOR_TEXT[locale === "ru" ? "ru" : "en"];
+  const setMayStartOrchestrators = async (plugin: InstalledPlugin, allowed: boolean): Promise<void> => {
+    setBusy(plugin.manifest.id);
+    setError(null);
+    try {
+      await onSetMayStartOrchestrators(plugin.manifest.id, allowed);
       setConfirming(null);
     } catch {
       setError(t(locale, "pluginHookChangeFailed"));
@@ -160,6 +192,43 @@ export function PluginServicesSettings({
                       disabled={busy !== null}
                       onClick={() => void setMayAllow(plugin, true)}
                     >{t(locale, "pluginDecisionsMayAllowEnable")}</button>
+                  </div>
+                </div>
+              )}
+              {trusted && plugin.manifest.permissions?.includes("sessions:launch") && (
+                <div className="agent-hooks__row-main">
+                  <span className="agent-hooks__copy">
+                    <strong>{orchestratorText.title}</strong>
+                    <small>{orchestratorText.description}</small>
+                  </span>
+                  <button
+                    className={`agent-hooks__toggle${plugin.mayStartOrchestrators ? " agent-hooks__toggle--on" : ""}`}
+                    type="button"
+                    role="switch"
+                    aria-checked={plugin.mayStartOrchestrators}
+                    aria-label={`${orchestratorText.title}: ${plugin.manifest.name}`}
+                    disabled={busy !== null}
+                    onClick={() => {
+                      if (plugin.mayStartOrchestrators) void setMayStartOrchestrators(plugin, false);
+                      else setConfirming(`${pluginId}:orchestrators`);
+                    }}
+                  >
+                    <span aria-hidden="true" />
+                    {t(locale, plugin.mayStartOrchestrators ? "on" : "off")}
+                  </button>
+                </div>
+              )}
+              {confirming === `${pluginId}:orchestrators` && (
+                <div className="agent-hooks__confirm">
+                  <p>{orchestratorText.confirm}</p>
+                  <div>
+                    <button type="button" onClick={() => setConfirming(null)}>{t(locale, "cancel")}</button>
+                    <button
+                      className="agent-hooks__trust"
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void setMayStartOrchestrators(plugin, true)}
+                    >{orchestratorText.enable}</button>
                   </div>
                 </div>
               )}

@@ -68,6 +68,11 @@ export interface PluginSessionsDependencies {
   terminals: TerminalPort;
   /** Sends a notification to a running service; false when it is not running. */
   notify(pluginId: string, serviceId: string, method: "canvastty.sessions.event", params: PluginSessionEvent): boolean;
+  /**
+   * The person let this plugin start orchestrator cards (Settings, per plugin), and it is enabled and trusted now.
+   * Asked on every such call; absent means no plugin may.
+   */
+  mayStartOrchestrators?(pluginId: string): boolean;
 }
 
 interface Subscriber {
@@ -85,7 +90,8 @@ const PROFILES = new Set<LaunchProfileId>(["normal", "yolo", "auto", "acceptEdit
 /**
  * Session events and plugin-owned session control (EP-4). A service subscribes to card events (metadata only;
  * the redacted end of the output only with `sessions:read-screen`). It can start cards through the normal launch
- * pipeline (launch options and environments included), and send text to and stop only the cards it started:
+ * pipeline (launch options and environments included; an orchestrator only after the person allowed it for this
+ * plugin), and send text to and stop only the cards it started:
  * the same ownership rule as the agent-control gateway. Ownership lives on the card's saved record, so a restored
  * card stays under the plugin that started it.
  */
@@ -220,11 +226,18 @@ export class PluginSessions {
   }
 
   private create(pluginId: string, values: Record<string, unknown>): { sessionId: string } {
+    const role = values.role === undefined ? "agent" : values.role;
+    if (role !== "agent" && role !== "orchestrator") throw new Error("role must be agent or orchestrator.");
+    if (role === "orchestrator" && !this.mayStartOrchestrators(pluginId)) {
+      // An orchestrator starts agents of its own: the person allows that per plugin, beyond sessions:launch.
+      throw new Error("The person has not allowed this plugin to start orchestrators. They can allow it in Settings, under Extension native code.");
+    }
     const owned = this.deps.terminals.listMetadata().filter((metadata) => this.owner(metadata.id) === pluginId).length;
     if (owned >= MAX_OWNED_PER_PLUGIN) throw new Error(`A plugin can run at most ${MAX_OWNED_PER_PLUGIN} cards of its own.`);
     if (typeof values.provider !== "string" || typeof values.cwd !== "string") throw new Error("provider and cwd are required.");
     const profile = values.profile === undefined ? "normal" : values.profile;
     if (!PROFILES.has(profile as LaunchProfileId)) throw new Error("profile must be auto, normal, acceptEdits, plan or yolo.");
+    if (role === "orchestrator" && profile === "yolo") throw new Error("A plugin never starts an orchestrator in YOLO; use auto, normal, acceptEdits or plan.");
     if (values.title !== undefined && (typeof values.title !== "string" || values.title.length > 80)) {
       throw new Error("title must be text of at most 80 characters.");
     }
@@ -234,7 +247,7 @@ export class PluginSessions {
       cwd: values.cwd,
       profile: profile as LaunchProfileId,
       position: { x: 80 + cascade, y: 80 + cascade },
-      role: "agent",
+      role,
       ...(typeof values.title === "string" ? { title: values.title } : {}),
       // The same launch pipeline as the launcher: options and environments are validated there.
       ...(values.launchOptions !== undefined ? { launchOptions: values.launchOptions as CreateSessionRequest["launchOptions"] } : {}),
@@ -264,6 +277,10 @@ export class PluginSessions {
     // Closes the card; environment data is kept, as when a person closes it and chooses Keep.
     this.deps.terminals.dispose(sessionId, { keepEnvironmentData: true });
     return { sessionId, stopped: true };
+  }
+
+  private mayStartOrchestrators(pluginId: string): boolean {
+    try { return this.deps.mayStartOrchestrators?.(pluginId) === true; } catch { return false; }
   }
 
   private owner(sessionId: string): string | null {

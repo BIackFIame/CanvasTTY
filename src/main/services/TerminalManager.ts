@@ -690,7 +690,8 @@ export class TerminalManager {
       exitCode: null,
       failureDetails: null,
       ...modelChoice,
-      ...(decision.isolation ? { isolation: decision.isolation } : {})
+      ...(decision.isolation ? { isolation: decision.isolation } : {}),
+      ...(control.ownerPluginId !== undefined && role === "orchestrator" ? { startedByPlugin: control.ownerPluginId } : {})
     };
     const awaitMeasuredGrid = request.provider === "grok"
       && this.providerClis.get(request.provider).state === "available";
@@ -1259,7 +1260,8 @@ export class TerminalManager {
       ...(step.note ? { restoreNote: step.note } : {}),
       ...(descriptor.environment ? { environment: environmentBadge(descriptor.environment) } : {}),
       ...(descriptor.model !== undefined ? { model: descriptor.model } : {}),
-      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {})
+      ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {}),
+      ...(descriptor.ownerPluginId && descriptor.role === "orchestrator" ? { startedByPlugin: descriptor.ownerPluginId } : {})
     };
     const extras: PersistedSessionExtras = {
       ...(descriptor.options ? { options: descriptor.options } : {}),
@@ -1859,7 +1861,8 @@ export class TerminalManager {
       if (!root) return undefined;
       next = root.metadata.parentSessionId;
     }
-    if (!root || root.extras.environment) return undefined;
+    // A tree a plugin started (its orchestrator): the plugin chose that folder, not the person.
+    if (!root || root.extras.environment || root.extras.ownerPluginId) return undefined;
     try {
       const folder = realpathSync(cwd);
       return isPathInside(realpathSync(root.metadata.cwd), folder) ? folder : undefined;

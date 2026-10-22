@@ -592,6 +592,8 @@ button { border: 0; }
 .terminal-card__identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 700 .92em var(--font-mono); }
 .terminal-card__header .provider-icon--small { --provider-icon-art-size: 1.85em; width: 2.15em; height: 2.15em; }
 .terminal-card__role { flex: none; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.2); font: 800 .7em var(--font-mono); letter-spacing: .05em; text-transform: uppercase; }
+.terminal-card__started-by { flex: 0 1 auto; min-width: 3em; max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-card__started-by > span { text-transform: none; }
 .terminal-card__environment { flex: 0 1 auto; min-width: 0; max-width: 40%; overflow: hidden; padding: .15em .55em; border-radius: .5em; background: rgba(255,255,255,.14); font: 700 .7em var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
 .terminal-card__isolation--off, .terminal-card__isolation--unavailable { background: rgba(255,170,60,.35); }
 .terminal-card__rename { width: min(27.7em, calc(100% - .92em)); height: 2.31em; padding: 0 .69em; border: .08em solid rgba(255,255,255,.24); outline: 0; border-radius: .54em; color: white; background: rgba(23,26,36,.72); font: 700 .92em var(--font-mono); user-select: text; }

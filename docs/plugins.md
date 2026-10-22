@@ -361,11 +361,13 @@ Control follows the agent-control gateway's model: the service is one controller
 
 | Request | Gate | Effect |
 |:--|:--|:--|
-| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }` |
+| `sessions.create` `{ provider, cwd, profile?, title?, role?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }`. `role: "orchestrator"` needs the person's consent too (below) |
 | `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started. A card whose launch its plugins still prepare gets it once that launch started; `sent` is false when the launch did not start (the text is dropped) |
 | `sessions.stop` `{ sessionId }` | `sessions:control` | Closes a card this plugin started; its environment data is kept |
 
 A foreign or unknown id gets the same error, so a plugin cannot probe other cards. There is no delete and no screen-reading control call.
+
+**Orchestrators.** With `"role": "orchestrator"` the card is an orchestrator: it gets the same orchestration tools as one the person starts (`spawn_agent`, `wait_for_agent` and the rest) and the same delegation rules for its subagents (delegable launch options only, profile no wider than its own, isolation as for any delegated launch). Because it starts agents of its own, `sessions:launch` alone is not enough: the person turns on **May start orchestrators** for that plugin in Settings, under Extension native code, after trusting its native code. Without it, or when the plugin is disabled or no longer trusted, the call is refused and no card is made; an update, a module change, disabling the plugin or revoking its trust turns it off again. Such an orchestrator never runs in `yolo`. Its card shows "Started by" and the plugin id, also after a restore, and its subagents never get the person's `trustedFolder` (the plugin chose the folder, not the person). Revoking the consent does not close orchestrators already running; the person closes them. `role` defaults to `"agent"`, which behaves exactly as before.
 
 ### Card badges and actions (`cards:decorate`)
 
@@ -424,7 +426,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `tools:agents` | A service's `tools` and `canvastty.tools.call` | Offers tools to agents of the listed roles; receives their arguments and the calling card's summary |
 | `sessions:events` | `sessions.subscribe`, `sessions.list` | Card metadata: provider, role, parent, title, status, folders, environment ref; no screen text |
 | `sessions:read-screen` | `screen` in status and exit events | The end of every card's output (masked): private data |
-| `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch |
+| `sessions:launch` | `sessions.create` | Starts visible agent cards through the normal launch; orchestrator cards only after the person's separate "May start orchestrators" |
 | `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |

@@ -23,6 +23,7 @@ import type {
   TerminalBorderSkinId
 } from "../../../../shared/contracts";
 import { usePluginCardDecorations } from "../plugins/cardDecorations";
+import { usePluginName } from "../plugins/pluginNames";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { UiIcon } from "../../components/UiIcon";
 import { t } from "../../lib/i18n";
@@ -239,6 +240,8 @@ function TerminalCardView({
   const [confirmClose, setConfirmClose] = useState(false);
   // Plugin badges and actions (EP-7); an action's answer shows as a toast on the card, as plain text.
   const pluginDecorations = usePluginCardDecorations(session);
+  // "Started by": the plugin's display name (its id in the tooltip).
+  const startedByName = usePluginName(session.startedByPlugin, locale);
   const [actionRunning, setActionRunning] = useState(false);
   const [actionToast, setActionToast] = useState<PluginCardActionResult | null>(null);
   const hasOptions = restoreEnabled || pluginDecorations.actions.length > 0;
@@ -1252,6 +1255,11 @@ function TerminalCardView({
           )}
           {session.role === "orchestrator" && (
             <span className="terminal-card__role" title={t(locale, "orchestratorRoleNote")}>{t(locale, "roleOrchestrator")}</span>
+          )}
+          {session.startedByPlugin && (
+            <span className="terminal-card__role terminal-card__started-by" title={`${t(locale, "startedByPlugin")}: ${session.startedByPlugin}`}>
+              {t(locale, "startedByPlugin")}: <span>{startedByName ?? session.startedByPlugin}</span>
+            </span>
           )}
           {session.profile === "auto" && (
             <span className="terminal-card__role" title={t(locale, session.autoDowngraded ? "autoDowngradedNote" : "autoProfileNote")}>

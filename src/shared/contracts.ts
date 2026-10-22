@@ -706,6 +706,8 @@ export interface SessionMetadata {
   configuredMode?: { mode: string; source: string };
   /** Dangerous git settings the isolated agent's session left under its folder (see GitRiskReport). */
   gitRisk?: GitRiskReport;
+  /** An orchestrator a plugin started (`sessions.create`), not the person: that plugin's id, shown on the card. */
+  startedByPlugin?: string;
 }
 
 /** Something in a repository's git folder that runs a program when the person uses git there (gitAudit.ts). */
@@ -1157,6 +1159,11 @@ export interface InstalledPlugin {
   nativeCodeTrusted: boolean;
   /** Its decision service may allow tool calls (a second confirmation); revoked with native code trust. */
   decisionsMayAllow: boolean;
+  /**
+   * The person let it start orchestrator cards (`sessions.create` with role "orchestrator"), a second confirmation
+   * after `sessions:launch`; revoked with native code trust (update, module change, disable).
+   */
+  mayStartOrchestrators: boolean;
 }
 
 export interface PluginInstallPreview {
@@ -1978,6 +1985,7 @@ export interface CanvasTTYApi {
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
     setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
+    setMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
@@ -2164,6 +2172,7 @@ export const IPC = {
   pluginsSetHookEnabled: "plugins:set-hook-enabled",
   pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
+  pluginsSetMayStartOrchestrators: "plugins:set-may-start-orchestrators",
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",
