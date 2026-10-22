@@ -47,6 +47,11 @@ export interface SpawnAgentRequest {
   /** The CLI's --model and reasoning effort for this subagent (checked by the launch for its CLI). */
   model?: string;
   effort?: CreateSessionRequest["effort"];
+  /**
+   * A plugin environment for the subagent (a server, a container), as list_providers lists it. Only a kind its
+   * plugin declared safe for subagents, within its parallel cap; the launch then runs it exactly as the launcher's.
+   */
+  environment?: CreateSessionRequest["environment"];
 }
 
 export interface AgentObservation {
@@ -173,13 +178,48 @@ export class AgentControlService {
     if (live >= limits.maxSubagents) {
       throw new DelegationRefusal(`This orchestration already runs ${live} live subagent${live === 1 ? "" : "s"}, its limit (Settings → Agents, set by the person). Wait for one to finish or cancel_agent one first.`);
     }
+    let launchProfile = profile.profile;
+    let environment: CreateSessionRequest["environment"];
+    if (request.environment !== undefined) {
+      const placed = this.terminals.delegatedEnvironment(request.provider, request.environment);
+      if (!placed.ok) throw new DelegationRefusal(placed.reason);
+      const { kind } = placed;
+      // Counted and created in the same turn: two calls at once cannot both take the last place.
+      const subagents = (count: number): string => `${count} subagent${count === 1 ? "" : "s"}`;
+      const after = "Wait for one to finish or cancel_agent one first, or run this one on this computer.";
+      const running = this.terminals.subagentsInEnvironment(kind.pluginId, kind.kind);
+      const server = kind.capBy ? placed.choice.options?.[kind.capBy] : undefined;
+      if (kind.capBy && typeof server === "string") {
+        const onServer = this.terminals.subagentsInEnvironment(kind.pluginId, kind.kind, { field: kind.capBy, value: server });
+        if (onServer >= kind.maxParallel) {
+          throw new DelegationRefusal(`${server} (${kind.name}) already runs ${subagents(onServer)}, the most ${kind.plugin} allows on one server at once. ${after}`);
+        }
+        if (kind.maxParallelTotal !== undefined && running >= kind.maxParallelTotal) {
+          throw new DelegationRefusal(`${kind.name} already runs ${subagents(running)} on all servers together, the most ${kind.plugin} allows at once. ${after}`);
+        }
+      } else if (running >= kind.maxParallel) {
+        throw new DelegationRefusal(`${kind.name} already runs ${subagents(running)}, the most ${kind.plugin} allows there at once. ${after}`);
+      }
+      // Without the launch passed on, only normal reaches the agent there (as for the person's launch). Lowering to
+      // normal is never more than asked; plan cannot be kept there, so it is refused rather than raised.
+      if (!kind.keepsLaunch && launchProfile !== "normal") {
+        if (launchProfile === "plan") {
+          throw new DelegationRefusal(`${kind.name} does not pass the launch on, so plan (read-only) cannot be kept there, and a subagent never gets more than plan from this session. Run it on this computer.`);
+        }
+        if (request.profile !== undefined) {
+          throw new DelegationRefusal(`${kind.name} does not pass the launch on, so CanvasTTY's hooks and the ${launchProfile} profile would not reach the agent there; only normal (it asks) runs there. Omit profile or pass "normal".`);
+        }
+        launchProfile = "normal";
+      }
+      environment = placed.choice;
+    }
     // A call cancelled before its agent starts launches nothing.
     if (signal?.aborted) return Promise.reject(spawnCanceled());
     const cascade = children.length;
     const created = this.terminals.create({
       provider: request.provider,
       cwd: cwd.cwd,
-      profile: profile.profile,
+      profile: launchProfile,
       position: {
         x: parent.position.x + CHILD_POSITION_STEP.x * (cascade + 1),
         y: parent.position.y + CHILD_POSITION_STEP.y * (cascade + 1)
@@ -189,7 +229,8 @@ export class AgentControlService {
       parentSessionId: parent.id,
       ...(request.launchOptions !== undefined ? { launchOptions: request.launchOptions } : {}),
       ...(request.model !== undefined ? { model: request.model } : {}),
-      ...(request.effort !== undefined ? { effort: request.effort } : {})
+      ...(request.effort !== undefined ? { effort: request.effort } : {}),
+      ...(environment ? { environment } : {})
     }, { ...(RESULT_CAPTURE_PROVIDERS.has(request.provider) ? { captureResult: true } : {}), origin: "subagent" });
     if (request.initialPrompt === undefined || request.initialPrompt.length === 0) return Promise.resolve(created);
     const input = request.provider === "codex"

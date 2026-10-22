@@ -43,7 +43,36 @@ export interface ProviderDirectory {
   providers: ProviderDirectoryEntry[];
   /** Plugin tools that pick launch options (such as an account route) for spawn_agent.launchOptions. */
   launchOptionTools?: string[];
+  /**
+   * Where a subagent may run besides this computer (spawn_agent.environment): kinds the person's enabled, trusted
+   * plugins offer and declared safe for subagents. Ids and names only: no hosts, folders, accounts or credentials.
+   */
+  environments?: ProviderDirectoryEnvironment[];
   note: string;
+}
+
+export interface ProviderDirectoryEnvironment {
+  pluginId: string;
+  plugin: string;
+  kind: string;
+  name: string;
+  /** Providers it takes; all when absent. */
+  providers?: string[];
+  /** spawn_agent.environment.options an orchestrator may set; every other option keeps the plugin's default. */
+  options?: Array<{ key: string; kind: PluginLaunchField["kind"]; choices?: string[] }>;
+  /** Subagents that may run there at once (per server when capBy is set), and how many do now (all servers). */
+  maxParallel: number;
+  running: number;
+  /** The option that names a server; maxParallel then applies to each server. */
+  capBy?: string;
+  /** With capBy: the cap for all servers together. */
+  maxParallelTotal?: number;
+  /** With capBy: the values it takes, the person's servers by the labels they gave them, and how many run on each. */
+  servers?: Array<{ name: string; running: number }>;
+  /** spawn_agent.profile values it takes: ["normal"] where CanvasTTY's hooks do not reach the agent. */
+  profiles?: LaunchProfile[];
+  /** CanvasTTY's local hooks and base protection reach the agent there. */
+  localProtection: boolean;
 }
 
 export interface ProviderDirectorySources {
@@ -57,6 +86,12 @@ export interface ProviderDirectorySources {
   models?(provider: AgentProviderId): { models: string[]; checkedAt: number } | null;
   /** Launch options trusted plugins declared (PluginManager.launchContributors). */
   launchContributors?(): Array<{ pluginId: string; pluginName: string; launch: { appliesTo?: AgentProviderId[]; fields: PluginLaunchField[]; delegable?: boolean } }>;
+  /** Environment kinds an orchestrator may choose for subagents (TerminalManager.delegatedEnvironments). */
+  environments?(): Array<{ pluginId: string; plugin: string; kind: string; name: string; appliesTo?: string[];
+    options: Array<{ key: string; kind: PluginLaunchField["kind"]; choices?: string[] }>; maxParallel: number; running: number; keepsLaunch: boolean;
+    capBy?: string; maxParallelTotal?: number; servers?: string[] | null; serversRunning?: Record<string, number> }>;
+  /** Asks plugins for the servers of kinds capped per server (bounded, cached); called before listing or spawning. */
+  refreshEnvironments?(): Promise<void>;
   /** CanvasTTY's agent isolation can contain an agent here (a CLI without an auto of its own gets auto only inside it). */
   containment?(): boolean;
 }
@@ -124,12 +159,35 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
     };
   });
   const launchOptionTools = pluginTools.filter((name) => LAUNCH_OPTION_TOOL.test(name));
+  let offered: ReturnType<NonNullable<ProviderDirectorySources["environments"]>> = [];
+  try { offered = sources.environments?.() ?? []; } catch { offered = []; }
+  // Built field by field, so nothing a source adds (a host, a folder) can reach the agent.
+  const environments = offered.map((entry): ProviderDirectoryEnvironment => ({
+    pluginId: entry.pluginId,
+    plugin: entry.plugin,
+    kind: entry.kind,
+    name: entry.name,
+    ...(entry.appliesTo ? { providers: [...entry.appliesTo] } : {}),
+    ...(entry.options.length > 0 ? { options: entry.options.map((option) => ({
+      key: option.key, kind: option.kind, ...(option.choices ? { choices: [...option.choices] } : {}) })) } : {}),
+    maxParallel: entry.maxParallel,
+    running: entry.running,
+    ...(entry.capBy ? { capBy: entry.capBy, servers: (entry.servers ?? []).map((name) => ({ name, running: entry.serversRunning?.[name] ?? 0 })) } : {}),
+    ...(entry.capBy && entry.maxParallelTotal !== undefined ? { maxParallelTotal: entry.maxParallelTotal } : {}),
+    ...(entry.keepsLaunch ? {} : { profiles: ["normal"] }),
+    localProtection: entry.keepsLaunch
+  }));
+  let note = launchOptionTools.length > 0
+    ? `${NOTE} To launch through a specific plugin account or route, call ${launchOptionTools.join(" or ")} and pass what it returns as spawn_agent.launchOptions.`
+    : NOTE;
+  if (environments.length > 0) {
+    note += " To run a subagent in one of environments (a server, a container the person set up), pass { pluginId, kind, options? } from it as spawn_agent.environment; without it the subagent runs on this computer.";
+  }
   return {
     providers,
     ...(launchOptionTools.length > 0 ? { launchOptionTools } : {}),
-    note: launchOptionTools.length > 0
-      ? `${NOTE} To launch through a specific plugin account or route, call ${launchOptionTools.join(" or ")} and pass what it returns as spawn_agent.launchOptions.`
-      : NOTE
+    ...(environments.length > 0 ? { environments } : {}),
+    note
   };
 }
 

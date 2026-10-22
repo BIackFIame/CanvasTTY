@@ -240,6 +240,7 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 | `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` 或 `{ stopped: { reason } }` | 10 秒 |
 | `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason`（`closed` 或 `quit`） | 忽略 | 10 秒 |
 | `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }`，用于卡片徽标及其提示 | 3 秒 |
+| `canvastty.environment.choices` | `kind, field` | `{ choices: string[] }`：用户的服务器标签，仅用于在文本字段上设置了 `subagents.capBy` 的类型 | 2 秒 |
 
 - `prepare` 只在卡片首次启动时调用一次。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
 - `wrap` 的输出会被检查：`command` 必须是可执行文件的绝对路径，或由宿主在 `PATH` 中解析的纯程序名；命令行、相对路径或 shell 语法会被拒绝，任何内容都不经过 shell 运行。`args` 是数组（256 项，每项 8 KB，不含 NUL）。`env` 和 `secretEnv` 遵循启动贡献者的规则：保留名称以及 CanvasTTY 或启动选项已为此次启动设置的名称会被拒绝。`secretEnv` 的值来自插件自己的机密（需要 `secrets`），并像启动机密一样被遮蔽。
@@ -247,6 +248,19 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 - 恢复时先恢复所有保存的环境，再先启动父卡片、后启动子卡片。如果插件被禁用、删除或不受信任，或 `resume` 应答 `stopped`，卡片以停止状态返回并显示原因，记录保留；重启会再次调用 `resume`。卡片绝不会改为在本地启动，超时或错误会拒绝启动，不会回退。
 - 在 `prepare` 成功之前，卡片的保存记录保留启动器中的选择（插件、种类、选项），而不是 ref。如果应用在 `prepare` 进行时退出，卡片以停止状态返回并显示该原因，在用户重启它之前不会准备或启动任何东西；重启会用相同的选项重新准备。`prepare` 失败时同样保留选择。在卡片关闭或重启之后、或应用开始退出之后才到达的 `prepare` 回答不会被使用或保存：只要宿主仍在运行，就立即以 `keepData: false` 和 `reason: "closed"` 调用 `release`。
 - 关闭环境中的卡片时只询问一次“Keep environment data?”，然后带着答案调用 `release`。退出应用不会释放任何环境（环境随卡片一起恢复）；关闭保存时，退出会以 `keepData: true` 和 `reason: "quit"` 调用 `release`，以便停止计算。插件不保存自己的会话列表，也没有恢复逻辑。
+
+**子智能体。** 默认只有用户在启动器中选择环境。声明了 `"subagents"` 的类型也可以由编排器为其子智能体选择（`spawn_agent` 的 `environment`）：
+
+```json
+"subagents": { "maxParallel": 2, "fields": ["host"] }
+```
+
+- `maxParallel`（1 到 16，省略时为 1）：该类型中可同时运行的子智能体数量，所有编排合计。仍在准备中的卡片计入；已退出或被拒绝的不计入。用户自己的启动不计入。
+- `fields`：编排器可以设置的该类型 `fields` 的键。其他字段一律使用清单中声明的默认值（绝不使用用户上次在启动器中的值），因此插件只列出对智能体安全的选择，例如选择哪台已配置的服务器；网络、镜像或工作区模式仍由用户决定。
+- `capBy`（`fields` 之一）：其值指明服务器的字段。此时 `maxParallel` 作用于每台服务器，`maxParallelTotal`（1 到 64，可选）作用于所有服务器合计。编排器必须用确切名称传入其中一台服务器：`select` 字段自身的值，或者对于文本字段，服务对 `canvastty.environment.choices` `{ kind, field }` 的应答 `{ "choices": ["<标签>", …] }` 中的标签（仅宿主可发，2 秒，在编排器列出或启动时最多每 30 秒询问一次；最多 64 个适合该字段的纯文本标签）。应答用户为服务器起的名称，绝不应答地址、用户名或密钥。无应答、出错或其他形状都意味着无法选择任何服务器。宿主不再知道其选项的卡片（重启之后）计入该类型的每台服务器。
+- `list_providers` 在 `environments` 下列出这些类型：`pluginId`、`kind`、类型名称和插件名称、可设置的字段（仅静态 `select` 选项）、`maxParallel` 以及当前运行数量；设置 `capBy` 时还有 `servers`（每台的名称及其上运行的数量）和 `maxParallelTotal`。它从不显示描述、默认值、ref 或插件保存的任何内容（主机、文件夹、账户），构建列表时也不会询问插件。
+- 只有启动器会显示的类型才符合条件：插件已启用、其原生代码受信任并拥有 `environment:provide`。禁用插件或撤销信任会立即撤回该类型。插件的 `prepare` 仍会检查这些值（例如所指定的服务器是否由用户配置），并以原因拒绝，原因会返回给编排器。
+- 子智能体与用户的启动走同一流程：委派规则（文件夹、配置上限、深度和存活数量限制）、`keeps`、智能体隔离和 `wrap` 均不变，因此环境收到的变量与用户启动时完全相同。没有 `keeps.launch` 时，继承的高于 normal 的配置会降为 normal，显式指定的配置（或 plan 编排器的配置）会被拒绝。
 
 完整示例见 [`examples/plugins/env-worktree`](../examples/plugins/env-worktree)：`prepare` 在插件数据目录下的文件夹中运行 `git worktree add`，`wrap` 设置文件夹，`resume` 检查它仍然存在，`describe` 显示当前分支，`release` 删除该 worktree（以及它创建的分支），除非你选择保留。
 

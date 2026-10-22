@@ -22,6 +22,20 @@ const launchOptions = {
   maxProperties: 16,
   additionalProperties: { type: "object" }
 };
+// A plugin environment for a subagent, `{ pluginId, kind, options? }`, as list_providers lists it; the host checks it
+// against what the plugin declared safe for subagents and the launch then runs it exactly like the launcher's.
+const MAX_ENVIRONMENT_OPTIONS = 8;
+const environment = {
+  type: "object",
+  properties: {
+    pluginId: string({ minLength: 1, maxLength: 128 }),
+    kind: string({ minLength: 1, maxLength: 32 }),
+    // Values are text or true/false (checked below); no type list here, which some tool-schema readers refuse.
+    options: { type: "object", maxProperties: MAX_ENVIRONMENT_OPTIONS }
+  },
+  required: ["pluginId", "kind"],
+  additionalProperties: false
+};
 const prompt = string({ minLength: 1, maxLength: 65_536 });
 /** Every provider id spawn_agent accepts, in launcher order: src/shared/providerCatalog.ts without "terminal"
  *  (a test keeps the two equal; this file ships as is and cannot import TypeScript). */
@@ -58,7 +72,7 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
   ),
   tool(
     "spawn_agent",
-    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. profile: without it the subagent gets this session's launch profile, or the next lower one its CLI has; a subagent never gets more than this session (plan < normal < acceptEdits < auto) and never YOLO. "auto" lets it work without asking the person for each edit or command inside the project; CanvasTTY's outer layers (agent isolation, base protection) still stop writes outside the project, secrets and system changes. The answer says the profile it got. cwd must be this project's folder or a folder inside it. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked), for plugins that allow an orchestrator to choose them. Refusals say why (a limit the person set, a folder outside the project, a profile above this session's): change the request instead of retrying it. Then call wait_for_agent and get_agent_result.`,
+    `Launch another provider's agent as a CanvasTTY subagent of this session and optionally deliver a first prompt. Returns the new session id. provider must be an id from list_providers (known ids: ${AGENT_PROVIDER_IDS.join(", ")}); call list_providers first to see which are installed and signed in. Give each subagent one self-contained part of the task and an absolute cwd. If the person names a model, pass it as model in the format list_providers gives for that provider (OpenCode: provider/model); effort sets the reasoning effort where that CLI has one (list_providers shows its efforts). An unsupported model or effort is refused with the reason. profile: without it the subagent gets this session's launch profile, or the next lower one its CLI has; a subagent never gets more than this session (plan < normal < acceptEdits < auto) and never YOLO. "auto" lets it work without asking the person for each edit or command inside the project; CanvasTTY's outer layers (agent isolation, base protection) still stop writes outside the project, secrets and system changes. The answer says the profile it got. cwd must be this project's folder or a folder inside it. launchOptions passes plugin launch options exactly as a plugin tool gives them (for example the account a plugin picked), for plugins that allow an orchestrator to choose them. environment runs the subagent where a plugin offers it (a server, a container): pass { pluginId, kind, options? } exactly as list_providers lists it under environments; only those, only the options listed there, and at most maxParallel subagents at once in each; where it lists servers, pass one of their names as the option capBy names (maxParallel then counts per server); where its localProtection is false (profiles lists only normal) it runs in normal (it asks) and CanvasTTY's local hooks and base protection do not reach it, so omit profile or pass normal. Without environment it runs on this computer. Refusals say why (a limit the person set, a folder outside the project, a profile above this session's): change the request instead of retrying it. Then call wait_for_agent and get_agent_result.`,
     {
       provider,
       cwd: string({ minLength: 1, maxLength: 4_096 }),
@@ -67,7 +81,8 @@ export const ORCHESTRATION_TOOL_DEFINITIONS = Object.freeze([
       profile: string({ enum: ["auto", "normal", "acceptEdits", "plan"] }),
       model: string({ minLength: 1, maxLength: 200 }),
       effort: string({ enum: [...REASONING_EFFORT_IDS] }),
-      launchOptions
+      launchOptions,
+      environment
     },
     ["provider", "cwd"]
   ),
@@ -128,6 +143,27 @@ export function isPluginOrchestrationTool(value) {
 // checks behave identically on both bridges.
 export { canonicalStringify };
 
+/** Why a spawn_agent.environment value has the wrong shape, or null; what it may name is the host's check. */
+function environmentProblem(candidate) {
+  const shape = "environment must be { pluginId, kind, options? } with options of text or true/false values.";
+  if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) return shape;
+  const { properties } = environment;
+  if (Object.keys(candidate).some((key) => !Object.prototype.hasOwnProperty.call(properties, key))) return shape;
+  for (const key of ["pluginId", "kind"]) {
+    const text = candidate[key];
+    if (typeof text !== "string" || text.length < properties[key].minLength || text.length > properties[key].maxLength) return shape;
+  }
+  if (candidate.options !== undefined) {
+    const options = candidate.options;
+    if (options === null || typeof options !== "object" || Array.isArray(options)
+      || Object.keys(options).length > MAX_ENVIRONMENT_OPTIONS
+      || !Object.values(options).every((item) => typeof item === "boolean" || (typeof item === "string" && item.length <= 200))) {
+      return shape;
+    }
+  }
+  return null;
+}
+
 export function validateOrchestrationArguments(toolName, args) {
   const definition = ORCHESTRATION_TOOL_DEFINITIONS.find((entry) => entry.name === toolName);
   if (!definition) return { ok: false, error: `Unsupported orchestration tool: ${toolName}.` };
@@ -168,6 +204,10 @@ export function validateOrchestrationArguments(toolName, args) {
       } else if (Buffer.byteLength(canonicalStringify(candidate), "utf8") > MAX_LAUNCH_OPTIONS_BYTES) {
         errors.push(`${key} is too large.`);
       } else value[key] = candidate;
+    } else if (property === environment) {
+      const problem = environmentProblem(candidate);
+      if (problem) errors.push(problem);
+      else value[key] = candidate;
     } else if (property.type === "integer") {
       if (!Number.isInteger(candidate)) errors.push(`${key} must be an integer.`);
       else if (property.minimum !== undefined && candidate < property.minimum) errors.push(`${key} is below the minimum.`);

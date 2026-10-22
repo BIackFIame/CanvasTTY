@@ -71,7 +71,7 @@ import { auditRepositories, neutralizeRepositories, type GitRiskRepository } fro
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
-import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
+import type { DelegatedEnvironmentKind, EnvironmentRegistry } from "./EnvironmentRegistry.ts";
 import {
   persistedTerminalSession,
   type PersistedEnvironmentRef,
@@ -133,6 +133,11 @@ interface ManagedSession {
    * and owning plugin carried into the saved record.
    */
   extras: PersistedSessionExtras;
+  /**
+   * The environment options this card was created with, kept in memory after its plugin prepared it, so a cap per
+   * server can count it. A restored card has none and counts against every server of its kind.
+   */
+  environmentOptions?: Record<string, boolean | string>;
   /** Bumped per launch attempt, so a late plugin answer never starts a superseded launch. */
   launchToken: number;
   /** Removes the current run's plugin files; called when the process exits. */
@@ -161,7 +166,7 @@ interface ManagedSession {
 
 type EnvironmentService = Pick<EnvironmentRegistry,
   "available" | "unavailableReason" | "normalizeChoice" | "prepare" | "resume" | "wrap" | "release" | "describe">
-  & Partial<Pick<EnvironmentRegistry, "keeps">>;
+  & Partial<Pick<EnvironmentRegistry, "keeps" | "delegatedKinds" | "delegatedChoice" | "refreshChoices">>;
 type LaunchOutcome = "launched" | "failed" | "superseded";
 /** Why a launch did not start: the CLI is missing, or a launch rule refused it. */
 interface LaunchFailure { diagnostic: string; exitCode?: number }
@@ -564,6 +569,48 @@ export class TerminalManager {
     return [...this.sessions.values()].map(publicSessionMetadata);
   }
 
+  /** Environment kinds an orchestrator may choose for subagents now, with how many subagents run in each. */
+  delegatedEnvironments(): Array<DelegatedEnvironmentKind & { running: number; serversRunning?: Record<string, number> }> {
+    let kinds: DelegatedEnvironmentKind[] = [];
+    try { kinds = this.environments?.delegatedKinds?.() ?? []; } catch { kinds = []; }
+    return kinds.map((kind) => ({
+      ...kind,
+      running: this.subagentsInEnvironment(kind.pluginId, kind.kind),
+      ...(kind.capBy && kind.servers ? { serversRunning: Object.fromEntries(kind.servers.map((server) =>
+        [server, this.subagentsInEnvironment(kind.pluginId, kind.kind, { field: kind.capBy!, value: server })])) } : {})
+    }));
+  }
+
+  /** Asks the plugins for the servers of kinds capped per server (cached; bounded; never throws). */
+  async refreshDelegatedEnvironments(): Promise<void> {
+    try { await this.environments?.refreshChoices?.(); } catch { /* no servers then */ }
+  }
+
+  /** Checks an orchestrator's environment for a subagent (see EnvironmentRegistry.delegatedChoice). */
+  delegatedEnvironment(provider: ProviderId, candidate: unknown): ReturnType<EnvironmentRegistry["delegatedChoice"]> {
+    if (!this.environments?.delegatedChoice) return { ok: false, reason: "Plugin environments are not available." };
+    return this.environments.delegatedChoice(provider, candidate);
+  }
+
+  /**
+   * Subagents that run in this environment kind now, all orchestrations together: placed there or still being
+   * prepared, and neither exited nor refused.
+   */
+  subagentsInEnvironment(pluginId: string, kind: string, server?: { field: string; value: string }): number {
+    let count = 0;
+    for (const session of this.sessions.values()) {
+      const { metadata, extras } = session;
+      if (metadata.role !== "subagent" || metadata.exitCode !== null || metadata.status === "failed") continue;
+      const environment = extras.environment ?? extras.environmentChoice;
+      if (environment?.pluginId !== pluginId || environment.kind !== kind) continue;
+      // A card whose options are not known (restored) counts against every server: the cap never under-counts.
+      const options = session.environmentOptions ?? extras.environmentChoice?.options;
+      if (server && options && options[server.field] !== server.value) continue;
+      count += 1;
+    }
+    return count;
+  }
+
   /** One session's metadata by id, or null. Unlike list(), a lookup never copies any scrollback. */
   getMetadata(id: string): SessionMetadata | null {
     const session = this.sessions.get(id);
@@ -748,7 +795,8 @@ export class TerminalManager {
       restoringLaunch: false,
       environmentReady: false,
       launchEpoch: 0,
-      launchWaiters: new Set()
+      launchWaiters: new Set(),
+      ...(environmentChoice?.options ? { environmentOptions: { ...environmentChoice.options } } : {})
     };
     this.sessions.set(id, session);
     this.adoptIsolationStart(id, session);

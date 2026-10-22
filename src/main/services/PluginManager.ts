@@ -30,6 +30,7 @@ import type {
   PluginModuleAsset,
   PluginPermission,
   PluginEnvironmentKind,
+  PluginEnvironmentSubagents,
   PluginLaunchField,
   PluginService,
   PluginServiceDecide,
@@ -1903,7 +1904,7 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   const kinds = new Set<string>();
   return value.map((candidate): PluginEnvironmentKind => {
     if (!isRecord(candidate)) throw new Error("Every plugin environment must be an object.");
-    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps"], "Plugin environment");
+    assertOnlyKeys(candidate, ["kind", "label", "description", "appliesTo", "fields", "keeps", "subagents"], "Plugin environment");
     const kind = requiredString(candidate.kind, "environment kind", 32);
     // Same shape the session store accepts for a saved environment's kind.
     if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(kind) || kinds.has(kind)) {
@@ -1933,11 +1934,50 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
         keeps[key] = value;
       }
     }
+    const subagents = candidate.subagents === undefined ? undefined : validateEnvironmentSubagents(candidate.subagents, kind, fields ?? []);
     return {
       kind, label, ...(description ? { description } : {}), ...(appliesTo ? { appliesTo } : {}),
-      ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {})
+      ...(fields?.length ? { fields } : {}), ...(keeps ? { keeps } : {}), ...(subagents ? { subagents } : {})
     };
   });
+}
+
+const MAX_ENVIRONMENT_SUBAGENTS = 16;
+const MAX_ENVIRONMENT_SUBAGENTS_TOTAL = 64;
+
+/** `subagents`: an orchestrator may choose this kind for its subagents, at most maxParallel at once, setting only `fields`. */
+function validateEnvironmentSubagents(value: unknown, kind: string, fields: PluginLaunchField[]): PluginEnvironmentSubagents {
+  if (!isRecord(value)) throw new Error(`Plugin environment ${kind} subagents must be an object.`);
+  assertOnlyKeys(value, ["maxParallel", "fields", "capBy", "maxParallelTotal"], `Plugin environment ${kind} subagents`);
+  const result: PluginEnvironmentSubagents = {};
+  if (value.maxParallel !== undefined) {
+    if (!Number.isInteger(value.maxParallel) || (value.maxParallel as number) < 1 || (value.maxParallel as number) > MAX_ENVIRONMENT_SUBAGENTS) {
+      throw new Error(`Plugin environment ${kind} subagents.maxParallel must be an integer from 1 to ${MAX_ENVIRONMENT_SUBAGENTS}.`);
+    }
+    result.maxParallel = value.maxParallel as number;
+  }
+  if (value.fields !== undefined) {
+    const known = new Set(fields.map((field) => field.key));
+    if (!Array.isArray(value.fields) || value.fields.some((key) => typeof key !== "string" || !known.has(key))
+      || new Set(value.fields).size !== value.fields.length) {
+      throw new Error(`Plugin environment ${kind} subagents.fields must list keys of its own fields, each once.`);
+    }
+    if (value.fields.length > 0) result.fields = [...value.fields as string[]];
+  }
+  if (value.capBy !== undefined) {
+    if (typeof value.capBy !== "string" || !result.fields?.includes(value.capBy)) {
+      throw new Error(`Plugin environment ${kind} subagents.capBy must be one of its subagents.fields.`);
+    }
+    result.capBy = value.capBy;
+  }
+  if (value.maxParallelTotal !== undefined) {
+    if (result.capBy === undefined) throw new Error(`Plugin environment ${kind} subagents.maxParallelTotal needs capBy.`);
+    if (!Number.isInteger(value.maxParallelTotal) || (value.maxParallelTotal as number) < 1 || (value.maxParallelTotal as number) > MAX_ENVIRONMENT_SUBAGENTS_TOTAL) {
+      throw new Error(`Plugin environment ${kind} subagents.maxParallelTotal must be an integer from 1 to ${MAX_ENVIRONMENT_SUBAGENTS_TOTAL}.`);
+    }
+    result.maxParallelTotal = value.maxParallelTotal as number;
+  }
+  return result;
 }
 
 function validateLaunchFields(value: unknown): PluginLaunchField[] {

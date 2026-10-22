@@ -314,6 +314,14 @@ export interface CanvasTTYEnvironmentKind {
   fields?: CanvasTTYLaunchField[];
   /** What of CanvasTTY's protection reaches the agent there; undeclared means no (see docs/plugins.md). */
   keeps?: { launch?: boolean; isolated?: boolean; confines?: boolean };
+  /**
+   * An orchestrator may choose this kind for its subagents (spawn_agent `environment`); without it only the person
+   * chooses it. `maxParallel` (1 to 16, 1 when omitted): subagents in this kind at once, all orchestrations together.
+   * `fields`: keys of `fields` an orchestrator may set; every other field keeps its declared default.
+   * `capBy`: one of those keys whose value names a server; `maxParallel` then counts per server and `maxParallelTotal`
+   * (1 to 64) over all of them. A text field's servers come from `canvastty.environment.choices`.
+   */
+  subagents?: { maxParallel?: number; fields?: string[]; capBy?: string; maxParallelTotal?: number };
 }
 
 /** Opaque to CanvasTTY: saved with the card (at most 4 KB of JSON) and handed back unchanged. */
@@ -378,6 +386,14 @@ export interface CanvasTTYEnvironmentReleaseParams {
 export interface CanvasTTYEnvironmentDescribeResult {
   label: string;
   detail?: string;
+}
+
+/**
+ * `canvastty.environment.choices` (2 s, cached 30 s): for a kind with `subagents.capBy` on a text field, the person's
+ * servers by the labels they gave them (at most 64). Never an address, user or key.
+ */
+export interface CanvasTTYEnvironmentChoicesResult {
+  choices: string[];
 }
 
 export interface CanvasTTYServiceLaunch {
@@ -471,6 +487,7 @@ export type CanvasTTYServiceHostRequest =
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.resume"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.release"; params: CanvasTTYEnvironmentReleaseParams }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.describe"; params: { sessionId: string; kind: string; ref: CanvasTTYEnvironmentRef } }
+  | { jsonrpc: "2.0"; id: number; method: "canvastty.environment.choices"; params: { kind: string; field: string } }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.decide"; params: CanvasTTYDecisionRequest }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.tools.call"; params: CanvasTTYToolCall }
   | { jsonrpc: "2.0"; id: number; method: "canvastty.cards.invoke"; params: CanvasTTYCardActionInvocation };

@@ -685,7 +685,9 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     checkModel: (provider, model) => providerModels.unknownModel(provider, model, { fresh: true }),
     limits: () => limitsService?.peek() ?? null,
     launchContributors: () => pluginManager?.launchContributors() ?? [],
-    containment: () => terminalManager?.containment() === true
+    containment: () => terminalManager?.containment() === true,
+    environments: () => terminalManager?.delegatedEnvironments() ?? [],
+    refreshEnvironments: async () => { await terminalManager?.refreshDelegatedEnvironments(); }
   };
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);

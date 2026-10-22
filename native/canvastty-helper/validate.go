@@ -233,6 +233,10 @@ func validateOrchestrationArguments(tool string, args any) (string, bool) {
 			} else if text, err := canonicalStringify(candidate); err == nil && len(text) > catalogInt("orchestration", "maxLaunchOptionsBytes") {
 				errors = append(errors, key+" is too large.")
 			}
+		case key == "environment":
+			if !validEnvironment(candidate, property) {
+				errors = append(errors, "environment must be { pluginId, kind, options? } with options of text or true/false values.")
+			}
 		case field(property, "type") == "integer":
 			if !isInteger(candidate) {
 				errors = append(errors, key+" must be an integer.")
@@ -252,6 +256,58 @@ func validateOrchestrationArguments(tool string, args any) (string, bool) {
 		return strings.Join(errors, " "), false
 	}
 	return "", true
+}
+
+// validEnvironment mirrors environmentProblem in orchestration-catalog.mjs: the shape only; the host checks what it names.
+func validEnvironment(candidate any, property any) bool {
+	environment, ok := candidate.(*jsObject)
+	if !ok {
+		return false
+	}
+	properties, _ := field(property, "properties").(*jsObject)
+	for _, key := range environment.keys {
+		if _, ok := properties.get(key); !ok {
+			return false
+		}
+	}
+	for _, key := range []string{"pluginId", "kind"} {
+		value, _ := environment.get(key)
+		text, ok := value.(string)
+		if !ok {
+			return false
+		}
+		schema, _ := properties.get(key)
+		if minimum, ok := field(schema, "minLength").(float64); ok && float64(jsLength(text)) < minimum {
+			return false
+		}
+		if maximum, ok := field(schema, "maxLength").(float64); ok && float64(jsLength(text)) > maximum {
+			return false
+		}
+	}
+	value, present := environment.get("options")
+	if !present {
+		return true
+	}
+	options, ok := value.(*jsObject)
+	if !ok {
+		return false
+	}
+	schema, _ := properties.get("options")
+	if maximum, ok := field(schema, "maxProperties").(float64); ok && float64(len(options.keys)) > maximum {
+		return false
+	}
+	for _, name := range options.keys {
+		switch option := options.values[name].(type) {
+		case bool:
+		case string:
+			if jsLength(option) > 200 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validLaunchOptions(candidate any, property any) bool {

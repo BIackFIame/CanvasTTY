@@ -251,6 +251,17 @@
             "isolated": { "description": "The agent does not run on this computer's files (container, remote host); this computer's isolation layer does not apply.", "type": "boolean" },
             "confines": { "description": "The environment itself confines the agent to the project.", "type": "boolean" }
           }
+        },
+        "subagents": {
+          "description": "An orchestrator may choose this kind for its subagents (spawn_agent environment). Without it only the person chooses it, in the launcher.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "maxParallel": { "description": "Subagents that may run in this kind at once, all orchestrations together; 1 when omitted.", "type": "integer", "minimum": 1, "maximum": 16 },
+            "fields": { "description": "Keys of this kind's fields an orchestrator may set; every other field keeps its declared default.", "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+            "capBy": { "description": "One of fields whose value names a server: maxParallel then counts per server. A text field's servers are the labels the service answers to canvastty.environment.choices.", "type": "string" },
+            "maxParallelTotal": { "description": "With capBy: subagents at once in the whole kind, all servers together.", "type": "integer", "minimum": 1, "maximum": 64 }
+          }
         }
       }
     },

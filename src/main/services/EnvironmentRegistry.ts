@@ -3,6 +3,7 @@ import { delimiter, isAbsolute, join } from "node:path";
 import type {
   PluginEnvironmentKeeps,
   PluginEnvironmentKind,
+  PluginLaunchField,
   PluginLaunchValues,
   ProviderId,
   SessionEnvironmentChoice
@@ -20,7 +21,34 @@ export interface EnvironmentProvider {
   secrets: boolean;
 }
 
-export type EnvironmentStep = "prepare" | "wrap" | "resume" | "release" | "describe";
+/** One environment kind an orchestrator may choose for subagents, as list_providers shows it: ids and names only. */
+export interface DelegatedEnvironmentKind {
+  pluginId: string;
+  plugin: string;
+  kind: string;
+  name: string;
+  appliesTo?: ProviderId[];
+  /** The fields an orchestrator may set (static choices only; the plugin checks the rest when it prepares). */
+  options: Array<{ key: string; kind: PluginLaunchField["kind"]; choices?: string[] }>;
+  /** Subagents at once: per value of `capBy` (each server) when it is set, else in the whole kind. */
+  maxParallel: number;
+  /** The settable field whose value names a server; each value has its own cap. */
+  capBy?: string;
+  /** With capBy: subagents at once in the whole kind, all servers together. */
+  maxParallelTotal?: number;
+  /**
+   * With capBy: the values an orchestrator may pass for it, the person's servers by the labels they gave them (static
+   * select values, or what the plugin answered to `canvastty.environment.choices`); null until the plugin answered.
+   */
+  servers?: string[] | null;
+  /** The launch reaches the agent unchanged (CanvasTTY's hooks and every profile work there); otherwise normal only. */
+  keepsLaunch: boolean;
+}
+
+/** Subagents in one kind at once when the plugin did not say. */
+export const DEFAULT_ENVIRONMENT_SUBAGENTS = 1;
+
+export type EnvironmentStep = "prepare" | "wrap" | "resume" | "release" | "describe" | "choices";
 export type EnvironmentMethod = `canvastty.environment.${EnvironmentStep}`;
 
 export interface EnvironmentRegistryDependencies {
@@ -38,8 +66,13 @@ const ENVIRONMENT_TIMEOUTS: Record<EnvironmentStep, number> = {
   wrap: 5_000,
   resume: 10_000,
   release: 10_000,
-  describe: 3_000
+  describe: 3_000,
+  choices: 2_000
 };
+
+/** How long the server labels a plugin answered stay valid, and how many it may answer. */
+const CHOICES_TTL_MS = 30_000;
+const MAX_CHOICES = 64;
 
 /**
  * How long a prepare or resume that ran out of time may still answer: the plugin call itself keeps this budget (the
@@ -77,6 +110,9 @@ export class EnvironmentRegistry {
   /** The latest resume asked per session: a late answer to an earlier one never stops what a newer one started. */
   private readonly resumes = new Map<string, number>();
   private resumeSerial = 0;
+  /** Server labels per `<pluginId>\u0000<kind>` (canvastty.environment.choices), with when they were read. */
+  private readonly choiceCache = new Map<string, { at: number; values: string[] | null }>();
+  private readonly choiceReads = new Map<string, Promise<void>>();
 
   constructor(dependencies: EnvironmentRegistryDependencies) {
     this.dependencies = dependencies;
@@ -129,6 +165,108 @@ export class EnvironmentRegistry {
       options[field.key] = value as boolean | string;
     }
     return { pluginId: owner.pluginId, kind: kind.kind, ...(fields.length ? { options } : {}) };
+  }
+
+  /**
+   * The kinds an orchestrator may choose for its subagents now: offered by an enabled plugin whose native code the
+   * person trusted (the launcher's list), and declared safe for subagents by that plugin. No plugin is asked anything.
+   */
+  delegatedKinds(): DelegatedEnvironmentKind[] {
+    const kinds: DelegatedEnvironmentKind[] = [];
+    const seen = new Set<string>();
+    for (const provider of this.dependencies.providers()) {
+      for (const kind of provider.kinds) {
+        const key = `${provider.pluginId}\u0000${kind.kind}`;
+        if (!kind.subagents || seen.has(key)) continue;
+        seen.add(key);
+        kinds.push(this.withServers(delegatedKind(provider, kind), kind));
+      }
+    }
+    return kinds;
+  }
+
+  /**
+   * Checks an orchestrator's environment for a subagent: the kind must be available now and declared safe for
+   * subagents, apply to the provider, and set only the fields its plugin let an orchestrator set (the others keep
+   * their declared defaults, never the person's last launcher values). Never asks the plugin.
+   */
+  delegatedChoice(provider: ProviderId, candidate: unknown): { ok: true; choice: SessionEnvironmentChoice; kind: DelegatedEnvironmentKind } | { ok: false; reason: string } {
+    if (!isRecord(candidate) || typeof candidate.pluginId !== "string" || typeof candidate.kind !== "string") {
+      return { ok: false, reason: "environment must be { pluginId, kind, options? } from list_providers." };
+    }
+    const found = this.lookup(candidate.pluginId, candidate.kind);
+    if (!found) {
+      return { ok: false, reason: `Environment ${candidate.kind.slice(0, 32)} from plugin ${candidate.pluginId.slice(0, 80)} is not available: its plugin is disabled, removed or not trusted, or offers no such kind. Call list_providers for the environments subagents may use.` };
+    }
+    const { provider: owner, kind } = found;
+    if (!kind.subagents) {
+      return { ok: false, reason: `${owner.pluginName} has not declared ${kind.label} safe for an orchestrator to choose; only the person starts agents there, in the launcher.` };
+    }
+    if (kind.appliesTo && !kind.appliesTo.includes(provider)) return { ok: false, reason: `${kind.label} does not apply to ${provider}.` };
+    const raw = candidate.options ?? {};
+    if (!isRecord(raw)) return { ok: false, reason: `${kind.label} options are invalid.` };
+    const allowed = new Set(kind.subagents.fields ?? []);
+    const refused = Object.keys(raw).find((key) => !allowed.has(key));
+    if (refused) {
+      return { ok: false, reason: `${kind.label}: an orchestrator may not set ${refused.slice(0, 40)}; only the person sets it, in the launcher. Options it may set: ${[...allowed].join(", ") || "none"}.` };
+    }
+    try {
+      const choice = this.normalizeChoice(provider, { pluginId: owner.pluginId, kind: kind.kind, options: raw });
+      if (!choice) return { ok: false, reason: "environment is invalid." };
+      const delegated = this.withServers(delegatedKind(owner, kind), kind);
+      if (delegated.capBy) {
+        const value = choice.options?.[delegated.capBy];
+        const field = kind.fields?.find((candidate) => candidate.key === delegated.capBy);
+        const name = field?.label ?? delegated.capBy;
+        if (typeof value !== "string" || value.length === 0) {
+          return { ok: false, reason: `${kind.label}: pass options.${delegated.capBy} (${name}), one of the servers list_providers lists for it.` };
+        }
+        if (!delegated.servers) {
+          return { ok: false, reason: `${owner.pluginName} did not list the servers for ${kind.label}, so none can be chosen now; call list_providers again later.` };
+        }
+        if (!delegated.servers.includes(value)) {
+          return { ok: false, reason: `${kind.label}: ${value.slice(0, 40)} is not one of the servers the person set up for subagents (${delegated.servers.join(", ") || "none"}). Call list_providers for them.` };
+        }
+      }
+      return { ok: true, choice, kind: delegated };
+    } catch (error) {
+      return { ok: false, reason: errorText(error) };
+    }
+  }
+
+  /**
+   * Asks each plugin whose subagent kind is capped per server for the person's servers (labels only), at most every
+   * 30 s per kind and 2 s per call. A failure or invalid answer leaves no servers, so none can be chosen (fail closed).
+   */
+  async refreshChoices(): Promise<void> {
+    const reads: Array<Promise<void>> = [];
+    for (const provider of this.dependencies.providers()) {
+      for (const kind of provider.kinds) {
+        const field = serverField(kind);
+        if (!field || field.kind === "select") continue;
+        const key = `${provider.pluginId}\u0000${kind.kind}`;
+        const cached = this.choiceCache.get(key);
+        if (cached && Date.now() - cached.at < CHOICES_TTL_MS) continue;
+        let read = this.choiceReads.get(key);
+        if (!read) {
+          read = this.ask(provider, "choices", { kind: kind.kind, field: field.key }).then((answer) => {
+            this.choiceCache.set(key, { at: Date.now(), values: answer.ok ? serverLabels(answer.value, field) : null });
+          }).finally(() => this.choiceReads.delete(key));
+          this.choiceReads.set(key, read);
+        }
+        reads.push(read);
+      }
+    }
+    await Promise.all(reads);
+  }
+
+  private withServers(delegated: DelegatedEnvironmentKind, kind: PluginEnvironmentKind): DelegatedEnvironmentKind {
+    const field = serverField(kind);
+    if (!field) return delegated;
+    const servers = field.kind === "select"
+      ? (field.options ?? []).map((option) => option.value)
+      : this.choiceCache.get(`${delegated.pluginId}\u0000${kind.kind}`)?.values ?? null;
+    return { ...delegated, servers: servers ? [...servers] : null };
   }
 
   /** `canvastty.environment.prepare`: creates the place (a worktree, a container) and returns its ref. */
@@ -353,6 +491,50 @@ export class EnvironmentRegistry {
       if (timer) clearTimeout(timer);
     }
   }
+}
+
+function delegatedKind(provider: EnvironmentProvider, kind: PluginEnvironmentKind): DelegatedEnvironmentKind {
+  const allowed = new Set(kind.subagents?.fields ?? []);
+  return {
+    pluginId: provider.pluginId,
+    plugin: provider.pluginName,
+    kind: kind.kind,
+    name: kind.label,
+    ...(kind.appliesTo ? { appliesTo: [...kind.appliesTo] } : {}),
+    options: (kind.fields ?? []).filter((field) => allowed.has(field.key)).map((field) => ({
+      key: field.key,
+      kind: field.kind,
+      ...(field.kind === "select" && field.options?.length && field.optionsFrom !== "service"
+        ? { choices: field.options.map((option) => option.value) }
+        : {})
+    })),
+    maxParallel: kind.subagents?.maxParallel ?? DEFAULT_ENVIRONMENT_SUBAGENTS,
+    ...(kind.subagents?.capBy ? { capBy: kind.subagents.capBy } : {}),
+    ...(kind.subagents?.maxParallelTotal !== undefined ? { maxParallelTotal: kind.subagents.maxParallelTotal } : {}),
+    keepsLaunch: kind.keeps?.launch === true
+  };
+}
+
+/** The field that names a server in a kind capped per server (subagents.capBy). */
+function serverField(kind: PluginEnvironmentKind): PluginLaunchField | null {
+  const key = kind.subagents?.capBy;
+  return key ? kind.fields?.find((field) => field.key === key) ?? null : null;
+}
+
+/**
+ * A plugin's `{ choices: string[] }` as server labels: plain text that fits the field, each once, at most 64. Anything
+ * else is no answer. The labels are the person's names for servers; the plugin answers no address, user or key.
+ */
+function serverLabels(value: unknown, field: PluginLaunchField): string[] | null {
+  if (!isRecord(value) || !Array.isArray(value.choices) || Object.keys(value).some((key) => key !== "choices")) return null;
+  const limit = field.maxLength ?? 200;
+  const labels: string[] = [];
+  for (const entry of value.choices.slice(0, MAX_CHOICES)) {
+    if (typeof entry !== "string" || entry.length === 0 || entry.length > limit || /[\u0000-\u001f\u007f]/.test(entry)) continue;
+    if (entry.trim() !== entry || labels.includes(entry)) continue;
+    labels.push(entry);
+  }
+  return labels;
 }
 
 function refParams(environment: PersistedEnvironmentRef, sessionId: string): Record<string, unknown> {
