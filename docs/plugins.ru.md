@@ -325,6 +325,7 @@ interface PluginSessionEvent {
   session: {
     id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
     title: string; status: string; exitCode: number | null; startedAt: number;
+    model?: string; effort?: string; // что запуск попросил у CLI, если назвал
     cwd: string;               // папка, которую выбрал человек
     workingDirectory: string;  // где окно работает на самом деле (среда worktree его переносит)
     environment?: { pluginId: string; kind: string; label: string; ref: unknown };
@@ -395,7 +396,7 @@ host.onStorageChange(listener) сообщает всем открытым пов
 |:--|:--|:--|
 | `storage` | `storage.get`, `storage.set` | Изолированное JSON-хранилище, 64 КБ на плагин |
 | `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; `secrets.get` сервиса | Строковые секреты, зашифрованные через Electron `safeStorage`; без защищённого хранилища ОС вызов завершается ошибкой. Доверенный сервис читает только секреты своего плагина |
-| `sessions:read` | `sessions.list` | Только ID, provider, title, status, startedAt и exitCode |
+| `sessions:read` | `sessions.list`, `sessions.focus` | Только ID, provider, title, status, startedAt и exitCode; по действию человека показывает карточку из списка |
 | `launch:contribute` | Блок `launch` сервиса и `canvastty.launch.prepare` | Может добавлять переменные окружения, аргументы и файлы агентам, запущенным с его опцией; с `policy` может отказать любому запуску агента |
 | `environment:provide` | `environments` сервиса и `canvastty.environment.*` | Может создавать место для окон, запущенных в его среде, и менять команду, аргументы, переменные и папку, с которыми они там работают |
 | `decision:provide` | `decide` сервиса и `canvastty.decide` | Видит команды и записи файлов агентов (с их вводом) до выполнения и может запрещать их или спрашивать человека; для разрешения нужно второе подтверждение |
@@ -457,7 +458,7 @@ if (library) {
 }
 ```
 
-Поддержаны `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*` и `playlists.*`. `canvas.open` открывает или фокусирует `canvas-app` того же плагина и по возможности ставит его рядом с вызывающей карточкой. `browser.open` завершается только после создания или фокусировки Browser-card workspace и одной навигации; принимаются лишь нормализованные HTTP(S)-URL, а не текст для поиска, `file:`, `data:`, `javascript:`, `about:` или URL с учётными данными. `window.open` может открыть только contribution типа `window` из того же manifest.
+Поддержаны `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `sessions.focus`, `media.*` и `playlists.*`. `canvas.open` открывает или фокусирует `canvas-app` того же плагина и по возможности ставит его рядом с вызывающей карточкой. `browser.open` завершается только после создания или фокусировки Browser-card workspace и одной навигации; принимаются лишь нормализованные HTTP(S)-URL, а не текст для поиска, `file:`, `data:`, `javascript:`, `about:` или URL с учётными данными. `window.open` может открыть только contribution типа `window` из того же manifest. `sessions.focus` `{ sessionId }` (или `host.canvas.focusSession(id)`; `sessions:read`) переводит камеру к открытой карточке и выделяет её, как строка на HOME. Работает из canvas-app и HOME-виджетов и только пока человек находится во фрейме плагина (ответ на его щелчок или клавишу); ничего не вводит, не запускает и не останавливает.
 
 Используйте `storage` для несекретных JSON-настроек, а `secrets` — только для OAuth-токенов, API-ключей и других учётных данных. Поддерживается до 32 строковых ключей, 16 КБ на значение и 64 КБ на плагин. Секреты удаляются при uninstall и никогда не сохраняются в plaintext; если ОС не предоставляет защищённое шифрование, вызов явно завершается ошибкой.
 

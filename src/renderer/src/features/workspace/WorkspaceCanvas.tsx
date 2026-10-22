@@ -1250,6 +1250,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 onBoundsChange={onPluginCanvasBoundsChange}
                 onDispose={onDisposePluginCanvas}
                 onOpenLauncher={(provider) => launchAt(provider)}
+                onFocusSession={focusSessionFromHome}
                 onError={onPluginError}
                 captureCanvasWheelOverWidgets={routeWidgetWheelToCanvas || widgetFocus.id !== pluginCanvasWidgetId(instance.id)}
                 onWidgetFocus={() => {

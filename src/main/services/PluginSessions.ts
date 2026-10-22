@@ -30,6 +30,9 @@ export interface PluginSessionSummary {
   /** The folder the card actually runs in (an environment such as a worktree may move it). */
   workingDirectory: string;
   startedAt: number;
+  /** The model and effort the launch asked the CLI for, when it named one (the CLI's own default otherwise). */
+  model?: string;
+  effort?: string;
   /** The plugin environment it runs in, with that plugin's saved ref. */
   environment?: { pluginId: string; kind: string; label: string; ref: unknown };
 }
@@ -152,6 +155,8 @@ export class PluginSessions {
       cwd: metadata.cwd,
       workingDirectory,
       startedAt: metadata.startedAt,
+      ...(metadata.model ? { model: metadata.model } : {}),
+      ...(metadata.effort ? { effort: metadata.effort } : {}),
       ...(environment ? {
         environment: { pluginId: environment.pluginId, kind: environment.kind, label: environment.label, ref: environment.ref }
       } : {})

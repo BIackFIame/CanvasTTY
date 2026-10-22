@@ -347,6 +347,7 @@ interface PluginSessionEvent {
   session: {
     id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
     title: string; status: string; exitCode: number | null; startedAt: number;
+    model?: string; effort?: string; // what the launch asked the CLI for, when it named one
     cwd: string;               // the folder the person chose
     workingDirectory: string;  // where it actually runs (a worktree environment moves it)
     environment?: { pluginId: string; kind: string; label: string; ref: unknown };
@@ -417,7 +418,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 |:--|:--|:--|
 | `storage` | `storage.get`, `storage.set` | Isolated JSON storage, 64 KB per plugin |
 | `secrets` | `secrets.get`, `secrets.set`, `secrets.delete`; a service's `secrets.get` | String secrets encrypted with Electron `safeStorage`; fails closed when protected OS storage is unavailable. A trusted service reads its own plugin's secrets only |
-| `sessions:read` | `sessions.list` | ID, provider, title, status, start time, exit code only |
+| `sessions:read` | `sessions.list`, `sessions.focus` | ID, provider, title, status, start time, exit code only; brings a listed card to the front on the person's action |
 | `launch:contribute` | A service's `launch` block and `canvastty.launch.prepare` | Can add environment variables, arguments and files to agents the person starts with its option; with `policy`, can refuse any agent launch |
 | `environment:provide` | A service's `environments` and `canvastty.environment.*` | Can create a place for cards the person starts in its environment and change the command, arguments, variables and folder they run with there |
 | `decision:provide` | A service's `decide` and `canvastty.decide` | Sees agents' commands and file writes (with their input) before they run and can block them or ask the person; allowing needs a second confirmation |
@@ -483,7 +484,7 @@ if (library) {
 }
 ```
 
-Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `media.*`, `playlists.*`, `hermesHud.*`, and `service.request` (see [Services](#services-apiversion-2)). `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
+Supported methods are `host.getContext`, `storage.*`, `secrets.*`, `sessions.list`, `limits.get`, `launcher.open`, `canvas.open`, `external.open`, `browser.open`, `window.open`, `sessions.focus`, `media.*`, `playlists.*`, `hermesHud.*`, and `service.request` (see [Services](#services-apiversion-2)). `canvas.open` opens or focuses a `canvas-app` contribution from the same plugin, placing it beside the requesting canvas card when possible. `browser.open` completes only after the workspace creates or focuses its Browser card and navigates it once; it accepts normalized HTTP(S) URLs only (not free-text searches, `file:`, `data:`, `javascript:`, `about:`, or credentialed URLs). `window.open` may target only a `window` contribution declared by the same plugin. `sessions.focus` `{ sessionId }` (also `host.canvas.focusSession(id)`; `sessions:read`) moves the camera to an open card and selects it, as a HOME row does. It works from canvas apps and HOME widgets, and only while the person is in the plugin's frame (it answers their click or key press); it never types into, starts or stops a card. `hermesHud.open` and `hermesHud.close` use a fixed Hermes control contract; plugins cannot choose an executable, arguments, or PID.
 
 Use `storage` for non-sensitive JSON preferences and `secrets` only for credentials such as OAuth tokens or API keys. Secrets are string-only, limited to 32 keys / 16 KB per value / 64 KB per plugin, removed on uninstall, and never fall back to plaintext storage. A secret call fails explicitly when the operating system cannot provide protected encryption.
 

@@ -13,6 +13,8 @@ export interface CanvasTTYPluginHost {
   request(method: "limits.get"): Promise<CanvasTTYPluginLimitsResult>;
   request(method: "launcher.open", params: { provider: "terminal" | "codex" | "claude" | "qwen" | "kimi" | "opencode" | "hermes" | "grok" | "omp" | "pi" }): Promise<null>;
   request(method: "canvas.open", params: { contributionId: string }): Promise<null>;
+  /** sessions:read; canvas apps and HOME widgets, only while the person is in the frame. */
+  request(method: "sessions.focus", params: { sessionId: string }): Promise<null>;
   request(method: "external.open", params: { url: string }): Promise<null>;
   request(method: "browser.open", params: { url: string }): Promise<null>;
   request(method: "window.open", params: { contributionId: string }): Promise<null>;
@@ -42,6 +44,8 @@ export interface CanvasTTYPluginHost {
   };
   canvas: {
     open(contributionId: string): Promise<void>;
+    /** `sessions.focus`: moves the camera to an open card (sessions:read; on the person's action only). */
+    focusSession(sessionId: string): Promise<null>;
   };
   media: {
     pickLibrary(): Promise<CanvasTTYPluginMediaLibrary | null>;
