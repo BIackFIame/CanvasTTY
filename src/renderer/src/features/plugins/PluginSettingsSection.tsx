@@ -24,6 +24,7 @@ import {
   unresolvedPageUrls
 } from "./pluginPagination";
 import { compareSemver } from "../../../../shared/hostVersion";
+import { contributionTitle, pluginName } from "../../../../shared/pluginLocalizedText.ts";
 import { UiIcon } from "../../components/UiIcon";
 
 /** Plugin description limit when displayed (longer text is truncated). */
@@ -533,7 +534,7 @@ export function PluginSettingsSection({
             icon={showcaseIcons[key]}
           />
           <span className="plugin-showcase-tile__title">
-            <strong>{manifest ? manifest.name : showcaseName(result.fullName)}</strong>
+            <strong>{manifest ? pluginName(manifest, locale) : showcaseName(result.fullName)}</strong>
             <small className="plugin-showcase-tile__author">{showcaseAuthor(result.fullName)}</small>
             {renderHostTag(result.minHostVersion)}
           </span>
@@ -558,7 +559,7 @@ export function PluginSettingsSection({
             icon={showcaseIcons[selectedShowcase]}
           />
           <span className="plugin-showcase-tile__title">
-            <strong>{manifest ? manifest.name : showcaseName(result.fullName)}</strong>
+            <strong>{manifest ? pluginName(manifest, locale) : showcaseName(result.fullName)}</strong>
             <small className="plugin-showcase-tile__author">{showcaseAuthor(result.fullName)}</small>
           </span>
         </header>
@@ -642,8 +643,8 @@ export function PluginSettingsSection({
         {preview && (
           <article className="plugin-preview">
             <header>
-              <PluginIcon pluginId={preview.manifest.id} icon={preview.manifest.icon} name={preview.manifest.name} />
-              <span><strong>{preview.manifest.name}</strong><small>v{preview.manifest.version}</small></span>
+              <PluginIcon pluginId={preview.manifest.id} icon={preview.manifest.icon} name={pluginName(preview.manifest, locale)} />
+              <span><strong>{pluginName(preview.manifest, locale)}</strong><small>v{preview.manifest.version}</small></span>
             </header>
             <p>{manifestDescription(preview.manifest, locale)}</p>
             <PermissionList permissions={preview.manifest.permissions} locale={locale} />
@@ -685,9 +686,9 @@ export function PluginSettingsSection({
               <article className={`installed-plugin ${plugin.enabled ? "" : "installed-plugin--disabled"} ${expanded ? "installed-plugin--expanded" : ""}`} key={plugin.manifest.id}>
                 <header className="installed-plugin__header" onClick={() => setExpandedInstalled((current) => ({ ...current, [plugin.manifest.id]: !current[plugin.manifest.id] }))}>
                   <span className="installed-plugin__title">
-                    <PluginIcon pluginId={plugin.manifest.id} icon={plugin.manifest.icon} name={plugin.manifest.name} remoteIcon={remoteIcon} />
+                    <PluginIcon pluginId={plugin.manifest.id} icon={plugin.manifest.icon} name={pluginName(plugin.manifest, locale)} remoteIcon={remoteIcon} />
                     <span className="installed-plugin__version">
-                      <strong>{plugin.manifest.name}</strong>
+                      <strong>{pluginName(plugin.manifest, locale)}</strong>
                       <small>
                         v{plugin.manifest.version}
                         {update && (
@@ -789,7 +790,7 @@ export function PluginSettingsSection({
                       {plugin.manifest.contributions.map((contribution) => (
                         <div className="plugin-contribution" key={contribution.id}>
                           <span>
-                            <strong>{contribution.title}</strong>
+                            <strong>{contributionTitle(contribution, locale)}</strong>
                             <small>{t(locale, contributionKindKey(contribution.kind))}</small>
                           </span>
                           {contribution.kind !== "home-widget" && (
