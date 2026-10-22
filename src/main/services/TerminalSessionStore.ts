@@ -54,6 +54,8 @@ export interface PersistedTerminalSession {
   environmentChoice?: SessionEnvironmentChoice;
   /** The plugin that started the card (EP-4 `sessions.create`); it keeps control after a restore. */
   ownerPluginId?: string;
+  /** A subagent: plugins chosen for or starting one of its ancestors; their `own-trees` launch policies police it. */
+  treePlugins?: string[];
   /** The model and reasoning effort its launches ask the CLI for (launchModel.ts). */
   model?: string;
   effort?: ReasoningEffort;
@@ -218,7 +220,7 @@ function normalizeStoredThreadId(provider: ProviderId, candidate: unknown): stri
 }
 
 /** What core keeps beside the live metadata: nothing here is scrollback, prompts or secrets. */
-export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "gitAuditSince"> & {
+export type PersistedSessionExtras = Pick<PersistedTerminalSession, "options" | "environment" | "environmentChoice" | "ownerPluginId" | "treePlugins" | "gitAuditSince"> & {
   /** Overrides the derived state while a card is held stopped (its environment is unavailable). */
   heldState?: PersistedLastState;
 };
@@ -250,6 +252,7 @@ export function persistedTerminalSession(
     ...(extras.environment ? { environment: structuredClone(extras.environment) } : {}),
     ...(extras.environmentChoice && !extras.environment ? { environmentChoice: structuredClone(extras.environmentChoice) } : {}),
     ...(extras.ownerPluginId ? { ownerPluginId: extras.ownerPluginId } : {}),
+    ...(extras.treePlugins?.length ? { treePlugins: [...extras.treePlugins] } : {}),
     ...(extras.gitAuditSince !== undefined ? { gitAuditSince: extras.gitAuditSince } : {}),
     ...(metadata.model !== undefined ? { model: metadata.model } : {}),
     ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
@@ -308,6 +311,10 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
     // Likewise a launch whose environment was chosen but not prepared yet.
     const environmentChoice = environment ? undefined : normalizeEnvironmentChoice(session.environmentChoice);
     if (!environment && session.environmentChoice !== undefined && !environmentChoice) continue;
+    // A tree's owners decide which scoped launch policies police the card: an unreadable list drops the card rather
+    // than letting it restore past them.
+    const treePlugins = normalizeTreePlugins(session.treePlugins);
+    if (session.treePlugins !== undefined && treePlugins === null) continue;
     sessions.push({
       id: session.id,
       provider: session.provider as ProviderId,
@@ -330,6 +337,7 @@ export function normalizePersistedTerminalSessions(candidate: unknown): Persiste
       ...(environment ? { environment } : {}),
       ...(environmentChoice ? { environmentChoice } : {}),
       ...(isPluginId(session.ownerPluginId) ? { ownerPluginId: session.ownerPluginId } : {}),
+      ...(treePlugins ? { treePlugins } : {}),
       ...(typeof session.gitAuditSince === "number" && Number.isFinite(session.gitAuditSince) && session.gitAuditSince > 0
         ? { gitAuditSince: session.gitAuditSince } : {}),
       // A model or effort this CLI would not take is dropped: the card restores on the CLI's default.
@@ -376,6 +384,19 @@ function normalizeEnvironmentChoice(value: unknown): SessionEnvironmentChoice | 
     kind: value.kind,
     ...(value.options !== undefined ? { options: structuredClone(value.options) as Record<string, boolean | string> } : {})
   };
+}
+
+/**
+ * At most this many plugins own one tree. Far above what a real tree reaches (each card chooses at most 16 plugins and
+ * only installed, trusted ones), and the host refuses a subagent beyond it instead of dropping an owner.
+ */
+export const MAX_TREE_PLUGINS = 64;
+
+/** A saved owner list is used whole or not at all: never cut to fit. */
+function normalizeTreePlugins(value: unknown): string[] | null | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > MAX_TREE_PLUGINS || !value.every(isPluginId)) return null;
+  return value.length > 0 ? [...new Set(value as string[])].sort() : undefined;
 }
 
 /** Same shape PluginManager accepts for plugin ids. */

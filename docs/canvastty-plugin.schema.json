@@ -225,7 +225,13 @@
           "items": { "enum": ["codex", "claude", "qwen", "kimi", "opencode", "hermes", "grok", "omp", "pi", "cursor", "minimax", "devin", "antigravity"] }
         },
         "fields": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/launchField" } },
-        "policy": { "description": "Also ask before every launch of these agents where the person did not choose the plugin; that answer may only refuse, and no answer refuses too.", "type": "boolean" },
+        "policy": {
+          "description": "Also ask before launches of these agents where the person did not choose the plugin; that answer may only refuse, and no answer refuses too. true: every such launch. {\"scope\": \"own-trees\"}: only subagents whose ancestors include a card this plugin was chosen for or started.",
+          "oneOf": [
+            { "type": "boolean" },
+            { "type": "object", "additionalProperties": false, "required": ["scope"], "properties": { "scope": { "const": "own-trees" } } }
+          ]
+        },
         "delegable": { "description": "These options are safe for an orchestrator to choose for its subagents (spawn_agent launchOptions). Without it only the person chooses them in the launcher.", "type": "boolean" }
       }
     },

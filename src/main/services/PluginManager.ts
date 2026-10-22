@@ -1777,7 +1777,16 @@ const MAX_LAUNCH_TEXT = 200;
 function validateServiceLaunch(value: unknown): PluginServiceLaunch {
   if (!isRecord(value)) throw new Error("Plugin service launch must be an object.");
   assertOnlyKeys(value, ["appliesTo", "fields", "policy", "delegable"], "Plugin service launch");
-  if (value.policy !== undefined && typeof value.policy !== "boolean") throw new Error("Plugin launch policy must be true or false.");
+  let policy: PluginServiceLaunch["policy"];
+  if (isRecord(value.policy)) {
+    assertOnlyKeys(value.policy, ["scope"], "Plugin launch policy");
+    if (value.policy.scope !== "own-trees") throw new Error('Plugin launch policy scope must be "own-trees".');
+    policy = { scope: "own-trees" };
+  } else if (value.policy !== undefined && typeof value.policy !== "boolean") {
+    throw new Error('Plugin launch policy must be true or false, or { "scope": "own-trees" }.');
+  } else if (value.policy === true) {
+    policy = true;
+  }
   if (value.delegable !== undefined && typeof value.delegable !== "boolean") throw new Error("Plugin launch delegable must be true or false.");
   let appliesTo: AgentProviderId[] | undefined;
   if (value.appliesTo !== undefined) {
@@ -1787,7 +1796,7 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
-  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields, true), ...(value.policy === true ? { policy: true } : {}),
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields, true), ...(policy ? { policy } : {}),
     ...(value.delegable === true ? { delegable: true } : {}) };
 }
 

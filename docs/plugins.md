@@ -238,6 +238,8 @@ Rules the host enforces, none of which is ever skipped:
 
 **Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. Every `canvastty.launch.prepare` also carries `"environment"`: `{ pluginId, kind }` of the card's environment, or `null` on this computer. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
 
+**Scoped policies.** `"policy": { "scope": "own-trees" }` asks the service only for subagents in its own trees: a subagent at any depth whose ancestors include a card this plugin was chosen for (its launch options were part of that launch) or that it started with `sessions.create`. The person's own launches and subagents in other trees never reach it and never wait for it, so when its service is down or failing only launches in its own trees are refused, with the same reason. The owners of a tree are fixed when each subagent is created (from its parent's) and saved with the card, so restore, restart and a closed ancestor keep the same scope. Owners are never dropped: a subagent whose tree would involve more than 64 plugins is refused, and a saved card whose list is unreadable or longer is not restored. Answers follow the same rules as `policy: true`: `null` or `refuse`, and no answer refuses. Use it when the policy only checks work the plugin itself routed.
+
 ```json
 "launch": { "policy": true, "fields": [] }
 ```

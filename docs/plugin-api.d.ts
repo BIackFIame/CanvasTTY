@@ -386,8 +386,9 @@ export interface CanvasTTYServiceLaunch {
   /** At most 8, shown in the agent launcher under Advanced (a policy with none is not shown). */
   fields: CanvasTTYLaunchField[];
   /** Also asked before every launch of these agents where the person did not choose the plugin (`chosen: false`);
-   * such an answer may only refuse, and no answer refuses too. */
-  policy?: boolean;
+   * such an answer may only refuse, and no answer refuses too. `{ scope: "own-trees" }`: only subagents whose
+   * ancestors include a card this plugin was chosen for or started; other launches never wait for it. */
+  policy?: boolean | { scope: "own-trees" };
   /** An orchestrator may choose these options for its subagents (spawn_agent launchOptions); otherwise only the person. */
   delegable?: boolean;
 }

@@ -82,6 +82,11 @@ export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen" | "r
   /** The model and effort the card's CLI is asked for (SessionMetadata). */
   model?: string;
   effort?: string;
+  /**
+   * For a subagent: the plugins that own its tree (chosen for, or starting, one of its ancestors). Only their
+   * `own-trees` policies are asked; never sent to any plugin.
+   */
+  treePlugins?: readonly string[];
 };
 
 export type PreparedLaunch =
@@ -145,16 +150,22 @@ export class LaunchPipeline {
     return rm(join(this.dependencies.runsRoot, safeSegment(sessionId)), { recursive: true, force: true });
   }
 
-  /** Launch policies that apply to this agent: every launch of it asks them, chosen or not. */
-  hasPolicy(provider: ProviderId): boolean {
-    return provider !== "terminal" && this.policies(provider, []).length > 0;
+  /**
+   * Launch policies that apply to this launch: a `policy: true` to every launch of the agent, an `own-trees` one only
+   * when `treePlugins` (a subagent's owning plugins) names it. A launch with none never waits for a policy.
+   */
+  hasPolicy(provider: ProviderId, treePlugins: readonly string[] = []): boolean {
+    return provider !== "terminal" && this.policies(provider, [], treePlugins).length > 0;
   }
 
-  private policies(provider: ProviderId, selected: readonly string[]): LaunchContributor[] {
+  private policies(provider: ProviderId, selected: readonly string[], treePlugins: readonly string[]): LaunchContributor[] {
     if (provider === "terminal") return [];
-    return this.dependencies.contributors().filter((contributor) => contributor.launch.policy === true
-      && !selected.includes(contributor.pluginId)
-      && (!contributor.launch.appliesTo || contributor.launch.appliesTo.includes(provider as never)));
+    return this.dependencies.contributors().filter((contributor) => {
+      const { policy } = contributor.launch;
+      const applies = policy === true || (typeof policy === "object" && policy?.scope === "own-trees" && treePlugins.includes(contributor.pluginId));
+      return applies && !selected.includes(contributor.pluginId)
+        && (!contributor.launch.appliesTo || contributor.launch.appliesTo.includes(provider as never));
+    });
   }
 
   /** Plugin ids among saved options that cannot prepare a launch now. */
@@ -267,7 +278,7 @@ export class LaunchPipeline {
     for (const pluginId of selected) {
       if (!contributors.has(pluginId)) return { ok: false, reason: unavailableReason(pluginId) };
     }
-    const policies = this.policies(context.provider, selected).sort((a, b) => a.pluginId.localeCompare(b.pluginId));
+    const policies = this.policies(context.provider, selected, context.treePlugins ?? []).sort((a, b) => a.pluginId.localeCompare(b.pluginId));
     const answers = await Promise.all([
       ...selected.map((pluginId) => this.ask(contributors.get(pluginId)!, context, true, contributors)),
       ...policies.map((contributor) => this.ask(contributor, context, false, contributors))
@@ -359,7 +370,7 @@ export class LaunchPipeline {
     contributors: ReadonlyMap<string, LaunchContributor>
   ): Promise<{ contributor: LaunchContributor; contribution: Contribution } | { refuse: string }> {
     const name = contributor.pluginName;
-    const { model, effort, options, ...rest } = context;
+    const { model, effort, options, treePlugins: _treePlugins, ...rest } = context;
     const params: LaunchContext = {
       ...rest,
       options: chosen ? structuredClone(options[contributor.pluginId]!) : {},
