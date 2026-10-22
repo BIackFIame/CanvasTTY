@@ -180,8 +180,17 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 智能体启动前，宿主向服务发送 `canvastty.launch.prepare` 请求（界面无法发送）：
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null,"requested":{"model":"sonnet","plugins":["com.example.launch-env"]},"peerOptions":{}}
 ```
+
+**启动请求的内容。** 每个 `canvastty.launch.prepare`（无论是被选择的还是策略）都带有 `"requested"`：CLI 启动时使用的 `model` 和 `effort`（使用 CLI 默认值时各自省略；对子智能体而言是 `spawn_agent` 请求的值），以及 `plugins`，即为此次启动选择的所有插件 id（已排序）。它还带有 `"peerOptions"`：其他被选插件的选项值，按插件 id 分组，但仅包含其所属插件在 `"visibleTo"` 中列出了接收方的字段。插件按字段自行选择加入；没有该声明时接收方看不到该字段：
+
+```json
+{ "key": "account", "label": "Model account", "kind": "select", "optionsFrom": "service",
+  "options": [{ "value": "none", "label": "The agent's own sign-in" }], "visibleTo": ["com.example.router"] }
+```
+
+`visibleTo` 列出 1 到 8 个插件 id，只允许用于启动选项中的 `select` 和 `boolean` 字段：自由文本字段可能包含用户输入的任何内容，因此从不共享；环境字段不能声明它。密钥从不是选项值（`secretEnv` 只是命名一个由宿主自行读取的键），因此任何密钥都不会进入 `peerOptions`。策略可以据此检查启动是否符合预期（例如路由决策选定的模型和账户），不符合则拒绝；它仍然不能向启动添加任何内容。
 
 应答为 `null`（不添加任何内容）或包含以下任意键的对象：
 

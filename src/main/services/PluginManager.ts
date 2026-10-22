@@ -1787,7 +1787,7 @@ function validateServiceLaunch(value: unknown): PluginServiceLaunch {
     }
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
-  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields), ...(value.policy === true ? { policy: true } : {}),
+  return { ...(appliesTo ? { appliesTo } : {}), fields: validateLaunchFields(value.fields, true), ...(value.policy === true ? { policy: true } : {}),
     ...(value.delegable === true ? { delegable: true } : {}) };
 }
 
@@ -1920,7 +1920,7 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
       }
       appliesTo = [...new Set(candidate.appliesTo as NonNullable<PluginEnvironmentKind["appliesTo"]>)];
     }
-    const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields);
+    const fields = candidate.fields === undefined ? undefined : validateLaunchFields(candidate.fields, false);
     let keeps: PluginEnvironmentKind["keeps"];
     if (candidate.keeps !== undefined) {
       if (!isRecord(candidate.keeps)) throw new Error(`Plugin environment ${kind} keeps must be an object.`);
@@ -1940,14 +1940,31 @@ function validateServiceEnvironments(value: unknown): PluginEnvironmentKind[] {
   });
 }
 
-function validateLaunchFields(value: unknown): PluginLaunchField[] {
+const MAX_VISIBLE_TO = 8;
+
+/**
+ * The plugins that may see one launch field's value (B7). Opt-in by the field's owner, on choices only: a `select`
+ * or a `boolean`. Free text is never shared, since a person may type anything there.
+ */
+function validateVisibleTo(value: unknown, key: string, kind: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (kind !== "select" && kind !== "boolean") throw new Error(`Plugin launch field ${key} visibleTo is only for select and boolean fields.`);
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_VISIBLE_TO || !value.every(isPluginId)
+    || new Set(value).size !== value.length) {
+    throw new Error(`Plugin launch field ${key} visibleTo must list 1 to ${MAX_VISIBLE_TO} distinct plugin ids.`);
+  }
+  return [...value as string[]];
+}
+
+/** `shareable`: launch option fields may declare `visibleTo`; environment fields never do. */
+function validateLaunchFields(value: unknown, shareable: boolean): PluginLaunchField[] {
   if (!Array.isArray(value) || value.length > MAX_LAUNCH_FIELDS) {
     throw new Error(`Plugin launch fields must be an array of at most ${MAX_LAUNCH_FIELDS} items.`);
   }
   const keys = new Set<string>();
   return value.map((field): PluginLaunchField => {
     if (!isRecord(field)) throw new Error("Every plugin launch field must be an object.");
-    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
+    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength", "visibleTo"], "Plugin launch field");
     const key = requiredString(field.key, "launch field key", 40);
     if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || keys.has(key)) {
       throw new Error(`Plugin launch field key is invalid or duplicated: ${key}.`);
@@ -1957,10 +1974,12 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
     if (field.optionsFrom !== undefined && (field.kind !== "select" || field.optionsFrom !== "service")) {
       throw new Error(`Plugin launch field ${key} optionsFrom must be "service" on a select.`);
     }
+    if (!shareable && field.visibleTo !== undefined) throw new Error(`Plugin environment field ${key} cannot declare visibleTo.`);
+    const visibleTo = validateVisibleTo(field.visibleTo, key, field.kind);
     if (field.kind === "boolean") {
       if (field.options !== undefined || field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
       if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin launch field ${key} default must be a boolean.`);
-      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
+      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}), ...(visibleTo ? { visibleTo } : {}) };
     }
     if (field.kind === "select") {
       if (field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
@@ -1982,7 +2001,8 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
       return {
         key, label, kind: "select", options,
         ...(field.optionsFrom === "service" ? { optionsFrom: "service" as const } : {}),
-        ...(field.default !== undefined ? { default: field.default as string } : {})
+        ...(field.default !== undefined ? { default: field.default as string } : {}),
+        ...(visibleTo ? { visibleTo } : {})
       };
     }
     if (field.kind === "text") {

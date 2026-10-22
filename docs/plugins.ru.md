@@ -182,8 +182,17 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 Перед запуском агента хост отправляет сервису запрос `canvastty.launch.prepare` (поверхности его отправить не могут):
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null,"requested":{"model":"sonnet","plugins":["com.example.launch-env"]},"peerOptions":{}}
 ```
+
+**Что запрашивает запуск.** Каждый `canvastty.launch.prepare`, выбранный или политика, несёт `"requested"`: `model` и `effort`, с которыми запускается CLI (каждое отсутствует, если используется значение CLI по умолчанию; у субагента это то, что попросил `spawn_agent`), и `plugins` — отсортированные id всех плагинов, выбранных для запуска. Ещё он несёт `"peerOptions"`: значения опций других выбранных плагинов по id плагина, но только тех полей, чей плагин-владелец указал получателя в `"visibleTo"`. Плагин включает это для каждого поля сам; без этого получатель поле не видит:
+
+```json
+{ "key": "account", "label": "Model account", "kind": "select", "optionsFrom": "service",
+  "options": [{ "value": "none", "label": "The agent's own sign-in" }], "visibleTo": ["com.example.router"] }
+```
+
+`visibleTo` перечисляет от 1 до 8 id плагинов и допустим только у полей опций запуска `select` и `boolean`: в текстовом поле может быть что угодно, что ввёл человек, поэтому оно никогда не передаётся, а поля сред его объявить не могут. Секреты никогда не бывают значениями опций (`secretEnv` называет ключ, который хост читает сам), поэтому ничего секретного в `peerOptions` попасть не может. Политика по ним проверяет, что запуск именно тот, который она ожидает (например, модель и учётная запись, выбранные решением маршрутизации), и отказывает иначе; добавить что-то к запуску она по-прежнему не может.
 
 Ответ: `null` (ничего не добавлять) или объект с любыми из ключей:
 

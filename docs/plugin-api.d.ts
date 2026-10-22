@@ -393,12 +393,19 @@ export interface CanvasTTYServiceLaunch {
 }
 
 export type CanvasTTYLaunchField =
-  | { key: string; label: string; kind: "boolean"; default?: boolean }
+  | {
+    key: string; label: string; kind: "boolean"; default?: boolean;
+    /** Plugin ids (1 to 8) whose launch services see this value in `peerOptions` when this plugin is selected. */
+    visibleTo?: string[];
+  }
   | {
     key: string; label: string; kind: "select"; options: Array<{ value: string; label: string }>; default?: string;
     /** The launcher also asks `canvastty.launch.options` (3 s) for up to 64 more choices; the saved value is then any
      * text up to 200 characters, which `canvastty.launch.prepare` must check. */
     optionsFrom?: "service";
+    /** Plugin ids (1 to 8) whose launch services see this value in `peerOptions` when this plugin is selected.
+     * Launch options only; text fields cannot declare it. */
+    visibleTo?: string[];
   }
   | { key: string; label: string; kind: "text"; maxLength?: number; default?: string };
 
@@ -423,6 +430,11 @@ export interface CanvasTTYLaunchContext {
   environment: { pluginId: string; kind: string } | null;
   /** A subagent on this computer in (or below) the folder the person chose for its top-level agent: that real path. */
   trustedFolder?: string;
+  /** The same for every plugin asked: the model and effort the CLI is started with (absent = the CLI's default),
+   * and the ids of the plugins selected for this launch, sorted. */
+  requested: { model?: string; effort?: string; plugins: string[] };
+  /** Other selected plugins' values, by plugin id: only fields whose owner lists this plugin in `visibleTo`. */
+  peerOptions: Record<string, Record<string, boolean | string>>;
 }
 
 /**

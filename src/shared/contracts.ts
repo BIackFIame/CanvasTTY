@@ -1013,6 +1013,12 @@ export interface PluginLaunchField {
   default?: boolean | string;
   /** `text` only: at most 200 characters (the default). */
   maxLength?: number;
+  /**
+   * `select` and `boolean` only: plugin ids whose launch services also see this field's value when this plugin is
+   * selected for a launch (`peerOptions` in `canvastty.launch.prepare`). The owner opts in per field; free text is
+   * never shared, and secrets never are (they are not option values).
+   */
+  visibleTo?: string[];
 }
 
 export interface PluginServiceLaunch {

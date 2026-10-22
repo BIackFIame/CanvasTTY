@@ -1996,7 +1996,9 @@ export class TerminalManager {
         resume: resume !== null,
         options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
         environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
-        ...(trustedFolder ? { trustedFolder } : {})
+        ...(trustedFolder ? { trustedFolder } : {}),
+        ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+        ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
       });
       if (!live()) {
         if (prepared.ok) void prepared.cleanup().catch(() => undefined);

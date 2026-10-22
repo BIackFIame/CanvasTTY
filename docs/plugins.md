@@ -201,8 +201,17 @@ Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<plu
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null,"requested":{"model":"sonnet","plugins":["com.example.launch-env"]},"peerOptions":{}}
 ```
+
+**What the launch asks for.** Every `canvastty.launch.prepare`, chosen or policy, carries `"requested"`: the `model` and `effort` the CLI is started with (each absent when the CLI's default is used; for a subagent these are what `spawn_agent` asked for) and `plugins`, the sorted ids of every plugin selected for the launch. It also carries `"peerOptions"`: other selected plugins' option values, by plugin id, but only the fields whose owning plugin lists the receiving plugin in `"visibleTo"`. A plugin opts in per field; the receiver never sees a field without it:
+
+```json
+{ "key": "account", "label": "Model account", "kind": "select", "optionsFrom": "service",
+  "options": [{ "value": "none", "label": "The agent's own sign-in" }], "visibleTo": ["com.example.router"] }
+```
+
+`visibleTo` lists 1 to 8 plugin ids and is allowed only on `select` and `boolean` launch option fields: a free-text field may hold anything a person typed, so it is never shared, and environment fields cannot declare it. Secrets are never option values (`secretEnv` names a key the host reads itself), so nothing secret can reach `peerOptions`. A policy uses both to check that a launch is the one it expects (for example the model and account a routing decision chose) and to refuse one that is not; it still cannot add to the launch.
 
 The answer is `null` (nothing to add) or an object with any of:
 

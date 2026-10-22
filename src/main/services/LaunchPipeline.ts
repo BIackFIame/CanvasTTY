@@ -58,9 +58,31 @@ export interface LaunchContext {
    * it trusted there for this run's agent; absent otherwise.
    */
   trustedFolder?: string;
+  /**
+   * What the launch asks for, the same for every plugin asked: the model and reasoning effort the CLI is started
+   * with (absent when the CLI's default is used) and the ids of the plugins selected for it, sorted. A policy can
+   * check that a launch is the one it expects.
+   */
+  requested: LaunchRequested;
+  /**
+   * Option values of other selected plugins, keyed by plugin id: only the fields whose owner listed this plugin in
+   * `visibleTo` (choices, never free text; secrets are never option values). Empty when none are shared.
+   */
+  peerOptions: Record<string, PluginLaunchValues>;
 }
 
-export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen"> & { options: Record<string, PluginLaunchValues> };
+export interface LaunchRequested {
+  model?: string;
+  effort?: string;
+  plugins: string[];
+}
+
+export type LaunchSessionContext = Omit<LaunchContext, "options" | "chosen" | "requested" | "peerOptions"> & {
+  options: Record<string, PluginLaunchValues>;
+  /** The model and effort the card's CLI is asked for (SessionMetadata). */
+  model?: string;
+  effort?: string;
+};
 
 export type PreparedLaunch =
   | {
@@ -247,8 +269,8 @@ export class LaunchPipeline {
     }
     const policies = this.policies(context.provider, selected).sort((a, b) => a.pluginId.localeCompare(b.pluginId));
     const answers = await Promise.all([
-      ...selected.map((pluginId) => this.ask(contributors.get(pluginId)!, context, true)),
-      ...policies.map((contributor) => this.ask(contributor, context, false))
+      ...selected.map((pluginId) => this.ask(contributors.get(pluginId)!, context, true, contributors)),
+      ...policies.map((contributor) => this.ask(contributor, context, false, contributors))
     ]);
     const runDirectory = join(this.dependencies.runsRoot, safeSegment(context.sessionId), randomUUID());
     const cleanup = (): Promise<void> => rm(runDirectory, { recursive: true, force: true });
@@ -333,10 +355,22 @@ export class LaunchPipeline {
   private async ask(
     contributor: LaunchContributor,
     context: LaunchSessionContext,
-    chosen: boolean
+    chosen: boolean,
+    contributors: ReadonlyMap<string, LaunchContributor>
   ): Promise<{ contributor: LaunchContributor; contribution: Contribution } | { refuse: string }> {
     const name = contributor.pluginName;
-    const params: LaunchContext = { ...context, options: chosen ? context.options[contributor.pluginId]! : {}, chosen };
+    const { model, effort, options, ...rest } = context;
+    const params: LaunchContext = {
+      ...rest,
+      options: chosen ? structuredClone(options[contributor.pluginId]!) : {},
+      chosen,
+      requested: {
+        ...(model !== undefined ? { model } : {}),
+        ...(effort !== undefined ? { effort } : {}),
+        plugins: Object.keys(options).sort()
+      },
+      peerOptions: visiblePeerOptions(contributor.pluginId, options, contributors)
+    };
     let timer: NodeJS.Timeout | undefined;
     try {
       const answer = await Promise.race([
@@ -361,6 +395,34 @@ export class LaunchPipeline {
       if (timer) clearTimeout(timer);
     }
   }
+}
+
+/**
+ * The other selected plugins' values this plugin may see: per field, only where the owning plugin's manifest lists
+ * it in `visibleTo` (select and boolean fields only, enforced when the manifest is read). A copy, never the launch's
+ * own record; a field without the opt-in, an unknown key or a non-choice value is left out.
+ */
+export function visiblePeerOptions(
+  viewer: string,
+  options: Record<string, PluginLaunchValues>,
+  contributors: ReadonlyMap<string, LaunchContributor>
+): Record<string, PluginLaunchValues> {
+  const result: Record<string, PluginLaunchValues> = {};
+  for (const pluginId of Object.keys(options).sort()) {
+    if (pluginId === viewer) continue;
+    const owner = contributors.get(pluginId);
+    const values = options[pluginId];
+    if (!owner || !values) continue;
+    const shared: PluginLaunchValues = {};
+    for (const field of owner.launch.fields) {
+      if ((field.kind !== "select" && field.kind !== "boolean") || !field.visibleTo?.includes(viewer)) continue;
+      if (!Object.hasOwn(values, field.key)) continue;
+      const value = values[field.key];
+      if (typeof value === "boolean" || typeof value === "string") shared[field.key] = value;
+    }
+    if (Object.keys(shared).length > 0) result[pluginId] = shared;
+  }
+  return result;
 }
 
 interface Contribution {

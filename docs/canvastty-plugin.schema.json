@@ -274,7 +274,12 @@
         },
         "optionsFrom": { "const": "service", "description": "select only: the launcher also asks the service (canvastty.launch.options) for up to 64 more choices." },
         "default": { "type": ["boolean", "string"] },
-        "maxLength": { "type": "integer", "minimum": 1, "maximum": 200 }
+        "maxLength": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "visibleTo": {
+          "description": "Launch options only, select and boolean fields only: plugin ids whose launch services also see this field's value (peerOptions in canvastty.launch.prepare) when this plugin is selected. Free text and secrets are never shared.",
+          "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+          "items": { "type": "string", "minLength": 3, "maxLength": 80, "pattern": "^(?!.*\\.\\.)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$" }
+        }
       }
     },
     "baseContribution": {
