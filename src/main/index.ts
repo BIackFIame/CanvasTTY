@@ -45,6 +45,7 @@ import { PluginManager } from "./services/PluginManager";
 import { MascotManager } from "./services/MascotManager";
 import { PluginServiceSupervisor } from "./services/PluginServiceSupervisor";
 import { PluginLimits } from "./services/PluginLimits";
+import { PluginUsage } from "./services/PluginUsage";
 import { LaunchPipeline } from "./services/LaunchPipeline";
 import { EnvironmentRegistry } from "./services/EnvironmentRegistry";
 import { DecisionHooks } from "./services/DecisionHooks";
@@ -182,6 +183,7 @@ let mascotManager: MascotManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
 let pluginLimits: PluginLimits | null = null;
+let pluginUsage: PluginUsage | null = null;
 let pluginCards: PluginCards | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
@@ -400,6 +402,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       sessions: (pluginId, serviceId, method, params, permissions) => pluginSessions?.handle(pluginId, serviceId, method, params, permissions),
       limits: (pluginId, serviceId, method, params, permissions, dataDir) =>
         pluginLimits?.handle(pluginId, serviceId, method, params, permissions, dataDir),
+      usage: (pluginId, method, params, permissions, dataDir) => pluginUsage?.handle(pluginId, method, params, permissions, dataDir),
       setBadge: (pluginId, params) => {
         if (!pluginCards) throw new Error("Cards are not ready yet.");
         return pluginCards.setBadge(pluginId, params);
@@ -599,6 +602,24 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const rendererOutbox = new TerminalRendererOutbox((channel, payload) => {
     if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send(channel, payload);
   });
+  // Measured token usage for plugin services (usage:read): core's usage history, scoped to the cards a plugin started
+  // or contributed launch options to, plus account homes in its own data folder. Created before the terminal manager
+  // so it sees every card's first event; it reads nothing until a service asks.
+  pluginUsage = new PluginUsage({
+    history: () => usageHistory,
+    cards: {
+      usageContext: (id) => terminalManager?.usageContext(id) ?? null,
+      usageContexts: () => terminalManager?.usageContexts() ?? []
+    },
+    allowed: (pluginId, permission) => {
+      try {
+        return pluginManager!.hasPermission(pluginId, permission);
+      } catch {
+        return false;
+      }
+    },
+    homeCollector: (source, home) => new LocalUsageCollector(homedir(), {}, {}, { only: { source, path: home }, byteBudget: 32 * 1024 * 1024 })
+  });
   terminalManager = new TerminalManager((channel, payload) => {
     // Output produced while a card is hidden is addressed to the observers
     // only, and the replay when it is shown again to the renderer only; the
@@ -607,6 +628,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       agentControl?.observe(channel, payload);
       evenG2?.observe(channel, payload);
       pluginSessions?.observe(channel, payload);
+      pluginUsage?.observe(channel, payload);
       handoffService?.observe(channel, payload);
       if (channel === IPC.terminalRemoved && "id" in payload) pluginCards?.forgetSession(payload.id);
     }

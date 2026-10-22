@@ -138,6 +138,7 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `sessions.subscribe` / `sessions.list` / `sessions.unsubscribe` | 请求 | `sessions:events` | 卡片事件和当前打开的卡片（见“会话事件”） |
 | `sessions.create` | 请求 | `sessions:launch` | 启动一张归插件所有的卡片 |
 | `sessions.send` / `sessions.stop` | 请求 | `sessions:control` | 仅限该插件启动的卡片 |
+| `usage.session` `{ cardId, homes? }` / `usage.summary` `{ since?, until?, groupBy?, homes? }` | 请求 | `usage:read`（`homes` 还需 `launch:contribute`） | 插件启动的、或为其提供了启动选项的卡片的实测 token 用量（见“实测用量”） |
 | `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
 | `limits.get` / `limits.subscribe` / `limits.unsubscribe` | 请求 | `limits:read`（账号主目录还需 `launch:contribute`） | 插件页面所得的订阅额度，来自主机缓存（见“订阅额度”） |
 
@@ -389,6 +390,18 @@ interface PluginSessionEvent {
 Qwen Code 没有任何报告剩余额度的命令或接口：`/stats` 只统计当前会话，新增额度命令的请求已被关闭（[QwenLM/qwen-code#3302](https://github.com/QwenLM/qwen-code/issues/3302)）。Qwen OAuth 免费额度已于 2026-04-15 结束（[认证文档](https://github.com/QwenLM/qwen-code/blob/main/docs/users/configuration/auth.md)）。阿里云 Coding Plan 的用量只在百炼控制台和阿里云独立的 `bl usage coding-plan` CLI 中显示（[Usage & Quota](https://www.alibabacloud.com/help/en/model-studio/cli/usage-quota)），需要不在 Qwen 主目录中的阿里云登录，且该套餐条款禁止在脚本中使用其密钥（[Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan)）。因此 Qwen 主目录总是返回 `unavailable`，原因取决于其中的登录：`not-authenticated`（无登录）、`subscription-required`（仅 Qwen OAuth）或 `unsupported-protocol`（API 密钥、Token Plan 或 Coding Plan）。只读取 `settings.json` 中的认证类型以及 `oauth_creds.json` 是否存在。在账号主目录中，主机从不沿符号链接读取凭据文件或数据库。
 
 停用插件、撤销信任或移除权限都会停止其服务，订阅随之结束；每次通知前主机还会再次检查插件的权限。界面没有任何变化：这只是服务 API。
+### 实测用量（`usage:read`）
+
+拥有 `usage:read` 的服务读取 CanvasTTY 用量历史已经从各 agent 自己的本地日志中收集到的 token 计数（Claude Code 会话记录、Codex rollout 文件、Hermes 的 `state.db`、OpenCode 的 `opencode.db` 与消息文件、Qwen Code 聊天记录和 Kimi wire 日志；应用运行期间每 60 秒收集一次）。调用本身不会触发收集，也不会调用任何模型。
+
+**哪些卡片。** 插件只能看到它通过 `sessions.create` 启动的卡片，以及已保存的启动选项中包含它自己选项的卡片（个人或编排器选择了它的启动选项，因此它的 `canvastty.launch.prepare` 为该次启动作了回答）。仅被询问过的启动策略不会让卡片归属于该插件。已关闭的卡片在应用退出前仍可读取。未知 id 与其他插件的卡片得到同样的错误。
+
+- `usage.session` `{ cardId, homes? }` 针对卡片当前的提供方会话返回 `{ cardId, provider, measured: true, totals, models, firstAt, lastAt, coverage }`，或返回 `{ cardId, provider, measured: false, reason }`，其中 `reason` 为 `conversation-unknown`（尚无会话 id）或 `provider-not-recorded`（CanvasTTY 不读取该 agent 的用量日志；只读取 Claude Code、Codex、Hermes、OpenCode、Qwen Code 和 Kimi；Grok 的本地文件只记录上下文大小，没有逐次请求的用量）。对 OpenCode，会话是卡片的根会话：其子 agent 会话（task 工具）一并计入。
+- `usage.summary` `{ since?, until?, groupBy?, homes? }` 汇总同一范围卡片中时间落在 `[since, until)` 的记录（毫秒；默认最近 24 小时，最多 30 天）。`groupBy` 为 `provider`（默认）、`model`、`home`，或它们的列表。返回 `{ since, until, groupBy, totals, rows, truncated, coverage }`；每行包含所选键和计数，以及 `sessions`（不同会话数）。
+- 计数：`input`（提示 token，含缓存部分）、`output`（含推理）、`cached`（`input` 中从缓存读取的部分）和 `events`（记录数）。`model` 是日志给出的模型名，或 `null`。`coverage` 为 `{ collectedAt, complete }`；`complete: false` 表示该时段内有一次收集未能读完所有来源，数字可能偏低。Claude Code 的最新一条消息在会话记录空闲 5 分钟或下一条消息开始后才计入。
+- **账号主目录。** 同时拥有 `launch:contribute` 时，`homes: [{ provider: "claude" | "codex" | "opencode" | "qwen" | "kimi", home }]`（每次最多 8 个）会加入这些 CLI 主目录中记录的全部用量：即插件保存在自己数据目录中并交给启动使用的 `CLAUDE_CONFIG_DIR`、`CODEX_HOME`、OpenCode 数据目录（或以 `opencode` 子目录形式包含它的 `XDG_DATA_HOME`）、`QWEN_HOME` 或 `KIMI_CODE_HOME` / `KIMI_SHARE_DIR` 目录。每个主目录必须是插件数据目录内部（不含数据目录本身）一个已存在目录的精确绝对路径，路径上不能有符号链接，每个插件最多 32 个（删除的目录会释放名额）；其他情况统一返回一个不透露路径信息的错误。主目录内部不跟随任何符号链接；OpenCode 数据库会先被打开，再用运行时自带的 SQLite（工作线程中的 `node:sqlite`）通过这个已打开的文件读取，期间被替换的文件不会被读取；若运行时的 SQLite 无法以只读方式打开 URI 文件名，则跳过并如实标出（`complete: false`）。每个主目录用同样的日志读取器读取，每分钟最多一次，所有插件合计同时最多两个。按 `home` 分组的行中，`home` 是 `homes` 中的下标，CanvasTTY 自己的历史为 `null`。
+- 限制：每个插件每分钟最多 30 次调用（两个方法合计）；最多 256 行（组更多时 `truncated: true`，`totals` 仍计入它们），每张卡片最多 256 个模型。
+- 返回内容只有计数、时间、提供方 id 和模型名：没有提示词或其他文本，没有路径，没有账号、邮箱或会话 id。CanvasTTY 不计算费用（没有价格表）。若 agent 自己记录了价格估算（OpenCode 的 `cost`），计数中还会有 `providerCostEstimate`：带有估算的记录的美元总和，否则不出现。这是 agent 按其模型列表给出的估算，不是账单；订阅用量通常为 0 或没有。
 
 ### 浏览器引擎（`browser:engine`）
 
@@ -434,6 +447,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
 | `limits:read` | `limits.get`；服务的 `limits.get`、`limits.subscribe` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot`；配合 `launch:contribute` 时还包括服务在自己数据目录中的账号主目录 |
+| `usage:read` | `usage.session`、`usage.summary` | 插件启动的、或为其提供了启动选项的卡片的 token 计数（输入、输出、缓存）、模型名和时间；有 `launch:contribute` 时还包括它自己的账号主目录。不含文本、路径和账号 id |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
 | `external:open` | `external.open` | 仅通过操作系统打开明确的 HTTP(S) URL |
 | `browser:open` | `browser.open` | 仅在 CanvasTTY 内置 Browser 卡片及其共享浏览器会话中打开明确的 HTTP(S) URL，包括 localhost |

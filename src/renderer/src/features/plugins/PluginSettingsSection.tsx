@@ -1026,7 +1026,7 @@ function PermissionList({ permissions, locale }: { permissions: PluginPermission
       <strong>{t(locale, "pluginPermissions")}</strong>
       {permissions.length === 0
         ? <span>{t(locale, "pluginNoPermissions")}</span>
-        : <ul>{permissions.map((permission) => <li key={permission}>{t(locale, permissionKey(permission))}</li>)}</ul>}
+        : <ul>{permissions.map((permission) => <li key={permission}>{permissionText(locale, permission)}</li>)}</ul>}
     </div>
   );
 }
@@ -1059,7 +1059,19 @@ function HookManifestWarning({
   );
 }
 
-function permissionKey(permission: PluginPermission): TranslationKey {
+// Labels of permissions newer than the startup string table; they load with Settings (this chunk), not at startup.
+const LAZY_PERMISSION_TEXT: Record<"ru" | "en", Partial<Record<PluginPermission, string>>> = {
+  ru: { "usage:read": "Читает расход токенов окон, которые он запустил или для которых задал параметры запуска" },
+  en: { "usage:read": "Reads token usage of the cards it started or set launch options for" }
+};
+
+function permissionText(locale: LocaleId, permission: PluginPermission): string {
+  return LAZY_PERMISSION_TEXT[locale === "ru" ? "ru" : "en"][permission] ?? t(locale, permissionKey(permission as KeyedPermission));
+}
+
+type KeyedPermission = Exclude<PluginPermission, "usage:read">;
+
+function permissionKey(permission: KeyedPermission): TranslationKey {
   return ({
     storage: "permissionStorage",
     secrets: "permissionSecrets",
@@ -1117,7 +1129,7 @@ function ModuleList({
             <strong>{module.title}</strong>
             {module.description && <small>{module.description}</small>}
             {module.permissions.length > 0 && (
-              <small>{module.permissions.map((permission) => t(locale, permissionKey(permission))).join(" · ")}</small>
+              <small>{module.permissions.map((permission) => permissionText(locale, permission)).join(" · ")}</small>
             )}
             <small>{formatBytes(module.files.reduce((total, file) => total + file.bytes, 0))}</small>
           </span>

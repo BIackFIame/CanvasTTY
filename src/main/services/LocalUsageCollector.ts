@@ -1,13 +1,15 @@
 import { execFile, type ExecFileOptions } from 'node:child_process';
 import { constants, type Dirent } from 'node:fs';
-import { access, open, readdir, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
+import { access, lstat, open, readdir, readlink, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { devNull, homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve, posix, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import type { UsageEvent } from '../../shared/usageHistory.ts';
+import { normalizeThreadId } from '../../agent-runtime/runtime-protocol.mjs';
+import { readOpenCodeStore, type OpenCodeCursor, type SqliteQuery } from './opencodeUsage.ts';
 import {
-  claudeFlush, claudeUsage, codexUsage, fingerprint, identifier, record, tokens,
+  claudeFlush, claudeUsage, codexUsage, fingerprint, identifier, kimiUsage, qwenUsage, record, tokens, usageModel,
   type ClaudeFileState, type CodexFileState, type LogContext,
 } from './usageReaders.ts';
 
@@ -34,6 +36,15 @@ export async function discoverSqlite(
 }
 
 const VERSION = 2;
+/** Log folders below each CLI home. */
+const LOG_FOLDERS: Record<LogSource, readonly string[]> = {
+  codex: ['sessions', 'archived_sessions'], claude: ['projects'], qwen: ['projects', 'tmp'], kimi: ['sessions'],
+};
+const SOURCE_NAMES: Record<LogSource, string> = { codex: 'Codex', claude: 'Claude Code', qwen: 'Qwen Code', kimi: 'Kimi' };
+/** Lines that may carry accounting, per source; others are skipped unparsed. */
+const MARKERS: Record<LogSource, string[]> = {
+  codex: ['token_count', 'session_meta', 'turn_context'], claude: ['"usage"'], qwen: ['"usageMetadata"'], kimi: ['usage.record', 'token_usage'],
+};
 const RETENTION = 30 * 86_400_000;
 const CLOCK_SKEW = 60_000;
 /** Claude Code may still append streamed entries of the newest message until its transcript idles. */
@@ -44,7 +55,10 @@ const HEAD = 256;
 const MAX_DEPTH = 8;
 const BYTE_BUDGET = 128 * 1024 * 1024;
 
-type Source = 'codex' | 'claude';
+/** Stores read as append-only JSONL logs. */
+type LogSource = 'codex' | 'claude' | 'qwen' | 'kimi';
+/** Every source one account home can be read for. */
+export type Source = LogSource | 'opencode';
 interface FileCursor {
   /** `${dev}:${ino}`; together with the head fingerprint it detects replaced or truncated files. */
   node: string;
@@ -69,6 +83,8 @@ export interface CollectorState {
   version?: number;
   files?: Record<string, FileCursor>;
   hermes?: Record<string, HermesDatabase>;
+  /** OpenCode stores (opencodeUsage.ts): a database's last read time, a message file's size and time. */
+  opencode?: Record<string, OpenCodeCursor>;
 }
 export interface CollectorOptions {
   sqlite?: string;
@@ -77,8 +93,15 @@ export interface CollectorOptions {
   sqliteRunner?: (file: string, args: string[], options: ExecFileOptions) => Promise<{ stdout: string }>;
   /** Maximum bytes of log backlog read per collection; the rest continues on the next one. */
   byteBudget?: number;
+  /**
+   * Reads this one CLI home only (a plugin's account home): its logs, without the default homes, the environment's
+   * homes or Hermes. `path` is the home itself (`CODEX_HOME` or `CLAUDE_CONFIG_DIR`).
+   */
+  only?: { source: Source; path: string };
+  /** OpenCode's database query (node:sqlite in a worker thread by default); tests replace it. */
+  openCodeQuery?: SqliteQuery;
 }
-type Clean = Required<CollectorState>;
+type Clean = Required<Omit<CollectorState, 'opencode'>> & { opencode: Record<string, OpenCodeCursor> };
 /**
  * `complete`: every discovered source was read to its end; absent default roots are normal.
  * `lost`: this run consumed accounting it could not use (unparsable or oversized lines, active
@@ -86,7 +109,7 @@ type Clean = Required<CollectorState>;
  */
 interface Health { complete: boolean; lost: boolean }
 interface Collection extends Health { events: UsageEvent[]; coverage: string[] }
-interface Root { source: Source; path: string; label: string; profile: string }
+interface Root { source: LogSource; path: string; label: string; profile: string }
 interface LogFile { root: Root; path: string; key: string; node: string; size: number; mtime: number }
 interface RootStats { files: number; read: number; bytes: number; invalid: number; oversized: number; unreadable: number; external: number; deep: number; problem: string }
 interface HermesCandidate { database: string; total: number; events: UsageEvent[] }
@@ -109,17 +132,20 @@ function codexState(value: unknown): CodexFileState | undefined {
   if (typeof v.external === 'string') state.external = v.external;
   if (Array.isArray(v.total) && v.total.length === 3 && v.total.every(counter)) state.total = v.total as CodexFileState['total'];
   if (finite(v.copyUntil)) state.copyUntil = v.copyUntil;
+  const model = usageModel(v.model);
+  if (model) state.model = model;
   return Object.keys(state).length ? state : undefined;
 }
 function claudeState(value: unknown): ClaudeFileState | undefined {
   const p = record(record(value).pending), usage = p.usage;
   if (!identifier(p.id) || typeof p.session !== 'string' || !finite(p.from) || !finite(p.to)) return undefined;
   if (!Array.isArray(usage) || usage.length !== 4 || !usage.every(counter)) return undefined;
-  return { pending: { id: p.id as string, session: p.session, from: p.from, to: p.to, usage: usage as [number, number, number, number] } };
+  const model = usageModel(p.model);
+  return { pending: { id: p.id as string, session: p.session, from: p.from, to: p.to, usage: usage as [number, number, number, number], ...(model ? { model } : {}) } };
 }
 /** Persisted state comes from disk: anything malformed is dropped, which only causes a rebaseline or re-read. */
 export function sanitizeCollectorState(input: unknown): Clean {
-  const state = record(input), clean: Clean = { version: VERSION, files: {}, hermes: {} };
+  const state = record(input), clean: Clean = { version: VERSION, files: {}, hermes: {}, opencode: {} };
   if (Object.keys(state).length && state.version !== VERSION) throw new Error("Unsupported usage collector version");
   for (const [key, value] of Object.entries(record(state.files))) {
     const c = record(value);
@@ -143,6 +169,16 @@ export function sanitizeCollectorState(input: unknown): Clean {
     }
     clean.hermes[key] = { node: d.node, at: d.at, rows };
   }
+  for (const [key, value] of Object.entries(record(state.opencode))) {
+    const c = record(value);
+    if (!hex(key) || typeof c.node !== 'string' || !finite(c.at)) continue;
+    const cursor: OpenCodeCursor = { node: c.node, at: c.at };
+    if (counter(c.size) && finite(c.mtime)) Object.assign(cursor, { size: c.size, mtime: c.mtime });
+    else if (c.size !== undefined || c.mtime !== undefined) continue;
+    clean.opencode[key] = cursor;
+  }
+  // Absent unless used, so the saved state keeps the shape older releases read.
+  if (!Object.keys(clean.opencode).length) delete (clean as CollectorState).opencode;
   return clean;
 }
 
@@ -168,6 +204,15 @@ function hermesProvider(route: unknown): string {
   // subscription login, and other routes are not tracked quotas.
   return String(route ?? '').trim().toLowerCase() === 'openai-codex' ? 'codex' : 'unknown';
 }
+/** A Kimi session is the nearest folder named like one (`session_<uuid>` for Kimi Code, a UUID for kimi-cli). */
+function kimiSession(path: string): string {
+  const segments = path.split(/[\\/]/).slice(0, -1);
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const id = normalizeThreadId('kimi', segments[index]);
+    if (id) return id;
+  }
+  return `file-${fingerprint(path).slice(0, 12)}`;
+}
 function sessionFromName(path: string): string {
   return /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$/i.exec(path)?.[1] ?? `file-${fingerprint(path).slice(0, 12)}`;
 }
@@ -184,8 +229,9 @@ async function readAt(handle: FileHandle, length: number, position: number): Pro
 
 /**
  * Collects token accounting of external agents from their local stores, strictly read-only:
- * logs are opened O_RDONLY and SQLite through a PATH-resolved executable in safe, read-only
- * mode that never creates a database or its -wal/-shm files. Only accounting fields leave here.
+ * logs are opened O_RDONLY; Hermes' SQLite through a PATH-resolved executable in safe, read-only
+ * mode, and OpenCode's database through the runtime's own node:sqlite (opencodeUsage.ts); neither
+ * ever creates a database or its -wal/-shm files. Only accounting fields leave here.
  */
 export class LocalUsageCollector {
   readonly state: CollectorState;
@@ -195,6 +241,8 @@ export class LocalUsageCollector {
   private readonly sqliteEnvironment: NodeJS.ProcessEnv;
   private readonly sqliteRunner: NonNullable<CollectorOptions['sqliteRunner']>;
   private readonly byteBudget: number;
+  private readonly only: CollectorOptions['only'];
+  private readonly openCodeQuery: SqliteQuery | undefined;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor(home = homedir(), state: CollectorState = {}, environment: NodeJS.ProcessEnv = process.env, options: CollectorOptions = {}) {
@@ -207,6 +255,8 @@ export class LocalUsageCollector {
       return { stdout: result.stdout };
     });
     this.byteBudget = options.byteBudget ?? BYTE_BUDGET;
+    this.only = options.only;
+    this.openCodeQuery = options.openCodeQuery;
     const clean = sanitizeCollectorState(state);
     for (const key of Object.keys(state)) delete (state as Record<string, unknown>)[key];
     this.state = Object.assign(state, clean);
@@ -220,7 +270,7 @@ export class LocalUsageCollector {
   }
 
   private async collectOnce(now: number): Promise<Collection> {
-    const next: Clean = { version: VERSION, files: {}, hermes: {} };
+    const next: Clean = { version: VERSION, files: {}, hermes: {}, opencode: {} };
     const events = new Map<string, UsageEvent>(), coverage: string[] = [], health: Health = { complete: true, lost: false };
     const add = (event: UsageEvent): void => {
       if (event.to < now - RETENTION) return;
@@ -229,17 +279,65 @@ export class LocalUsageCollector {
       const known = events.get(event.id);
       if (!known || event.input + event.output > known.input + known.output) events.set(event.id, event);
     };
+    if (this.only) {
+      if (this.only.source === 'opencode') await this.collectOpenCode(now, next, add, coverage, health);
+      else await this.collectLogs(now, next, add, coverage, health);
+      this.commit(next);
+      return { events: [...events.values()].sort((a, b) => a.to - b.to || (a.id < b.id ? -1 : 1)), coverage, ...health };
+    }
     await this.collectHermes(now, next, add, coverage, health);
+    await this.collectOpenCode(now, next, add, coverage, health);
     await this.collectLogs(now, next, add, coverage, health);
     coverage.push(
-      'Sources: Hermes state.db in the default home, every profiles/<name> (symlinks followed) and HERMES_HOME; Codex rollouts in ~/.codex and CODEX_HOME (sessions, archived_sessions); Claude Code transcripts in ~/.claude, ~/.config/claude and CLAUDE_CONFIG_DIR. Not covered: other OS users, undiscovered custom homes, other devices, web and desktop chat apps, and tools that keep no local log. This is not a complete record of usage on this device.',
+      'Sources: Hermes state.db in the default home, every profiles/<name> (symlinks followed) and HERMES_HOME; Codex rollouts in ~/.codex and CODEX_HOME (sessions, archived_sessions); Claude Code transcripts in ~/.claude, ~/.config/claude and CLAUDE_CONFIG_DIR; OpenCode messages in its data folder ($XDG_DATA_HOME/opencode or ~/.local/share/opencode: opencode.db and storage/message); Qwen Code chats in QWEN_HOME or ~/.qwen (projects, tmp); Kimi wire logs in KIMI_CODE_HOME or ~/.kimi-code and KIMI_SHARE_DIR or ~/.kimi (sessions). Grok is not covered: its local session files hold context sizes, not per-request usage. Not covered: other OS users, undiscovered custom homes, other devices, web and desktop chat apps, and tools that keep no local log. This is not a complete record of usage on this device.',
       'Hermes: cumulative counters are baselined the first time a database is observed (no retrospective allocation); later increases are poll-delta intervals. Per-model rows are used; a session aggregate only for sessions without per-model rows, never both. Only the openai-codex route is attributed to codex; other routes (anthropic API key vs subscription is not recorded) are provider unknown.',
       'Logs: last 30 days, accounting fields only. Codex cumulative counters are differenced (cached is part of input, reasoning part of output) and identified per session lineage; Claude messages are deduplicated by API message id, including persisted print-mode (claude -p) sessions, which are attributed to Claude Code whatever launched them. The account or plan a log was billed to is not verified.',
     );
+    this.commit(next);
+    return { events: [...events.values()].sort((a, b) => a.to - b.to || (a.id < b.id ? -1 : 1)), coverage, ...health };
+  }
+
+  private commit(next: Clean): void {
     this.state.version = VERSION;
     this.state.files = next.files;
     this.state.hermes = next.hermes;
-    return { events: [...events.values()].sort((a, b) => a.to - b.to || (a.id < b.id ? -1 : 1)), coverage, ...health };
+    // Written only when used, so a file without OpenCode keeps the shape older releases read.
+    if (Object.keys(next.opencode).length) this.state.opencode = next.opencode;
+    else delete this.state.opencode;
+  }
+
+  /** OpenCode's data folder(s) and database, read by opencodeUsage.ts. */
+  private async collectOpenCode(now: number, next: Clean, add: (event: UsageEvent) => void, coverage: string[], health: Health): Promise<void> {
+    let dataDir: string, database: string | null, noFollow = false, name = 'OpenCode';
+    if (this.only) {
+      noFollow = true;
+      // A home is the data folder itself or, run with XDG_DATA_HOME=<home>, holds it as `opencode`.
+      const nested = join(this.only.path, 'opencode');
+      let isNested = false;
+      try { isNested = (await lstat(nested)).isDirectory(); } catch { /* Not nested. */ }
+      dataDir = isNested ? nested : this.only.path;
+      if (isNested && await realpath(nested) !== join(await realpath(this.only.path), 'opencode')) return;
+      database = join(dataDir, 'opencode.db');
+    } else {
+      const xdg = this.directory('XDG_DATA_HOME');
+      dataDir = join(xdg ?? join(this.home, '.local', 'share'), 'opencode');
+      const override = this.environment.OPENCODE_DB?.trim();
+      database = override === ':memory:' ? null : override && isAbsolute(override) ? override : join(dataDir, override || 'opencode.db');
+      name = xdg ? 'OpenCode XDG_DATA_HOME' : 'OpenCode ~/.local/share/opencode';
+    }
+    const before = Object.keys(this.state.opencode ?? {});
+    const read = await readOpenCodeStore({
+      dataDir, database, noFollow, profile: this.only ? 'home' : 'default', cursors: this.state.opencode ?? {}, now, retention: RETENTION,
+      ...(this.openCodeQuery ? { query: this.openCodeQuery } : {}),
+    });
+    Object.assign(next.opencode, read.cursors);
+    for (const key of before) {
+      const known = this.state.opencode![key];
+      if (!next.opencode[key] && known.at >= now - RETENTION && known.size === undefined) next.opencode[key] = known;
+    }
+    read.events.forEach(add);
+    if (!read.complete) health.complete = false;
+    coverage.push(`${name}: ${read.notes.length ? read.notes.join('; ') : 'no store found'}.`);
   }
 
   private directory(name: string): string | null {
@@ -331,6 +429,7 @@ export class LocalUsageCollector {
             id: fingerprint(JSON.stringify(['hermes', rowKey, base])), provider: hermesProvider(row.provider), app: 'Hermes', profile,
             session: identifier(id) || `hermes-${fingerprint(id).slice(0, 12)}`, from, to,
             input: dInput, output: dOutput, cached: Math.min(dCached, dInput), timing: 'poll-delta',
+            ...(usageModel(row.model) ? { model: usageModel(row.model) } : {}),
           });
         }
         next.hermes[key] = { node, at: now, rows: baselines };
@@ -429,15 +528,25 @@ export class LocalUsageCollector {
 
   private logRoots(): Root[] {
     const roots: Root[] = [];
-    const add = (source: Source, base: string | null, folders: string[], name: string, profile: string): void => {
+    const add = (source: LogSource, base: string | null, folders: readonly string[], name: string, profile: string): void => {
       if (base) for (const folder of folders) roots.push({ source, path: join(base, folder), label: `${name}/${folder}`, profile });
     };
+    if (this.only) {
+      const { source, path } = this.only;
+      if (source === 'opencode') return roots;
+      add(source, path, LOG_FOLDERS[source], 'home', 'home');
+      return roots;
+    }
     const codex = this.directory('CODEX_HOME'), claude = this.directory('CLAUDE_CONFIG_DIR');
     add('codex', join(this.home, '.codex'), ['sessions', 'archived_sessions'], '~/.codex', 'default');
     if (codex !== join(this.home, '.codex')) add('codex', codex, ['sessions', 'archived_sessions'], 'CODEX_HOME', codex ? label(basename(codex)) : '');
     add('claude', join(this.home, '.claude'), ['projects'], '~/.claude', 'default');
     add('claude', join(this.home, '.config', 'claude'), ['projects'], '~/.config/claude', 'default');
     if (claude !== join(this.home, '.claude')) add('claude', claude, ['projects'], 'CLAUDE_CONFIG_DIR', claude ? label(basename(claude)) : '');
+    const qwen = this.directory('QWEN_HOME'), kimiCode = this.directory('KIMI_CODE_HOME'), kimi = this.directory('KIMI_SHARE_DIR');
+    add('qwen', qwen ?? join(this.home, '.qwen'), LOG_FOLDERS.qwen, qwen ? 'QWEN_HOME' : '~/.qwen', qwen ? label(basename(qwen)) : 'default');
+    add('kimi', kimiCode ?? join(this.home, '.kimi-code'), LOG_FOLDERS.kimi, kimiCode ? 'KIMI_CODE_HOME' : '~/.kimi-code', kimiCode ? label(basename(kimiCode)) : 'default');
+    add('kimi', kimi ?? join(this.home, '.kimi'), LOG_FOLDERS.kimi, kimi ? 'KIMI_SHARE_DIR' : '~/.kimi', kimi ? label(basename(kimi)) : 'default');
     return roots;
   }
 
@@ -448,7 +557,12 @@ export class LocalUsageCollector {
       stats.set(root, s);
       const walk = async (directory: string, depth: number): Promise<void> => {
         let real: string;
-        try { real = await realpath(directory); } catch (error) {
+        try {
+          // A single home is read without following any symbolic link: nothing outside it is counted.
+          if (this.only && (await lstat(directory)).isSymbolicLink()) throw Object.assign(new Error('symlink'), { code: 'ENOENT' });
+          real = await realpath(directory);
+          if (this.only && real !== directory) throw Object.assign(new Error('moved'), { code: 'ENOENT' });
+        } catch (error) {
           if (depth === 0) s.problem = errno(error) === 'ENOENT' ? 'not present' : `not accessible (${errno(error) || 'error'})`;
           return;
         }
@@ -464,11 +578,11 @@ export class LocalUsageCollector {
           if (entry.name.startsWith('.')) continue;
           const path = join(real, entry.name);
           if (entry.isDirectory()) { await walk(path, depth + 1); continue; }
-          if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+          if (!entry.isFile() && (this.only || !entry.isSymbolicLink())) continue;
           try {
             const info = await stat(path, { bigint: true });
             if (info.isDirectory()) { await walk(path, depth + 1); continue; }
-            if (!info.isFile() || !entry.name.endsWith('.jsonl')) continue;
+            if (!info.isFile() || !entry.name.endsWith('.jsonl') || (root.source === 'kimi' && entry.name !== 'wire.jsonl')) continue;
             const node = `${info.dev}:${info.ino}`, mtime = Number(info.mtimeMs);
             if (nodes.has(node) || mtime < now - RETENTION) continue;
             nodes.add(node);
@@ -493,7 +607,7 @@ export class LocalUsageCollector {
       const known = this.state.files![key] ?? (moved && !claimed.has(moved) ? this.state.files![moved] : undefined);
       claimed.add(key);
       if (moved && known === this.state.files![moved]) claimed.add(moved);
-      const context: LogContext = { profile: file.root.profile, session: sessionFromName(file.path) };
+      const context: LogContext = { profile: file.root.profile, session: file.root.source === 'kimi' ? kimiSession(file.path) : sessionFromName(file.path) };
       if (known && known.node === file.node && known.size === file.size && known.mtime === file.mtime) {
         const cursor = structuredClone(known);
         cursor.seen = now;
@@ -527,7 +641,7 @@ export class LocalUsageCollector {
       if (!claimed.has(key) && !next.files[key] && cursor.seen >= now - RETENTION) next.files[key] = cursor;
     }
     for (const root of roots) {
-      const s = stats.get(root)!, name = `${root.source === 'codex' ? 'Codex' : 'Claude Code'} ${root.label}`;
+      const s = stats.get(root)!, name = `${SOURCE_NAMES[root.source]} ${root.label}`;
       if (s.problem && s.problem !== 'not present') health.complete = false;
       if (s.unreadable || s.deep) health.complete = false;
       // Unparsable and oversized lines are consumed: their accounting is not read again.
@@ -558,14 +672,17 @@ export class LocalUsageCollector {
         && fingerprint(head.subarray(0, known.headLength)) === known.head;
       const cursor: FileCursor = same ? structuredClone(known) : { node, head: '', headLength: 0, size, mtime, offset: 0, seen: now };
       Object.assign(cursor, { node, head: fingerprint(head), headLength: head.length, size, mtime, seen: now });
-      const markers = file.root.source === 'codex' ? ['token_count', 'session_meta'] : ['"usage"'];
+      const markers = MARKERS[file.root.source];
       const events: UsageEvent[] = [];
       let invalid = 0, oversized = 0;
       const consume = (line: Buffer): void => {
         if (!line.length || !markers.some(marker => line.includes(marker))) return;
         let raw: unknown;
         try { raw = JSON.parse(line.toString('utf8')); } catch { invalid++; return; }
-        const event = file.root.source === 'codex' ? codexUsage(raw, cursor.codex ??= {}, context) : claudeUsage(raw, cursor.claude ??= {}, context);
+        const source = file.root.source;
+        const event = source === 'codex' ? codexUsage(raw, cursor.codex ??= {}, context)
+          : source === 'claude' ? claudeUsage(raw, cursor.claude ??= {}, context)
+          : source === 'qwen' ? qwenUsage(raw, context) : kimiUsage(raw, context);
         if (event) events.push(event);
       };
       const start = cursor.offset;

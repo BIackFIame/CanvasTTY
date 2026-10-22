@@ -131,6 +131,7 @@ const PLUGIN_PERMISSIONS = new Set<PluginPermission>([
   "secrets",
   "sessions:read",
   "limits:read",
+  "usage:read",
   "launcher:open",
   "external:open",
   "browser:open",

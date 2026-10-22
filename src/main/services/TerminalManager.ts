@@ -72,6 +72,7 @@ import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
+import type { CardUsageContext } from "./PluginUsage.ts";
 import {
   persistedTerminalSession,
   type PersistedEnvironmentRef,
@@ -389,6 +390,27 @@ export class TerminalManager {
       restored: session.restored === true,
       owner: session.extras.ownerPluginId ?? null
     };
+  }
+
+  /**
+   * What plugin usage answers need about a card: its provider, the provider conversation it is attached to, the
+   * plugins whose launch options its launches carry, and the plugin that started it. No text, no paths.
+   */
+  usageContext(id: string): CardUsageContext | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    return {
+      id,
+      provider: session.metadata.provider,
+      ...(session.threadId ? { threadId: session.threadId } : {}),
+      contributors: Object.keys(session.extras.options ?? {}),
+      owner: session.extras.ownerPluginId ?? null
+    };
+  }
+
+  /** usageContext of every card. */
+  usageContexts(): CardUsageContext[] {
+    return [...this.sessions.keys()].map((id) => this.usageContext(id)!);
   }
 
   /** Records the plugin that started a card (EP-4); saved with the card so control survives a restore. */
