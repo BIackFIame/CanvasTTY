@@ -196,6 +196,7 @@ interface SettingsPanelProps {
   onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
+  onPluginChanged?(plugin: InstalledPlugin): void;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
   onEditHome(): void;
   onOpenBrowser(url?: string): Promise<void>;
@@ -232,6 +233,7 @@ export function SettingsPanel({
   onSetPluginDecisionsMayAllow,
   onUninstallPlugin,
   onOpenPluginContribution,
+  onPluginChanged,
   onToggleHomeWidget,
   onEditHome,
   onOpenBrowser,
@@ -1369,6 +1371,7 @@ export function SettingsPanel({
               onSetPluginEnabled={onSetPluginEnabled}
               onUninstallPlugin={onUninstallPlugin}
               onOpenPluginContribution={onOpenPluginContribution}
+              onPluginChanged={onPluginChanged}
             />
           )}
 

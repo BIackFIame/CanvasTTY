@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gunzipSync } from "node:zlib";
 import {
+  appendFile,
   chmod,
   cp,
   lstat,
@@ -26,6 +27,8 @@ import type {
   PluginContribution,
   PluginInstallPreview,
   PluginManifest,
+  PluginSourceChangeDiff,
+  PluginSourceChangePreview,
   PluginModule,
   PluginModuleAsset,
   PluginPermission,
@@ -93,6 +96,10 @@ const PREVIEW_TTL_MS = 10 * 60_000;
  * showcase) accumulates one staging directory per preview until the oldest ones happen to expire.
  */
 const MAX_PENDING_PREVIEWS = 20;
+/** Source change reviews held at once (each keeps a downloaded package in staging). */
+const MAX_PENDING_SOURCE_CHANGES = 4;
+const AUDIT_FILE = "plugin-audit.log";
+const MAX_AUDIT_BYTES = 512 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 90_000;
 const DOWNLOAD_ATTEMPTS = 3;
 const DOWNLOAD_RETRY_DELAY_MS = 1_500;
@@ -161,6 +168,8 @@ interface StoredPluginRecord {
   trustedServices?: Record<string, string>;
   /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
   decisionsMayAllow?: boolean;
+  /** The repository before the person's last source change, offered as "switch back". */
+  previousSourceUrl?: string;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -194,6 +203,14 @@ interface PendingInstall {
   preview: PluginInstallPreview;
 }
 
+interface PendingSourceChange {
+  directory: string;
+  packageRoot: string;
+  preview: PluginSourceChangePreview;
+  /** The install the review was made against; a different one at commit time refuses the change. */
+  installedAt: number;
+}
+
 type DownloadRepository = (url: string, destination: string) => Promise<void>;
 type DownloadModuleFiles = (
   url: string,
@@ -215,6 +232,8 @@ export class PluginManager {
   private readonly serviceTrust = new Map<string, Record<string, string>>();
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
+  private readonly pendingSourceChanges = new Map<string, PendingSourceChange>();
+  private readonly auditPath: string;
   private readonly updatingPlugins = new Map<string, Promise<InstalledPlugin>>();
   /** Plugin id -> tail of the install, module change, update and uninstall chain for that plugin. */
   private readonly pluginOperations = new Map<string, Promise<void>>();
@@ -239,6 +258,7 @@ export class PluginManager {
     this.versionsPath = join(userDataPath, VERSIONS_FILE);
     this.hookRegistryPath = join(userDataPath, "lifecycle", RUNTIME_HOOK_REGISTRY_FILE);
     this.dataRoot = join(userDataPath, PLUGIN_DATA_DIR);
+    this.auditPath = join(userDataPath, AUDIT_FILE);
     this.downloadRepository = downloadRepository ?? downloadGithubManifest;
     this.downloadFullRepository = downloadRepository ?? downloadGithubRepository;
     this.downloadModuleFiles = downloadModuleFiles;
@@ -292,6 +312,7 @@ export class PluginManager {
         this.plugins.set(pluginId, {
           manifest,
           sourceUrl: isLocalMascotSource(record.sourceUrl) ? record.sourceUrl : normalizeGithubUrl(record.sourceUrl),
+          ...storedPreviousSource(record),
           enabled: record.enabled,
           installedAt: record.installedAt,
           selectedModules,
@@ -1137,6 +1158,186 @@ export class PluginManager {
     }
   }
 
+  /**
+   * Downloads and validates another repository's package of an installed plugin, exactly as Update does, without
+   * touching the install. The answer is the review (what differs); changeSource commits exactly this package.
+   */
+  async previewSourceChange(pluginId: string, sourceUrl: string): Promise<PluginSourceChangePreview> {
+    this.cleanupExpiredPreviews();
+    const plugin = this.requirePlugin(pluginId);
+    if (isLocalMascotSource(plugin.sourceUrl)) throw new Error("A local mascot plugin has no repository to change.");
+    const canonicalUrl = normalizeGithubUrl(sourceUrl);
+    const currentKey = repositoryKeyOfUrl(plugin.sourceUrl).toLowerCase();
+    const nextKey = repositoryKeyOfUrl(canonicalUrl).toLowerCase();
+    if (nextKey === currentKey) throw new Error("The plugin is already installed from this repository; use Update instead.");
+    const directory = await mkdtemp(join(this.stagingRoot, "source-"));
+    const packageRoot = join(directory, "repository");
+    try {
+      await this.downloadFullRepository(canonicalUrl, packageRoot);
+      await inspectPackage(packageRoot);
+      const manifest = await readManifest(packageRoot);
+      if (manifest.id !== pluginId) {
+        throw new Error(`That repository holds plugin ${manifest.id}, not ${pluginId}. Only the same plugin id can replace it.`);
+      }
+      assertPlatformCompatible(manifest);
+      if (manifest.modules?.length) assertModularContributionFiles(manifest);
+      else await assertManifestAssets(packageRoot, manifest);
+      const preview: PluginSourceChangePreview = {
+        token: randomUUID(),
+        pluginId,
+        sourceUrl: canonicalUrl,
+        currentSourceUrl: plugin.sourceUrl,
+        currentVersion: plugin.manifest.version,
+        manifest,
+        sameOwner: nextKey.split("/")[0] === currentKey.split("/")[0],
+        changes: pluginSourceChanges(
+          activeManifest(plugin.manifest, plugin.selectedModules),
+          activeManifest(manifest, normalizeSelectedModules(manifest, plugin.selectedModules))
+        ),
+        expiresAt: Date.now() + PREVIEW_TTL_MS
+      };
+      while (this.pendingSourceChanges.size >= MAX_PENDING_SOURCE_CHANGES) {
+        const [oldest, held] = this.pendingSourceChanges.entries().next().value!;
+        this.pendingSourceChanges.delete(oldest);
+        await rm(held.directory, { recursive: true, force: true });
+      }
+      this.pendingSourceChanges.set(preview.token, { directory, packageRoot, preview, installedAt: plugin.installedAt });
+      return structuredClone(preview);
+    } catch (error) {
+      await rm(directory, { recursive: true, force: true });
+      throw error;
+    }
+  }
+
+  /**
+   * Switches an installed plugin to the reviewed package of another repository with the same plugin id. Its
+   * storage, data folder and secrets stay; every grant pinned to the old code (hooks, native code trust and the
+   * confirmations that need it) is revoked for the person to give again. A failure puts the old package and
+   * source back; the revoked grants stay revoked (fail closed) and the error says so.
+   */
+  async changeSource(pluginId: string, sourceUrl: string, token: string): Promise<InstalledPlugin> {
+    this.cleanupExpiredPreviews();
+    const pending = this.pendingSourceChanges.get(token);
+    if (!pending) throw new Error("The source change review expired. Inspect the repository again.");
+    this.pendingSourceChanges.delete(token);
+    let canonicalUrl = "";
+    try {
+      canonicalUrl = normalizeGithubUrl(sourceUrl);
+    } catch {
+      // Refused below: a review always holds a valid URL.
+    }
+    if (pending.preview.pluginId !== pluginId || pending.preview.sourceUrl !== canonicalUrl) {
+      await rm(pending.directory, { recursive: true, force: true });
+      throw new Error("The source change does not match its review.");
+    }
+    return this.withPluginLock(pluginId, () => this.performSourceChange(pending));
+  }
+
+  private async performSourceChange({ preview, packageRoot, directory, installedAt }: PendingSourceChange): Promise<InstalledPlugin> {
+    const pluginId = preview.pluginId;
+    const nextRoot = join(directory, "next");
+    const backupRoot = join(directory, "previous");
+    const currentRoot = join(this.pluginRoot, pluginId);
+    let plugin: InstalledPlugin | undefined;
+    let previous: InstalledPlugin | undefined;
+    let backedUp = false;
+    let swapped = false;
+    try {
+      plugin = this.requirePlugin(pluginId);
+      if (plugin.sourceUrl !== preview.currentSourceUrl || plugin.manifest.version !== preview.currentVersion
+        || plugin.installedAt !== installedAt) {
+        throw new Error("The plugin changed since the review. Inspect the repository again.");
+      }
+      previous = structuredClone(plugin);
+      // Revocation is durable (and stops the plugin's services) before any file is replaced.
+      plugin.enabledHooks = [];
+      this.revokeNativeCode(plugin);
+      await this.persistRegistry();
+
+      const { manifest } = preview;
+      const selected = normalizeSelectedModules(manifest, previous.selectedModules);
+      if (manifest.modules?.length) {
+        await materializeModularPackage(preview.sourceUrl, packageRoot, nextRoot, manifest, selected, this.downloadModuleFiles);
+      } else {
+        await rename(packageRoot, nextRoot);
+      }
+      await rename(currentRoot, backupRoot);
+      backedUp = true;
+      await rename(nextRoot, currentRoot);
+      swapped = true;
+
+      const changed: InstalledPlugin = {
+        manifest,
+        sourceUrl: preview.sourceUrl,
+        previousSourceUrl: previous.sourceUrl,
+        enabled: previous.enabled,
+        installedAt: previous.installedAt,
+        selectedModules: selected,
+        // The new source's code is reviewed and trusted again by the person; nothing carries over.
+        enabledHooks: [],
+        nativeCodeTrusted: false,
+        decisionsMayAllow: false
+      };
+      this.plugins.set(pluginId, changed);
+      await this.persistRegistry();
+      await this.withVersionsLock((versions) => {
+        versions[pluginId] = { installedVersion: manifest.version, latestVersion: manifest.version, checkedAt: Date.now() };
+      });
+      const revoked = [
+        ...(previous.nativeCodeTrusted ? ["native-code"] : []),
+        ...(previous.decisionsMayAllow ? ["decisions-may-allow"] : []),
+        ...(previous.enabledHooks.length ? [`hooks:${previous.enabledHooks.length}`] : [])
+      ];
+      await this.audit({
+        event: "plugin.source-changed",
+        plugin: pluginId,
+        from: previous.sourceUrl,
+        to: preview.sourceUrl,
+        fromVersion: previous.manifest.version,
+        toVersion: manifest.version,
+        revoked,
+        kept: ["storage", "data", "secrets"]
+      });
+      return structuredClone(activePlugin(changed));
+    } catch (error) {
+      if (!previous) throw error;
+      try {
+        if (swapped) await rm(currentRoot, { recursive: true, force: true });
+        if (backedUp) await rename(backupRoot, currentRoot);
+        // The old package is back unchanged (moved, never copied), with its source, version and modules. Fail
+        // closed: no grant comes back by itself. The person's hooks, trust and confirmations could have changed
+        // while the switch ran, and re-applying a snapshot taken before it could revive one they withdrew.
+        const restored: InstalledPlugin = { ...structuredClone(previous), enabledHooks: [] };
+        this.plugins.set(pluginId, restored);
+        this.revokeNativeCode(restored);
+        await this.persistRegistry();
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], `Plugin ${pluginId} source change failed and could not be rolled back.`);
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Plugin ${pluginId} source change failed: ${reason} The previous source and package are back; its native code trust, `
+          + "hooks and approvals stay revoked. Allow them again in Settings if you still want them.",
+        { cause: error }
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  /** One JSON line per plugin lifecycle decision the person made; kept next to the registry, bounded. */
+  private async audit(entry: Record<string, unknown>): Promise<void> {
+    const line = `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`;
+    try {
+      const size = await stat(this.auditPath).then((metadata) => metadata.size, () => 0);
+      if (size + line.length > MAX_AUDIT_BYTES) await rename(this.auditPath, `${this.auditPath}.1`);
+      await appendFile(this.auditPath, line, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      console.warn("CanvasTTY plugin audit line could not be written.", error);
+    }
+    console.info(`CanvasTTY plugin audit: ${line.trim()}`);
+  }
+
   private async readVersions(): Promise<Record<string, StoredVersionRecord>> {
     try {
       const raw = await readFile(this.versionsPath, "utf8");
@@ -1299,8 +1500,9 @@ export class PluginManager {
   }
 
   async dispose(): Promise<void> {
-    const directories = [...this.pending.values()].map((pending) => pending.directory);
+    const directories = [...this.pending.values(), ...this.pendingSourceChanges.values()].map((pending) => pending.directory);
     this.pending.clear();
+    this.pendingSourceChanges.clear();
     await Promise.allSettled(directories.map((directory) => rm(directory, { recursive: true, force: true })));
   }
 
@@ -1365,6 +1567,11 @@ export class PluginManager {
       this.pending.delete(token);
       void rm(pending.directory, { recursive: true, force: true });
     }
+    for (const [token, pending] of this.pendingSourceChanges) {
+      if (pending.preview.expiresAt > now) continue;
+      this.pendingSourceChanges.delete(token);
+      void rm(pending.directory, { recursive: true, force: true });
+    }
   }
 
   /**
@@ -1387,6 +1594,7 @@ export class PluginManager {
   private persistRegistry(): Promise<void> {
     const registry = Object.fromEntries([...this.plugins].map(([id, plugin]) => [id, {
       sourceUrl: plugin.sourceUrl,
+      ...(plugin.previousSourceUrl ? { previousSourceUrl: plugin.previousSourceUrl } : {}),
       enabled: plugin.enabled,
       installedAt: plugin.installedAt,
       selectedModules: plugin.selectedModules,
@@ -3189,7 +3397,42 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
     && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
+    && (value.previousSourceUrl === undefined || typeof value.previousSourceUrl === "string")
   );
+}
+
+/** A recorded previous source that is still a valid GitHub repository URL; anything else is dropped. */
+function storedPreviousSource(record: StoredPluginRecord): { previousSourceUrl?: string } {
+  if (!record.previousSourceUrl) return {};
+  try {
+    return { previousSourceUrl: normalizeGithubUrl(record.previousSourceUrl) };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * What differs between the installed plugin and another source's package, compared on the parts that grant
+ * something: permissions, native services and hooks, surfaces, decision services and launch policies.
+ */
+export function pluginSourceChanges(current: PluginManifest, next: PluginManifest): PluginSourceChangeDiff[] {
+  const parts = (manifest: PluginManifest): Record<string, string[]> => ({
+    permissions: [...manifest.permissions],
+    services: (manifest.services ?? []).map((service) => service.id),
+    hooks: (manifest.hooks ?? []).map((hook) => hook.id),
+    contributions: manifest.contributions.map((contribution) => `${contribution.kind}:${contribution.id}`),
+    decide: (manifest.services ?? []).filter((service) => service.decide).map((service) => service.id),
+    launchPolicy: (manifest.services ?? []).filter((service) => service.launch?.policy).map((service) => service.id)
+  });
+  const before = parts(current);
+  const after = parts(next);
+  const changes: PluginSourceChangeDiff[] = [];
+  for (const kind of Object.keys(before)) {
+    const added = after[kind].filter((item) => !before[kind].includes(item));
+    const removed = before[kind].filter((item) => !after[kind].includes(item));
+    if (added.length || removed.length) changes.push({ kind, added, removed });
+  }
+  return changes;
 }
 
 function sameServiceTrust(current: Record<string, string>, stored: Record<string, string>): boolean {

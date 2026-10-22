@@ -2134,6 +2134,7 @@ export function App(): React.JSX.Element {
           onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
           onUninstallPlugin={uninstallPlugin}
           onOpenPluginContribution={openPluginContribution}
+          onPluginChanged={(changed) => setPlugins((current) => current.map((plugin) => plugin.manifest.id === changed.manifest.id ? changed : plugin))}
           onToggleHomeWidget={toggleHomeWidget}
           onEditHome={startHomeEditor}
           onOpenBrowser={openBrowser}

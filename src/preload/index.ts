@@ -190,6 +190,8 @@ const api: CanvasTTYApi = {
     onUpdatesAvailable: (listener: (updates: PluginUpdateStatus[]) => void) => subscribe(IPC.pluginsUpdatesAvailable, listener),
     previewInstall: (sourceUrl: string) => ipcRenderer.invoke(IPC.pluginsPreviewInstall, sourceUrl),
     install: (token: string, selectedModules?: string[]) => ipcRenderer.invoke(IPC.pluginsInstall, token, selectedModules),
+    previewSourceChange: (request: { id: string; url: string }) => ipcRenderer.invoke(IPC.pluginsPreviewSourceChange, request),
+    changeSource: (request: { id: string; url: string; token: string }) => ipcRenderer.invoke(IPC.pluginsChangeSource, request),
     setModules: (pluginId: string, selectedModules: string[]) => (
       ipcRenderer.invoke(IPC.pluginsSetModules, pluginId, selectedModules)
     ),
