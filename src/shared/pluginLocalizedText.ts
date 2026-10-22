@@ -11,6 +11,14 @@ export function pluginName(manifest: Pick<PluginManifest, "name" | "name.ru" | "
   return localized(manifest, "name", locale);
 }
 
+/** The plugin name on a card action (its `name.ru`/`name.en` carried as `pluginName.ru`/`pluginName.en`). */
+export function cardActionPluginName(
+  action: { readonly pluginName: string; readonly "pluginName.ru"?: string; readonly "pluginName.en"?: string },
+  locale: LocaleId
+): string {
+  return localized(action, "pluginName", locale);
+}
+
 /** A contribution's (canvas app, settings page, home widget, window) title in the UI language; `title` otherwise. */
 export function contributionTitle(contribution: Pick<PluginContributionBase, "title" | "title.ru" | "title.en">, locale: LocaleId): string {
   return localized(contribution, "title", locale);

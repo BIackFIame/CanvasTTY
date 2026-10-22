@@ -1,4 +1,5 @@
 import type {
+  LocaleId,
   PluginCardAction,
   PluginCardActionResult,
   PluginCardBadge,
@@ -6,12 +7,15 @@ import type {
   PluginCardTone
 } from "../../shared/contracts.ts";
 import { cardActionMatches } from "../../shared/pluginCardActions.ts";
+import { cardActionPluginName } from "../../shared/pluginLocalizedText.ts";
 import type { PluginSessionSummary } from "./PluginSessions.ts";
 
 /** A trusted plugin service that declared `cardActions` (PluginManager.cardActionProviders). */
 export interface CardActionProvider {
   pluginId: string;
   pluginName: string;
+  "pluginName.ru"?: string;
+  "pluginName.en"?: string;
   serviceId: string;
   actions: PluginCardAction[];
 }
@@ -23,8 +27,9 @@ export interface PluginCardsDependencies {
   call(pluginId: string, serviceId: string, method: "canvastty.cards.invoke", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): PluginSessionSummary | null;
   redact(text: string): string;
-  /** The app's current language, sent with every action so the answer can be in it. */
-  locale(): string;
+  /** The app's current language: sent with every action so the answer can be in it, and used for the plugin name in a
+   * failed action's toast. */
+  locale(): LocaleId;
   /** Pushes the new decorations to the window. */
   changed(decorations: PluginCardDecorations): void;
   timeoutMs?: number;
@@ -122,6 +127,8 @@ export class PluginCards {
       actions: this.providers().flatMap((provider) => provider.actions.map((action) => ({
         pluginId: provider.pluginId,
         pluginName: provider.pluginName,
+        ...(provider["pluginName.ru"] ? { "pluginName.ru": provider["pluginName.ru"] } : {}),
+        ...(provider["pluginName.en"] ? { "pluginName.en": provider["pluginName.en"] } : {}),
         actionId: action.id,
         title: action.title,
         ...(action.when ? { when: structuredClone(action.when) } : {})
@@ -154,7 +161,8 @@ export class PluginCards {
       const message = typeof record.message === "string" && record.message.trim() ? this.message(record.message) : undefined;
       return { tone, ...(message ? { message } : {}) };
     } catch (error) {
-      return { tone: "error", message: this.message(`${provider.pluginName}: ${error instanceof Error ? error.message : "the action failed."}`) };
+      const name = cardActionPluginName(provider, this.deps.locale());
+      return { tone: "error", message: this.message(`${name}: ${error instanceof Error ? error.message : "the action failed."}`) };
     } finally {
       clearTimeout(timer);
     }

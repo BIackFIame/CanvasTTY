@@ -698,8 +698,13 @@ export class PluginManager {
 
   /** Services whose card actions are shown now: enabled, native code trusted, `cards:decorate` granted. */
   cardActionProviders(): CardActionProvider[] {
-    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
-      pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name, localizedName }) => ({
+      pluginId: plugin,
+      pluginName: name,
+      ...(localizedName["name.ru"] ? { "pluginName.ru": localizedName["name.ru"] } : {}),
+      ...(localizedName["name.en"] ? { "pluginName.en": localizedName["name.en"] } : {}),
+      serviceId: service.id,
+      actions: structuredClone(service.cardActions!)
     }));
   }
 
@@ -718,8 +723,8 @@ export class PluginManager {
   private trustedServicesWith(
     permission: PluginPermission,
     declares: (service: PluginService) => unknown
-  ): Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> {
-    const found: Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> = [];
+  ): Array<{ plugin: string; name: string; localizedName: Pick<PluginManifest, "name.ru" | "name.en">; service: PluginService; secrets: boolean }> {
+    const found: Array<{ plugin: string; name: string; localizedName: Pick<PluginManifest, "name.ru" | "name.en">; service: PluginService; secrets: boolean }> = [];
     for (const plugin of this.plugins.values()) {
       const trust = this.serviceTrust.get(plugin.manifest.id);
       if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
@@ -727,7 +732,13 @@ export class PluginManager {
       if (!manifest.permissions.includes(permission)) continue;
       for (const service of manifest.services ?? []) {
         if (declares(service) && trust[service.id]) {
-          found.push({ plugin: plugin.manifest.id, name: manifest.name, service, secrets: manifest.permissions.includes("secrets") });
+          found.push({
+            plugin: plugin.manifest.id,
+            name: manifest.name,
+            localizedName: { "name.ru": manifest["name.ru"], "name.en": manifest["name.en"] },
+            service,
+            secrets: manifest.permissions.includes("secrets")
+          });
         }
       }
     }

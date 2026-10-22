@@ -933,6 +933,9 @@ export interface PluginCardBadge {
 export interface PluginCardActionEntry {
   pluginId: string;
   pluginName: string;
+  /** The plugin's `name.ru`/`name.en`, when its manifest has them. */
+  "pluginName.ru"?: string;
+  "pluginName.en"?: string;
   actionId: string;
   title: string;
   when?: PluginCardActionFilter;
