@@ -121,6 +121,8 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 
 协议：通过 stdin/stdout 的逐行 JSON-RPC 2.0，每个方向单条消息最多 1 MB。更大的宿主请求会被拒绝，服务输出的超长行会被丢弃并记录。宿主首先发送 `canvastty.initialize` 通知，参数为 `{ apiVersion: 2, pluginId, serviceId, dataDir, locale, hostVersion }`。
 
+当用户切换应用语言时，每个正在运行的服务会收到一次 `canvastty.locale.changed` 通知，参数为 `{ locale }`（无需权限：语言不属于隐私数据，每个插件页面的上下文中也已包含它）。已停止、正在重启或失败的服务不会收到；它下一次的 `canvastty.initialize` 会带上当前语言。服务显示的文本（标记、提示、它自己的事件）应随之切换。
+
 应用启动时，只有在服务可能调用的所有宿主 API（`sessions.*`、`cards.setBadge`、`secrets.get` 等）就绪之后、恢复已保存卡片之前，才会启动服务：服务收到 `canvastty.initialize` 后即可调用它们，订阅会话事件的服务会以事件或 `sessions.subscribe` 快照的形式收到恢复的卡片。
 
 来自插件自身界面的请求使用界面选择的方法和参数；以 `canvastty.` 开头的方法名保留给宿主。用 `{"jsonrpc":"2.0","id":…,"result":…}` 或 `{"jsonrpc":"2.0","id":…,"error":{"code":-32000,"message":"…"}}` 应答。15 秒内未应答的请求以超时错误结束；服务已停止、正在重启或失败时的请求同样返回错误；每个服务同时最多等待 64 个请求。
@@ -356,7 +358,7 @@ interface PluginSessionEvent {
 ```
 
 - `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`：`text` 最多 24 个字符，`tone` 为 `neutral`（默认）、`info`、`warn` 或 `error`，`tooltip` 最多 200 个字符；`null` 移除该插件的标记。每张卡片最多 4 个插件标记。标记是纯文本，像 agent 文本一样被遮蔽，并随卡片关闭或插件信任撤销而消失。
-- 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session }`（仅宿主可发；`session` 为上面的摘要），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
+- 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session, locale }`（仅宿主可发；`session` 为上面的摘要，`locale` 为此刻的应用语言，用于回答的文本），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
 - 任何地方都没有 HTML：标记、标题和消息都按文本渲染。
 
 完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。

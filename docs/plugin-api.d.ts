@@ -260,6 +260,8 @@ export interface CanvasTTYCardActionInvocation {
   actionId: string;
   sessionId: string;
   session: CanvasTTYSessionSummary;
+  /** The app language when the person chose the action (`"en"`, `"ru"`): write `message` in it. */
+  locale: string;
 }
 
 /** Answer to `canvastty.cards.invoke`: `message` (plain text, 2000 characters, masked) is a toast on the card. */
@@ -459,6 +461,8 @@ export interface CanvasTTYServiceContext {
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
   | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> }
+  /** The person switched the app language; sent once to running services, no permission. */
+  | { jsonrpc: "2.0"; method: "canvastty.locale.changed"; params: { locale: string } }
   | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent };
 
 /** Requests the host sends to a service, which plugin surfaces cannot send. */

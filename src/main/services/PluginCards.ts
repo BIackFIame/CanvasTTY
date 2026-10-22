@@ -23,6 +23,8 @@ export interface PluginCardsDependencies {
   call(pluginId: string, serviceId: string, method: "canvastty.cards.invoke", params: unknown, timeoutMs: number): Promise<unknown>;
   session(sessionId: string): PluginSessionSummary | null;
   redact(text: string): string;
+  /** The app's current language, sent with every action so the answer can be in it. */
+  locale(): string;
   /** Pushes the new decorations to the window. */
   changed(decorations: PluginCardDecorations): void;
   timeoutMs?: number;
@@ -33,6 +35,8 @@ export interface CardActionInvocation {
   actionId: string;
   sessionId: string;
   session: PluginSessionSummary;
+  /** The app's language when the person chose the action (`en`, `ru`); write `message` in it. */
+  locale: string;
 }
 
 const CARD_ACTION_TIMEOUT_MS = 15_000;
@@ -136,7 +140,7 @@ export class PluginCards {
     if (!session) throw new Error("No card has that session id.");
     if (!cardActionMatches(action.when, session)) throw new Error("That action does not apply to this card.");
     const timeoutMs = this.deps.timeoutMs ?? CARD_ACTION_TIMEOUT_MS;
-    const params: CardActionInvocation = { actionId, sessionId, session };
+    const params: CardActionInvocation = { actionId, sessionId, session, locale: this.deps.locale() };
     let timer: NodeJS.Timeout | undefined;
     try {
       const answer = await Promise.race([

@@ -408,6 +408,7 @@ test("card badges and actions: plain text, filtered by card, answers redacted, f
     call: (pluginId, serviceId, method, params) => answer(params, method),
     session: (id) => sessions.summary(id),
     redact: (text) => text.replaceAll(SECRET, "[redacted]"),
+    locale: () => "en",
     changed: (decorations) => published.push(decorations),
     timeoutMs: 50
   });
@@ -496,6 +497,7 @@ test("collect-demo through the real supervisor: the action and the tool return g
       return summary && { ...summary, workingDirectory: tree, environment: { pluginId: "e", kind: "worktree", label: "w", ref: { dir: tree } } };
     },
     redact: (text) => text,
+    locale: () => "en",
     changed: (decorations) => badges.push(decorations.badges)
   });
   const tools = new PluginAgentTools({

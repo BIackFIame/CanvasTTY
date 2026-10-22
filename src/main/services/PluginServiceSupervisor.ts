@@ -187,6 +187,8 @@ interface ServiceRecord {
   lastError?: string;
   /** Bytes handed to stdin.write() that have not yet drained (accepted by the OS pipe). */
   queuedBytes: number;
+  /** The locale this process was last told (in `canvastty.initialize` or `canvastty.locale.changed`). */
+  locale?: string;
 }
 
 /**
@@ -274,6 +276,25 @@ export class PluginServiceSupervisor {
     }
     if (Buffer.byteLength(frame, "utf8") >= this.options.maxFrameBytes) return false;
     return this.write(record, frame);
+  }
+
+  /**
+   * The person changed the app language: every running service whose process was told another locale gets
+   * `canvastty.locale.changed { locale }`. A stopped, restarting or failed service gets nothing; its next start
+   * reads the current locale in `canvastty.initialize`. Returns how many services were notified.
+   */
+  localeChanged(): number {
+    const locale = this.options.locale();
+    let notified = 0;
+    for (const record of this.services.values()) {
+      if (!record.child || (record.state !== "running" && record.state !== "starting") || record.locale === locale) continue;
+      // Written in order after `canvastty.initialize` on the same pipe, so a starting service sees both in order.
+      if (this.write(record, JSON.stringify({ jsonrpc: "2.0", method: "canvastty.locale.changed", params: { locale } }))) {
+        record.locale = locale;
+        notified += 1;
+      }
+    }
+    return notified;
   }
 
   /**
@@ -430,6 +451,7 @@ export class PluginServiceSupervisor {
       }
       for (const line of lines) if (line.trim()) this.log(spec, "stderr", "warn", line);
     });
+    record.locale = this.options.locale();
     this.write(record, JSON.stringify({
       jsonrpc: "2.0",
       method: "canvastty.initialize",
@@ -438,7 +460,7 @@ export class PluginServiceSupervisor {
         pluginId: spec.pluginId,
         serviceId: spec.serviceId,
         dataDir: spec.dataDir,
-        locale: this.options.locale(),
+        locale: record.locale,
         hostVersion: this.options.hostVersion
       }
     }));

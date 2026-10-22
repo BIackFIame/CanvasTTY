@@ -667,6 +667,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => sessionsForPlugins.summary(sessionId),
     redact: (text) => redaction.redact(text),
+    locale: () => settings.get().locale,
     changed: (decorations) => {
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         mainWindow.webContents.send(IPC.pluginsCardDecorationsChanged, decorations);
@@ -870,6 +871,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     applyBrowserSettings: async (next) => {
       terminalManager?.setKeyboardShortcuts(next.shortcuts);
       installMacMenu?.();
+      // Running plugin services hear about a language change (only when it changed).
+      pluginServices?.localeChanged();
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
       terminalManager?.setLifecycleHooksEnabled(next.agentLifecycleHooksEnabled);
       // Awaited so the renderer's settings.update resolves with the endpoint live
