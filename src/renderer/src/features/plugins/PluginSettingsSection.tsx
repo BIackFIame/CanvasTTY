@@ -1128,7 +1128,7 @@ function PluginSourceChange({
     }
   };
   const label = (kind: string, item: string): string => (
-    kind === "permissions" ? t(locale, permissionKey(item as PluginPermission)) : item
+    kind === "permissions" ? permissionText(locale, item as PluginPermission) : item
   );
   return (
     <div className="plugin-source-change">
