@@ -63,7 +63,7 @@ import { MATERIAL_SCHEME } from "../shared/materials.ts";
 import { contributionTitle } from "../shared/pluginLocalizedText.ts";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
-import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
+import { listProviderDirectory, providerListForPlugin, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
 import { isGitProjectRoot, subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
@@ -188,6 +188,8 @@ let mascotManager: MascotManager | null = null;
 let pluginServices: PluginServiceSupervisor | null = null;
 let pluginSessions: PluginSessions | null = null;
 let pluginCards: PluginCards | null = null;
+/** What `providers.list` answers from: the sources list_providers uses, set once they exist. */
+let pluginProviderSources: ProviderDirectorySources | null = null;
 let githubAuth: GithubAuthService | null = null;
 let pluginMediaService: PluginMediaService | null = null;
 let materialService: MaterialService | null = null;
@@ -411,6 +413,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         return pluginSecretsService.get(pluginId, key);
       },
       sessions: (pluginId, serviceId, method, params, permissions) => pluginSessions?.handle(pluginId, serviceId, method, params, permissions),
+      // The same directory list_providers answers from (cached CLI, limits and model reads; no process is awaited).
+      providers: (pluginId) => providerListForPlugin(pluginId, {
+        allowed: (id) => pluginManager!.hasPermission(id, "providers:read"),
+        sources: () => {
+          if (!pluginProviderSources) throw new Error("Providers are not ready yet.");
+          return pluginProviderSources;
+        }
+      }),
       setBadge: (pluginId, params) => {
         if (!pluginCards) throw new Error("Cards are not ready yet.");
         return pluginCards.setBadge(pluginId, params);
@@ -726,6 +736,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     launchContributors: () => pluginManager?.launchContributors() ?? [],
     containment: () => terminalManager?.containment() === true
   };
+  pluginProviderSources = providerDirectorySources;
   // The orchestration bridge exists only for sessions launched with the
   // orchestrator role, or with a role a trusted plugin tool lists (EP-6);
   // other sessions never receive capabilities.

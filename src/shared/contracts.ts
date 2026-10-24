@@ -843,6 +843,7 @@ export type PluginPermission =
   | "secrets"
   | "sessions:read"
   | "limits:read"
+  | "providers:read"
   | "launcher:open"
   | "external:open"
   | "browser:open"

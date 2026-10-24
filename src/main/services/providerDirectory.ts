@@ -133,6 +133,21 @@ export function listProviderDirectory(sources: ProviderDirectorySources, pluginT
   };
 }
 
+/**
+ * `providers.list` for a plugin service with `providers:read`: exactly what list_providers gives an orchestrator
+ * that has no plugin tools. `allowed` is the host registry's answer at the moment of the call (a plugin disabled
+ * or updated without the permission is refused even while its old process still runs).
+ */
+export function providerListForPlugin(
+  pluginId: string,
+  deps: { allowed(pluginId: string): boolean; sources(): ProviderDirectorySources }
+): ProviderDirectory {
+  let allowed = false;
+  try { allowed = deps.allowed(pluginId) === true; } catch { allowed = false; }
+  if (!allowed) throw new Error("Plugin does not have the providers:read permission.");
+  return listProviderDirectory(deps.sources());
+}
+
 function signInState(entry: ProviderLimitsSnapshot | undefined): { state: ProviderSignIn; checkedAt?: number } {
   if (!entry) return { state: "unknown" };
   if (entry.state === "available") return { state: "ok", checkedAt: entry.fetchedAt };

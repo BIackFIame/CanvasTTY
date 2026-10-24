@@ -41,6 +41,11 @@ export interface PluginServiceHost {
    * does not know. `permissions` are the plugin's active manifest permissions; it checks them per method.
    */
   sessions?(pluginId: string, serviceId: string, method: string, params: unknown, permissions: readonly PluginPermission[]): unknown;
+  /**
+   * `providers.list`, already checked against the manifest for `providers:read`: the launchable providers as
+   * list_providers gives them to an orchestrator. The host checks the registry again (a disabled plugin is refused).
+   */
+  providers?(pluginId: string): unknown;
   /** `cards.setBadge` (EP-7), already checked for `cards:decorate`. */
   setBadge?(pluginId: string, params: unknown): unknown;
   /** The service process ended (stopped, crashed or removed): its subscriptions end with it. */
@@ -632,6 +637,10 @@ export class PluginServiceSupervisor {
       }
       this.options.host.registerSecrets?.(spec.pluginId, values.values as string[]);
       return null;
+    }
+    if (method === "providers.list" && this.options.host.providers) {
+      if (!spec.permissions.includes("providers:read")) throw new Error("Plugin does not have the providers:read permission.");
+      return this.options.host.providers(spec.pluginId);
     }
     if (method === "cards.setBadge" && this.options.host.setBadge) {
       if (!spec.permissions.includes("cards:decorate")) throw new Error("Plugin does not have the cards:decorate permission.");

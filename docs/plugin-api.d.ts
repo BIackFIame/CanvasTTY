@@ -83,7 +83,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "providers:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
     modules: string[];
   };
   contribution: {
@@ -519,6 +519,31 @@ export interface CanvasTTYLaunchContribution {
   refuse?: { reason: string };
 }
 
+/** One launchable provider in `providers.list` (the `list_providers` entry). No tokens, e-mails, account ids or paths. */
+export interface CanvasTTYProviderDirectoryEntry {
+  id: CanvasTTYProviderId;
+  name: string;
+  /** Its CLI was found on this computer; null when CanvasTTY cannot tell. */
+  installed: boolean | null;
+  available: boolean;
+  /** As the last usage-limits read left it; "unknown" when it was never read. */
+  signIn: "ok" | "signed_out" | "expired" | "unknown";
+  signInCheckedAt?: number;
+  subagent: boolean;
+  orchestrator: boolean;
+  model: { supported: boolean; format: string; known?: string[]; knownAt?: number };
+  efforts?: string[];
+  profiles?: Array<"normal" | "auto" | "acceptEdits" | "plan">;
+  /** Launch options of plugins whose `launch` block is `delegable`. */
+  launchOptions?: Array<{ pluginId: string; plugin: string; fields: Array<{ key: string; kind: string; choices?: string[] }> }>;
+}
+
+export interface CanvasTTYProviderDirectory {
+  providers: CanvasTTYProviderDirectoryEntry[];
+  launchOptionTools?: string[];
+  note: string;
+}
+
 /** Params of the first host notification, `canvastty.initialize`. */
 export interface CanvasTTYServiceContext {
   apiVersion: 2;
@@ -582,6 +607,8 @@ export interface CanvasTTYServiceHostApi {
   "sessions.send"(params: { sessionId: string; text: string; submit?: boolean }): { sessionId: string; sent: boolean };
   /** Needs `sessions:control`; only cards this plugin created. Closes the card, keeps its environment data. */
   "sessions.stop"(params: { sessionId: string }): { sessionId: string; stopped: true };
+  /** Needs `providers:read`. What `list_providers` gives an orchestrator, from cached reads only. */
+  "providers.list"(params: Record<string, never>): CanvasTTYProviderDirectory;
   /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */
   "cards.setBadge"(params: { sessionId: string; badge: { text: string; tone?: CanvasTTYCardTone; tooltip?: string } | null }): null;
 }
