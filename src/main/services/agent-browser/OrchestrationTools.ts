@@ -65,6 +65,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       }
       switch (request.tool) {
         case "list_providers":
+          await this.refreshEnvironments();
           return this.listProviders(session);
         case "wait_for_agent":
           return await this.wait(sessionId, request.arguments, signal);
@@ -113,6 +114,10 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     }
   }
 
+  private async refreshEnvironments(): Promise<void> {
+    try { await this.providers.refreshEnvironments?.(); } catch { /* the listing shows no servers then */ }
+  }
+
   private listProviders(session: { role: SessionRole; provider: ProviderId }): Record<string, unknown> {
     const pluginTools = this.plugins?.list(session.role, session.provider).map((tool) => tool.name) ?? [];
     return listProviderDirectory(this.providers, pluginTools) as unknown as Record<string, unknown>;
@@ -157,6 +162,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       try { unknown = await this.providers.checkModel?.(provider, args.model as string) ?? null; } catch { unknown = null; }
       if (unknown) throw orchestrationBridgeError("INVALID_REQUEST", unknown, false);
     }
+    // The servers a per-server cap names come from the plugin; read (cached) before the check.
+    if (args.environment !== undefined) await this.refreshEnvironments();
     if (signal?.aborted) throw canceledError();
     // A plugin the spawn does not name keeps this session's own options (never silently the CLI's default model).
     const requested = args.launchOptions as SpawnAgentRequest["launchOptions"];
@@ -177,7 +184,9 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       ...(args.model !== undefined ? { model: args.model as string } : {}),
       ...(args.effort !== undefined ? { effort: args.effort as SpawnAgentRequest["effort"] } : {}),
       ...(args.isolate === "worktree" ? { isolate: "worktree" as const } : {}),
-      profile: profile.profile
+      ...(args.environment !== undefined ? { environment: args.environment as SpawnAgentRequest["environment"] } : {}),
+      // An inherited profile is left for spawn to work out the same way, so an environment may still lower it.
+      ...(profile.inherited ? {} : { profile: profile.profile })
     }, signal, Math.max(0, deadline - Date.now())).catch((error: unknown) => {
       if (signal?.aborted) throw canceledError();
       throw error;
@@ -203,7 +212,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       // Which CLI serves it, the model it was asked for (null: its launch options or the CLI's own default decide),
       // and where each plugin's launch options came from.
       servedBy: { provider: created.provider, model: created.model ?? null, launchOptions: inheritance.sources },
-      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {})
+      ...(args.isolate === "worktree" ? { isolationRequested: "worktree" } : {}),
+      ...(args.environment !== undefined ? { environment: environmentIds(args.environment) } : {})
     };
   }
 
@@ -283,6 +293,12 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
       );
     }
   }
+}
+
+/** Which environment the subagent was placed in, by id only (its options stay with the card). */
+function environmentIds(value: unknown): { pluginId: string; kind: string } {
+  const { pluginId, kind } = value as { pluginId: string; kind: string };
+  return { pluginId, kind };
 }
 
 function canceledError(): Error {

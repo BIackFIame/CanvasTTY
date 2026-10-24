@@ -1115,6 +1115,29 @@ export interface PluginEnvironmentKind {
    * means no: the core then refuses a launch that needs it, or marks the card as not protected.
    */
   keeps?: PluginEnvironmentKeeps;
+  /**
+   * The plugin declares this kind safe for an orchestrator to choose for its subagents (spawn_agent's environment).
+   * Without it only the person chooses it, in the launcher.
+   */
+  subagents?: PluginEnvironmentSubagents;
+}
+
+export interface PluginEnvironmentSubagents {
+  /**
+   * Subagents that may run at once, all orchestrations together: 1 to 16, 1 when omitted. Per server (each value of
+   * `capBy`) when `capBy` is set, else in the whole kind.
+   */
+  maxParallel?: number;
+  /** Keys of this kind's fields an orchestrator may set; every other field keeps its declared default. */
+  fields?: string[];
+  /**
+   * A key from `fields` whose value names a server: each value has its own `maxParallel`. The orchestrator must pass
+   * one of the servers the plugin lists: a `select` field's own values, or, for a text field, the labels the service
+   * answers to `canvastty.environment.choices`.
+   */
+  capBy?: string;
+  /** With `capBy`: subagents at once in the whole kind, all servers together (1 to 64). */
+  maxParallelTotal?: number;
 }
 
 export interface PluginEnvironmentKeeps {

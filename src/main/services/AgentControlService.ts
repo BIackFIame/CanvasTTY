@@ -57,6 +57,11 @@ export interface SpawnAgentRequest {
   effort?: CreateSessionRequest["effort"];
   /** "worktree": run it in a worktree of the installed environments plugin; refused when none is available. */
   isolate?: "worktree";
+  /**
+   * A plugin environment for the subagent (a server, a container), as list_providers lists it. Only a kind its
+   * plugin declared safe for subagents, within its parallel cap; the launch then runs it exactly as the launcher's.
+   */
+  environment?: CreateSessionRequest["environment"];
 }
 
 /** What an environment resolver gets for one subagent (AgentControlOptions.resolveSubagentEnvironment). */
@@ -212,6 +217,44 @@ export class AgentControlService {
     const profile = subagentProfile(parent.profile, request.provider, request.profile, this.containment());
     if ("error" in profile) throw new DelegationRefusal(profile.error);
     const { live } = this.spawnCapacity(parent.id);
+    if (request.environment !== undefined) {
+      // An environment the orchestrator names (a server, a container) replaces the automatic worktree placement.
+      if (request.isolate === "worktree") {
+        throw new DelegationRefusal("Pass either environment or isolate: \"worktree\", not both.");
+      }
+      let launchProfile = profile.profile;
+      const placed = this.terminals.delegatedEnvironment(request.provider, request.environment);
+      if (!placed.ok) throw new DelegationRefusal(placed.reason);
+      const { kind } = placed;
+      // Counted and created in the same turn: two calls at once cannot both take the last place.
+      const subagents = (count: number): string => `${count} subagent${count === 1 ? "" : "s"}`;
+      const after = "Wait for one to finish or cancel_agent one first, or run this one on this computer.";
+      const running = this.terminals.subagentsInEnvironment(kind.pluginId, kind.kind);
+      const server = kind.capBy ? placed.choice.options?.[kind.capBy] : undefined;
+      if (kind.capBy && typeof server === "string") {
+        const onServer = this.terminals.subagentsInEnvironment(kind.pluginId, kind.kind, { field: kind.capBy, value: server });
+        if (onServer >= kind.maxParallel) {
+          throw new DelegationRefusal(`${server} (${kind.name}) already runs ${subagents(onServer)}, the most ${kind.plugin} allows on one server at once. ${after}`);
+        }
+        if (kind.maxParallelTotal !== undefined && running >= kind.maxParallelTotal) {
+          throw new DelegationRefusal(`${kind.name} already runs ${subagents(running)} on all servers together, the most ${kind.plugin} allows at once. ${after}`);
+        }
+      } else if (running >= kind.maxParallel) {
+        throw new DelegationRefusal(`${kind.name} already runs ${subagents(running)}, the most ${kind.plugin} allows there at once. ${after}`);
+      }
+      // Without the launch passed on, only normal reaches the agent there (as for the person's launch). Lowering to
+      // normal is never more than asked; plan cannot be kept there, so it is refused rather than raised.
+      if (!kind.keepsLaunch && launchProfile !== "normal") {
+        if (launchProfile === "plan") {
+          throw new DelegationRefusal(`${kind.name} does not pass the launch on, so plan (read-only) cannot be kept there, and a subagent never gets more than plan from this session. Run it on this computer.`);
+        }
+        if (request.profile !== undefined) {
+          throw new DelegationRefusal(`${kind.name} does not pass the launch on, so CanvasTTY's hooks and the ${launchProfile} profile would not reach the agent there; only normal (it asks) runs there. Omit profile or pass "normal".`);
+        }
+        launchProfile = "normal";
+      }
+      return this.createSubagent(parent.id, request, cwd.cwd, launchProfile, placed.choice, signal, promptWaitMs);
+    }
     const resolve = this.options.resolveSubagentEnvironment;
     if (!resolve) {
       if (request.isolate === "worktree") throw new DelegationRefusal(NO_WORKTREE);
