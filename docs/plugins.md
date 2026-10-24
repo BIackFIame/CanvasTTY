@@ -167,8 +167,9 @@ A service may call back this host API (the base that later extension points add 
 | `cards.setBadge` `{ sessionId, badge }` | request | `cards:decorate` | A short plain-text badge on any card (see [Card badges and actions](#card-badges-and-actions-cardsdecorate)) |
 | `limits.get` / `limits.subscribe` / `limits.unsubscribe` | request | `limits:read` (an account home also `launch:contribute`) | The subscription limits plugin surfaces get, from the host's cache (see [Subscription limits](#subscription-limits-limitsread)) |
 | `providers.list` `{}` | request | `providers:read` | The agent CLIs CanvasTTY can launch, exactly as `list_providers` gives them to an orchestrator: `{ providers, note }`, each provider with `id`, `name`, `installed`, `available`, `signIn` (`ok`, `signed_out`, `expired`, `unknown`) and `signInCheckedAt`, `subagent`, `orchestrator`, `model` (`supported`, `format`, `known` when its CLI listed them), `efforts`, `profiles`, and the launch options of plugins that made them `delegable`. Read from what CanvasTTY already holds (the CLI check, the last limits read, the cached model listing); it starts no read and waits for nothing. No tokens, e-mails, account ids or paths |
+| `plugins.request` `{ plugin, method, params? }` | request | the pair in `uses`, approved by the person | Another plugin's shared read (see [Shared reads between plugins](#shared-reads-between-plugins-shares-and-uses)) |
 
-The host binds every call to the service's own plugin; a service cannot name another plugin or read another plugin's secrets, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
+The host binds every call to the service's own plugin; a service cannot read another plugin's secrets, names another plugin only in a shared read the person approved, and reaches sessions only through the `sessions:*` permissions below. The example [`service-echo`](../examples/plugins/service-echo) saves a token from its page with `host.secrets.set` and its service reads it with `secrets.get`, answering only whether one is set.
 
 UI channel: sandboxed surfaces call their own plugin's services, and only those:
 
@@ -405,6 +406,31 @@ A foreign or unknown id gets the same error, so a plugin cannot probe other card
 
 **Orchestrators.** With `"role": "orchestrator"` the card is an orchestrator: it gets the same orchestration tools as one the person starts (`spawn_agent`, `wait_for_agent` and the rest) and the same delegation rules for its subagents (delegable launch options only, profile no wider than its own, isolation as for any delegated launch). Because it starts agents of its own, `sessions:launch` alone is not enough: the person turns on **May start orchestrators** for that plugin in Settings, under Extension native code, after trusting its native code. Without it, or when the plugin is disabled or no longer trusted, the call is refused and no card is made; an update, a module change, disabling the plugin or revoking its trust turns it off again. Such an orchestrator never runs in `yolo`. Its card shows "Started by" and the plugin id, also after a restore, and its subagents never get the person's `trustedFolder` (the plugin chose the folder, not the person). Revoking the consent does not close orchestrators already running; the person closes them. `role` defaults to `"agent"`, which behaves exactly as before.
 
+### Shared reads between plugins (`shares` and `uses`)
+
+One plugin's service can read data another plugin chose to share, for example a router reading an accounts plugin's routes and per-account quota instead of waiting for an agent to pass them along. It is read-only: one request, one JSON answer. There is no write, no stream and no subscription.
+
+The provider lists what it shares on the service that answers; the reader lists what it reads at the top level (apiVersion 2, with a service):
+
+```json
+"services": [{
+  "id": "accounts", "title": "Accounts", "entry": "services/accounts.mjs",
+  "shares": [{ "method": "accounts.routes", "description": "Model routes and each account's quota (no keys).", "dataClass": "D1" }]
+}]
+```
+
+```json
+"uses": [{ "plugin": "canvastty-accounts", "method": "accounts.routes" }]
+```
+
+- `method` is lowercase words joined by dots (at most 64 characters, never `canvastty.…`), unique across the provider's services; up to 16 `shares` per plugin and 16 `uses`. `description` (200 characters) and the optional `dataClass` (`D0` public … `D3` most sensitive) are what the person sees; the host passes `dataClass` to the reader and does not interpret it. A plugin cannot use its own shares.
+- Both lists are shown before install next to the permissions. Installing grants nothing: the person allows each pair under the reader in **Settings → Agents → Extension native code**, after trusting its native code, the same way as **May allow agent actions**. The approval records the provider's source, method, description and data class; if an update of the provider changes any of them, the pair stops until the person allows it again. Turning the reader's native code off, updating it, changing its modules or disabling it removes its approvals; uninstalling the provider removes every approval for it.
+- The reader calls `plugins.request` `{ plugin, method, params? }`. The host checks, on every call and from its own registry: the reader declares the pair and holds a current approval; both plugins are enabled with native code trusted; the provider declares the method on a running service. Then it sends that service `canvastty.shares.read` `{ caller: { pluginId }, method, params }` (host-only; surfaces cannot send it) and waits at most 5 s. The answer reaches the reader as `{ plugin, method, dataClass?, data }`.
+- The answer is the provider's responsibility, and the host checks it before the reader sees any of it: it must be JSON of at most 256 KB, and it must not contain anything the [redaction registry](#base-protection-and-redaction-core) would mask (keys CanvasTTY holds, launch `secretEnv` values, secrets a service read with `secrets.get` or registered with `redaction.register`, and common key shapes); such an answer is refused whole, never masked and passed on. The provider's error text is not passed on either.
+- Limits: `params` at most 16 KB; 60 reads per minute and 4 at once per pair; 8 at once per provider.
+- A refusal is a JSON-RPC error with `data.reason`: `invalid_request`, `consumer_unavailable`, `not_declared`, `not_shared`, `not_approved`, `approval_changed`, `provider_unavailable`, `rate_limited`, `busy`, `timeout`, `provider_error`, `not_json`, `too_large` or `secret_in_response`.
+- Each read is logged under both plugins (the log in **Extension native code**) with the method, the other plugin, the outcome, the time taken, the answer's size and SHA-256 prefixes of the params and the answer, never their contents.
+
 ### Card badges and actions (`cards:decorate`)
 
 A service with `cards:decorate` can put a badge on any card and declare up to 16 `cardActions`:
@@ -511,7 +537,7 @@ host.onStorageChange(listener) notifies every live contribution of the same plug
 | `sessions:control` | `sessions.send`, `sessions.stop` | Types into and closes only the cards the plugin started |
 | `cards:decorate` | `cards.setBadge`, a service's `cardActions`, `canvastty.cards.invoke` | Plain-text badges on cards and actions in their menu |
 | `browser:engine` | A service's `browserEngine` and `canvastty.browserEngine.*` | Receives the URLs of agents' background tabs and serves them from its own engine; no cookies, profile or credentials |
-| `limits:read` | `limits.get`; a service's `limits.get`, `limits.subscribe` | The same sanitized `LimitsSnapshot` used by HOME; with `launch:contribute`, a service's account homes in its own data folder |
+| `limits:read` | `limits.get`; a service's `limits.get`, `limits.subscribe`, `canvastty.activity` `limit.exhausted` | The same sanitized `LimitsSnapshot` used by HOME; with `launch:contribute`, a service's account homes in its own data folder. A service is told once when a read shows a provider's default-login window used up: `{ type: "limit.exhausted", at, provider, accountId: "default", window: { id, label, windowMinutes }, resetAt? }`. It follows reads that happen anyway (HOME, a plugin page, a service's `limits.get`) and starts none |
 | `providers:read` | `providers.list` (services) | Which agent CLIs are installed and signed in, their model format and listed models, and delegable launch options: what `list_providers` gives an orchestrator. No tokens, e-mails, account ids or paths |
 | `usage:read` | `usage.session`, `usage.summary` | Token counts (input, output, cached), model names and times of the cards the plugin started or contributed launch options to; with `launch:contribute`, of its own account homes. No text, paths or account ids |
 | `launcher:open` | `launcher.open` | Opens the built-in provider Focus Card or terminal action; it does not bypass user launch choices |
@@ -619,7 +645,7 @@ Context updates include the active CanvasTTY locale and palette. Plugins own the
 1. Publish the static package at the root of a public GitHub repository.
 2. Open **Settings → Plugins**.
 3. Paste `https://github.com/owner/repository` and choose **Inspect**.
-4. Review the manifest and requested permissions, then confirm **Install**.
+4. Review the manifest, requested permissions and shared reads, then confirm **Install**.
 5. Enable/disable or uninstall the package from the same section. HOME widgets are added or removed beside the built-in widgets under **Appearance → HOME composition**. If the manifest declares `settingsContribution`, the plugin card also shows a dedicated **Settings** action.
 6. Open **Settings → Appearance → HOME composition**, then choose **Edit HOME** to drag tiles, resize them, or pull the bottom-right HOME boundary. The Settings tile is retained as the recovery entry point; all other core and plugin tiles are optional.
 

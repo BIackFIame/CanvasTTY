@@ -14,6 +14,7 @@ import type {
   PluginPermission,
   PluginUpdateStatus
 } from "../../../../shared/contracts";
+import { sharedReadText } from "../settings/sharedReadText";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { pollWhileOpen, STOP_POLLING } from "../settings/settingsPolling";
 import {
@@ -605,6 +606,7 @@ export function PluginSettingsSection({
               {renderInstalledHostTag(manifest.minHostVersion)}
               <p className="plugin-showcase-tile__description">{manifestDescription(manifest, locale)}</p>
               <PermissionList permissions={manifest.permissions} locale={locale} />
+              <SharedReadManifest manifest={manifest} locale={locale} />
               <HookManifestWarning manifest={manifest} locale={locale} />
               <ModuleList
                 modules={manifest.modules ?? []}
@@ -680,6 +682,7 @@ export function PluginSettingsSection({
             </header>
             <p>{manifestDescription(preview.manifest, locale)}</p>
             <PermissionList permissions={preview.manifest.permissions} locale={locale} />
+            <SharedReadManifest manifest={preview.manifest} locale={locale} />
             <HookManifestWarning manifest={preview.manifest} locale={locale} showEntries />
             <ModuleList
               modules={preview.manifest.modules ?? []}
@@ -810,6 +813,7 @@ export function PluginSettingsSection({
                     )}
                     <p>{manifestDescription(plugin.manifest, locale)}</p>
                     <PermissionList permissions={plugin.manifest.permissions} locale={locale} />
+                    <SharedReadManifest manifest={plugin.manifest} locale={locale} />
                     <HookManifestWarning manifest={plugin.manifest} locale={locale} showEntries />
                     <ModuleList
                       modules={plugin.manifest.modules ?? []}
@@ -1070,6 +1074,34 @@ function PermissionList({ permissions, locale }: { permissions: PluginPermission
         ? <span>{t(locale, "pluginNoPermissions")}</span>
         : <ul>{permissions.map((permission) => <li key={permission}>{permissionText(locale, permission)}</li>)}</ul>}
     </div>
+  );
+}
+
+/** What a manifest asks to read from other plugins (`uses`) and offers them (`shares`), before install. */
+function SharedReadManifest({ manifest, locale }: { manifest: PluginManifest; locale: LocaleId }): React.JSX.Element | null {
+  const shares = (manifest.services ?? []).flatMap((service) => service.shares ?? []);
+  if (!manifest.uses?.length && shares.length === 0) return null;
+  return (
+    <>
+      {manifest.uses?.length ? (
+        <div className="plugin-permissions">
+          <strong>{sharedReadText(locale, "usesTitle")}</strong>
+          <ul>{manifest.uses.map((use) => <li key={`${use.plugin} ${use.method}`}><code>{use.plugin}</code> · <code>{use.method}</code></li>)}</ul>
+          <span>{sharedReadText(locale, "usesNote")}</span>
+        </div>
+      ) : null}
+      {shares.length > 0 && (
+        <div className="plugin-permissions">
+          <strong>{sharedReadText(locale, "sharesTitle")}</strong>
+          <ul>{shares.map((share) => (
+            <li key={share.method}>
+              <code>{share.method}</code> · {share.description}
+              {share.dataClass ? ` · ${sharedReadText(locale, "dataClass")} ${share.dataClass}` : ""}
+            </li>
+          ))}</ul>
+        </div>
+      )}
+    </>
   );
 }
 

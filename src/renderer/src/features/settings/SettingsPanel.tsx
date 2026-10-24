@@ -200,6 +200,7 @@ interface SettingsPanelProps {
   onSetPluginNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<void>;
   onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onSetPluginMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<void>;
+  onSetPluginSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onToggleHomeWidget(widgetId: string, size: PluginGridSize): Promise<void>;
@@ -237,6 +238,7 @@ export function SettingsPanel({
   onSetPluginNativeCodeTrusted,
   onSetPluginDecisionsMayAllow,
   onSetPluginMayStartOrchestrators,
+  onSetPluginSharedReadApproved,
   onUninstallPlugin,
   onOpenPluginContribution,
   onToggleHomeWidget,
@@ -1005,6 +1007,7 @@ export function SettingsPanel({
                 onSetNativeCodeTrusted={onSetPluginNativeCodeTrusted}
                 onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
                 onSetMayStartOrchestrators={onSetPluginMayStartOrchestrators}
+                onSetSharedReadApproved={onSetPluginSharedReadApproved}
               />
               <SettingGroup
                 label={t(locale, "agentControlEnabled")}

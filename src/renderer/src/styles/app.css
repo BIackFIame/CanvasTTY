@@ -1108,6 +1108,8 @@ button { border: 0; }
 .agent-hooks__meta dt { color: var(--text-muted); font-weight: 800; }
 .agent-hooks__meta dd { margin: 0; font-weight: 750; overflow-wrap: anywhere; }
 .agent-hooks__meta code { font: 750 9px var(--font-mono); }
+.plugin-shared-reads { margin: 9px 0 0; display: grid; gap: 9px; }
+.plugin-shared-reads code { font: 750 10px var(--font-mono); }
 .agent-hooks__toggle { min-width: 88px; min-height: 36px; padding: 5px 9px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 10px; color: var(--text-muted); background: rgba(45,45,56,.08); cursor: pointer; font-size: 10px; font-weight: 900; }
 .agent-hooks__toggle > span { width: 28px; height: 17px; padding: 2px; display: flex; border-radius: 999px; background: rgba(45,45,56,.24); }
 .agent-hooks__toggle > span::after { width: 13px; height: 13px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,.22); content: ""; transition: transform .16s ease; }

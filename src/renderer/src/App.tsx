@@ -1664,25 +1664,29 @@ export function App(): React.JSX.Element {
   }, []);
 
   /** One plugin record changed in main: show the answer, or the registry again when the change failed. */
-  const applyPluginChange = useCallback(async (pluginId: string, change: Promise<InstalledPlugin>): Promise<void> => {
+  const applyPluginChange = useCallback(async (pluginId: string, change: Promise<InstalledPlugin>, refreshOthers = false): Promise<void> => {
     try {
       const updated = await change;
       setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
+      // Other plugins' shared reads of this one (their state and approvals) changed with it.
+      if (refreshOthers) void refreshPlugins().catch(() => undefined);
     } catch (error) {
       await refreshPlugins().catch(() => undefined);
       throw error;
     }
   }, [refreshPlugins]);
   const setPluginEnabled = useCallback((pluginId: string, enabled: boolean) => (
-    applyPluginChange(pluginId, window.canvasTTY.plugins.setEnabled(pluginId, enabled))), [applyPluginChange]);
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setEnabled(pluginId, enabled), true)), [applyPluginChange]);
   const setPluginHookEnabled = useCallback((pluginId: string, hookId: string, enabled: boolean) => (
     applyPluginChange(pluginId, window.canvasTTY.plugins.setHookEnabled(pluginId, hookId, enabled))), [applyPluginChange]);
   const setPluginNativeCodeTrusted = useCallback((pluginId: string, trusted: boolean) => (
-    applyPluginChange(pluginId, window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted))), [applyPluginChange]);
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setNativeCodeTrusted(pluginId, trusted), true)), [applyPluginChange]);
   const setPluginDecisionsMayAllow = useCallback((pluginId: string, allowed: boolean) => (
     applyPluginChange(pluginId, window.canvasTTY.plugins.setDecisionsMayAllow(pluginId, allowed))), [applyPluginChange]);
   const setPluginMayStartOrchestrators = useCallback((pluginId: string, allowed: boolean) => (
     applyPluginChange(pluginId, window.canvasTTY.plugins.setMayStartOrchestrators(pluginId, allowed))), [applyPluginChange]);
+  const setPluginSharedReadApproved = useCallback((pluginId: string, provider: string, method: string, approved: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setSharedReadApproved(pluginId, provider, method, approved))), [applyPluginChange]);
 
   const setPluginModules = useCallback(async (pluginId: string, selectedModules: string[]): Promise<void> => {
     let updated: InstalledPlugin;
@@ -1713,6 +1717,7 @@ export function App(): React.JSX.Element {
       throw error;
     }
     setPlugins((current) => current.filter((plugin) => plugin.manifest.id !== pluginId));
+    void refreshPlugins().catch(() => undefined);
     await saveSettings({
       homeLayout: settings.homeLayout.filter((placement) => !placement.widgetId.startsWith(`plugin:${pluginId}:`)),
       pluginCanvas: settings.pluginCanvas.filter((instance) => instance.pluginId !== pluginId)
@@ -2133,6 +2138,7 @@ export function App(): React.JSX.Element {
           onSetPluginNativeCodeTrusted={setPluginNativeCodeTrusted}
           onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
           onSetPluginMayStartOrchestrators={setPluginMayStartOrchestrators}
+          onSetPluginSharedReadApproved={setPluginSharedReadApproved}
           onUninstallPlugin={uninstallPlugin}
           onOpenPluginContribution={openPluginContribution}
           onToggleHomeWidget={toggleHomeWidget}

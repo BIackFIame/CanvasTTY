@@ -146,8 +146,9 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 | `cards.setBadge` `{ sessionId, badge }` | 请求 | `cards:decorate` | 在任意卡片上显示简短的纯文本标记（见“卡片标记与动作”） |
 | `limits.get` / `limits.subscribe` / `limits.unsubscribe` | 请求 | `limits:read`（账号主目录还需 `launch:contribute`） | 插件页面所得的订阅额度，来自主机缓存（见“订阅额度”） |
 | `providers.list` `{}` | 请求 | `providers:read` | CanvasTTY 可以启动的智能体 CLI，与 `list_providers` 提供给编排器的内容完全相同：`{ providers, note }`，每个提供方包含 `id`、`name`、`installed`、`available`、`signIn`（`ok`、`signed_out`、`expired`、`unknown`）和 `signInCheckedAt`、`subagent`、`orchestrator`、`model`（`supported`、`format`，以及其 CLI 列出模型时的 `known`）、`efforts`、`profiles`，以及将其设为 `delegable` 的插件的启动选项。只读取 CanvasTTY 已有的信息（CLI 检查、最近一次额度读取、缓存的模型列表）；不启动任何读取，也不等待。不含令牌、邮箱、账户 ID 或路径 |
+| `plugins.request` `{ plugin, method, params? }` | 请求 | `uses` 中的配对，且经用户允许 | 读取另一个插件的共享数据（见“插件之间的共享读取”） |
 
-宿主把每次调用绑定到服务自身的插件：服务无法指定其他插件或读取其他插件的机密，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
+宿主把每次调用绑定到服务自身的插件：服务无法读取其他插件的机密，只在用户允许的共享读取中指定其他插件，只能通过下面的 `sessions:*` 权限访问会话。示例 [`service-echo`](../examples/plugins/service-echo) 在其页面用 `host.secrets.set` 保存令牌，其服务用 `secrets.get` 读取，只回答是否已设置。
 
 UI 通道：sandboxed 界面只能调用自身插件的服务：
 
@@ -379,6 +380,31 @@ interface PluginSessionEvent {
 
 **编排器。** 使用 `"role": "orchestrator"` 时，卡片是一个编排器：它获得与用户启动的编排器相同的编排工具（`spawn_agent`、`wait_for_agent` 等），其子智能体也遵循相同的委派规则（只能使用可委派的启动选项，配置文件不宽于它自己的，隔离与任何委派启动相同）。由于它会自行启动智能体，仅有 `sessions:launch` 不够：用户需要在信任插件的原生代码之后，在“设置”的“扩展原生代码”部分中为该插件开启 **可以启动编排器**。没有该同意，或插件已禁用、不再受信任时，调用会被拒绝，不会创建卡片；更新、更改模块、禁用插件或撤销信任都会再次关闭该同意。这样的编排器从不以 `yolo` 运行。它的卡片显示“启动者”和插件 id（恢复后也是如此），其子智能体从不获得用户的 `trustedFolder`（文件夹是插件选择的，而不是用户）。撤销同意不会关闭已在运行的编排器；由用户关闭它们。`role` 默认为 `"agent"`，行为与以前完全相同。
 
+### 插件之间的共享读取（`shares` 与 `uses`）
+
+一个插件的服务可以读取另一个插件选择共享的数据，例如路由器直接读取账户插件的路由和每个账户的配额，而不是等智能体转交。只读：一次请求，一个 JSON 回答。没有写入、没有流、没有订阅。
+
+提供方在负责回答的服务上列出共享内容；读取方在顶层列出要读取的内容（apiVersion 2，且有服务）：
+
+```json
+"services": [{
+  "id": "accounts", "title": "Accounts", "entry": "services/accounts.mjs",
+  "shares": [{ "method": "accounts.routes", "description": "Model routes and each account's quota (no keys).", "dataClass": "D1" }]
+}]
+```
+
+```json
+"uses": [{ "plugin": "canvastty-accounts", "method": "accounts.routes" }]
+```
+
+- `method` 是用点连接的小写单词（最多 64 个字符，不能以 `canvastty.` 开头），在提供方的所有服务中唯一；每个插件最多 16 个 `shares` 和 16 个 `uses`。用户看到的是 `description`（200 个字符）和可选的 `dataClass`（`D0` 公开 … `D3` 最敏感）；宿主把 `dataClass` 传给读取方，自身不解释它。插件不能使用自己的共享。
+- 两个列表在安装前与权限一起显示。安装不授予任何东西：用户在信任读取方的原生代码之后，在**设置 → Agents → Extension native code**中该插件下逐对允许，方式与 **May allow agent actions** 相同。允许记录提供方的来源、方法、描述和数据类别；提供方的更新若改变其中任何一项，该配对即停止，直到用户再次允许。关闭读取方的原生代码、更新它、更改其模块或禁用它，会撤销它的所有允许；卸载提供方会撤销针对它的所有允许。
+- 读取方调用 `plugins.request` `{ plugin, method, params? }`。宿主在每次调用时按自身注册表检查：读取方声明了该配对且持有有效允许；两个插件均已启用且原生代码受信任；提供方在运行中的服务上声明了该方法。然后向该服务发送 `canvastty.shares.read` `{ caller: { pluginId }, method, params }`（仅宿主可发；界面无法发送），最多等待 5 秒。读取方收到 `{ plugin, method, dataClass?, data }`。
+- 回答由提供方负责，宿主在读取方看到任何内容之前检查它：必须是不超过 256 KB 的 JSON，且不能包含[遮蔽注册表](#基础保护与密钥遮蔽核心)会遮蔽的内容（CanvasTTY 持有的密钥、启动 `secretEnv` 值、服务通过 `secrets.get` 读取或通过 `redaction.register` 注册的机密，以及常见密钥形态）。这样的回答整体被拒绝，而不是遮蔽后转交。提供方的错误文本也不会转交。
+- 限制：`params` 最多 16 KB；每个配对每分钟 60 次、同时 4 个；每个提供方同时 8 个。
+- 拒绝是带有 `data.reason` 的 JSON-RPC 错误：`invalid_request`、`consumer_unavailable`、`not_declared`、`not_shared`、`not_approved`、`approval_changed`、`provider_unavailable`、`rate_limited`、`busy`、`timeout`、`provider_error`、`not_json`、`too_large` 或 `secret_in_response`。
+- 每次读取都记录在两个插件的日志中（**Extension native code** 中的日志）：方法、另一个插件、结果、耗时、回答大小，以及参数和回答的 SHA-256 前缀，绝不记录其内容。
+
 ### 卡片标记与动作（`cards:decorate`）
 
 具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 16 个 `cardActions`：
@@ -485,7 +511,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `sessions:control` | `sessions.send`、`sessions.stop` | 只能向本插件启动的卡片输入文本并关闭它们 |
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
-| `limits:read` | `limits.get`；服务的 `limits.get`、`limits.subscribe` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot`；配合 `launch:contribute` 时还包括服务在自己数据目录中的账号主目录 |
+| `limits:read` | `limits.get`；服务的 `limits.get`、`limits.subscribe`、`canvastty.activity` `limit.exhausted` | 与 HOME 使用的同一个脱敏 `LimitsSnapshot`；配合 `launch:contribute` 时还包括服务在自己数据目录中的账号主目录。当一次读取显示某提供商默认登录的窗口已用尽时，服务会收到一次通知：`{ type: "limit.exhausted", at, provider, accountId: "default", window: { id, label, windowMinutes }, resetAt? }`。它跟随本来就会发生的读取（HOME、插件页面），自身不发起读取 |
 | `providers:read` | `providers.list`（服务） | 哪些智能体 CLI 已安装并已登录、模型格式与列出的模型、可委派的启动选项：即 `list_providers` 提供给编排器的内容。不含令牌、邮箱、账户 ID 或路径 |
 | `usage:read` | `usage.session`、`usage.summary` | 插件启动的、或为其提供了启动选项的卡片的 token 计数（输入、输出、缓存）、模型名和时间；有 `launch:contribute` 时还包括它自己的账号主目录。不含文本、路径和账号 id |
 | `launcher:open` | `launcher.open` | 打开内置服务商的 Focus Card 或终端动作；不会绕过用户的启动选择 |
@@ -579,7 +605,7 @@ if (library) {
 1. 把静态包发布到公开 GitHub 仓库的根目录。
 2. 打开 **Settings → Plugins**。
 3. 粘贴 `https://github.com/owner/repository` 并选择 **Inspect**。
-4. 查看 manifest 和请求的权限，然后确认 **Install**。
+4. 查看 manifest、请求的权限和共享读取，然后确认 **Install**。
 5. 在同一个区块启用、禁用或卸载该包。HOME 小组件在 **外观 → HOME 组成** 中与内置小组件一起添加或移除。如果 manifest 声明了 `settingsContribution`，插件卡片还会显示独立的 **Settings** 操作。
 6. 打开 **Settings → Appearance → HOME composition**，然后选择 **Edit HOME**，即可拖动磁贴、调整大小，或拉动 HOME 边界的右下角。Settings 磁贴会保留为恢复入口；其余所有核心磁贴和插件磁贴都是可选的。
 
