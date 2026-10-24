@@ -87,7 +87,8 @@ import {
   type PersistedEnvironmentRef,
   type PersistedSessionExtras,
   type PersistedTerminalSession,
-  type TerminalSessionStore
+  type TerminalSessionStore,
+  MAX_TREE_PLUGINS
 } from "./TerminalSessionStore.ts";
 import { chooseResume, planSessionRestore, restorableRecords, type ResumeRequest, type RestoreStep } from "./sessionRestorePlan.ts";
 import type { ProviderCliRegistry, UnavailableProviderCli } from "./providerCliRegistry.ts";
@@ -972,7 +973,8 @@ export class TerminalManager {
     const awaitMeasuredGrid = this.needsMeasuredGrid(request.provider)
       && (request.provider === "terminal" || this.providerClis.get(request.provider).state === "available");
     // With launch options, an environment or a launch policy the plugins answer first; the card waits and launches when they do.
-    const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider)) && !awaitMeasuredGrid;
+    const treePlugins = request.parentSessionId !== undefined ? this.treePluginsUnder(request.parentSessionId) : [];
+    const contributed = (Boolean(launchOptions) || Boolean(environmentChoice) || this.policyApplies(request.provider, treePlugins)) && !awaitMeasuredGrid;
     this.startingModels.set(id, modelChoice);
     if (request.initialPrompt && request.initialImagePath) {
       this.initialCodexInputs.set(id, { prompt: request.initialPrompt, imagePath: request.initialImagePath });
@@ -1021,7 +1023,8 @@ export class TerminalManager {
       extras: {
         ...(launchOptions ? { options: launchOptions } : {}),
         ...(environmentChoice ? { environmentChoice } : {}),
-        ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {})
+        ...(control.ownerPluginId !== undefined ? { ownerPluginId: control.ownerPluginId } : {}),
+        ...(treePlugins.length > 0 ? { treePlugins } : {})
       },
       launchToken: 0,
       launchCleanup: null,
@@ -1738,6 +1741,7 @@ export class TerminalManager {
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
       ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {}),
       ...(descriptor.projectRoot && descriptor.environment ? { projectRoot: descriptor.projectRoot } : {}),
+      ...(descriptor.treePlugins ? { treePlugins: descriptor.treePlugins } : {}),
       ...(descriptor.gitAuditSince !== undefined ? { gitAuditSince: descriptor.gitAuditSince } : {})
     };
 
@@ -1796,7 +1800,7 @@ export class TerminalManager {
       && (descriptor.provider === "terminal" || this.providerClis.get(descriptor.provider).state === "available");
 
     const contributed = directoryReady && !awaitMeasuredGrid
-      && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider));
+      && (Boolean(extras.options) || Boolean(extras.environment) || this.policyApplies(descriptor.provider, extras.treePlugins));
     if (directoryReady && !awaitMeasuredGrid && !contributed) {
       try {
         this.startingModels.set(descriptor.id, { ...(metadata.model !== undefined ? { model: metadata.model } : {}),
@@ -2492,12 +2496,30 @@ export class TerminalManager {
 
   private contributed(session: ManagedSession): boolean {
     return Boolean(session.extras.options) || Boolean(session.extras.environment) || Boolean(session.extras.environmentChoice)
-      || this.policyApplies(session.metadata.provider);
+      || this.policyApplies(session.metadata.provider, session.extras.treePlugins);
   }
 
   /** A trusted plugin's launch policy applies to this agent: its launches wait for the policy's answer. */
-  private policyApplies(provider: ProviderId): boolean {
-    try { return this.launchPipeline?.hasPolicy?.(provider) === true; } catch { return false; }
+  private policyApplies(provider: ProviderId, treePlugins: readonly string[] = []): boolean {
+    try { return this.launchPipeline?.hasPolicy?.(provider, treePlugins) === true; } catch { return false; }
+  }
+
+  /**
+   * The plugins that own the tree below this card, for its children: those its own ancestors' trees had, the ones
+   * chosen for its launch, and the plugin that started it. Fixed at the child's creation and saved with it, so a
+   * closed ancestor or a restore does not change which scoped policies police it.
+   */
+  private treePluginsUnder(parentSessionId: string): string[] {
+    const parent = this.sessions.get(parentSessionId);
+    if (!parent) return [];
+    const owners = new Set<string>(parent.extras.treePlugins ?? []);
+    for (const pluginId of Object.keys(parent.extras.options ?? {})) owners.add(pluginId);
+    if (parent.extras.ownerPluginId) owners.add(parent.extras.ownerPluginId);
+    // Never cut: a dropped owner would no longer police this subtree. Too many owners refuse the child instead.
+    if (owners.size > MAX_TREE_PLUGINS) {
+      throw new LaunchRefusal(`This subagent's tree already involves ${owners.size} plugins (at most ${MAX_TREE_PLUGINS}), so CanvasTTY cannot keep every plugin's launch policy in force for it; it was not started.`);
+    }
+    return [...owners].sort();
   }
 
   private pendingEnvironmentReason(choice: SessionEnvironmentChoice): string {
@@ -2628,7 +2650,7 @@ export class TerminalManager {
     let plannedCleanup: (() => void) | undefined;
     try {
       const trustedFolder = session.extras.environment ? undefined : this.personTrustedFolder(metadata.parentSessionId, metadata.cwd);
-      if (session.extras.options || this.policyApplies(metadata.provider)) {
+      if (session.extras.options || this.policyApplies(metadata.provider, session.extras.treePlugins)) {
         const pipeline = this.launchPipeline;
         if (!pipeline) return refuse(missingLaunchPlugins(Object.keys(session.extras.options ?? {})));
         // This pipeline may write run files for the card, so closing it later removes its folder there.
@@ -2647,7 +2669,10 @@ export class TerminalManager {
           resume: resume !== null,
           options: structuredClone(session.extras.options ?? {}) as Record<string, Record<string, boolean | string>>,
           environment: placedIn ? { pluginId: placedIn.pluginId, kind: placedIn.kind } : null,
-          ...(trustedFolder ? { trustedFolder } : {})
+          ...(trustedFolder ? { trustedFolder } : {}),
+          ...(session.extras.treePlugins ? { treePlugins: [...session.extras.treePlugins] } : {}),
+          ...(metadata.model !== undefined ? { model: metadata.model } : {}),
+          ...(metadata.effort !== undefined ? { effort: metadata.effort } : {})
         }, {
           ...(this.launchModelOf(id).model !== undefined ? { model: this.launchModelOf(id).model } : {}),
           personChosen: this.personChosenLaunchPlugins(metadata, session.extras.options)

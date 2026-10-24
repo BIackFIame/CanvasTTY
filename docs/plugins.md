@@ -208,8 +208,17 @@ Orchestrators pass the same values to `spawn_agent` as `launchOptions` (`{ "<plu
 Before the agent starts, the host sends the service a `canvastty.launch.prepare` request, which surfaces cannot send:
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null,"requested":{"model":"sonnet","plugins":["com.example.launch-env"]},"peerOptions":{}}
 ```
+
+**What the launch asks for.** Every `canvastty.launch.prepare`, chosen or policy, carries `"requested"`: the `model` and `effort` the CLI is started with (each absent when the CLI's default is used; for a subagent these are what `spawn_agent` asked for) and `plugins`, the sorted ids of every plugin selected for the launch. It also carries `"peerOptions"`: other selected plugins' option values, by plugin id, but only the fields whose owning plugin lists the receiving plugin in `"visibleTo"`. A plugin opts in per field; the receiver never sees a field without it:
+
+```json
+{ "key": "account", "label": "Model account", "kind": "select", "optionsFrom": "service",
+  "options": [{ "value": "none", "label": "The agent's own sign-in" }], "visibleTo": ["com.example.router"] }
+```
+
+`visibleTo` lists 1 to 8 plugin ids and is allowed only on `select` and `boolean` launch option fields: a free-text field may hold anything a person typed, so it is never shared, and environment fields cannot declare it. Secrets are never option values (`secretEnv` names a key the host reads itself), so nothing secret can reach `peerOptions`. A policy uses both to check that a launch is the one it expects (for example the model and account a routing decision chose) and to refuse one that is not; it still cannot add to the launch.
 
 The answer is `null` (nothing to add) or an object with any of:
 
@@ -236,6 +245,8 @@ Rules the host enforces, none of which is ever skipped:
 **Trusted folder.** A subagent on this computer whose folder is the one the person chose for its top-level agent, or inside it, gets `"trustedFolder"`: that folder's real path. CanvasTTY itself answers Codex's "Trust this folder?" for it with a per-run `-c projects=…` override (nothing is written to `~/.codex`); a plugin that keeps the agent's own config home (an account's `CLAUDE_CONFIG_DIR`, say) may mark the folder trusted there. Codex also gets per-run trust for the hooks CanvasTTY itself adds (`-c hooks.state=…`), so it does not stop at "Hooks need review"; a project's or the person's own hooks still ask. Plugins cannot pass `-c hooks…`.
 
 **Launch policies.** With `"policy": true` the service is also asked before every launch of the agents it applies to (create, restart, restore) where the person did not choose it, with `"chosen": false` and empty `options`. Such an answer may only be `null` or `refuse`; anything else, no answer within 5 s, or an error refuses the launch, so a policy never lets a launch through by failing. Every `canvastty.launch.prepare` also carries `"environment"`: `{ pluginId, kind }` of the card's environment, or `null` on this computer. A policy with no `fields` is not shown in the launcher. Revoking the plugin's native code trust removes its policy.
+
+**Scoped policies.** `"policy": { "scope": "own-trees" }` asks the service only for subagents in its own trees: a subagent at any depth whose ancestors include a card this plugin was chosen for (its launch options were part of that launch) or that it started with `sessions.create`. The person's own launches and subagents in other trees never reach it and never wait for it, so when its service is down or failing only launches in its own trees are refused, with the same reason. The owners of a tree are fixed when each subagent is created (from its parent's) and saved with the card, so restore, restart and a closed ancestor keep the same scope. Owners are never dropped: a subagent whose tree would involve more than 64 plugins is refused, and a saved card whose list is unreadable or longer is not restored. Answers follow the same rules as `policy: true`: `null` or `refuse`, and no answer refuses. Use it when the policy only checks work the plugin itself routed.
 
 ```json
 "launch": { "policy": true, "fields": [] }

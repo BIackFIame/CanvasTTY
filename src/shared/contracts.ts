@@ -1157,20 +1157,32 @@ export interface PluginLaunchField {
   default?: boolean | string;
   /** `text` only: at most 200 characters (the default). */
   maxLength?: number;
+  /**
+   * `select` and `boolean` only: plugin ids whose launch services also see this field's value when this plugin is
+   * selected for a launch (`peerOptions` in `canvastty.launch.prepare`). The owner opts in per field; free text is
+   * never shared, and secrets never are (they are not option values).
+   */
+  visibleTo?: string[];
 }
 
 export interface PluginServiceLaunch {
   /** Agents the options apply to; all agents when omitted. */
   appliesTo?: AgentProviderId[];
   fields: PluginLaunchField[];
-  /** Also asked, with `chosen: false`, before every launch of those agents where the person did not choose the
-   * plugin; such an answer may only refuse. */
-  policy?: boolean;
+  /** Also asked, with `chosen: false`, before launches of those agents where the person did not choose the plugin;
+   * such an answer may only refuse. `true`: every such launch. `{ scope: "own-trees" }`: only subagents whose
+   * ancestors include a card this plugin was chosen for or started (`sessions.create`); other launches never wait
+   * for it, so its service being down refuses only those. */
+  policy?: true | PluginLaunchPolicyScope;
   /**
    * The plugin declares these options safe for an orchestrator to choose for its subagents (spawn_agent's
    * launchOptions). Without it only the person chooses them, in the launcher.
    */
   delegable?: boolean;
+}
+
+export interface PluginLaunchPolicyScope {
+  scope: "own-trees";
 }
 
 /** Field key -> extra choices a service offered for an `optionsFrom: "service"` select. */

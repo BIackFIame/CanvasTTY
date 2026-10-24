@@ -187,8 +187,17 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 智能体启动前，宿主向服务发送 `canvastty.launch.prepare` 请求（界面无法发送）：
 
 ```json
-{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null}
+{"sessionId":"…","provider":"claude","profile":"normal","role":"agent","cwd":"/project","restoring":false,"resume":false,"options":{"enabled":true,"greeting":"hello","mode":"plain"},"chosen":true,"environment":null,"requested":{"model":"sonnet","plugins":["com.example.launch-env"]},"peerOptions":{}}
 ```
+
+**启动请求的内容。** 每个 `canvastty.launch.prepare`（无论是被选择的还是策略）都带有 `"requested"`：CLI 启动时使用的 `model` 和 `effort`（使用 CLI 默认值时各自省略；对子智能体而言是 `spawn_agent` 请求的值），以及 `plugins`，即为此次启动选择的所有插件 id（已排序）。它还带有 `"peerOptions"`：其他被选插件的选项值，按插件 id 分组，但仅包含其所属插件在 `"visibleTo"` 中列出了接收方的字段。插件按字段自行选择加入；没有该声明时接收方看不到该字段：
+
+```json
+{ "key": "account", "label": "Model account", "kind": "select", "optionsFrom": "service",
+  "options": [{ "value": "none", "label": "The agent's own sign-in" }], "visibleTo": ["com.example.router"] }
+```
+
+`visibleTo` 列出 1 到 8 个插件 id，只允许用于启动选项中的 `select` 和 `boolean` 字段：自由文本字段可能包含用户输入的任何内容，因此从不共享；环境字段不能声明它。密钥从不是选项值（`secretEnv` 只是命名一个由宿主自行读取的键），因此任何密钥都不会进入 `peerOptions`。策略可以据此检查启动是否符合预期（例如路由决策选定的模型和账户），不符合则拒绝；它仍然不能向启动添加任何内容。
 
 应答为 `null`（不添加任何内容）或包含以下任意键的对象：
 
@@ -215,6 +224,8 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 **受信任文件夹。** 在本机运行、其文件夹是用户为其顶层智能体选择的文件夹（或位于其中）的子智能体，会收到 `"trustedFolder"`：该文件夹的真实路径。CanvasTTY 会以仅限此次运行的 `-c projects=…` 覆盖替它回答 Codex 的 “Trust this folder?”（不会写入 `~/.codex`）；自行保存智能体配置目录的插件（例如账户的 `CLAUDE_CONFIG_DIR`）可以在那里将该文件夹标记为受信任。Codex 还会获得对 CanvasTTY 自己添加的 hook 的本次运行信任（`-c hooks.state=…`），因此不会停在 “Hooks need review”；项目或用户自己的 hook 仍会询问。插件不能传递 `-c hooks…`。
 
 **启动策略。** 设置 `"policy": true` 后，在该服务适用的智能体每次启动（创建、重启、恢复）而用户没有选择它时，也会以 `"chosen": false` 和空的 `options` 询问它。这样的回答只能是 `null` 或 `refuse`；其他任何回答、5 秒内无回答或出错都会拒绝启动，因此策略绝不会因失败而放行。每个 `canvastty.launch.prepare` 还带有 `"environment"`：卡片环境的 `{ pluginId, kind }`，在本机运行时为 `null`。没有 `fields` 的策略不会显示在启动器中。撤销插件的原生代码信任即移除其策略。
+
+**限定范围的策略。** `"policy": { "scope": "own-trees" }` 只在其自身的树中的子智能体启动时询问该服务：任意深度的子智能体，只要其祖先中有一张卡片在启动时选择了该插件（其启动选项属于那次启动），或是该插件通过 `sessions.create` 启动的卡片。用户自己的启动和其他树中的子智能体永远不会到达它，也不会等待它；因此当它的服务停止或出错时，只有其自身树中的启动会被拒绝，原因相同。树的所有者在每个子智能体创建时（从其父级）确定并随卡片保存，因此恢复、重启以及关闭祖先都保持相同的范围。所有者从不被丢弃：其树会涉及超过 64 个插件的子智能体会被拒绝，列表无法读取或更长的已保存卡片不会被恢复。应答规则与 `policy: true` 相同：`null` 或 `refuse`，无应答即拒绝。当策略只检查插件自己路由的工作时使用它。
 
 ```json
 "launch": { "policy": true, "fields": [] }
