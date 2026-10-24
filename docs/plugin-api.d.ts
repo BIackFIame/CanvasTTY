@@ -90,6 +90,9 @@ export interface CanvasTTYPluginContext {
   appearance: {
     locale: "ru" | "en";
     palette: "sage" | "lilac" | "night";
+    /** The app's UI scale (Settings → Appearance; 1 is 100%, from 0.85 to 1.25), the value CanvasTTY scales its own
+     * text and controls by. Sent again whenever the person changes it. */
+    uiScale: number;
   };
 }
 
@@ -278,6 +281,8 @@ export interface CanvasTTYCardActionInvocation {
   actionId: string;
   sessionId: string;
   session: CanvasTTYSessionSummary;
+  /** The app language when the person chose the action (`"en"`, `"ru"`): write `message` in it. */
+  locale: string;
 }
 
 /** A page of text in a review (plain text, masked). */
@@ -453,7 +458,11 @@ export interface CanvasTTYServiceLaunch {
   delegable?: boolean;
 }
 
-export type CanvasTTYLaunchField =
+export type CanvasTTYLaunchField = {
+  /** The label when the app is in Russian / English (up to 80 characters, like `description.ru`); `label` otherwise. */
+  "label.ru"?: string;
+  "label.en"?: string;
+} & (
   | { key: string; label: string; kind: "boolean"; default?: boolean }
   | {
     key: string; label: string; kind: "select"; options: Array<{ value: string; label: string }>; default?: string;
@@ -461,7 +470,8 @@ export type CanvasTTYLaunchField =
      * text up to 200 characters, which `canvastty.launch.prepare` must check. */
     optionsFrom?: "service";
   }
-  | { key: string; label: string; kind: "text"; maxLength?: number; default?: string };
+  | { key: string; label: string; kind: "text"; maxLength?: number; default?: string }
+);
 
 /** Params of the host request `canvastty.launch.prepare`: launches that chose this plugin, and with `policy` every agent launch. */
 export interface CanvasTTYLaunchContext {
@@ -520,6 +530,8 @@ export interface CanvasTTYServiceContext {
 export type CanvasTTYServiceHostNotification =
   | { jsonrpc: "2.0"; method: "canvastty.initialize"; params: CanvasTTYServiceContext }
   | { jsonrpc: "2.0"; method: "canvastty.shutdown"; params: Record<string, never> }
+  /** The person switched the app language; sent once to running services, no permission. */
+  | { jsonrpc: "2.0"; method: "canvastty.locale.changed"; params: { locale: string } }
   | { jsonrpc: "2.0"; method: "canvastty.sessions.event"; params: CanvasTTYSessionEvent };
 
 /** Requests the host sends to a service, which plugin surfaces cannot send. */

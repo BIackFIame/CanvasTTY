@@ -1281,6 +1281,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
                 contribution={contribution}
                 locale={settings.locale}
                 palette={settings.palette}
+                uiScale={settings.uiScale}
                 camera={camera}
                 stackIndex={canvasLayerZIndex(layerOrder, pluginLayerId(instance.id))}
                 snapEnabled={settings.snapToGrid}

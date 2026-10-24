@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { validatePluginManifest } from "../src/main/services/PluginManager.ts";
+import { PluginManager, validatePluginManifest } from "../src/main/services/PluginManager.ts";
 import { PluginServiceSupervisor } from "../src/main/services/PluginServiceSupervisor.ts";
 import { PluginAgentTools, checkArguments, pluginToolName } from "../src/main/services/PluginAgentTools.ts";
 import { PluginSessions, plainText } from "../src/main/services/PluginSessions.ts";
@@ -22,6 +22,7 @@ import { createOrchestrationDispatcher } from "../src/agent-browser/orchestratio
 import { ORCHESTRATION_TOOL_NAMES, isPluginOrchestrationTool } from "../src/agent-browser/orchestration-catalog.mjs";
 import { TerminalSessionStore, normalizePersistedTerminalSessions } from "../src/main/services/TerminalSessionStore.ts";
 import { cardActionMatches } from "../src/shared/pluginCardActions.ts";
+import { cardActionPluginName } from "../src/shared/pluginLocalizedText.ts";
 
 const example = new URL("../examples/plugins/collect-demo/", import.meta.url);
 const exampleManifest = JSON.parse(await readFile(new URL("canvastty.plugin.json", example), "utf8"));
@@ -412,6 +413,7 @@ test("card badges and actions: plain text, filtered by card, answers redacted, f
     call: (pluginId, serviceId, method, params) => answer(params, method),
     session: (id) => sessions.summary(id),
     redact: (text) => text.replaceAll(SECRET, "[redacted]"),
+    locale: () => "en",
     changed: (decorations) => published.push(decorations),
     timeoutMs: 50
   });
@@ -454,6 +456,44 @@ test("card badges and actions: plain text, filtered by card, answers redacted, f
   cards.forgetSession(card.id);
   assert.deepEqual(published.at(-1).badges, {});
   cards.setBadge("collect-demo", { sessionId: card.id, badge: null });
+});
+
+test("card actions carry the plugin's localized names to the card tooltip and the failure toast", async (t) => {
+  const userData = await mkdtemp(join(tmpdir(), "ctty-card-names-"));
+  const manager = new PluginManager(userData, async (_url, destination) => {
+    await cp(fileURLToPath(example), destination, { recursive: true });
+    const manifest = { ...exampleManifest, "name.ru": "Сбор изменений", "name.en": "Collect changes" };
+    await writeFile(join(destination, "canvastty.plugin.json"), JSON.stringify(manifest));
+  });
+  t.after(async () => { await manager.dispose(); await rm(userData, { recursive: true, force: true }); });
+  await manager.load();
+  const { manifest } = await manager.install((await manager.previewInstall("https://github.com/example/collect-demo")).token);
+  await manager.setNativeCodeTrusted(manifest.id, true);
+  const [provider] = manager.cardActionProviders();
+  assert.equal(provider.pluginName, "Collect Demo");
+  assert.equal(provider["pluginName.ru"], "Сбор изменений");
+  assert.equal(provider["pluginName.en"], "Collect changes");
+
+  const published = [];
+  let locale = "ru";
+  const cards = new PluginCards({
+    providers: () => manager.cardActionProviders(),
+    trustedPlugins: () => new Set([manifest.id]),
+    call: () => Promise.reject(new Error("broken")),
+    session: () => ({ id: "card", provider: "terminal", role: "agent", environment: { pluginId: "e", kind: "worktree", label: "w", ref: {} } }),
+    redact: (text) => text,
+    changed: (decorations) => published.push(decorations),
+    locale: () => locale
+  });
+  const [action] = cards.decorations().actions;
+  assert.equal(cardActionPluginName(action, "ru"), "Сбор изменений", "the card tooltip follows the UI language");
+  assert.equal(cardActionPluginName(action, "en"), "Collect changes");
+  assert.equal(cardActionPluginName({ pluginName: "Plain" }, "ru"), "Plain", "without variants the plain name is used");
+  assert.deepEqual(await cards.invoke(manifest.id, "show-changes", "card"), { tone: "error", message: "Сбор изменений: broken" });
+  locale = "en";
+  assert.deepEqual(await cards.invoke(manifest.id, "show-changes", "card"), { tone: "error", message: "Collect changes: broken" });
+  const terminalCard = await readFile(new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url), "utf8");
+  assert.match(terminalCard, /title=\{cardActionPluginName\(action, locale\)\}/u);
 });
 
 test("collect-demo through the real supervisor: the action and the tool return git diff --stat of a worktree", async (t) => {
@@ -500,6 +540,7 @@ test("collect-demo through the real supervisor: the action and the tool return g
       return summary && { ...summary, workingDirectory: tree, environment: { pluginId: "e", kind: "worktree", label: "w", ref: { dir: tree } } };
     },
     redact: (text) => text,
+    locale: () => "en",
     changed: (decorations) => badges.push(decorations.badges)
   });
   const tools = new PluginAgentTools({

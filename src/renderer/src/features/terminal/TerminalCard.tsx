@@ -61,6 +61,7 @@ import { createPinnedInputRefresh, limitPinnedTerminalInput, pinnedTerminalInput
 import { terminalLinkTarget } from "./terminalLinkTarget";
 import { terminalFileLinkProvider } from "./terminalFileLinks";
 import { parseTerminalFileLink } from "../../../../shared/terminalFileLink";
+import { cardActionPluginName } from "../../../../shared/pluginLocalizedText.ts";
 import {
   constrainResize,
   snapMove,
@@ -1477,7 +1478,7 @@ function TerminalCardView({
           )}
           {pluginActions.map((action, index) => (
             <button key={`${action.pluginId}:${action.actionId}`} className="terminal-card__menu-action" type="button" role="menuitem"
-              autoFocus={!restoreEnabled && index === 0} title={action.pluginName} onClick={() => runPluginAction(action)}>
+              autoFocus={!restoreEnabled && index === 0} title={cardActionPluginName(action, locale)} onClick={() => runPluginAction(action)}>
               {action.title}
             </button>
           ))}

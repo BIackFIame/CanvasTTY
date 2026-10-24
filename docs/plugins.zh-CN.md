@@ -91,6 +91,8 @@ hooks/audit.mjs
 
 `platforms` 为可选字段；一旦声明，就必须包含 `"canvastty"`，否则直接安装或更新会被拒绝。`minHostVersion` 仅用于提示：展示页会标记需要更高宿主版本的插件，但不会阻止安装；较旧的最低版本不会被视为不兼容。
 
+面向用户的文字可以像 `description.ru`/`description.en` 一样提供应用语言版本：插件的 `name` 可加 `"name.ru"` 和 `"name.en"`，contribution 的 `title`（画布应用、设置页、HOME 小组件、窗口）可加 `"title.ru"` 和 `"title.en"`，启动字段的 `label` 可加 `"label.ru"` 和 `"label.en"`。长度限制与原文相同（80 个字符）。CanvasTTY 显示当前语言的版本，没有时显示原文。其他后缀会被拒绝。
+
 ### 可选模块
 
 模块化 manifest 可声明经过完整性校验的 coreFiles 和最多 16 个可选 modules。每个文件都包含 path、精确的 bytes 大小和 SHA-256。CanvasTTY 在预览时只下载 manifest，显示模块复选框、大小和权限，然后仅下载核心文件与用户选择的模块。之后更改选择时会原子替换插件包，并删除已取消模块的文件。Contribution 可以通过 module 字段在模块未安装时隐藏。
@@ -120,6 +122,8 @@ Hook-only 插件使用空的 `contributions` 与非空的 `hooks`。安装只复
 生命周期：已启用且受信任插件的每个服务都作为独立进程运行（`process.execPath` 加 `ELECTRON_RUN_AS_NODE=1`），工作目录为插件目录。环境变量最小化：`PATH`、`HOME`、用户、shell、语言区域、临时目录与 XDG 目录、`SSH_AUTH_SOCK` 以及 Windows 系统目录；provider 密钥、令牌、`NODE_OPTIONS` 和所有 `CANVASTTY_*` 变量都会被移除。意外退出的服务会在 1、2、4、8、16 秒后重启；10 分钟内意外退出超过 5 次后保持失败状态，直到重新确认信任。禁用、卸载、更新、更换模块、撤销信任或退出 CanvasTTY 都会停止服务：先发送 `canvastty.shutdown` 通知并关闭 stdin，然后 `SIGTERM`，最后 `SIGKILL`。服务会获得 `<userData>/plugin-data/<pluginId>` 目录，卸载时删除。stderr、协议之外的 stdout、`log` 调用和生命周期事件写入每个插件的有界日志（最近 300 条），显示在 **设置 → Agents → Extension native code**。
 
 协议：通过 stdin/stdout 的逐行 JSON-RPC 2.0，每个方向单条消息最多 1 MB。更大的宿主请求会被拒绝，服务输出的超长行会被丢弃并记录。宿主首先发送 `canvastty.initialize` 通知，参数为 `{ apiVersion: 2, pluginId, serviceId, dataDir, locale, hostVersion }`。
+
+当用户切换应用语言时，每个正在运行的服务会收到一次 `canvastty.locale.changed` 通知，参数为 `{ locale }`（无需权限：语言不属于隐私数据，每个插件页面的上下文中也已包含它）。已停止、正在重启或失败的服务不会收到；它下一次的 `canvastty.initialize` 会带上当前语言。服务显示的文本（标记、提示、它自己的事件）应随之切换。
 
 应用启动时，只有在服务可能调用的所有宿主 API（`sessions.*`、`cards.setBadge`、`secrets.get` 等）就绪之后、恢复已保存卡片之前，才会启动服务：服务收到 `canvastty.initialize` 后即可调用它们，订阅会话事件的服务会以事件或 `sessions.subscribe` 快照的形式收到恢复的卡片。
 
@@ -171,7 +175,7 @@ host.service.onEvent(({ serviceId, event, data }) => { /* … */ });
 }]
 ```
 
-最多 8 个字段；`kind` 为 `boolean`、`select`（1–16 个选项）或 `text`（最多 200 个字符或 `maxLength`）。`appliesTo` 列出适用的智能体服务商，省略表示所有智能体。所选值按字段校验，保存在卡片的会话记录中（每个插件最多 4 KB），并在重启和恢复时复用。它们不是机密：密钥应放在插件的 `secrets` 中，而不是字段里。
+最多 8 个字段；`kind` 为 `boolean`、`select`（1–16 个选项）或 `text`（最多 200 个字符或 `maxLength`）。`appliesTo` 列出适用的智能体服务商，省略表示所有智能体。所选值按字段校验，保存在卡片的会话记录中（每个插件最多 4 KB），并在重启和恢复时复用。它们不是机密：密钥应放在插件的 `secrets` 中，而不是字段里。 字段的 `label` 可加 `"label.ru"` 和 `"label.en"`（见上文清单）。
 
 带 `"optionsFrom": "service"` 的 `select` 还会列出服务提供的选项，例如插件自己的账户。启动器打开时，CanvasTTY 向服务发送 `canvastty.launch.options` `{ provider, fields: [键] }`，最多等待 3 秒；回答 `{ "<键>": [{ value, label }] }` 在声明的选项之后为每个字段追加最多 64 个选项（声明的选项仍然必需，服务未回答时启动器只显示它们）。由于此类列表可能在卡片保存后变化，其值接受为不含控制字符、最多 200 个字符的任意文本，`canvastty.launch.prepare` 必须检查该值，并拒绝已不存在的选项。
 
@@ -357,7 +361,7 @@ interface PluginSessionEvent {
 ```
 
 - `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`：`text` 最多 24 个字符，`tone` 为 `neutral`（默认）、`info`、`warn` 或 `error`，`tooltip` 最多 200 个字符；`null` 移除该插件的标记。每张卡片最多 4 个插件标记。标记是纯文本，像 agent 文本一样被遮蔽，并随卡片关闭或插件信任撤销而消失。
-- 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session }`（仅宿主可发；`session` 为上面的摘要），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
+- 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session, locale }`（仅宿主可发；`session` 为上面的摘要，`locale` 为此刻的应用语言，用于回答的文本），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
 - 任何地方都没有 HTML：标记、标题和消息都按文本渲染。
 - 带有 `review` 的回答会打开变更审查对话框，而不是提示。`review` 为 `{ title, groups, acceptActionId?, rejectActionId?, nextOffset? }`；每个分组为 `{ sessionId, title, files, error?, active? }`（每个代理一个；`active: true` 表示该代理仍在运行，此时对话框会禁用接受其全部文件、拒绝它以及整个任务的操作，但仍可接受其中一部分文件；其文件初始不被选中，其 `error` 显示为提示而非错误），每个文件为 `{ path, diff, status?, page?, hasMore?, truncated?, conflict? }`，其中 `conflict` 为 `{ current, agent }` 两个文本页 `{ label?, text, startLine, totalLines, hasMore }`。整个审查最多 512 KiB、24 个分组和 400 个文件；文本为纯文本、经过遮蔽、去除控制字符并截断到 16 KiB（此时文件标记为已截断）；文件路径不得因遮蔽而改变。`acceptActionId` 和 `rejectActionId` 必须是本插件声明的动作 id，否则回答被拒绝。请用 `"menu": false` 声明它们：这样的动作不会出现在卡片菜单中（从菜单运行时没有 `input`），不带 `input` 调用时会被拒绝。
 - 对话框打开期间，宿主会带着 `input` 对象（最多 1 MiB 的 JSON 对象，仅由应用窗口发送，从不作为会话身份）再次调用同一动作：不带 `input` 表示刷新审查，`{ offset }` 表示下一页文件（`nextOffset`），`{ agentSessionId, file, page }` 表示某个文件 diff 的一页（打开文件时为第 0 页）。接受会以 `{ agentSessionId?, files, resolutions? }` 调用 `acceptActionId`（所选文件；`resolutions` 把冲突路径映射为 `"current"` 或 `"agent"`；整个任务时不带 `agentSessionId`），拒绝会以 `{ agentSessionId? }` 调用 `rejectActionId`。接受和拒绝只在用户于对话框中确认后才发送。对修改请回答剩余的审查或一条消息。
@@ -491,7 +495,7 @@ if (library) {
 
 推荐的启动流程：调用 `listLibraries()`；仅在没有已授权文件夹时才通过 `pickLibrary()` 请求选择文件夹；扫描所选音乐库；从 `storage` 恢复队列和偏好；然后列出并解析播放列表。把已撤销或已移动的文件夹当作明确的不可用状态处理，并让用户重新选择。
 
-上下文更新包含当前 CanvasTTY 的语言环境和配色方案。插件自行负责其内部本地化和样式；应在 contribution 的预期尺寸下保持可读，且不得虚构加载进度、会话、状态、限额或遥测。
+上下文更新包含当前 CanvasTTY 的语言环境和配色方案。插件自行负责其内部本地化和样式；应在 contribution 的预期尺寸下保持可读，且不得虚构加载进度、会话、状态、限额或遥测。 `appearance.uiScale` 是应用的界面缩放（设置 → 外观；1 表示 100%，范围 0.85 到 1.25），也是 CanvasTTY 缩放自身文字和控件所用的值；希望与应用一致的页面或画布应用按它缩放文字，例如 `` document.documentElement.style.fontSize = `${13 * appearance.uiScale}px` ``。每当用户更改语言、配色或缩放时都会发送新的上下文；独立窗口在加载时读取它。
 
 ### 可见性
 

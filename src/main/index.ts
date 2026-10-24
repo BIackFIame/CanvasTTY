@@ -60,6 +60,7 @@ import { MaterialService } from "./services/materials/MaterialService";
 import { HandoffService } from "./services/materials/HandoffService";
 import { electronImageOps } from "./services/materials/electronImageOps";
 import { MATERIAL_SCHEME } from "../shared/materials.ts";
+import { contributionTitle } from "../shared/pluginLocalizedText.ts";
 import { PluginSecretsService } from "./services/PluginSecretsService";
 import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
@@ -704,6 +705,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     session: (sessionId) => sessionsForPlugins.summary(sessionId),
     restoring: (folder) => terminalManager?.isRestoringFolder(folder) ?? false,
     redact: (text) => redaction.redact(text),
+    locale: () => settings.get().locale,
     changed: (decorations) => {
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
         mainWindow.webContents.send(IPC.pluginsCardDecorationsChanged, decorations);
@@ -918,6 +920,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     applyBrowserSettings: async (next) => {
       terminalManager?.setKeyboardShortcuts(next.shortcuts);
       installMacMenu?.();
+      // Running plugin services hear about a language change (only when it changed).
+      pluginServices?.localeChanged();
       agentRuntimeBridge?.setCoreHooksEnabled(next.agentLifecycleHooksEnabled);
       terminalManager?.setLifecycleHooksEnabled(next.agentLifecycleHooksEnabled);
       // Awaited so the renderer's settings.update resolves with the endpoint live
@@ -1369,7 +1373,7 @@ async function openPluginWindow(pluginId: string, contributionId: string): Promi
     height: contribution.defaultSize.height,
     minWidth: contribution.minSize?.width ?? 320,
     minHeight: contribution.minSize?.height ?? 220,
-    title: contribution.title,
+    title: contributionTitle(contribution, editMenuLocale()),
     backgroundColor: "#353442",
     webPreferences: {
       preload: join(__dirname, "../preload/plugin.cjs"),

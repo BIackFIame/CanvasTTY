@@ -875,6 +875,9 @@ export interface PluginGridSize extends HomeGridSize {}
 export interface PluginContributionBase {
   id: string;
   title: string;
+  /** The title when the app is in Russian / English (like the manifest's `description.ru`); `title` otherwise. */
+  "title.ru"?: string;
+  "title.en"?: string;
   description?: string;
   entry: string;
   icon?: string;
@@ -993,6 +996,9 @@ export interface PluginCardBadge {
 export interface PluginCardActionEntry {
   pluginId: string;
   pluginName: string;
+  /** The plugin's `name.ru`/`name.en`, when its manifest has them. */
+  "pluginName.ru"?: string;
+  "pluginName.en"?: string;
   actionId: string;
   title: string;
   "title.ru"?: string;
@@ -1137,6 +1143,9 @@ export type PluginLaunchFieldKind = "boolean" | "select" | "text";
 export interface PluginLaunchField {
   key: string;
   label: string;
+  /** The label when the app is in Russian / English (like the manifest's `description.ru`); `label` otherwise. */
+  "label.ru"?: string;
+  "label.en"?: string;
   kind: PluginLaunchFieldKind;
   /** `select` only: 1 to 16 choices. */
   options?: Array<{ value: string; label: string }>;
@@ -1223,6 +1232,9 @@ export interface PluginManifest {
   apiVersion: PluginApiVersion;
   id: string;
   name: string;
+  /** The name when the app is in Russian / English (like `description.ru`); `name` otherwise. */
+  "name.ru"?: string;
+  "name.en"?: string;
   version: string;
   description: string;
   /** Optional icon path inside the package root (defaults to `icon.png`). */

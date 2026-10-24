@@ -699,8 +699,13 @@ export class PluginManager {
 
   /** Services whose card actions are shown now: enabled, native code trusted, `cards:decorate` granted. */
   cardActionProviders(): CardActionProvider[] {
-    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name }) => ({
-      pluginId: plugin, pluginName: name, serviceId: service.id, actions: structuredClone(service.cardActions!)
+    return this.trustedServicesWith("cards:decorate", (service) => service.cardActions).map(({ plugin, service, name, localizedName }) => ({
+      pluginId: plugin,
+      pluginName: name,
+      ...(localizedName["name.ru"] ? { "pluginName.ru": localizedName["name.ru"] } : {}),
+      ...(localizedName["name.en"] ? { "pluginName.en": localizedName["name.en"] } : {}),
+      serviceId: service.id,
+      actions: structuredClone(service.cardActions!)
     }));
   }
 
@@ -719,8 +724,8 @@ export class PluginManager {
   private trustedServicesWith(
     permission: PluginPermission,
     declares: (service: PluginService) => unknown
-  ): Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> {
-    const found: Array<{ plugin: string; name: string; service: PluginService; secrets: boolean }> = [];
+  ): Array<{ plugin: string; name: string; localizedName: Pick<PluginManifest, "name.ru" | "name.en">; service: PluginService; secrets: boolean }> {
+    const found: Array<{ plugin: string; name: string; localizedName: Pick<PluginManifest, "name.ru" | "name.en">; service: PluginService; secrets: boolean }> = [];
     for (const plugin of this.plugins.values()) {
       const trust = this.serviceTrust.get(plugin.manifest.id);
       if (!plugin.enabled || !plugin.nativeCodeTrusted || !trust) continue;
@@ -728,7 +733,13 @@ export class PluginManager {
       if (!manifest.permissions.includes(permission)) continue;
       for (const service of manifest.services ?? []) {
         if (declares(service) && trust[service.id]) {
-          found.push({ plugin: plugin.manifest.id, name: manifest.name, service, secrets: manifest.permissions.includes("secrets") });
+          found.push({
+            plugin: plugin.manifest.id,
+            name: manifest.name,
+            localizedName: { "name.ru": manifest["name.ru"], "name.en": manifest["name.en"] },
+            service,
+            secrets: manifest.permissions.includes("secrets")
+          });
         }
       }
     }
@@ -1502,7 +1513,7 @@ function repositoryKeyOfUrl(value: string): string {
 export function validatePluginManifest(candidate: unknown): PluginManifest {
   if (!isRecord(candidate)) throw new Error("Plugin manifest must be a JSON object.");
   assertOnlyKeys(candidate, [
-    "apiVersion", "id", "name", "version", "description", "description.ru", "description.en",
+    "apiVersion", "id", "name", "name.ru", "name.en", "version", "description", "description.ru", "description.en",
     "icon", "author", "homepage", "settingsContribution", "coreFiles", "modules", "permissions",
     "contributions", "hooks", "services", "platforms", "minHostVersion"
   ], "Plugin manifest");
@@ -1516,6 +1527,8 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
   const id = requiredString(candidate.id, "id", 80);
   if (!isPluginId(id) || id === "host") throw new Error("Plugin id must be a lowercase DNS-style identifier.");
   const name = requiredString(candidate.name, "name", 80);
+  const nameRu = optionalString(candidate["name.ru"], "name.ru", 80);
+  const nameEn = optionalString(candidate["name.en"], "name.en", 80);
   const version = requiredString(candidate.version, "version", 40);
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) throw new Error("Plugin version must be semantic version text.");
   const description = requiredString(candidate.description, "description", 2_000);
@@ -1627,6 +1640,8 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     apiVersion,
     id,
     name,
+    ...(nameRu ? { "name.ru": nameRu } : {}),
+    ...(nameEn ? { "name.en": nameEn } : {}),
     version,
     description,
     ...(descriptionRu ? { "description.ru": descriptionRu } : {}),
@@ -1956,20 +1971,26 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
   const keys = new Set<string>();
   return value.map((field): PluginLaunchField => {
     if (!isRecord(field)) throw new Error("Every plugin launch field must be an object.");
-    assertOnlyKeys(field, ["key", "label", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
+    assertOnlyKeys(field, ["key", "label", "label.ru", "label.en", "kind", "options", "optionsFrom", "default", "maxLength"], "Plugin launch field");
     const key = requiredString(field.key, "launch field key", 40);
     if (!/^[A-Za-z][A-Za-z0-9_]{0,39}$/.test(key) || keys.has(key)) {
       throw new Error(`Plugin launch field key is invalid or duplicated: ${key}.`);
     }
     keys.add(key);
-    const label = requiredString(field.label, "launch field label", 80);
+    const labelRu = optionalString(field["label.ru"], "launch field label.ru", 80);
+    const labelEn = optionalString(field["label.en"], "launch field label.en", 80);
+    const label = {
+      label: requiredString(field.label, "launch field label", 80),
+      ...(labelRu ? { "label.ru": labelRu } : {}),
+      ...(labelEn ? { "label.en": labelEn } : {})
+    };
     if (field.optionsFrom !== undefined && (field.kind !== "select" || field.optionsFrom !== "service")) {
       throw new Error(`Plugin launch field ${key} optionsFrom must be "service" on a select.`);
     }
     if (field.kind === "boolean") {
       if (field.options !== undefined || field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
       if (field.default !== undefined && typeof field.default !== "boolean") throw new Error(`Plugin launch field ${key} default must be a boolean.`);
-      return { key, label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
+      return { key, ...label, kind: "boolean", ...(field.default !== undefined ? { default: field.default } : {}) };
     }
     if (field.kind === "select") {
       if (field.maxLength !== undefined) throw new Error(`Plugin launch field ${key} has keys its kind does not use.`);
@@ -1989,7 +2010,7 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
         throw new Error(`Plugin launch field ${key} default must be one of its options.`);
       }
       return {
-        key, label, kind: "select", options,
+        key, ...label, kind: "select", options,
         ...(field.optionsFrom === "service" ? { optionsFrom: "service" as const } : {}),
         ...(field.default !== undefined ? { default: field.default as string } : {})
       };
@@ -2004,7 +2025,7 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
         throw new Error(`Plugin launch field ${key} default must be text within maxLength.`);
       }
       return {
-        key, label, kind: "text",
+        key, ...label, kind: "text",
         ...(field.maxLength !== undefined ? { maxLength: maxLength as number } : {}),
         ...(field.default !== undefined ? { default: field.default as string } : {})
       };
@@ -2016,11 +2037,13 @@ function validateLaunchFields(value: unknown): PluginLaunchField[] {
 function validateContribution(value: unknown): PluginContribution {
   if (!isRecord(value)) throw new Error("Every plugin contribution must be an object.");
   assertOnlyKeys(value, [
-    "id", "kind", "title", "description", "entry", "icon", "module", "defaultSize", "minSize"
+    "id", "kind", "title", "title.ru", "title.en", "description", "entry", "icon", "module", "defaultSize", "minSize"
   ], "Plugin contribution");
   const id = requiredString(value.id, "contribution id", 64);
   if (!isContributionId(id)) throw new Error("Contribution id contains unsupported characters.");
   const title = requiredString(value.title, "contribution title", 80);
+  const titleRu = optionalString(value["title.ru"], "contribution title.ru", 80);
+  const titleEn = optionalString(value["title.en"], "contribution title.en", 80);
   const description = optionalString(value.description, "contribution description", 240);
   const entry = assetPath(requiredString(value.entry, "contribution entry", 180));
   if (extname(entry).toLowerCase() !== ".html") throw new Error("Contribution entry must be an HTML file.");
@@ -2031,6 +2054,8 @@ function validateContribution(value: unknown): PluginContribution {
   const base = {
     id,
     title,
+    ...(titleRu ? { "title.ru": titleRu } : {}),
+    ...(titleEn ? { "title.en": titleEn } : {}),
     ...(description ? { description } : {}),
     entry,
     ...(icon ? { icon } : {}),

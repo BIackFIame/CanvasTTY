@@ -72,7 +72,7 @@ test("a service that subscribes on initialize gets a snapshot and restored/new e
   terminals.configureSessionPersistence(new TerminalSessionStore(root), "continue");
   sessions = new PluginSessions({ terminals, notify: (pluginId, serviceId, method, params) => supervisor.notify(pluginId, serviceId, method, params) });
   cards = new PluginCards({ providers: () => [], trustedPlugins: () => new Set(["p.watch"]), call: async () => null,
-    session: (id) => sessions.summary(id), redact: (text) => text, changed: () => undefined });
+    session: (id) => sessions.summary(id), redact: (text) => text, locale: () => "en", changed: () => undefined });
   secrets = { get: async () => "token-value-123" };
   // index.ts: the host APIs exist now; services may start. Then saved cards are restored.
   supervisor.hostReady?.();

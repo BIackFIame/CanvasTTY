@@ -1,4 +1,5 @@
 import type {
+  LocaleId,
   PluginCardAction,
   PluginCardActionResult,
   PluginCardBadge,
@@ -6,6 +7,7 @@ import type {
   PluginCardTone
 } from "../../shared/contracts.ts";
 import { cardActionMatches } from "../../shared/pluginCardActions.ts";
+import { cardActionPluginName } from "../../shared/pluginLocalizedText.ts";
 import type { PluginSessionSummary } from "./PluginSessions.ts";
 import { normalizeCardActionInput, normalizeCardReview } from "./PluginChangeReviews.ts";
 
@@ -13,6 +15,8 @@ import { normalizeCardActionInput, normalizeCardReview } from "./PluginChangeRev
 export interface CardActionProvider {
   pluginId: string;
   pluginName: string;
+  "pluginName.ru"?: string;
+  "pluginName.en"?: string;
   serviceId: string;
   actions: PluginCardAction[];
 }
@@ -26,6 +30,9 @@ export interface PluginCardsDependencies {
   /** A rollback point restore is writing files in (or above, or below) this folder. */
   restoring?(folder: string): boolean;
   redact(text: string): string;
+  /** The app's current language: sent with every action so the answer can be in it, and used for the plugin name in a
+   * failed action's toast. */
+  locale(): LocaleId;
   /** Pushes the new decorations to the window. */
   changed(decorations: PluginCardDecorations): void;
   timeoutMs?: number;
@@ -38,6 +45,8 @@ export interface CardActionInvocation {
   actionId: string;
   sessionId: string;
   session: PluginSessionSummary;
+  /** The app's language when the person chose the action (`en`, `ru`); write `message` in it. */
+  locale: string;
 }
 
 const CARD_ACTION_TIMEOUT_MS = 15_000;
@@ -124,6 +133,8 @@ export class PluginCards {
       actions: this.providers().flatMap((provider) => provider.actions.filter((action) => action.menu !== false).map((action) => ({
         pluginId: provider.pluginId,
         pluginName: provider.pluginName,
+        ...(provider["pluginName.ru"] ? { "pluginName.ru": provider["pluginName.ru"] } : {}),
+        ...(provider["pluginName.en"] ? { "pluginName.en": provider["pluginName.en"] } : {}),
         actionId: action.id,
         title: action.title,
         ...(action["title.ru"] ? { "title.ru": action["title.ru"] } : {}),
@@ -150,7 +161,7 @@ export class PluginCards {
     const normalizedInput = normalizeCardActionInput(input);
     if (action.menu === false && normalizedInput === undefined) throw new Error("That action runs only from a change review.");
     const timeoutMs = this.deps.timeoutMs ?? CARD_ACTION_TIMEOUT_MS;
-    const params: CardActionInvocation = { actionId, sessionId, session };
+    const params: CardActionInvocation = { actionId, sessionId, session, locale: this.deps.locale() };
     let timer: NodeJS.Timeout | undefined;
     try {
       const answer = await Promise.race([
@@ -167,7 +178,8 @@ export class PluginCards {
       const review = record.review === undefined ? undefined : normalizeCardReview(record.review, this.deps.redact, actions);
       return { tone, ...(message ? { message } : {}), ...(review ? { review } : {}) };
     } catch (error) {
-      return { tone: "error", message: this.message(`${provider.pluginName}: ${error instanceof Error ? error.message : "the action failed."}`) };
+      const name = cardActionPluginName(provider, this.deps.locale());
+      return { tone: "error", message: this.message(`${name}: ${error instanceof Error ? error.message : "the action failed."}`) };
     } finally {
       clearTimeout(timer);
     }
