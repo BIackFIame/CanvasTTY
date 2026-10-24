@@ -484,6 +484,20 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     )) throw new Error("Plugin module selection is invalid.");
     return plugins.install(token, selectedModules);
   });
+  ipcMain.handle(IPC.pluginsPreviewSourceChange, (event, request: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    const { id, url } = sourceChangeRequest(request);
+    return plugins.previewSourceChange(id, url);
+  });
+  ipcMain.handle(IPC.pluginsChangeSource, (event, request: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    const { id, url, token } = sourceChangeRequest(request);
+    if (typeof token !== "string") throw new Error("Plugin source change review is invalid.");
+    // Like Update: the plugin's windows close and its services stop (trust is revoked) before files change.
+    // Unlike uninstall, storage, the data folder, secrets and media grants stay with the plugin id.
+    closePluginWindows(id);
+    return plugins.changeSource(id, url, token);
+  });
   ipcMain.handle(IPC.pluginsSetModules, async (event, pluginId: string, selectedModules: string[]) => {
     assertMainRenderer(event, getMainWindow);
     if (!Array.isArray(selectedModules) || selectedModules.some((item) => typeof item !== "string")) {
@@ -1091,6 +1105,14 @@ export function assertMainRenderer(
   ) {
     throw new Error("Browser IPC is available only to the trusted CanvasTTY renderer.");
   }
+}
+
+/** `{ id, url, token? }` of a plugin source change; the URL itself is checked by PluginManager like an install's. */
+function sourceChangeRequest(value: unknown): { id: string; url: string; token?: unknown } {
+  if (typeof value !== "object" || value === null) throw new Error("Plugin source change request is invalid.");
+  const { id, url, token } = value as Record<string, unknown>;
+  if (typeof id !== "string" || typeof url !== "string") throw new Error("Plugin identifier and GitHub URL are required.");
+  return { id, url, token };
 }
 
 function safeGithubUrl(value: unknown): string {

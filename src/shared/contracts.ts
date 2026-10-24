@@ -1422,12 +1422,39 @@ export interface InstalledPlugin {
   mayStartOrchestrators: boolean;
   /** Its declared `uses`, each with the person's approval state; revoked with native code trust. */
   sharedReads?: PluginSharedReadStatus[];
+  /** The repository it was installed from before the person last changed its source ("switch back"). */
+  previousSourceUrl?: string;
 }
 
 export interface PluginInstallPreview {
   token: string;
   sourceUrl: string;
   manifest: PluginManifest;
+  expiresAt: number;
+}
+
+/** One part of a plugin's manifest that differs between its installed source and a new one. */
+export interface PluginSourceChangeDiff {
+  /** permissions, services, hooks, contributions, decide (services that judge tool calls), launchPolicy. */
+  kind: string;
+  added: string[];
+  removed: string[];
+}
+
+/**
+ * The review before the person switches an installed plugin to another repository. The new package is
+ * already downloaded and validated; the token commits exactly that package.
+ */
+export interface PluginSourceChangePreview {
+  token: string;
+  pluginId: string;
+  sourceUrl: string;
+  currentSourceUrl: string;
+  currentVersion: string;
+  manifest: PluginManifest;
+  /** Same GitHub owner as the installed source (a fork or another owner's repository is not). */
+  sameOwner: boolean;
+  changes: PluginSourceChangeDiff[];
   expiresAt: number;
 }
 
@@ -2238,6 +2265,8 @@ export interface CanvasTTYApi {
     onUpdatesAvailable(listener: (updates: PluginUpdateStatus[]) => void): () => void;
     previewInstall(sourceUrl: string): Promise<PluginInstallPreview>;
     install(token: string, selectedModules?: string[]): Promise<InstalledPlugin>;
+    previewSourceChange(request: { id: string; url: string }): Promise<PluginSourceChangePreview>;
+    changeSource(request: { id: string; url: string; token: string }): Promise<InstalledPlugin>;
     setModules(pluginId: string, selectedModules: string[]): Promise<InstalledPlugin>;
     setEnabled(pluginId: string, enabled: boolean): Promise<InstalledPlugin>;
     setHookEnabled(pluginId: string, hookId: string, enabled: boolean): Promise<InstalledPlugin>;
@@ -2443,6 +2472,8 @@ export const IPC = {
   pluginsUpdatesAvailable: "plugins:updates-available",
   pluginsPreviewInstall: "plugins:preview-install",
   pluginsInstall: "plugins:install",
+  pluginsPreviewSourceChange: "plugins:preview-change-source",
+  pluginsChangeSource: "plugins:change-source",
   pluginsSetModules: "plugins:set-modules",
   pluginsSetEnabled: "plugins:set-enabled",
   pluginsSetHookEnabled: "plugins:set-hook-enabled",

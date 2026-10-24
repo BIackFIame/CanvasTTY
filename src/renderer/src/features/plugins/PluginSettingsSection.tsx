@@ -12,9 +12,11 @@ import type {
   PluginManifest,
   PluginModule,
   PluginPermission,
+  PluginSourceChangePreview,
   PluginUpdateStatus
 } from "../../../../shared/contracts";
 import { sharedReadText } from "../settings/sharedReadText";
+import { repositoryLabel, sourceChangeText, type SourceChangeTextKey } from "./pluginSourceChangeText";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { pollWhileOpen, STOP_POLLING } from "../settings/settingsPolling";
 import {
@@ -48,6 +50,8 @@ interface PluginSettingsSectionProps {
   onSetPluginEnabled(pluginId: string, enabled: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
+  /** A plugin changed outside the callbacks above (its source was switched here). */
+  onPluginChanged?(plugin: InstalledPlugin): void;
   /** Settings is open; the section's polling runs only then. */
   open?: boolean;
 }
@@ -68,6 +72,7 @@ export function PluginSettingsSection({
   onSetPluginEnabled,
   onUninstallPlugin,
   onOpenPluginContribution,
+  onPluginChanged,
   open = true
 }: PluginSettingsSectionProps): React.JSX.Element {
   const locale = settings.locale;
@@ -839,6 +844,12 @@ export function PluginSettingsSection({
                         </div>
                       ))}
                     </div>
+                    <PluginSourceChange
+                      plugin={plugin}
+                      locale={locale}
+                      disabled={busy || updatingId !== null}
+                      onChanged={(changed) => onPluginChanged?.(changed)}
+                    />
                   </div>
                 </div>
               </article>
@@ -1065,6 +1076,144 @@ function manifestDescription(manifest: PluginManifest, locale: LocaleId): string
     ? `${description.slice(0, MAX_DESCRIPTION_LENGTH - 1)}…`
     : description;
 }
+
+/**
+ * "Change source…" in an installed plugin's row: download and review another repository's package of the same
+ * plugin id, then switch to it on an explicit confirmation. The host keeps the plugin's data and revokes its trust.
+ */
+function PluginSourceChange({
+  plugin,
+  locale,
+  disabled,
+  onChanged
+}: {
+  plugin: InstalledPlugin;
+  locale: LocaleId;
+  disabled: boolean;
+  onChanged(plugin: InstalledPlugin): void;
+}): React.JSX.Element | null {
+  const [open, setOpen] = useState(false);
+  const [url, setUrl] = useState("");
+  const [review, setReview] = useState<PluginSourceChangePreview | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!plugin.sourceUrl.startsWith("https://github.com/")) return null;
+  const text = (key: SourceChangeTextKey): string => sourceChangeText(locale, key);
+  const inspect = async (target: string): Promise<void> => {
+    setBusy(true);
+    setError(null);
+    setReview(null);
+    try {
+      setReview(await window.canvasTTY.plugins.previewSourceChange({ id: plugin.manifest.id, url: target.trim() }));
+    } catch (reason) {
+      setError(errorMessage(reason, text("failed")));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirm = async (): Promise<void> => {
+    if (!review) return;
+    setBusy(true);
+    setError(null);
+    try {
+      onChanged(await window.canvasTTY.plugins.changeSource({ id: review.pluginId, url: review.sourceUrl, token: review.token }));
+      setOpen(false);
+      setUrl("");
+    } catch (reason) {
+      setError(errorMessage(reason, text("failed")));
+    } finally {
+      // The review token is single-use either way.
+      setReview(null);
+      setBusy(false);
+    }
+  };
+  const label = (kind: string, item: string): string => (
+    kind === "permissions" ? t(locale, permissionKey(item as PluginPermission)) : item
+  );
+  return (
+    <div className="plugin-source-change">
+      <div className="installed-plugin__author-row">
+        <span className="installed-plugin__author">{text("source")}: {repositoryLabel(plugin.sourceUrl)}</span>
+        <span className="installed-plugin__repo-actions plugin-source-change__actions">
+          {plugin.previousSourceUrl && (
+            <button
+              type="button"
+              disabled={disabled || busy}
+              onClick={() => {
+                setOpen(true);
+                setUrl(plugin.previousSourceUrl!);
+                void inspect(plugin.previousSourceUrl!);
+              }}
+            >{text("switchBack")} {repositoryLabel(plugin.previousSourceUrl)}</button>
+          )}
+          <button
+            type="button"
+            disabled={disabled || busy}
+            aria-expanded={open}
+            onClick={() => {
+              setOpen(!open);
+              setReview(null);
+              setError(null);
+            }}
+          >{text("change")}</button>
+        </span>
+      </div>
+      {open && (
+        <div className="plugin-install-row">
+          <input
+            value={url}
+            type="url"
+            spellCheck={false}
+            placeholder="https://github.com/owner/repository"
+            aria-label={text("urlLabel")}
+            onChange={(event) => {
+              setUrl(event.target.value);
+              setReview(null);
+              setError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && url.trim()) void inspect(url);
+            }}
+          />
+          <button type="button" disabled={disabled || busy || url.trim().length === 0} onClick={() => void inspect(url)}>
+            {text("inspect")}
+          </button>
+        </div>
+      )}
+      {review && (
+        <article className="plugin-preview">
+          <header>
+            <PluginIcon pluginId={review.manifest.id} icon={review.manifest.icon} name={review.manifest.name} />
+            <span><strong>{text("reviewTitle")}</strong><small>{review.manifest.name}</small></span>
+          </header>
+          <p>{text("from")}: {repositoryLabel(review.currentSourceUrl)} · v{review.currentVersion}</p>
+          <p>{text("to")}: {repositoryLabel(review.sourceUrl)} · v{review.manifest.version}</p>
+          {review.changes.length === 0 ? <p>{text("noChanges")}</p> : review.changes.map((change) => (
+            <div className="plugin-permissions" key={change.kind}>
+              <strong>{change.kind in KNOWN_SOURCE_CHANGE_KINDS ? text(change.kind as SourceChangeTextKey) : change.kind}</strong>
+              <ul>
+                {change.added.map((item) => <li key={`+${item}`}>+ {label(change.kind, item)} ({text("added")})</li>)}
+                {change.removed.map((item) => <li key={`-${item}`}>− {label(change.kind, item)} ({text("removed")})</li>)}
+              </ul>
+            </div>
+          ))}
+          <div className="plugin-hook-warning" role="note">
+            {!review.sameOwner && <strong>{text("otherOwner")}</strong>}
+            <span>{text("keeps")}</span>
+            <span>{text("revokes")}</span>
+          </div>
+          <div className="plugin-preview__actions">
+            <button type="button" disabled={busy} onClick={() => setReview(null)}>{text("cancel")}</button>
+            <button className="plugin-primary-action" type="button" disabled={busy} onClick={() => void confirm()}>{text("confirm")}</button>
+          </div>
+        </article>
+      )}
+      {error && <p className="plugin-settings__error" role="alert">{error}</p>}
+    </div>
+  );
+}
+
+const KNOWN_SOURCE_CHANGE_KINDS = { permissions: 1, services: 1, hooks: 1, contributions: 1, decide: 1, launchPolicy: 1 };
 
 function PermissionList({ permissions, locale }: { permissions: PluginPermission[]; locale: LocaleId }): React.JSX.Element {
   return (

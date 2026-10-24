@@ -671,6 +671,16 @@ The current installer intentionally rejects private repositories, GitHub `/tree/
 
 Browsing and searching the showcase work without an account through GitHub's public search API. Signing in is optional and only raises GitHub's search limits; when the anonymous limit is reached, CanvasTTY shows when to try again. The optional showcase sign-in uses GitHub's OAuth device flow. Build maintainers can [register an OAuth App and enable Device Flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app), then store its public client ID in the `CANVASTTY_GITHUB_CLIENT_ID` GitHub Actions repository variable. Official builds bake in that value when configured; local builds can use `GITHUB_OAUTH_CLIENT_ID` or `CANVASTTY_GITHUB_CLIENT_ID`, and either variable can also override the bundled value at runtime. No client secret is shipped or required. Sign-in opens GitHub in CanvasTTY's built-in Browser by default and offers the system browser as an explicit fallback. Without a client ID the UI reports that OAuth is unavailable, while direct repository inspection and installation continue to work. Signing out removes the encrypted local session; revoke the OAuth grant separately under [GitHub application settings](https://github.com/settings/applications) when needed.
 
+### Changing a plugin's source
+
+An installed plugin's row in **Settings → Plugins** shows its source repository and **Change source…**. Paste another GitHub repository of the **same plugin id** (a `-dev` repository, a fork) and choose **Review**: CanvasTTY downloads and validates it exactly like an update and shows what differs (permissions, services, hooks, surfaces, decision services, launch policies) and whether the owner differs. Nothing changes until you confirm **Switch source**.
+
+- Kept: the plugin's storage, `<userData>/plugin-data/<pluginId>`, its secrets and its media-folder grants. The new source's code can read all of them.
+- Revoked: native code trust, enabled hooks and every confirmation that depends on them (for example "may allow agent actions"). Trust the new code again under **Settings → Agents → Extension native code**.
+- Refused: another plugin id, a non-`https://github.com/owner/repository` URL, the repository already installed (use **Update**), an invalid package, or a review older than 10 minutes or made before an update.
+- A failure puts the previous package and source back. What was revoked stays revoked (fail closed); the error says so, and you allow it again if you still want it.
+- The previous source is remembered: **Switch back to …** runs the same review. Each switch adds a line to `<userData>/plugin-audit.log` (plugin, from, to, versions, what was revoked; no data).
+
 ## Author checklist
 
 - Use only structured host data and explicit loading/unavailable/error states.

@@ -37,6 +37,8 @@ test("channels that change settings, plugins, secrets or terminals accept only t
     "mediaRead",
     "pluginsPreviewInstall",
     "pluginsInstall",
+    "pluginsPreviewSourceChange",
+    "pluginsChangeSource",
     "pluginsSetModules",
     "pluginsSetBrokerGrant",
     "pluginsBrokerAccounts",

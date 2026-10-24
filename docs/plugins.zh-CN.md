@@ -627,6 +627,16 @@ if (library) {
 
 无需账号即可通过 GitHub 公共搜索 API 浏览和搜索展示页。登录是可选的，只会提高 GitHub 搜索限额；达到匿名限额时，CanvasTTY 会显示何时可以重试。可选的展示页登录使用 GitHub OAuth Device Flow。构建维护者可以[注册 OAuth App 并启用 Device Flow](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/creating-an-oauth-app)，再将公开的 client ID 保存到 GitHub Actions 仓库变量 `CANVASTTY_GITHUB_CLIENT_ID`。正式构建会在该变量已配置时嵌入其值；本地构建可使用 `GITHUB_OAUTH_CLIENT_ID` 或 `CANVASTTY_GITHUB_CLIENT_ID`，运行时也可以用任一变量覆盖内置值。应用不包含也不需要 client secret。默认情况下，登录会在 CanvasTTY 内置浏览器中打开 GitHub，同时明确提供系统浏览器作为备用选项。未配置 client ID 时，界面会明确显示 OAuth 不可用，但仍可通过仓库链接检查和安装插件。退出登录只删除本机的加密会话；需要时请另行在 [GitHub 应用设置](https://github.com/settings/applications)中撤销授权。
 
+### 更换插件来源
+
+在 **Settings → Plugins** 中，已安装插件的行会显示其来源仓库和 **更换来源…**。粘贴**同一插件 id** 的另一个 GitHub 仓库（`-dev` 仓库或分叉），然后选择 **检查**：CanvasTTY 会像更新一样下载并验证它，并显示差异（权限、服务、钩子、界面、决策服务、启动策略）以及所有者是否不同。在你确认 **更换来源** 之前不会有任何改变。
+
+- 保留：插件的存储、`<userData>/plugin-data/<pluginId>`、其密钥以及媒体文件夹授权。新来源的代码可以读取这些内容。
+- 撤销：原生代码信任、已启用的钩子以及依赖它们的所有确认（例如“可以允许智能体操作”）。请在 **设置 → Agents → Extension native code** 中重新信任新代码。
+- 拒绝：不同的插件 id、非 `https://github.com/owner/repository` 形式的地址、已安装的同一仓库（请使用 **更新**）、无效的包，或超过 10 分钟或在更新之前做出的检查。
+- 失败时恢复之前的包和来源。已撤销的授权保持撤销（失败即关闭）；错误信息会说明，如仍需要请重新允许。
+- 会记住之前的来源：**切换回 …** 走同样的检查。每次更换都会在 `<userData>/plugin-audit.log` 中追加一行（插件、来源、目标、版本、撤销了什么；不含数据）。
+
 ## 作者检查清单
 
 - 只使用结构化的 host 数据和明确的 loading/unavailable/error 状态。

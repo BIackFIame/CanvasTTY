@@ -79,6 +79,15 @@ test("Settings and the launch/link dialogs are split out of the app's static imp
   assert.ok(!eagerPaths.has(paletteChunk), "the command palette must only be reachable through a dynamic import()");
   assert.ok(!eagerPaths.has(contextMenuChunk), "the canvas context menu must only be reachable through a dynamic import()");
 
+  // Changing a plugin's source is a Settings-only action: its UI and text never reach the startup bundle.
+  const eagerInputs = [...eagerPaths].flatMap((path) => Object.keys(metafile.outputs[path].inputs));
+  assert.ok(eagerInputs.some((input) => input.endsWith("App.tsx")), "eager inputs are listed");
+  assert.ok(!eagerInputs.some((input) => /pluginSourceChangeText|PluginSettingsSection/.test(input)),
+    "the plugin source change UI must only be reachable through Settings");
+  assert.ok(Object.values(metafile.outputs).some((output) => (
+    Object.keys(output.inputs).some((input) => input.endsWith("pluginSourceChangeText.ts"))
+  )), "the source change text is bundled into an on-demand chunk");
+
   const settingsBytes = metafile.outputs[settingsPath].bytes;
   assert.ok(settingsBytes > 100_000, `SettingsPanel chunk should carry real weight, got ${settingsBytes} bytes`);
 
