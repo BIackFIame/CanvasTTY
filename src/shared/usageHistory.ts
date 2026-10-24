@@ -10,6 +10,13 @@ export interface UsageEvent {
   output: number;
   cached: number;
   timing: 'event' | 'poll-delta';
+  /** The model the log reported for this usage (a plain identifier); absent when it did not name one. */
+  model?: string;
+  /**
+   * The agent's own price estimate for this usage in USD (OpenCode's `cost`, from its model list): an estimate, not a
+   * bill; absent where the agent records none.
+   */
+  providerCostEstimate?: number;
 }
 export interface HistorySample {
   provider: string;

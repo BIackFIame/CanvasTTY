@@ -844,6 +844,7 @@ export type PluginPermission =
   | "sessions:read"
   | "limits:read"
   | "providers:read"
+  | "usage:read"
   | "launcher:open"
   | "external:open"
   | "browser:open"

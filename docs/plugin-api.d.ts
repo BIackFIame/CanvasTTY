@@ -83,7 +83,7 @@ export interface CanvasTTYPluginContext {
     id: string;
     name: string;
     version: string;
-    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "providers:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
+    permissions: Array<"storage" | "secrets" | "sessions:read" | "limits:read" | "providers:read" | "usage:read" | "launcher:open" | "external:open" | "browser:open" | "media:library" | "playlists:read" | "playlists:write" | "hermes:hud" | "network" | "launch:contribute" | "environment:provide" | "decision:provide" | "tools:agents" | "sessions:events" | "sessions:read-screen" | "sessions:launch" | "sessions:control" | "cards:decorate" | "browser:engine">;
     modules: string[];
   };
   contribution: {
@@ -683,4 +683,72 @@ export interface CanvasTTYServiceHostApi {
   "providers.list"(params: Record<string, never>): CanvasTTYProviderDirectory;
   /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */
   "cards.setBadge"(params: { sessionId: string; badge: { text: string; tone?: CanvasTTYCardTone; tooltip?: string } | null }): null;
+  /**
+   * Needs `usage:read` (`homes` also `launch:contribute`). Measured usage of a card this plugin started or whose
+   * launch options include this plugin's; an unknown or foreign id is refused. 30 calls a minute per plugin.
+   */
+  "usage.session"(params: { cardId: string; homes?: CanvasTTYUsageHome[] }): CanvasTTYUsageSession;
+  /** Needs `usage:read` (`homes` also `launch:contribute`). The same cards (and homes) over `[since, until)`, at most 30 days. */
+  "usage.summary"(params: {
+    since?: number; until?: number;
+    groupBy?: CanvasTTYUsageGroup | CanvasTTYUsageGroup[];
+    homes?: CanvasTTYUsageHome[];
+  }): CanvasTTYUsageSummary;
+}
+
+/**
+ * An account home in the plugin's own data folder (exact absolute path, no symbolic links, at most 32 per plugin and
+ * 8 per call): a `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, OpenCode data folder (or the `XDG_DATA_HOME` holding it),
+ * `QWEN_HOME`, or `KIMI_CODE_HOME` / `KIMI_SHARE_DIR` the plugin hands to launches.
+ */
+export interface CanvasTTYUsageHome {
+  provider: "claude" | "codex" | "opencode" | "qwen" | "kimi";
+  home: string;
+}
+
+export type CanvasTTYUsageGroup = "provider" | "model" | "home";
+
+export interface CanvasTTYUsageCounts {
+  /** Prompt tokens, cached ones included. */
+  input: number;
+  /** Output tokens, reasoning included. */
+  output: number;
+  /** The cache-read part of `input`. */
+  cached: number;
+  /** Usage records. */
+  events: number;
+  /** Sum of the agent's own price estimates in USD (OpenCode's `cost`) over records that carry one; absent if none. Not a bill. */
+  providerCostEstimate?: number;
+}
+
+export interface CanvasTTYUsageCoverage {
+  /** When CanvasTTY's usage history last collected (every 60 s); 0 before the first collection. */
+  collectedAt: number;
+  /** False when a collection over the period could not read every source: the numbers may be low. */
+  complete: boolean;
+}
+
+export type CanvasTTYUsageSession =
+  | {
+    cardId: string;
+    provider: CanvasTTYProviderId;
+    measured: true;
+    totals: CanvasTTYUsageCounts;
+    /** At most 256, largest first; `model` is null where the log named none. */
+    models: Array<CanvasTTYUsageCounts & { model: string | null }>;
+    firstAt: number | null;
+    lastAt: number | null;
+    coverage: CanvasTTYUsageCoverage;
+  }
+  | { cardId: string; provider: CanvasTTYProviderId; measured: false; reason: "conversation-unknown" | "provider-not-recorded" };
+
+export interface CanvasTTYUsageSummary {
+  since: number;
+  until: number;
+  groupBy: CanvasTTYUsageGroup[];
+  totals: CanvasTTYUsageCounts & { sessions: number };
+  /** At most 256, largest first; each row has the grouped keys. `home` is an index into `homes`, null for CanvasTTY's own history. */
+  rows: Array<CanvasTTYUsageCounts & { provider?: string; model?: string | null; home?: number | null; sessions: number }>;
+  truncated: boolean;
+  coverage: CanvasTTYUsageCoverage;
 }

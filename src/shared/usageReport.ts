@@ -210,6 +210,11 @@ export type ParsedUsageHistory = { ok: true; history: UsageHistory } | { ok: fal
 
 const UNKNOWN_PROVIDER = "unknown";
 const PROVIDER_ORDER = ["codex", "claude"];
+/**
+ * Providers the report explains quota with: the sampled ones and Hermes' unattributed routes. Records of other agents
+ * (OpenCode, Qwen Code, Kimi) are collected for plugin usage answers and are left out here.
+ */
+const REPORT_PROVIDERS: ReadonlySet<string> = new Set([...PROVIDER_ORDER, UNKNOWN_PROVIDER]);
 const BACKLOG_PATTERN = /read budget reached/i;
 const SOURCE_PROBLEM_PATTERN = /not collected this time|not accessible|cannot be opened/i;
 
@@ -291,7 +296,8 @@ export function buildUsageReport(history: UsageHistory, options: UsageReportOpti
   };
   const streams = sampleStreams(Array.isArray(history.samples) ? history.samples : [], issues);
   const conflicts: UsageEvent[] = [];
-  const events = dedupeEvents(Array.isArray(history.events) ? history.events : [], issues, conflicts);
+  const events = dedupeEvents(Array.isArray(history.events) ? history.events : [], issues, conflicts)
+    .filter((event) => REPORT_PROVIDERS.has(event.provider));
   const startedAt = finite(history.startedAt);
   const collectedAt = finite(history.collectedAt);
   const coverageText = strings(history.coverage);

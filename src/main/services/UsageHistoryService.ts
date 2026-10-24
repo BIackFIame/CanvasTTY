@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { LimitProviderId, LimitsSnapshot } from "../../shared/contracts.ts";
 import type { HistorySample, UsageCollectionHealth, UsageEvent, UsageHistory } from "../../shared/usageHistory.ts";
 import { sanitizeCollectorState, type CollectorState } from "./LocalUsageCollector.ts";
+import { usageModel } from "./usageReaders.ts";
 
 const FILE_NAME = "usage-history.json";
 const FORMAT = "canvastty-usage-history";
@@ -194,6 +195,14 @@ export class UsageHistoryService {
     return structuredClone(this.snapshot());
   }
 
+  /**
+   * The recorded usage without a copy, for in-process readers that aggregate it synchronously (plugin usage answers).
+   * The arrays are the service's own: read them, never change or keep them across an await.
+   */
+  peek(): { startedAt: number; collectedAt: number; events: readonly UsageEvent[]; health: readonly UsageCollectionHealth[] } {
+    return { startedAt: this.startedAt, collectedAt: this.collectedAt, events: this.events, health: this.health };
+  }
+
   /** Runs one collection now, or joins the one already running. */
   async collect(): Promise<UsageHistory> {
     if (!this.closed) await this.serialized();
@@ -356,9 +365,12 @@ export class UsageHistoryService {
         to: Math.max(existing.to, event.to),
         input: Math.max(existing.input, event.input),
         output: Math.max(existing.output, event.output),
-        cached: Math.max(existing.cached, event.cached)
+        cached: Math.max(existing.cached, event.cached),
+        ...(existing.model ?? event.model ? { model: existing.model ?? event.model } : {}),
+        ...(existing.providerCostEstimate !== undefined || event.providerCostEstimate !== undefined
+          ? { providerCostEstimate: Math.max(existing.providerCostEstimate ?? 0, event.providerCostEstimate ?? 0) } : {})
       } : event;
-      if (existing && sameUsage(existing, merged)) continue;
+      if (existing && sameUsage(existing, merged) && existing.providerCostEstimate === merged.providerCostEstimate) continue;
       this.eventIndex.set(event.id, merged);
       this.eventsChanged = true;
     }
@@ -545,11 +557,11 @@ function restore(value: Record<string, unknown>): Restored | null {
  * secret-bearing fields) counts as invalid, so the original file is preserved before rewriting.
  */
 function collectorState(value: Record<string, unknown>): { state: CollectorState; invalid: number } | null {
-  if ((value.files !== undefined && !isRecord(value.files)) || (value.hermes !== undefined && !isRecord(value.hermes))) return null;
+  if (["files", "hermes", "opencode"].some((table) => value[table] !== undefined && !isRecord(value[table]))) return null;
   const state = sanitizeCollectorState(value);
-  let invalid = Object.keys(value).filter((key) => !["version", "files", "hermes"].includes(key)).length;
-  for (const table of ["files", "hermes"] as const) {
-    const kept: Record<string, unknown> = state[table];
+  let invalid = Object.keys(value).filter((key) => !["version", "files", "hermes", "opencode"].includes(key)).length;
+  for (const table of ["files", "hermes", "opencode"] as const) {
+    const kept: Record<string, unknown> = state[table] ?? {};
     for (const [key, entry] of Object.entries((value[table] ?? {}) as Record<string, unknown>)) {
       if (!Object.hasOwn(kept, key) || !isDeepStrictEqual(compact(kept[key]), compact(entry))) invalid += 1;
     }
@@ -580,7 +592,7 @@ function sample(value: unknown): HistorySample | null {
 
 function usageEvent(value: unknown): UsageEvent | null {
   if (!isRecord(value)) return null;
-  const { id, provider, app, profile, session, from, to, input, output, cached, timing } = value;
+  const { id, provider, app, profile, session, from, to, input, output, cached, timing, model, providerCostEstimate } = value;
   if (
     !isText(id, 200)
     || !isText(provider, 64)
@@ -590,8 +602,13 @@ function usageEvent(value: unknown): UsageEvent | null {
     || !isTime(from) || !isTime(to) || from > to
     || !isCount(input) || !isCount(output) || !isCount(cached)
     || (timing !== "event" && timing !== "poll-delta")
+    || (model !== undefined && (typeof model !== "string" || usageModel(model) !== model))
+    || (providerCostEstimate !== undefined && !isCost(providerCostEstimate))
   ) return null;
-  return { id, provider, app, profile, session, from, to, input, output, cached, timing };
+  return {
+    id, provider, app, profile, session, from, to, input, output, cached, timing, ...(model ? { model } : {}),
+    ...(providerCostEstimate !== undefined ? { providerCostEstimate } : {})
+  };
 }
 
 function collectionHealth(value: unknown): UsageCollectionHealth | null {
@@ -656,6 +673,10 @@ function isStringArray(value: unknown): value is string[] {
 
 function isTime(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isCost(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1_000;
 }
 
 function isCount(value: unknown): value is number {

@@ -51,6 +51,11 @@ export interface PluginServiceHost {
    * list_providers gives them to an orchestrator. The host checks the registry again (a disabled plugin is refused).
    */
   providers?(pluginId: string): unknown;
+  /**
+   * Measured token usage (`usage.*`). Returns undefined for a method it does not know. `permissions` are the plugin's
+   * active manifest permissions and `dataDir` its data folder, both from the host's record of the service.
+   */
+  usage?(pluginId: string, method: string, params: unknown, permissions: readonly PluginPermission[], dataDir: string): unknown;
   /** `cards.setBadge` (EP-7), already checked for `cards:decorate`. */
   setBadge?(pluginId: string, params: unknown): unknown;
   /** The service process ended (stopped, crashed or removed): its subscriptions end with it. */
@@ -653,6 +658,10 @@ export class PluginServiceSupervisor {
     }
     if (method.startsWith("limits.") && this.options.host.limits) {
       const result = this.options.host.limits(spec.pluginId, spec.serviceId, method, params, spec.permissions, spec.dataDir);
+      if (result !== undefined) return result;
+    }
+    if (method.startsWith("usage.") && this.options.host.usage) {
+      const result = this.options.host.usage(spec.pluginId, method, params, spec.permissions, spec.dataDir);
       if (result !== undefined) return result;
     }
     if (method.startsWith("sessions.") && this.options.host.sessions) {

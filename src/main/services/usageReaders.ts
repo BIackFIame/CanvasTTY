@@ -24,6 +24,13 @@ export function fingerprint(value: string | Uint8Array): string { return createH
 export function identifier(value: unknown): string {
   return typeof value === 'string' && /^[A-Za-z0-9_.:-]{1,180}$/.test(value) ? value : '';
 }
+/**
+ * A model name as logs report it (`claude-sonnet-4-5`, `gpt-5-codex`, `anthropic/claude-sonnet-4`). Anything else,
+ * including free text, is dropped: only a plain identifier is ever kept with a usage record.
+ */
+export function usageModel(value: unknown): string {
+  return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,119}$/.test(value) ? value : '';
+}
 function timestamp(value: unknown): number {
   return typeof value === 'string' ? Date.parse(value) : Number.NaN;
 }
@@ -47,6 +54,8 @@ export interface CodexFileState {
   total?: CodexTokens;
   /** Copied parent history is being replayed; its counters only rebaseline until this time. */
   copyUntil?: number;
+  /** Model of the latest turn_context line: the model the following token counts were spent on. */
+  model?: string;
 }
 /** A forked rollout replays the parent's lines in one burst right after the second session_meta. */
 export const CODEX_COPY_WINDOW = 5_000;
@@ -89,6 +98,11 @@ export function codexUsage(raw: unknown, state: CodexFileState, context: LogCont
     }
     return null;
   }
+  if (r.type === 'turn_context') {
+    const model = usageModel(p.model);
+    if (model) state.model = model;
+    return null;
+  }
   if (r.type !== 'event_msg' || p.type !== 'token_count') return null;
   const info = record(p.info), total = codexTokens(info.total_token_usage);
   if (!total) return null;
@@ -110,6 +124,7 @@ export function codexUsage(raw: unknown, state: CodexFileState, context: LogCont
     id: fingerprint(JSON.stringify(['codex', session, ...counters])),
     provider: 'codex', app: state.app ?? 'Codex', profile: context.profile, session,
     from: at, to: at, input: delta[0], output: delta[2], cached: Math.min(delta[1], delta[0]), timing: 'event',
+    ...(state.model ? { model: state.model } : {}),
   };
 }
 
@@ -120,6 +135,7 @@ interface ClaudeMessage {
   to: number;
   /** [uncached input, cache read, cache write, output] */
   usage: [number, number, number, number];
+  model?: string;
 }
 /** Per-transcript reader state. JSON-serializable: it is persisted in collector cursors. */
 export interface ClaudeFileState {
@@ -134,7 +150,11 @@ function claudeMessage(raw: unknown, context: LogContext): ClaudeMessage | null 
   if (m.model === '<synthetic>' || r.isApiErrorMessage === true) return null;
   const usage = [required(u.input_tokens), tokens(u.cache_read_input_tokens), tokens(u.cache_creation_input_tokens), required(u.output_tokens)];
   if (usage.some(value => value === null)) return null;
-  return { id, session: identifier(r.sessionId) || context.session, from: at, to: at, usage: usage as ClaudeMessage['usage'] };
+  const model = usageModel(m.model);
+  return {
+    id, session: identifier(r.sessionId) || context.session, from: at, to: at, usage: usage as ClaudeMessage['usage'],
+    ...(model ? { model } : {}),
+  };
 }
 function claudeEvent(message: ClaudeMessage, context: LogContext): UsageEvent | null {
   const [input, read, write, output] = message.usage;
@@ -142,6 +162,7 @@ function claudeEvent(message: ClaudeMessage, context: LogContext): UsageEvent | 
   return {
     id: fingerprint(`claude:${message.id}`), provider: 'claude', app: 'Claude Code', profile: context.profile,
     session: message.session, from: message.from, to: message.to, input: input + read + write, output, cached: read, timing: 'event',
+    ...(message.model ? { model: message.model } : {}),
   };
 }
 
@@ -158,6 +179,7 @@ export function claudeUsage(raw: unknown, state: ClaudeFileState, context: LogCo
     pending.from = Math.min(pending.from, message.from);
     pending.to = Math.max(pending.to, message.to);
     pending.usage = pending.usage.map((value, index) => Math.max(value, message.usage[index])) as ClaudeMessage['usage'];
+    if (!pending.model && message.model) pending.model = message.model;
     return null;
   }
   state.pending = message;
@@ -168,4 +190,59 @@ export function claudeFlush(state: ClaudeFileState, context: LogContext): UsageE
   const pending = state.pending;
   delete state.pending;
   return pending ? claudeEvent(pending, context) : null;
+}
+
+/**
+ * Qwen Code chat records (`<QWEN_HOME>/projects/<project>/chats/<session>.jsonl`): one `assistant` record per model
+ * response with Gemini-style `usageMetadata`. `promptTokenCount` already includes the cached part
+ * (`cachedContentTokenCount`); thoughts are reported apart from candidates and counted as output here. A branched
+ * session copies records verbatim (same `uuid`), so ids deduplicate copies.
+ */
+export function qwenUsage(raw: unknown, context: LogContext): UsageEvent | null {
+  const r = record(raw), u = record(r.usageMetadata), at = timestamp(r.timestamp), id = identifier(r.uuid);
+  if (r.type !== 'assistant' || !id || !Number.isFinite(at) || !Object.keys(u).length) return null;
+  const [prompt, candidates, cached, thoughts] = [u.promptTokenCount, u.candidatesTokenCount, u.cachedContentTokenCount, u.thoughtsTokenCount].map(tokens);
+  if (prompt === null || candidates === null || cached === null || thoughts === null) return null;
+  if (!prompt && !candidates && !thoughts) return null;
+  const model = usageModel(r.model);
+  return {
+    id: fingerprint(`qwen:${id}`), provider: 'qwen', app: 'Qwen Code', profile: context.profile,
+    session: identifier(r.sessionId) || context.session, from: at, to: at,
+    input: prompt, output: candidates + thoughts, cached: Math.min(cached, prompt), timing: 'event',
+    ...(model ? { model } : {}),
+  };
+}
+
+/**
+ * Kimi's per-request usage. Kimi Code (`<KIMI_CODE_HOME>/sessions/…/<session>/agents/<agent>/wire.jsonl`) writes
+ * `{"type":"usage.record","model","usage":{inputOther,output,inputCacheRead,inputCacheCreation},"time"}`; the older
+ * kimi-cli (`<KIMI_SHARE_DIR>/sessions/<dir>/<session>/wire.jsonl`) writes `StatusUpdate` messages whose
+ * `token_usage` is that step's usage. `inputOther` excludes both cache parts, so input is the sum of the three. The
+ * session comes from the folder the file is in (`context.session`).
+ */
+export function kimiUsage(raw: unknown, context: LogContext): UsageEvent | null {
+  const r = record(raw);
+  let usage: unknown[], at: number, model = '', key: unknown[];
+  if (r.type === 'usage.record') {
+    const u = record(r.usage);
+    usage = [u.inputOther, u.inputCacheRead, u.inputCacheCreation, u.output];
+    at = typeof r.time === 'number' ? r.time : Number.NaN;
+    model = usageModel(r.model);
+    key = ['kimi-code', identifier(r.agentId), at, model];
+  } else {
+    const message = record(r.message), payload = record(message.payload), u = record(payload.token_usage);
+    if (message.type !== 'StatusUpdate' || !Object.keys(u).length) return null;
+    usage = [u.input_other, u.input_cache_read, u.input_cache_creation, u.output];
+    at = typeof r.timestamp === 'number' ? Math.round(r.timestamp * 1000) : Number.NaN;
+    key = ['kimi-cli', identifier(payload.message_id), at];
+  }
+  const counted = usage.map(tokens);
+  if (!Number.isFinite(at) || at <= 0 || counted.some(value => value === null)) return null;
+  const [other, read, write, output] = counted as number[];
+  if (!other && !read && !write && !output) return null;
+  return {
+    id: fingerprint(JSON.stringify([...key, counted])), provider: 'kimi', app: 'Kimi', profile: context.profile,
+    session: context.session, from: at, to: at, input: other + read + write, output, cached: read, timing: 'event',
+    ...(model ? { model } : {}),
+  };
 }

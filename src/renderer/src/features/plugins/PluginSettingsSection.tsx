@@ -1103,15 +1103,15 @@ function HookManifestWarning({
 
 // Labels of permissions newer than the startup string table; they load with Settings (this chunk), not at startup.
 const LAZY_PERMISSION_TEXT: Record<"ru" | "en", Partial<Record<PluginPermission, string>>> = {
-  ru: { "providers:read": "Узнаёт, какие CLI агентов установлены и выполнен ли в них вход, и их модели (без токенов, почты и путей)" },
-  en: { "providers:read": "Learns which agent CLIs are installed and signed in, and their models (no tokens, e-mails or paths)" }
+  ru: { "usage:read": "Читает расход токенов окон, которые он запустил или для которых задал параметры запуска", "providers:read": "Узнаёт, какие CLI агентов установлены и выполнен ли в них вход, и их модели (без токенов, почты и путей)" },
+  en: { "usage:read": "Reads token usage of the cards it started or set launch options for", "providers:read": "Learns which agent CLIs are installed and signed in, and their models (no tokens, e-mails or paths)" }
 };
 
 function permissionText(locale: LocaleId, permission: PluginPermission): string {
   return LAZY_PERMISSION_TEXT[locale === "ru" ? "ru" : "en"][permission] ?? t(locale, permissionKey(permission as KeyedPermission));
 }
 
-type KeyedPermission = Exclude<PluginPermission, "providers:read">;
+type KeyedPermission = Exclude<PluginPermission, "usage:read" | "providers:read">;
 
 function permissionKey(permission: KeyedPermission): TranslationKey {
   return ({
