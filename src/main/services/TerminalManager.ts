@@ -69,8 +69,9 @@ import { terminalFailureDetails } from "./terminalFailureDetails.ts";
 import { canResumeThreadById, resolveTerminalLaunch } from "./terminalLaunch.ts";
 import { isLaunchProfile, PROFILE_RANK, profileAvailable, profileCeiling, type LaunchProfile } from "../../shared/autoMode.ts";
 import type { AgentIsolation, IsolationDecision } from "./isolation/AgentIsolation.ts";
-import { controlGrantFolder } from "./isolation/AgentIsolation.ts";
+import { controlGrantFolder, gatewaySocketAddresses } from "./isolation/AgentIsolation.ts";
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
+import { providerHomeVariables, type PlacedProject } from "./isolation/isolationPaths.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
@@ -223,6 +224,8 @@ interface PlannedSpawn {
   agentBrowser: PreparedAgentBrowserPtyLaunch | null;
   agentRuntime: PreparedAgentRuntimePtyLaunch | null;
   agentOrchestration: PreparedOrchestrationPtyLaunch | null;
+  /** The folder of the control grant CanvasTTY itself gave this launch (orchestrators only), never read from `env`. */
+  controlGrant: string | null;
   cleanup(): void;
 }
 /** Quitting with saving off asks environments to stop compute, but never waits longer than this. */
@@ -316,7 +319,11 @@ export class TerminalManager {
   // Every text an agent reads from another card passes through it (EP-8).
   private redaction = new SecretRedactionRegistry();
   // Where each running card was actually started (an environment may move it) and its agent config folder.
-  private readonly launchContexts = new Map<string, { cwd: string; configDir: string | null }>();
+  /**
+   * Where each running card was started: its folder, and its own config folders (CLAUDE_CONFIG_DIR, and the account
+   * home a launch contributor selected inside its plugin data), which base protection treats as the agent's own.
+   */
+  private readonly launchContexts = new Map<string, { cwd: string; configDirs: string[] }>();
   private modelCheck: (provider: ProviderId, model: string) => string | null = () => null;
   // Whether base protection is on (Settings → Agents); OpenCode's auto profile lets shell commands run without asking
   // only then. Unknown counts as off.
@@ -432,7 +439,7 @@ export class TerminalManager {
       provider: session.metadata.provider,
       role: session.metadata.role ?? "agent",
       cwd: launched?.cwd ?? session.metadata.cwd,
-      configDirs: launched?.configDir ? [launched.configDir] : [],
+      configDirs: launched ? [...launched.configDirs] : [],
       profile: session.metadata.profile
     };
   }
@@ -1834,7 +1841,10 @@ export class TerminalManager {
     let spawn: { command: string; args: string[] | string; env: Record<string, string> } = planned;
     if (decision.apply) {
       try {
-        spawn = this.wrapIsolated(id, provider, profile, planned);
+        spawn = this.wrapIsolated(id, provider, profile, planned, planned, {
+          ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
+          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined)
+        });
       } catch (error) {
         planned.cleanup();
         return { ...none, failure: { diagnostic: `Launch refused: ${error instanceof Error ? error.message : String(error)}`, exitCode: 1 } };
@@ -1844,7 +1854,7 @@ export class TerminalManager {
       const process = this.spawnPty(spawn.command, spawn.args, {
         name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
-      this.launchContexts.set(id, { cwd: planned.cwd, configDir: planned.env.CLAUDE_CONFIG_DIR ?? null });
+      this.launchContexts.set(id, launchContext(planned.cwd, provider, planned.env, contribution?.accountHome));
       return {
         process,
         agentBrowser: planned.agentBrowser,
@@ -1898,10 +1908,13 @@ export class TerminalManager {
   }
 
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
-  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> }): { command: string; args: string[]; env: Record<string, string> } {
+  private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
+    gateways: Pick<PlannedSpawn, "agentBrowser" | "agentRuntime" | "agentOrchestration" | "controlGrant">,
+    placement: { accountHome?: string; placedProjects: readonly PlacedProject[] }): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
-    const grant = controlGrantFolder(planned.env);
+    // Only the grant CanvasTTY handed this launch: a CANVASTTY_CONTROL_CONNECTION a plugin set reopens nothing.
+    const grant = gateways.controlGrant;
     const wrapped = this.isolation.wrap({
       sessionId: id,
       provider,
@@ -1910,7 +1923,12 @@ export class TerminalManager {
       args: planned.args,
       env: planned.env,
       profile,
-      ...(grant ? { grantedPrivate: [grant] } : {})
+      ...(placement.accountHome ? { accountHome: placement.accountHome } : {}),
+      placedProjects: placement.placedProjects,
+      ...(grant ? { grantedPrivate: [grant] } : {}),
+      // Only the sockets CanvasTTY's own gateways prepared; a CANVASTTY_*_ADDRESS from elsewhere is never bound in.
+      gatewaySockets: gatewaySocketAddresses(gateways.agentBrowser?.environment, gateways.agentRuntime?.environment,
+        gateways.agentOrchestration?.environment)
     });
     this.releaseIsolation(id);
     this.isolationCleanups.set(id, wrapped.cleanup);
@@ -2019,13 +2037,14 @@ export class TerminalManager {
       const browserEnvironment = agentBrowser?.environment ?? {};
       const runtimeEnvironment = agentRuntime?.environment ?? {};
       const orchestrationEnvironment = agentOrchestration?.environment ?? {};
+      const hostControlEnvironment = controlEnvironment(role, this.controlConnection, id);
       const providerEnvironment: Record<string, string> = {
         ...(provider === "opencode"
           ? mergeOpenCodeLaunchEnvironment(browserEnvironment, runtimeEnvironment)
           : { ...browserEnvironment, ...runtimeEnvironment }),
         ...orchestrationEnvironment,
         // Orchestrators alone learn where the control descriptor and CLI are.
-        ...controlEnvironment(role, this.controlConnection, id)
+        ...hostControlEnvironment
       };
       // OpenCode: the project folder in its other Unicode spelling is still this folder, not an external one.
       if (provider === "opencode") Object.assign(providerEnvironment, openCodeProjectFolderEnvironment({ ...baseEnvironment, ...providerEnvironment }, cwd));
@@ -2073,6 +2092,7 @@ export class TerminalManager {
         agentBrowser,
         agentRuntime,
         agentOrchestration,
+        controlGrant: controlGrantFolder(hostControlEnvironment),
         cleanup
       };
     } catch (error) {
@@ -2142,6 +2162,30 @@ export class TerminalManager {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * The folders CanvasTTY itself placed a launch in, the only ones the isolation layer opens inside plugin data: the
+   * folder an environment prepared for this card (inside that plugin's own data), or, for a card the person started
+   * and its subagents, the top card's folder (the person's choice, or its environment's). A subagent's own folder is
+   * never one by itself: an agent asked for it. A plugin's own card is placed by nothing but an environment.
+   */
+  private placedProjects(id: string, parentSessionId: string | undefined, cwd: string,
+    environment: { pluginId: string } | undefined): PlacedProject[] {
+    if (environment) return [{ folder: cwd, pluginId: environment.pluginId }];
+    if (parentSessionId === undefined) {
+      return (this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id)) === undefined ? [{ folder: cwd }] : [];
+    }
+    let root: ManagedSession | undefined;
+    let next: string | undefined = parentSessionId;
+    for (let depth = 0; next !== undefined && depth < 64; depth++) {
+      root = this.sessions.get(next);
+      if (!root) return [];
+      next = root.metadata.parentSessionId;
+    }
+    if (!root || next !== undefined) return [];
+    if (root.extras.environment) return [{ folder: root.metadata.cwd, pluginId: root.extras.environment.pluginId }];
+    return root.extras.ownerPluginId === undefined ? [{ folder: root.metadata.cwd }] : [];
   }
 
   private contributed(session: ManagedSession): boolean {
@@ -2365,7 +2409,10 @@ export class TerminalManager {
       }
       if (decision.apply) {
         try {
-          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn), cwd: spawn.cwd };
+          spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, {
+            ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
+            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment)
+          }), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
         }
@@ -2386,7 +2433,7 @@ export class TerminalManager {
       } else {
         delete metadata.nativeEditor;
       }
-      this.launchContexts.set(id, { cwd: spawn.cwd, configDir: spawn.env.CLAUDE_CONFIG_DIR ?? null });
+      this.launchContexts.set(id, launchContext(spawn.cwd, metadata.provider, spawn.env, contribution?.accountHome));
       session.agentBrowser = planned.agentBrowser;
       session.agentRuntime = planned.agentRuntime;
       session.agentOrchestration = planned.agentOrchestration;
@@ -2874,4 +2921,16 @@ function appendScrollback(session: ManagedSession, data: string): void {
 function signalExitText(signal: number): string {
   const name = Object.entries(osConstants.signals).find(([, value]) => value === signal)?.[0];
   return `The process was killed by signal ${name ? `${name} (${signal})` : signal}.`;
+}
+
+/**
+ * A started card's folder and own config folders. The selected account home counts only while the CLI is still
+ * started with it (an environment may have replaced the variable): then it is that card's, and only that one's.
+ */
+function launchContext(cwd: string, provider: ProviderId, env: Readonly<Record<string, string>>, accountHome: string | undefined): { cwd: string; configDirs: string[] } {
+  const configDirs = env.CLAUDE_CONFIG_DIR ? [env.CLAUDE_CONFIG_DIR] : [];
+  const started = accountHome !== undefined && providerHomeVariables(provider)
+    .some((name) => typeof env[name] === "string" && env[name]!.replace(/[\\/]+$/u, "") === accountHome);
+  if (started && !configDirs.includes(accountHome)) configDirs.push(accountHome);
+  return { cwd, configDirs };
 }

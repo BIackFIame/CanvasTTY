@@ -27,6 +27,7 @@ import {
   CLAUDE_HTTP_HOOK,
   DECISION_BUDGET_ENV,
   OPENCODE_DECISIONS_ENV,
+  OPENCODE_DECISION_READS_ENV,
   permissionGateTimings
 } from "../../../agent-runtime/runtime-protocol.mjs";
 
@@ -190,6 +191,7 @@ export class ProviderRuntimeLaunchAdapters {
    * `decisionBudgetMs` (a decision service's `decide.timeoutMs`) lengthens the hook's deadlines to fit it.
    * `claudeHttpHookBase` (Claude Code only) sends its lifecycle events, except SessionStart, as HTTP hooks to the
    * gateway's loopback listener instead of running the helper; the decision hook stays a command.
+   * `decisionReads` (base protection on at launch) lets the decision hook see read-only file tools as well.
    * `accountHome` (Grok and Kimi only, see accountHomes.ts): the CLI home a launch contributor started this launch
    * with. When it is an account home inside `accountHomesRoot`, the Grok/Kimi overlay goes there instead of into the
    * default home, since that is the only home the CLI reads. Claude Code, Codex, Qwen Code and OpenCode take their hooks
@@ -202,6 +204,7 @@ export class ProviderRuntimeLaunchAdapters {
     decisions = false,
     decisionBudgetMs?: number,
     claudeHttpHookBase?: string,
+    decisionReads = false,
     accountHome?: string,
     /** The card's own (already filtered) environment; the launch reads the person's OpenCode inline config from it. */
     environment: Readonly<Record<string, string | undefined>> = this.environment
@@ -210,7 +213,7 @@ export class ProviderRuntimeLaunchAdapters {
     const gate = decisions && this.decisionsSupported(provider);
     const pluginCommands = [
       ...this.pluginHookCommands(provider, pluginRegistrations),
-      ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs) : [])
+      ...(gate && provider !== "opencode" ? decisionHookCommands(provider as DecisionHookProvider, this.options.permissionGate!, this.platform, decisionBudgetMs, decisionReads) : [])
     ];
     const openCodeDecisions = gate && provider === "opencode";
     // Only providers with a hook adapter get lifecycle configuration. Cursor,
@@ -254,7 +257,11 @@ export class ProviderRuntimeLaunchAdapters {
       return prepared([], {
         ...hookEnvironment,
         ...pluginEnvironment,
-        ...(openCodeDecisions ? { [OPENCODE_DECISIONS_ENV]: "1", ...budgetEnvironment(decisionBudgetMs) } : {}),
+        ...(openCodeDecisions ? {
+          [OPENCODE_DECISIONS_ENV]: "1",
+          ...(decisionReads ? { [OPENCODE_DECISION_READS_ENV]: "1" } : {}),
+          ...budgetEnvironment(decisionBudgetMs)
+        } : {}),
         [OPENCODE_CONFIG_CONTENT]: openCodeLifecycleConfig(
           environment[OPENCODE_CONFIG_CONTENT],
           this.options.openCodePluginPath
@@ -616,17 +623,28 @@ const DECISION_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
   qwen: "^(run_shell_command|write_file|edit|replace)$"
 };
 
+/**
+ * With base protection on at launch the hook also matches read-only file tools, for its private-data rule only.
+ * Codex has no read-only file tool in its hooks: it reads through its shell.
+ */
+const DECISION_READ_TOOL_MATCHERS: Readonly<Record<DecisionHookProvider, string>> = {
+  claude: "Bash|Write|Edit|MultiEdit|NotebookEdit|Read|NotebookRead|Grep|Glob|LS",
+  codex: "Bash|apply_patch|Edit|Write",
+  qwen: "^(run_shell_command|write_file|edit|replace|read_file|read_many_files|grep_search|search_file_content|glob|list_directory)$"
+};
+
 function decisionHookCommands(
   provider: DecisionHookProvider,
   gate: RuntimeHookHelperLaunch,
   platform: NodeJS.Platform,
-  decisionBudgetMs?: number
+  decisionBudgetMs?: number,
+  reads = false
 ): ProviderHookCommand[] {
   validateHelper(gate);
   const { hookSeconds } = permissionGateTimings(decisionBudgetMs);
   return [{
     event: "PreToolUse",
-    matcher: DECISION_TOOL_MATCHERS[provider],
+    matcher: (reads ? DECISION_READ_TOOL_MATCHERS : DECISION_TOOL_MATCHERS)[provider],
     // The hook is installed only when something decides for this session, so it always fails closed.
     command: commandWithEnvironment(
       [gate.command, ...gate.args, "pretool"],

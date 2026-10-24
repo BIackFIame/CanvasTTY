@@ -1,12 +1,13 @@
 import { FAIL_CLOSED_MESSAGE, buildRequest, exchange, identityFrom } from "./permission-gate.mjs";
-import { OPENCODE_DECISIONS_ENV, helperDeadlineMs } from "./runtime-protocol.mjs";
+import { OPENCODE_DECISIONS_ENV, OPENCODE_DECISION_READS_ENV, helperDeadlineMs } from "./runtime-protocol.mjs";
 
 /**
  * Decision hooks for OpenCode, used by opencode-plugin.mjs while `CANVASTTY_RUNTIME_DECISIONS` is "1".
  *
  * `guard` runs in `tool.execute.before` (before OpenCode's own permission check, in every mode, YOLO included)
  * and sends each shell and file-writing call (bash, write, edit, multiedit, apply_patch/patch) to CanvasTTY the way
- * the Claude/Codex/Qwen PreToolUse hook does. A deny throws, which fails that tool call with the reason as its error
+ * the Claude/Codex/Qwen PreToolUse hook does; with `CANVASTTY_RUNTIME_DECISION_READS` "1" (base protection on at
+ * launch) also read, grep, glob and list, for base protection's private-data rule. A deny throws, which fails that tool call with the reason as its error
  * text for the model. An allow (only from plugins the person let allow) is remembered by call id: when OpenCode then
  * asks for that call (`permission.asked`), `permissionAsked` answers `once` through OpenCode's own API
  * (POST /permission/{requestID}/reply), never `always`. Anything else (ask, no verdict, an error) leaves OpenCode's
@@ -23,6 +24,9 @@ const MAX_ALLOWED = 64;
 export function createOpenCodeDecisions({ client, env = process.env, send = exchange } = {}) {
   const identity = identityFrom(env);
   const enabled = env[OPENCODE_DECISIONS_ENV] === "1" && identity?.provider === "opencode";
+  // Read-only file tools are sent only when the launch asked for it (base protection was on): otherwise a read never
+  // waits on, or fails closed because of, the gateway.
+  const reads = enabled && env[OPENCODE_DECISION_READS_ENV] === "1";
   /** callIDs a plugin allowed; their permission request is answered `once`. */
   const allowed = new Set();
 
@@ -30,7 +34,7 @@ export function createOpenCodeDecisions({ client, env = process.env, send = exch
     if (!enabled) return;
     let decision = null;
     try {
-      const call = guardedCall(stringOf(input?.tool), output && typeof output === "object" ? output.args : null);
+      const call = guardedCall(stringOf(input?.tool), output && typeof output === "object" ? output.args : null, reads);
       if (!call) return;
       const message = buildRequest({ tool_name: call.toolName, tool_input: call.toolInput }, identity);
       if (message) decision = await send(identity.address, message, helperDeadlineMs(env));
@@ -63,14 +67,15 @@ export function createOpenCodeDecisions({ client, env = process.env, send = exch
 
 /**
  * An OpenCode tool call in the shape the decision hook reads (Claude Code's hook tool names and input shapes), or null
- * for a tool that neither runs commands nor writes files. OpenCode's own names: bash {command, workdir}, write
+ * for a tool that neither runs commands, writes files nor reads them. OpenCode's own names: bash {command, workdir}, write
  * {filePath, content}, edit {filePath, oldString, newString, replaceAll}, multiedit {filePath, edits: [{filePath,
  * oldString, newString, replaceAll}]}, apply_patch {patchText}. They go out as bash {command, workdir}, Write {file_path,
  * content} (the whole new file), Edit {file_path, old_string, new_string, replace_all} (one replacement in the file),
  * MultiEdit {file_path, edits: [{old_string, new_string, replace_all}]} and apply_patch {patch}, so a decision service
- * can tell a whole-file write from a partial edit and sees the text an edit replaces.
+ * can tell a whole-file write from a partial edit and sees the text an edit replaces. Read-only tools (read, grep,
+ * glob, list) go out as Read, Grep, Glob and LS, only when `reads` is set.
  */
-export function guardedCall(tool, args) {
+export function guardedCall(tool, args, reads = false) {
   if (!tool || !args || typeof args !== "object") return null;
   if (tool === "bash") {
     if (typeof args.command !== "string" || args.command.length === 0) return null;
@@ -87,6 +92,20 @@ export function guardedCall(tool, args) {
     const edits = Array.isArray(args.edits) ? args.edits.filter((edit) => edit && typeof edit === "object").map(replacement)
       .filter((edit) => Object.keys(edit).length > 0) : [];
     return { toolName: "MultiEdit", toolInput: { file_path: filePath, edits } };
+  }
+  // Read-only tools, only when the launch checks them (base protection on): only CanvasTTY's private data is checked
+  // (read {filePath}, grep {pattern, path, include}, glob {pattern, path}, list {path}). A grep without a path
+  // searches the current folder, so it is always sent, as `.`.
+  if (reads && (tool === "read" || tool === "grep" || tool === "glob" || tool === "list")) {
+    const text = (value) => typeof value === "string" && value.length > 0 ? value : null;
+    const toolInput = {};
+    const filePath = text(args.filePath) ?? text(args.file_path);
+    if (filePath) toolInput.file_path = filePath;
+    const path = text(args.path) ?? (tool === "grep" ? "." : null);
+    if (path) toolInput.path = path;
+    if (tool === "glob" && text(args.pattern)) toolInput.pattern = args.pattern;
+    if (Object.keys(toolInput).length === 0) return null;
+    return { toolName: { read: "Read", grep: "Grep", glob: "Glob", list: "LS" }[tool], toolInput };
   }
   if (tool === "apply_patch" || tool === "patch") {
     const patch = typeof args.patchText === "string" ? args.patchText : typeof args.patch === "string" ? args.patch : null;

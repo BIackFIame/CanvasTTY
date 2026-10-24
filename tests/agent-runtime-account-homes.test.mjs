@@ -9,7 +9,8 @@ import { LaunchPipeline } from "../src/main/services/LaunchPipeline.ts";
 import { ProviderRuntimeLaunchAdapters } from "../src/main/services/agent-runtime/ProviderRuntimeLaunch.ts";
 import { ProviderLaunchAdapters } from "../src/main/services/agent-browser/ProviderLaunch.ts";
 import { AgentBrowserBridge } from "../src/main/services/agent-browser/AgentBrowserBridge.ts";
-import { accountHookHome, contributedHookHome } from "../src/main/services/accountHomes.ts";
+import { accountHookHome } from "../src/main/services/accountHomes.ts";
+import { contributedAccountHome } from "../src/main/services/isolation/accountHomeIsolation.ts";
 import { TerminalManager } from "../src/main/services/TerminalManager.ts";
 
 const helper = Object.freeze({
@@ -64,18 +65,25 @@ test("accountHookHome: GROK_HOME for Grok, KIMI_CODE_HOME for Kimi, nothing for 
   assert.equal(accountHookHome("grok", { GROK_HOME: "" }), undefined);
 });
 
-test("contributedHookHome: only the contributor's own data folder, only the hook home variable", () => {
+test("account home: only the contributor's own data folder; only GROK_HOME / KIMI_CODE_HOME get the hooks", () => {
   const dataDir = "/data/plugin-data/accounts";
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", `${dataDir}/homes/a/`), `${dataDir}/homes/a`);
-  assert.equal(contributedHookHome("kimi", dataDir, "KIMI_CODE_HOME", `${dataDir}/homes/k`), `${dataDir}/homes/k`);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", "/data/plugin-data/other/homes/a"), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", dataDir), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", `${dataDir}/../other/homes/a`), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "GROK_HOME", "homes/a"), undefined);
-  assert.equal(contributedHookHome("grok", dataDir, "KIMI_CODE_HOME", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("kimi", dataDir, "KIMI_SHARE_DIR", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("claude", dataDir, "CLAUDE_CONFIG_DIR", `${dataDir}/homes/a`), undefined);
-  assert.equal(contributedHookHome("grok", undefined, "GROK_HOME", `${dataDir}/homes/a`), undefined);
+  // The launch's account home (one rule, contributedAccountHome) gets the hooks only when it is the hook home too, as
+  // TerminalManager checks it.
+  const hookHome = (provider, key, value) => {
+    const home = contributedAccountHome(provider, dataDir, key, value);
+    const hook = accountHookHome(provider, { [key]: value });
+    return home !== undefined && home === hook ? home : undefined;
+  };
+  assert.equal(hookHome("grok", "GROK_HOME", `${dataDir}/homes/a/`), `${dataDir}/homes/a`);
+  assert.equal(hookHome("kimi", "KIMI_CODE_HOME", `${dataDir}/homes/k`), `${dataDir}/homes/k`);
+  assert.equal(hookHome("grok", "GROK_HOME", "/data/plugin-data/other/homes/a"), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", dataDir), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", `${dataDir}/../other/homes/a`), undefined);
+  assert.equal(hookHome("grok", "GROK_HOME", "homes/a"), undefined);
+  assert.equal(hookHome("grok", "KIMI_CODE_HOME", `${dataDir}/homes/a`), undefined);
+  assert.equal(hookHome("kimi", "KIMI_SHARE_DIR", `${dataDir}/homes/a`), undefined);
+  assert.equal(hookHome("claude", "CLAUDE_CONFIG_DIR", `${dataDir}/homes/a`), undefined);
+  assert.equal(contributedAccountHome("grok", undefined, "GROK_HOME", `${dataDir}/homes/a`), undefined);
 });
 
 test("Grok: an account home gets the status hooks, the default home is left alone, and the release removes them", async (t) => {
@@ -84,7 +92,7 @@ test("Grok: an account home gets the status hooks, the default home is left alon
   await mkdir(join(home, "hooks"), { recursive: true });
   await writeFile(join(home, "hooks", "person.json"), "{\"hooks\":{}}\n");
   await writeFile(join(home, "config.toml"), "model = \"grok-4\"\n");
-  const launch = adapters().prepare("grok", "card-grok", true, false, undefined, undefined, home);
+  const launch = adapters().prepare("grok", "card-grok", true, false, undefined, undefined, false, home);
   const written = JSON.parse(await readFile(join(home, ...GROK_FILE), "utf8"));
   assert.match(written.hooks.UserPromptSubmit[0].hooks[0].command, /working.*UserPromptSubmit/u);
   assert.match(written.hooks.Notification[0].hooks[0].command, /needs_approval.*Notification/u);
@@ -104,7 +112,7 @@ test("Kimi: an account home's config.toml gets one owned block; the person's set
   await writeFile(config, PERSON_KIMI);
   await chmod(config, 0o640);
   await writeFile(join(defaultKimi, "config.toml"), "default_model = \"default\"\n");
-  const launch = adapters().prepare("kimi", "card-kimi", true, false, undefined, undefined, home);
+  const launch = adapters().prepare("kimi", "card-kimi", true, false, undefined, undefined, false, home);
   const during = await readFile(config, "utf8");
   assert.ok(during.startsWith(PERSON_KIMI), "the person's settings stay first and unchanged");
   assert.equal(markers(during), 1);
@@ -125,9 +133,9 @@ test("idempotent: two cards in one account home share one overlay; another home 
   const config = join(home, "config.toml");
   await writeFile(config, PERSON_KIMI);
   const runtime = adapters();
-  const first = runtime.prepare("kimi", "card-1", true, false, undefined, undefined, home);
-  const second = runtime.prepare("kimi", "card-2", true, false, undefined, undefined, `${home}/`);
-  const third = runtime.prepare("kimi", "card-3", true, false, undefined, undefined, other);
+  const first = runtime.prepare("kimi", "card-1", true, false, undefined, undefined, false, home);
+  const second = runtime.prepare("kimi", "card-2", true, false, undefined, undefined, false, `${home}/`);
+  const third = runtime.prepare("kimi", "card-3", true, false, undefined, undefined, false, other);
   assert.equal(markers(await readFile(config, "utf8")), 1);
   assert.equal(markers(await readFile(join(other, "config.toml"), "utf8")), 1);
   first.releaseConfiguration();
@@ -139,11 +147,11 @@ test("idempotent: two cards in one account home share one overlay; another home 
   assert.equal(await exists(join(other, "config.toml")), false, "a file CanvasTTY created is removed again");
 
   // An app that ended without releasing (a crash) leaves its overlay; the next launch there replaces it, not adds one.
-  runtime.prepare("kimi", "card-crashed", true, false, undefined, undefined, home);
-  runtime.prepare("grok", "card-crashed-grok", true, false, undefined, undefined, home);
+  runtime.prepare("kimi", "card-crashed", true, false, undefined, undefined, false, home);
+  runtime.prepare("grok", "card-crashed-grok", true, false, undefined, undefined, false, home);
   const restarted = adapters();
-  const again = restarted.prepare("kimi", "card-again", true, false, undefined, undefined, home);
-  const grokAgain = restarted.prepare("grok", "card-again-grok", true, false, undefined, undefined, home);
+  const again = restarted.prepare("kimi", "card-again", true, false, undefined, undefined, false, home);
+  const grokAgain = restarted.prepare("grok", "card-again-grok", true, false, undefined, undefined, false, home);
   assert.equal(markers(await readFile(config, "utf8")), 1);
   assert.ok((await readFile(config, "utf8")).startsWith(PERSON_KIMI));
   again.releaseConfiguration();
@@ -162,22 +170,22 @@ test("symbolic links: a linked account home, a linked folder above it, or a link
   const linkedHome = accountHome("accounts", "linked");
   await symlink(outside, linkedHome);
   for (const provider of ["grok", "kimi"]) {
-    assert.throws(() => runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, linkedHome),
+    assert.throws(() => runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, false, linkedHome),
       /missing or crosses a symbolic link/u);
   }
 
   await symlink(join(pluginData, "accounts"), join(pluginData, "alias"));
-  assert.throws(() => runtime.prepare("grok", "card-alias", true, false, undefined, undefined, join(pluginData, "alias", "homes", "a")),
+  assert.throws(() => runtime.prepare("grok", "card-alias", true, false, undefined, undefined, false, join(pluginData, "alias", "homes", "a")),
     /missing or crosses a symbolic link/u);
 
   const kimiHome = accountHome("accounts", "a");
   await symlink(join(outside, "config.toml"), join(kimiHome, "config.toml"));
-  assert.throws(() => runtime.prepare("kimi", "card-config", true, false, undefined, undefined, kimiHome),
+  assert.throws(() => runtime.prepare("kimi", "card-config", true, false, undefined, undefined, false, kimiHome),
     /symbolic link where CanvasTTY writes/u);
 
   const grokHome = accountHome("accounts", "b");
   await symlink(join(outside, "hooks"), join(grokHome, "hooks"));
-  assert.throws(() => runtime.prepare("grok", "card-hooks", true, false, undefined, undefined, grokHome),
+  assert.throws(() => runtime.prepare("grok", "card-hooks", true, false, undefined, undefined, false, grokHome),
     /symbolic link where CanvasTTY writes/u);
 
   assert.deepEqual((await readdir(outside)).sort(), ["config.toml", "hooks"]);
@@ -195,7 +203,7 @@ test("a new account's home that does not exist yet is created (private, no link 
     // A first sign-in: the contributor names the account's home before the CLI ever created it.
     const home = accountHome("accounts", `new-${provider}`);
     assert.equal(await exists(home), false);
-    const launch = runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, home);
+    const launch = runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, false, home);
     assert.equal((await stat(home)).mode & 0o777, 0o700, `${provider}: created private`);
     if (provider === "grok") assert.equal(await exists(join(home, ...GROK_FILE)), true);
     else assert.match(await readFile(join(home, "config.toml"), "utf8"), /CanvasTTY lifecycle hooks/u);
@@ -211,8 +219,8 @@ test("homes the launch does not own are never written: outside plugin data, a wh
   await mkdir(elsewhere, { recursive: true });
   const runtime = adapters();
   for (const candidate of [elsewhere, join(pluginData, "accounts"), pluginData, "relative/home", `${pluginData}/accounts/../accounts/homes/a`]) {
-    const launch = runtime.prepare("grok", "card", true, false, undefined, undefined, candidate);
-    const kimi = runtime.prepare("kimi", "card-k", true, false, undefined, undefined, candidate);
+    const launch = runtime.prepare("grok", "card", true, false, undefined, undefined, false, candidate);
+    const kimi = runtime.prepare("kimi", "card-k", true, false, undefined, undefined, false, candidate);
     assert.equal(await exists(join(defaultGrok, ...GROK_FILE)), true, `${candidate}: the default home, as before`);
     assert.match(await readFile(join(defaultKimi, "config.toml"), "utf8"), /CanvasTTY lifecycle hooks/u);
     launch.releaseConfiguration();
@@ -223,7 +231,7 @@ test("homes the launch does not own are never written: outside plugin data, a wh
 
   const noRoot = await fixture(t, { root: false });
   const home = noRoot.accountHome("accounts", "a");
-  const launch = noRoot.adapters().prepare("grok", "card", true, false, undefined, undefined, home);
+  const launch = noRoot.adapters().prepare("grok", "card", true, false, undefined, undefined, false, home);
   assert.deepEqual(await readdir(home), []);
   assert.equal(await exists(join(noRoot.defaultGrok, ...GROK_FILE)), true);
   launch.releaseConfiguration();
@@ -242,12 +250,12 @@ test("default homes are unchanged without an account home, and hooks off writes 
   assert.equal(await exists(join(defaultKimi, "config.toml")), false);
 
   const home = accountHome("accounts", "a");
-  const off = runtime.prepare("grok", "card-off", false, false, undefined, undefined, home);
+  const off = runtime.prepare("grok", "card-off", false, false, undefined, undefined, false, home);
   assert.deepEqual(await readdir(home), []);
   off.releaseConfiguration();
   // Claude Code and Codex take their hooks as arguments; their homes are never written either way.
   for (const provider of ["claude", "codex"]) {
-    const launch = runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, home);
+    const launch = runtime.prepare(provider, `card-${provider}`, true, false, undefined, undefined, false, home);
     assert.ok(launch.args.length > 0);
     launch.releaseConfiguration();
   }
