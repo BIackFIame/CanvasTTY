@@ -4,6 +4,7 @@ import type { ProviderId } from "../../../shared/contracts.ts";
 import { AGENT_PROVIDERS } from "../../../shared/contracts.ts";
 import { otherSpellings } from "../onDiskPath.ts";
 import { openCodeConfigPaths } from "../inspectedConfig.ts";
+import type { WorktreeGitAccess } from "./worktreeGitAccess.ts";
 
 /**
  * The folders one isolated agent may write, the ones it may not read, and the sockets it may connect to. Pure: the
@@ -40,6 +41,8 @@ export interface IsolationPathInput {
   placedProjects?: readonly PlacedProject[];
   /** Plan: the project is readable only (the CLI's own folders stay writable). */
   readOnlyProject?: boolean;
+  /** Host-derived from cwd + task root after validating a linked worktree; never supplied by a plugin. */
+  worktreeGitAccess?: WorktreeGitAccess | null;
 }
 
 /**
@@ -188,7 +191,9 @@ export const PLUGIN_DATA_FOLDER = "plugin-data";
  * runtime folders stay readable: they hold token-authenticated sockets and per-run hook settings the CLI must read.
  */
 export function privateAppData(userDataPath: string): string[] {
-  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER]
+  return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER,
+    // Rollback points live in "checkpoints"; the two older names stay private in case an earlier build left them.
+    "checkpoints", "checkpoints.json", "checkpoint-objects"]
     .map((name) => join(userDataPath, name));
 }
 
@@ -256,18 +261,37 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     // variable pointing at HOME or above the project would hide them, so it is not followed.
     .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
-  const project = input.cwd;
+  // A validated linked worktree (a plugin environment's): the project is the whole registered worker tree, even when
+  // the agent starts in a subfolder of it.
+  const worktree = input.worktreeGitAccess && isWithin(input.cwd, input.worktreeGitAccess.cwd) ? input.worktreeGitAccess : null;
+  const project = worktree?.cwd ?? input.cwd;
   // A project inside plugin data (a plugin environment's worktree) stays this launch's project: that exact folder is
   // reopened, never its siblings, its plugin's other data or all plugin data. Only when the host placed the launch
   // there: a folder an agent asked for (a subagent's cwd) could otherwise be a plugin's account homes.
   const pluginDataRoot = join(input.userDataPath, PLUGIN_DATA_FOLDER);
   const projectDepth = pluginDataDepth(pathSpellings, pluginDataRoot, project);
   if (projectDepth >= 0 && projectDepth < 2) throw new Error(`The project ${project} is CanvasTTY's private plugin data.`);
-  if (projectDepth >= 2 && !(input.placedProjects ?? []).some((placed) => placesProject(pathSpellings, pluginDataRoot, placed, project))) {
+  // A validated worktree widens the project from the launch folder to its registered worker tree; the host placed the
+  // launch folder (a subagent can start in a subfolder of the worktree), so that is what must be placed.
+  const placedTarget = worktree ? input.cwd : project;
+  if (projectDepth >= 2 && !(input.placedProjects ?? []).some((placed) => placesProject(pathSpellings, pluginDataRoot, placed, placedTarget))) {
     throw new Error(`The project ${project} is inside CanvasTTY's private plugin data, and CanvasTTY did not place this launch there. Only a plugin environment's own folder or a folder the person chose is opened inside plugin data.`);
   }
   const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
     ...(projectDepth >= 2 ? [project] : [])];
+  if (input.readOnlyProject && worktree) {
+    // Plan in a worktree: no writable CLI state may sit inside or above the read-only worker tree.
+    const projectPaths = pathSpellings(project);
+    const otherWritePaths = all([
+      ...ownFolders, ...own.files, input.sessionTemp,
+      join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
+    ]);
+    for (const path of otherWritePaths) {
+      if (projectPaths.some((root) => isWithin(root, path) || isWithin(path, root))) {
+        throw new Error(`Writable CLI state ${path} overlaps the read-only project ${project}.`);
+      }
+    }
+  }
   const trustedOwn = providerFolders(input.provider, {}, hostHome);
   const trustedOthers = AGENT_PROVIDERS.filter((provider) => provider !== input.provider).flatMap((provider) => {
     const defaults = providerFolders(provider, {}, hostHome);
@@ -331,18 +355,24 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
       // Where git reads the shared config and hooks from. Protected where it exists: an empty placeholder (Linux) would
       // stop git from working; seatbelt also denies creating it (projectRoots).
       ...(existsSync(join(gitDir, "commondir")) ? [join(gitDir, "commondir")] : []),
+      // A linked worktree's Git metadata stays read-only: its `.git` pointer and its HEAD (the shared repository and
+      // the sibling worktrees' branches are below, in protectedDirectories).
+      ...(worktree ? [join(project, ".git"), join(worktree.adminDir, "HEAD")] : []),
       // Codex's and Kimi's config.toml hold their permission rules and hooks.
       ...(input.provider === "codex" || input.provider === "kimi" ? ownFolders.map((folder) => join(folder, "config.toml")) : []),
       ...(input.provider === "claude" ? ownFolders.flatMap((folder) => [join(folder, "settings.json"), join(folder, "settings.local.json")]) : []),
       ...configSources.jsonFiles
     ]),
     // Linked worktrees' records (their git folder, `commondir` and config): what git reads when the person works there.
-    protectedDirectories: all([...configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")]),
-      ...(repository ? [join(gitDir, "worktrees")] : [])]),
-    gitHooks: all([join(project, ".git", "hooks")]),
+    protectedDirectories: all([
+      ...configSources.agentDirectories.flatMap((folder) => [join(folder, "agent"), join(folder, "agents")]),
+      ...(repository ? [join(gitDir, "worktrees")] : []),
+      ...(worktree ? [worktree.adminDir, worktree.commonDir] : [])
+    ]),
+    gitHooks: all([join(project, ".git", "hooks"), ...(worktree ? [join(worktree.adminDir, "hooks"), join(worktree.commonDir, "hooks")] : [])]),
     projectRoots: input.readOnlyProject ? [] : all([project]),
-    unreadable: all([...sensitive, ...others, ...privateData]),
-    readableAgain: all([...grants, ...movedHomes]),
+    unreadable: all([...sensitive, ...others, ...privateData, ...(worktree ? worktree.otherAdminDirs : [])]),
+    readableAgain: all([...grants, ...movedHomes, ...(worktree ? [worktree.adminDir] : [])]),
     socketFolders: all(socketFolders),
     // The temporary folder a launch's own folder lives in (sessionTemp is <temp root>/ctty-iso-…/tmp), and /tmp: where
     // CanvasTTY's gateways put their sockets when the userData path is too long for one.

@@ -53,8 +53,11 @@ export function bubblewrapArguments(
     args.push("--ro-bind", path, path);
     for (const folder of seen) if (folder !== path && within(folder, path)) args.push("--bind", folder, folder);
   }
+  // The CLI's own writable single files (such as ~/.claude.json), each bound on its own unless a writable folder bound
+  // above already contains it. (Linked-worktree Git metadata is not among them: a bind cannot allow atomic ref updates
+  // to one branch without making its whole folder writable, so it stays read-only under bubblewrap.)
   for (const path of paths.writableFiles) {
-    if (exists(path) === "file") args.push("--bind", path, path);
+    if (exists(path) === "file" && ![...seen].some((folder) => within(path, folder))) args.push("--bind", path, path);
   }
   for (const path of paths.unreadable) {
     const kind = exists(path);

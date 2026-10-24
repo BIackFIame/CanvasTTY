@@ -73,6 +73,7 @@ import { controlGrantFolder, gatewaySocketAddresses } from "./isolation/AgentIso
 import { auditRepositories, neutralizeRepositories, type GitRiskRepository } from "./isolation/gitAudit.ts";
 import { providerHomeVariables, type PlacedProject } from "./isolation/isolationPaths.ts";
 import { LaunchRefusal } from "./launchRefusal.ts";
+import { CheckpointRefusal } from "./checkpointRefusal.ts";
 import { configuredMode } from "./configuredMode.ts";
 import { envKey, RESERVED_ENV, type LaunchPipeline, type PreparedLaunch } from "./LaunchPipeline.ts";
 import type { EnvironmentRegistry } from "./EnvironmentRegistry.ts";
@@ -198,6 +199,13 @@ interface ManagedSession {
   /** When this launch's first lifecycle hook stops waiting for inputReady (INPUT_READY_HOOK_GRACE_MS after it). */
   hookReadyAt?: number;
   hookReadyTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Bumped by every submitted input (and restart): a pre-turn rollback point belongs to one generation. Separate from
+   * inputGeneration, which ties a subagent's answer to its prompt.
+   */
+  checkpointGeneration?: number;
+  /** Bumped by every input submitted while no approval is pending, even inside a turn (see submittedInputs). */
+  submittedInputs?: number;
 }
 
 type EnvironmentService = Pick<EnvironmentRegistry,
@@ -360,6 +368,11 @@ export class TerminalManager {
   // the main process reads it from its emit callback to tell a failure that is
   // merely re-derived state from one the user just caused.
   private emittingFailureOrigin: FailureOrigin | null = null;
+  // A rollback point restore in progress: its folder, the cards it holds (no input, launch or close), the closes it
+  // deferred, and when it ends.
+  private checkpointRestore: { cwd: string; ids: Set<string>; closes: Map<string, { keepEnvironmentData?: boolean }>; done: Promise<void> } | null = null;
+  // Cards whose plugin launch (options, environment) is still being prepared: their final folder is not known yet.
+  private readonly pendingLaunches = new Set<string>();
 
   constructor(
     emit: Emit,
@@ -484,16 +497,22 @@ export class TerminalManager {
     this.sessionRestoreMode = mode;
   }
 
-  async restorePersistedSessions(): Promise<void> {
+  /**
+   * Brings the saved cards back. Returns the ids of saved cards known not to come back (so data kept for them, such as
+   * rollback points, may go); empty when the saved cards could not be read, are from a newer version, or restore is off.
+   */
+  async restorePersistedSessions(): Promise<string[]> {
     const store = this.sessionStore;
-    if (!store) return;
+    if (!store) return [];
     const persisted = await store.load();
     if (this.sessionRestoreMode === "off") {
       if (persisted.length > 0) await store.clear();
-      return;
+      return [];
     }
 
     await this.restoreSessionRecords(persisted, this.sessionRestoreMode);
+    if (store.loadProblem) return [];
+    return persisted.map((record) => record.id).filter((id) => !this.sessions.has(id));
   }
 
   private async restoreSessionRecords(persisted: PersistedTerminalSession[], mode: SessionRestoreMode): Promise<void> {
@@ -545,6 +564,7 @@ export class TerminalManager {
   }
 
   async shutdown(): Promise<void> {
+    if (this.checkpointRestore) await this.checkpointRestore.done;
     if (this.persistenceTimer !== null) {
       clearTimeout(this.persistenceTimer);
       this.persistenceTimer = null;
@@ -658,6 +678,134 @@ export class TerminalManager {
     return { promptSent: mark !== undefined, turnStartedSincePrompt: mark !== undefined && (session.turnStarts ?? 0) > mark };
   }
 
+  /** A rollback point restore holds this card: no input, launch or close reaches it until the restore ends. */
+  isCheckpointRestoreActive(id: string): boolean {
+    return this.checkpointRestore?.ids.has(id) ?? false;
+  }
+
+  /** The app is quitting: closing cards now keeps their rollback points for the next start. */
+  isQuitting(): boolean {
+    return this.quitting;
+  }
+
+  /** A rollback point restore is writing files in (or above, or below) this folder. */
+  isRestoringFolder(path: string): boolean {
+    const lease = this.checkpointRestore;
+    if (!lease) return false;
+    let folder: string;
+    try { folder = realpathSync(path); } catch { folder = path; }
+    return isPathInside(lease.cwd, folder) || isPathInside(folder, lease.cwd);
+  }
+
+  /** A pre-turn rollback point may be taken for this card now. */
+  canCaptureCheckpoint(id: string): boolean {
+    const session = this.sessions.get(id);
+    return Boolean(session && session.metadata.exitCode === null && !this.isCheckpointRestoreActive(id));
+  }
+
+  /**
+   * A host-only freshness check for a pre-turn rollback point: false once the card was replaced, received new submitted
+   * input, ended, or a restore holds it.
+   */
+  providerSignalGuard(id: string): () => boolean {
+    const session = this.sessions.get(id);
+    const generation = session?.checkpointGeneration ?? 0;
+    return () => Boolean(session && this.sessions.get(id) === session && (session.checkpointGeneration ?? 0) === generation
+      && session.metadata.status !== "done" && session.metadata.status !== "failed" && !this.isCheckpointRestoreActive(id));
+  }
+
+  /**
+   * How many inputs were submitted to this card (not counting answers to an approval). A CLI without a turn-end hook
+   * keeps its card "working", so the turn barrier compares this count to tell a new prompt from the running turn.
+   */
+  submittedInputs(id: string): number {
+    return this.sessions.get(id)?.submittedInputs ?? 0;
+  }
+
+  /** No launch may start in (or above, or below) a folder whose files are being restored, nor any plugin launch. */
+  private assertCheckpointLaunchAllowed(cwd: string, contributed = false): void {
+    const lease = this.checkpointRestore;
+    if (!lease) return;
+    let folder: string;
+    try { folder = realpathSync(cwd); } catch { folder = cwd; }
+    if (contributed || isPathInside(lease.cwd, folder) || isPathInside(folder, lease.cwd)) {
+      throw new LaunchRefusal("Workspace rollback point restoration is in progress. Try the launch again after it finishes.");
+    }
+  }
+
+  /**
+   * Restores a card's files under a lease over every card whose folder overlaps it. Refused (CheckpointRefusal) while
+   * any of them is still running or launching, or when a related plugin environment ran isolated (stopping its local
+   * wrapper does not prove the remote or container workload stopped). While it runs, those cards take no input, no
+   * launch starts in the folder, and closing one waits until the restore ends.
+   */
+  async withCheckpointRestore<T>(id: string, restore: (cwd: string) => Promise<T>): Promise<T> {
+    if (this.checkpointRestore) throw new CheckpointRefusal("restore-in-progress", "Another rollback point restoration is in progress.");
+    const target = this.sessions.get(id);
+    if (!target) throw new CheckpointRefusal("missing-session", "Terminal session does not exist.");
+    if (this.pendingLaunches.size > 0) throw new CheckpointRefusal("pending-launch", "Wait for pending agent launches before restoring files.");
+    let cwd: string;
+    try { cwd = realpathSync(this.launchContexts.get(id)?.cwd ?? target.metadata.cwd); }
+    catch { throw new CheckpointRefusal("not-git-root", "The card's folder is unavailable."); }
+    const targetScopes = new Set([cwd]);
+    let targetScopeAmbiguous = false;
+    for (const path of [target.metadata.cwd, this.taskProjectRoot(target.metadata.cwd, target.metadata.parentSessionId)]) {
+      try { targetScopes.add(realpathSync(path)); } catch { targetScopeAmbiguous = true; }
+    }
+    const overlaps = (path: string): boolean => [...targetScopes].some((scope) => isPathInside(path, scope) || isPathInside(scope, path));
+    const taskRoot = (session: ManagedSession): string => {
+      let root = session;
+      for (let depth = 0; root.metadata.parentSessionId && depth < 64; depth++) {
+        const parent = this.sessions.get(root.metadata.parentSessionId);
+        if (!parent) break;
+        root = parent;
+      }
+      return root.metadata.id;
+    };
+    const targetTask = taskRoot(target);
+    const affected: ManagedSession[] = [];
+    for (const session of this.sessions.values()) {
+      const isolated = session.extras.isolatedEnvironmentScopes;
+      if (isolated && (isolated.roots.length > 0 || isolated.ambiguous)) {
+        // Recorded folders decide. Evidence that is incomplete (ambiguous) also counts the card's own folders and its
+        // task: an unrelated card elsewhere never blocks this restore, an unknown one in the same task or folder does.
+        let related = targetScopeAmbiguous || isolated.roots.some(overlaps);
+        if (!related && isolated.ambiguous) {
+          let known = 0;
+          for (const path of [session.metadata.cwd, this.taskProjectRoot(session.metadata.cwd, session.metadata.parentSessionId)]) {
+            try { if (overlaps(realpathSync(path))) related = true; known++; } catch { /* unknown folder */ }
+          }
+          if (known === 0 || taskRoot(session) === targetTask) related = true;
+        }
+        if (related) throw new CheckpointRefusal("isolated-environment", "Rollback point restoration is unavailable for a related isolated environment.");
+      }
+      let folder: string;
+      try { folder = realpathSync(this.launchContexts.get(session.metadata.id)?.cwd ?? session.metadata.cwd); }
+      catch { if (session.metadata.exitCode !== null) continue; folder = session.metadata.cwd; }
+      if (!isPathInside(cwd, folder) && !isPathInside(folder, cwd)) continue;
+      if (session.metadata.exitCode === null) {
+        throw new CheckpointRefusal("agent-running", "Close or exit every agent and terminal in this folder before restoring files.");
+      }
+      affected.push(session);
+    }
+    let complete!: () => void;
+    const lease = { cwd, ids: new Set(affected.map((session) => session.metadata.id)), closes: new Map<string, { keepEnvironmentData?: boolean }>(),
+      done: new Promise<void>((resolve) => { complete = resolve; }) };
+    // Closing an ancestor closes its children and may release their environment: the whole close waits.
+    for (const session of affected) {
+      let parent = session.metadata.parentSessionId;
+      while (parent && !lease.ids.has(parent)) { lease.ids.add(parent); parent = this.sessions.get(parent)?.metadata.parentSessionId; }
+    }
+    this.checkpointRestore = lease;
+    try {
+      return await restore(cwd);
+    } finally {
+      this.checkpointRestore = null;
+      complete();
+      for (const [closed, options] of lease.closes) this.dispose(closed, options);
+    }
+  }
+
   /** The session's output offset without copying its scrollback; null when it does not exist. */
   outputOffset(id: string): number | null {
     return this.sessions.get(id)?.outputOffset ?? null;
@@ -686,6 +834,7 @@ export class TerminalManager {
     control: { captureResult?: boolean; answerCaptureGrantExpiresAt?: number; origin?: LaunchOrigin; ownerPluginId?: string } = {}
   ): SessionSnapshot {
     assertCreateRequest(request, this.containment());
+    this.assertCheckpointLaunchAllowed(request.cwd, Boolean(request.environment || request.launchOptions));
     const origin: LaunchOrigin = request.role === "subagent" ? "subagent" : control.origin ?? "person";
     if (request.profile === "yolo" && request.provider !== "terminal") {
       // YOLO is the person's decision, made in the launcher for that CLI; nothing else starts it on their behalf.
@@ -852,6 +1001,9 @@ export class TerminalManager {
     const session = this.sessions.get(id);
     if (!session) throw new Error("Terminal session does not exist.");
     if (session.metadata.exitCode === null) throw new Error("Terminal session is still running.");
+    if (this.isCheckpointRestoreActive(id)) throw new LaunchRefusal("Workspace rollback point restoration is in progress.");
+    this.assertCheckpointLaunchAllowed(session.metadata.cwd,
+      Boolean(session.extras.environment || session.extras.environmentChoice || session.extras.options));
     const environment = session.extras.environment;
     if (environment && !this.environmentUsable(environment)) {
       // Never run a placed session locally instead of where it belongs.
@@ -865,6 +1017,7 @@ export class TerminalManager {
     if (missingPlugins.length > 0) throw new Error(`Launch refused: ${missingLaunchPlugins(missingPlugins)}`);
     delete session.extras.heldState;
     delete session.metadata.restoreNote;
+    session.checkpointGeneration = (session.checkpointGeneration ?? 0) + 1;
     // Input queued for the launch that ended never reaches this one.
     session.launchEpoch += 1;
     this.wakeLaunchWaiters(session);
@@ -1124,9 +1277,17 @@ export class TerminalManager {
    */
   private writeInput(id: string, session: ManagedSession, process: IPty, data: string): boolean {
     if (this.sessions.get(id) !== session || session.process !== process || session.metadata.exitCode !== null) return false;
+    // A rollback point restore holds the card: neither typed nor replayed input reaches it until the restore ends.
+    if (this.isCheckpointRestoreActive(id)) return false;
     const written = tryPtyOperation(() => process.write(data));
     if (written) delete session.codexDraftEpoch;
     if (written) this.noteSubmittedInput(session, data);
+    // Input submitted while the agent is not in a turn starts the next one: an earlier turn's rollback point is not
+    // this one's. An Enter inside a running turn (answering a prompt or a menu) never does.
+    if (written && data.includes("\r") && session.metadata.status !== "working" && session.metadata.status !== "needs_approval") {
+      session.checkpointGeneration = (session.checkpointGeneration ?? 0) + 1;
+    }
+    if (written && data.includes("\r") && session.metadata.status !== "needs_approval") session.submittedInputs = (session.submittedInputs ?? 0) + 1;
     if (written && ANSWERS_PROMPT.test(data)) this.settleAnsweredPrompt(id, session);
     return written;
   }
@@ -1405,6 +1566,7 @@ export class TerminalManager {
    * answer to "Keep environment data?" (kept unless they said no). Quitting releases nothing.
    */
   dispose(id: string, options: { keepEnvironmentData?: boolean } = {}): void {
+    if (this.checkpointRestore?.ids.has(id)) { this.checkpointRestore.closes.set(id, options); return; }
     const session = this.sessions.get(id);
     if (!session) return;
     // A subagent belongs to its parent: closing the parent closes its subagents first (deepest first), so none keeps
@@ -1500,10 +1662,12 @@ export class TerminalManager {
       ...(descriptor.effort !== undefined ? { effort: descriptor.effort } : {})
     };
     const extras: PersistedSessionExtras = {
+      ...(descriptor.isolatedEnvironmentScopes ? { isolatedEnvironmentScopes: structuredClone(descriptor.isolatedEnvironmentScopes) } : {}),
       ...(descriptor.options ? { options: descriptor.options } : {}),
       ...(descriptor.environment ? { environment: descriptor.environment } : {}),
       ...(descriptor.environmentChoice && !descriptor.environment ? { environmentChoice: descriptor.environmentChoice } : {}),
       ...(descriptor.ownerPluginId ? { ownerPluginId: descriptor.ownerPluginId } : {}),
+      ...(descriptor.projectRoot && descriptor.environment ? { projectRoot: descriptor.projectRoot } : {}),
       ...(descriptor.gitAuditSince !== undefined ? { gitAuditSince: descriptor.gitAuditSince } : {})
     };
 
@@ -1843,7 +2007,8 @@ export class TerminalManager {
       try {
         spawn = this.wrapIsolated(id, provider, profile, planned, planned, {
           ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
-          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined)
+          placedProjects: this.placedProjects(id, parentSessionId, planned.cwd, undefined),
+          taskProjectRoot: this.taskProjectRoot(cwd, parentSessionId)
         });
       } catch (error) {
         planned.cleanup();
@@ -1851,6 +2016,7 @@ export class TerminalManager {
       }
     }
     try {
+      this.assertCheckpointLaunchAllowed(planned.cwd);
       const process = this.spawnPty(spawn.command, spawn.args, {
         name: "xterm-256color", cols, rows, cwd: planned.cwd, env: spawn.env
       });
@@ -1910,7 +2076,7 @@ export class TerminalManager {
   /** Wraps a planned launch in the isolation layer (throws when the layer cannot start: the launch is refused). */
   private wrapIsolated(id: string, provider: ProviderId, profile: LaunchProfile, planned: { command: string; args: string[] | string; cwd: string; env: Record<string, string> },
     gateways: Pick<PlannedSpawn, "agentBrowser" | "agentRuntime" | "agentOrchestration" | "controlGrant">,
-    placement: { accountHome?: string; placedProjects: readonly PlacedProject[] }): { command: string; args: string[]; env: Record<string, string> } {
+    placement: { accountHome?: string; placedProjects: readonly PlacedProject[]; taskProjectRoot?: string }): { command: string; args: string[]; env: Record<string, string> } {
     if (!this.isolation) throw new LaunchRefusal("agent isolation is not configured; the agent was not started without it.");
     if (typeof planned.args === "string") throw new LaunchRefusal("a Windows batch launcher cannot run inside agent isolation.");
     // Only the grant CanvasTTY handed this launch: a CANVASTTY_CONTROL_CONNECTION a plugin set reopens nothing.
@@ -1925,6 +2091,7 @@ export class TerminalManager {
       profile,
       ...(placement.accountHome ? { accountHome: placement.accountHome } : {}),
       placedProjects: placement.placedProjects,
+      ...(placement.taskProjectRoot ? { taskProjectRoot: placement.taskProjectRoot } : {}),
       ...(grant ? { grantedPrivate: [grant] } : {}),
       // Only the sockets CanvasTTY's own gateways prepared; a CANVASTTY_*_ADDRESS from elsewhere is never bound in.
       gatewaySockets: gatewaySocketAddresses(gateways.agentBrowser?.environment, gateways.agentRuntime?.environment,
@@ -2144,6 +2311,23 @@ export class TerminalManager {
   }
 
   /**
+   * The task's original project: the folder the person chose for the top-level card a session descends from (its own
+   * when it has no parent), also after an environment placed that card in a worktree. A plugin worktree is validated
+   * against this repository.
+   */
+  private taskProjectRoot(cwd: string, parentSessionId?: string, own?: PersistedSessionExtras): string {
+    let root: ManagedSession | undefined;
+    for (let depth = 0, next = parentSessionId; next !== undefined && depth < 64; depth++) {
+      const current = this.sessions.get(next);
+      if (!current) break;
+      root = current;
+      next = current.metadata.parentSessionId;
+    }
+    if (root) return root.extras.projectRoot ?? root.metadata.cwd;
+    return own?.projectRoot ?? cwd;
+  }
+
+  /**
    * For a subagent: the folder the person chose for the top-level agent it descends from, when that agent runs on this
    * computer, and this subagent's folder is it or inside it. The subagent's own real folder then needs no trust answer
    * of the person again; unreadable counts as outside.
@@ -2230,8 +2414,12 @@ export class TerminalManager {
     // Each launch decides its model again; until it is prepared no plugin has.
     session.modelSetBy = [];
     const tasks = session.launchTasks ??= new Set();
+    this.pendingLaunches.add(id);
     // Register before invoking plugin code, which may synchronously close or restart its card.
-    const task = Promise.resolve().then(() => this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt))
+    const task = Promise.resolve().then(() => {
+      this.assertCheckpointLaunchAllowed(metadata.cwd, true);
+      return this.runContributedLaunch(id, session, token, resume, restoring, answerCaptureGrantExpiresAt);
+    })
       .catch((error: unknown): LaunchOutcome => {
         metadata.failureDetails = this.redactSecrets(`Launch refused: ${error instanceof Error ? error.message : String(error)}`);
         return "failed";
@@ -2245,7 +2433,11 @@ export class TerminalManager {
         this.emitSession(metadata, outcome === "failed" ? failureOrigin : null);
         this.schedulePersistence();
       })
-      .finally(() => { tasks.delete(task); this.wakeLaunchWaiters(session); });
+      .finally(() => {
+        tasks.delete(task);
+        if (session.launchToken === token || this.sessions.get(id) !== session) this.pendingLaunches.delete(id);
+        this.wakeLaunchWaiters(session);
+      });
     tasks.add(task);
     void task.catch(() => undefined);
   }
@@ -2271,10 +2463,13 @@ export class TerminalManager {
 
     // 1. Place a new session where the person chose. The choice stays saved with the card until the plugin has
     // prepared it, so a card whose preparation was cut short (quit, crash) or failed never restores locally.
+    // The folder asked for, before an environment may move the card: an isolated environment's evidence keeps it.
+    const requestedCwd = metadata.cwd;
     const choice = session.extras.environmentChoice;
     if (choice && !session.extras.environment) {
       if (!environments) return refuse("plugin environments are not available.");
-      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice });
+      const placed = await environments.prepare({ sessionId: id, provider: metadata.provider, cwd: metadata.cwd, choice,
+        projectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId) });
       if (!live()) {
         // An answer for a launch that no longer exists (the card was closed or restarted, or the app is quitting)
         // is never adopted or saved: nobody used it, so it is released at once and nothing is kept.
@@ -2287,6 +2482,8 @@ export class TerminalManager {
       session.extras.environment = placed.environment;
       metadata.environment = environmentBadge(placed.environment);
       if (placed.cwd && placed.cwd !== metadata.cwd) {
+        // The folder the person chose stays the task's project: the placed worktree is validated against it.
+        session.extras.projectRoot = this.taskProjectRoot(metadata.cwd, metadata.parentSessionId);
         metadata.cwd = placed.cwd;
         session.lifecycle = this.lifecycleHooksEnabled
           ? createProviderLifecycleParser(metadata.provider, metadata.cwd)
@@ -2349,6 +2546,7 @@ export class TerminalManager {
 
       // 4. What the environment keeps of CanvasTTY's protection, and the isolation layer for this launch.
       const keeps = environment ? this.environments?.keeps?.(environment) ?? {} : {};
+      const isolatedEnvironment = Boolean(environment && keeps.isolated === true);
       if (environment && keeps.launch !== true && metadata.profile !== "normal") {
         return refuse(`${environment.label} does not pass the launch on unchanged (the plugin does not declare it), so the ${metadata.profile} profile's settings and CanvasTTY's hooks would not reach the agent there. Launch it in normal, or use an environment that keeps them.`);
       }
@@ -2411,7 +2609,8 @@ export class TerminalManager {
         try {
           spawn = { ...this.wrapIsolated(id, metadata.provider, decision.profile, spawn, planned, {
             ...(contribution?.accountHome ? { accountHome: contribution.accountHome } : {}),
-            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment)
+            placedProjects: this.placedProjects(id, metadata.parentSessionId, spawn.cwd, environment),
+            taskProjectRoot: this.taskProjectRoot(metadata.cwd, metadata.parentSessionId, session.extras)
           }), cwd: spawn.cwd };
         } catch (error) {
           return refuse(error instanceof Error ? error.message : String(error));
@@ -2419,6 +2618,7 @@ export class TerminalManager {
       }
       let process: IPty;
       try {
+        this.assertCheckpointLaunchAllowed(spawn.cwd);
         process = this.spawnPty(spawn.command, spawn.args, {
           name: "xterm-256color", cols: session.cols, rows: session.rows, cwd: spawn.cwd, env: spawn.env
         });
@@ -2428,6 +2628,21 @@ export class TerminalManager {
         return "failed";
       }
       session.process = process;
+      if (environment) session.extras.isolatedEnvironmentScopes ??= { roots: [], ambiguous: false };
+      if (isolatedEnvironment) {
+        // The folders an isolated environment ran for, kept with the card: a later restore never re-reads a plugin that
+        // changed or was removed.
+        const evidence = session.extras.isolatedEnvironmentScopes!;
+        for (const path of [requestedCwd, this.taskProjectRoot(requestedCwd, metadata.parentSessionId), metadata.cwd, spawn.cwd]) {
+          try {
+            const root = realpathSync(path);
+            if (!evidence.roots.includes(root)) {
+              if (evidence.roots.length < 32) evidence.roots.push(root);
+              else evidence.ambiguous = true;
+            }
+          } catch { evidence.ambiguous = true; }
+        }
+      }
       if (planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD) {
         metadata.nativeEditor = JSON.parse(planned.launchEnvironment.CANVASTTY_CODEX_KEYBOARD);
       } else {

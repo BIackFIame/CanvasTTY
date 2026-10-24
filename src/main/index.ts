@@ -64,6 +64,9 @@ import { ProviderSecretsService } from "./services/ProviderSecretsService";
 import { listProviderDirectory, type ProviderDirectorySources } from "./services/providerDirectory";
 import { ProviderModelCatalog } from "./services/providerModels";
 import { AgentControlService } from "./services/AgentControlService";
+import { isGitProjectRoot, subagentWorktreeResolver } from "./services/SubagentWorktreeResolver";
+import { GitCheckpoints } from "./services/GitCheckpoints";
+import { createCheckpointTurnBarrier } from "./services/checkpointTurnBarrier";
 import { AgentIsolation } from "./services/isolation/AgentIsolation";
 import type { AgentProviderId, LaunchProfileId } from "../shared/contracts";
 import { HermesHudService } from "./services/HermesHudService";
@@ -371,6 +374,14 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // Secrets this app knows are masked in every text one agent reads from another (EP-8).
   const redaction = new SecretRedactionRegistry();
   diagnostics.configureRedaction(text => redaction.redact(text));
+  // Rollback points of agents' Git projects, kept in host-owned storage (userData/checkpoints: the registry, its
+  // temporary and set-aside copies, and the packs) that the isolation layer hides from agents.
+  const checkpoints = new GitCheckpoints((text) => redaction.redact(text), 50, join(userDataPath, "checkpoints", "checkpoints.json"));
+  const checkpointBarrier = createCheckpointTurnBarrier({
+    terminals: () => terminalManager,
+    checkpoints,
+    redact: (text) => redaction.redact(text)
+  });
   diagnosticContext = () => ({
     servicesReady,
     settings: { locale: settings.get().locale, keyboardPreset: settings.get().keyboardPreset,
@@ -531,7 +542,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     runtimeGateway = new RuntimeGateway({
       runtimeDirectory: lifecycleRuntimeDirectory,
       windowsHostPath,
+      // An auto or yolo agent's turn start waits (at most 750 ms, fail-open) for its rollback point.
+      lifecycleGuard: (terminalSessionId) => checkpointBarrier.lifecycleGuard(terminalSessionId),
+      beforeLifecycle: (terminalSessionId, signal, cancellation) => checkpointBarrier.beforeLifecycle(terminalSessionId, signal, cancellation),
       onSignal: (terminalSessionId, signal) => {
+        checkpointBarrier.onSignal(terminalSessionId, signal.state);
         if (terminalManager) applyRuntimeSignal(terminalManager, terminalSessionId, signal);
         agentControl?.onSignal(terminalSessionId, signal);
         if (signal.lastAssistantMessage !== undefined && signal.answerCaptureGrantExpiresAt !== undefined) {
@@ -544,7 +559,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }
       },
       onAnswerCaptureRevoked: (terminalSessionId) => evenG2?.clearAnswer(terminalSessionId),
-      onPermissionRequest: (terminalSessionId, request, signal) => decisionHooks.decide(terminalSessionId, request, signal),
+      onPermissionRequest: async (terminalSessionId, request, signal) => {
+        const refusal = await checkpointBarrier.beforePermission(terminalSessionId, signal);
+        if (refusal) return { behavior: "deny", message: refusal };
+        return decisionHooks.decide(terminalSessionId, request, signal);
+      },
       // Claude Code's lifecycle hooks go straight to a loopback listener where ClaudeHttpHookPolicy allows it.
       httpHooks: true
     });
@@ -628,6 +647,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
         }).show();
       }
     } else if (channel === IPC.terminalRemoved && "id" in payload) {
+      checkpointBarrier.forget(payload.id);
+      // A closed card's rollback points go with it; quitting keeps them for the restored card.
+      if (terminalManager && !terminalManager.isQuitting()) {
+        void checkpoints.forgetSession(payload.id).catch((error: unknown) => console.warn("Rollback points of a closed card could not be removed.", error instanceof Error ? error.message : "error"));
+      }
       diagnostics.record("info", "terminal", "session.closed", { id: payload.id });
       notifiedAttentionStatus.delete(payload.id);
     }
@@ -664,6 +688,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
     trustedPlugins: () => new Set(pluginManager!.trustedServiceSpecs().map((spec) => spec.pluginId)),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     session: (sessionId) => sessionsForPlugins.summary(sessionId),
+    restoring: (folder) => terminalManager?.isRestoringFolder(folder) ?? false,
     redact: (text) => redaction.redact(text),
     changed: (decorations) => {
       if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) {
@@ -694,7 +719,12 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const agentControlService = new AgentControlService(managedTerminals, {
     limits: () => ({ maxDepth: settings.get().orchestrationMaxDepth, maxSubagents: settings.get().orchestrationMaxSubagents }),
     containment: () => managedTerminals.containment(),
-    userDataPath
+    userDataPath,
+    // A subagent of a Git project runs in a worktree when a trusted environments plugin provides one.
+    resolveSubagentEnvironment: subagentWorktreeResolver({
+      isGitProject: isGitProjectRoot,
+      providers: () => pluginManager?.environmentProviders() ?? []
+    })
   });
   orchestrationGateway = new OrchestrationGateway({
     runtimeDirectory: join(userDataPath, "orchestration", "runtime"),
@@ -727,7 +757,11 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // launch options or an environment ask their plugin's service, so start services first.
   pluginServices.hostReady();
   await pluginServicesStarted.catch(() => undefined);
-  await terminalManager.restorePersistedSessions();
+  const notRestored = await terminalManager.restorePersistedSessions();
+  // Rollback points of saved cards known not to come back (not restored, or a subagent whose parent is gone). Points
+  // of any other card stay (unreadable saved cards, a newer version's, or restore turned off): retention bounds them.
+  void checkpoints.forgetSessions(notRestored)
+    .catch((error: unknown) => console.warn("Rollback points could not be pruned.", error instanceof Error ? error.message : "error"));
   // The agent-control endpoint follows Settings → Agents → "Agent orchestration
   // endpoint"; the start flag / env var force it on for one launch (CI smoke)
   // regardless of the setting. Start and stop are serialised so a quick toggle
@@ -841,6 +875,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   registerIpc(ipc, {
     mascots: mascotManager,
     settings,
+    checkpoints,
     recheckProviderClis: async () => {
       providerClis!.refresh();
       agentBrowserBridge?.providerClisRefreshed();

@@ -236,13 +236,13 @@ CanvasTTY 负责卡片、PTY、保存的记录和恢复顺序；服务回答五�
 
 | 请求 | 参数 | 应答 | 时限 |
 |:--|:--|:--|:--|
-| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, options` | `{ ref, label, cwd? }` 或 `{ refuse: { reason } }`。`ref` 是不超过 4 KB 的不透明 JSON，随卡片保存；`label`（80 字符）是徽标；`cwd`（已存在的绝对路径文件夹）成为卡片的文件夹 | 15 秒 |
+| `canvastty.environment.prepare` | `sessionId, kind, provider, cwd, projectRoot?, options` | `{ ref, label, cwd? }` 或 `{ refuse: { reason } }`。`ref` 是不超过 4 KB 的不透明 JSON，随卡片保存；`label`（80 字符）是徽标；`cwd`（已存在的绝对路径文件夹）成为卡片的文件夹 | 15 秒 |
 | `canvastty.environment.wrap` | `sessionId, kind, ref, provider, command, args, env, secretEnvNames, cwd` | `{ command, args, env?, secretEnv?, cwd? }` 或 `{ refuse }` | 5 秒 |
 | `canvastty.environment.resume` | `sessionId, kind, ref` | `{ ok: true }` 或 `{ stopped: { reason } }` | 10 秒 |
 | `canvastty.environment.release` | `sessionId, kind, ref, keepData, reason`（`closed` 或 `quit`） | 忽略 | 10 秒 |
 | `canvastty.environment.describe` | `sessionId, kind, ref` | `{ label, detail? }`，用于卡片徽标及其提示 | 3 秒 |
 
-- `prepare` 只在卡片首次启动时调用一次。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
+- `prepare` 只在卡片首次启动时调用一次。`projectRoot` 是用户启动的代理所在的文件夹（任务的项目），用于创建该仓库的 worktree。插件数据中的 worktree 环境文件夹只有在它是该仓库的链接 worktree、且所在分支没有被其他 worktree 检出时，才会在代理隔离下作为代理的项目；Git 元数据对代理只读（不能 `git add` 或 `git commit`），因此由插件自己收集代理的修改。`wrap` 在每次启动（创建、重启、恢复）前调用，把宿主原本要启动的命令变成在环境中运行的命令，例如 `ssh -tt host …`、`docker exec -it …`，或在另一个文件夹中运行同一程序。PTY 仍由宿主通过 node-pty 创建，因此回滚、状态和编排照常工作。
 - `wrap` 的输出会被检查：`command` 必须是可执行文件的绝对路径，或由宿主在 `PATH` 中解析的纯程序名；命令行、相对路径或 shell 语法会被拒绝，任何内容都不经过 shell 运行。`args` 是数组（256 项，每项 8 KB，不含 NUL）。`env` 和 `secretEnv` 遵循启动贡献者的规则：保留名称以及 CanvasTTY 或启动选项已为此次启动设置的名称会被拒绝。`secretEnv` 的值来自插件自己的机密（需要 `secrets`），并像启动机密一样被遮蔽。
 - `wrap` 收到此次启动自身的变量（来自 CanvasTTY 和所选启动选项），不含保留的 `CANVASTTY_*` 名称，也不含机密值；`secretEnvNames` 列出进程将从宿主获得值的名称，包装器可以按名称转发它们（`docker exec -e NAME`）。
 - 恢复时先恢复所有保存的环境，再先启动父卡片、后启动子卡片。如果插件被禁用、删除或不受信任，或 `resume` 应答 `stopped`，卡片以停止状态返回并显示原因，记录保留；重启会再次调用 `resume`。卡片绝不会改为在本地启动，超时或错误会拒绝启动，不会回退。
@@ -346,7 +346,7 @@ interface PluginSessionEvent {
 
 ### 卡片标记与动作（`cards:decorate`）
 
-具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 8 个 `cardActions`：
+具有 `cards:decorate` 的服务可以在任意卡片上设置标记，并声明最多 16 个 `cardActions`：
 
 ```json
 "permissions": ["cards:decorate"],
@@ -359,6 +359,9 @@ interface PluginSessionEvent {
 - `cards.setBadge` `{ sessionId, badge: { text, tone?, tooltip? } | null }`：`text` 最多 24 个字符，`tone` 为 `neutral`（默认）、`info`、`warn` 或 `error`，`tooltip` 最多 200 个字符；`null` 移除该插件的标记。每张卡片最多 4 个插件标记。标记是纯文本，像 agent 文本一样被遮蔽，并随卡片关闭或插件信任撤销而消失。
 - 动作出现在所有匹配 `when` 的卡片的选项菜单中：`providers`、`environmentKinds`（任意插件的环境；不在环境中的卡片永远不匹配）和 `roles`，均为可选；列出的每一项都必须匹配。选择动作会发送 `canvastty.cards.invoke` `{ actionId, sessionId, session }`（仅宿主可发；`session` 为上面的摘要），最多等待 15 s。回答 `{ message?, tone? }`：消息（纯文本，最多 2000 个字符，经过遮蔽）以提示的形式显示在卡片上。超时或出错时显示错误提示。
 - 任何地方都没有 HTML：标记、标题和消息都按文本渲染。
+- 带有 `review` 的回答会打开变更审查对话框，而不是提示。`review` 为 `{ title, groups, acceptActionId?, rejectActionId?, nextOffset? }`；每个分组为 `{ sessionId, title, files, error?, active? }`（每个代理一个；`active: true` 表示该代理仍在运行，此时对话框会禁用接受其全部文件、拒绝它以及整个任务的操作，但仍可接受其中一部分文件；其文件初始不被选中，其 `error` 显示为提示而非错误），每个文件为 `{ path, diff, status?, page?, hasMore?, truncated?, conflict? }`，其中 `conflict` 为 `{ current, agent }` 两个文本页 `{ label?, text, startLine, totalLines, hasMore }`。整个审查最多 512 KiB、24 个分组和 400 个文件；文本为纯文本、经过遮蔽、去除控制字符并截断到 16 KiB（此时文件标记为已截断）；文件路径不得因遮蔽而改变。`acceptActionId` 和 `rejectActionId` 必须是本插件声明的动作 id，否则回答被拒绝。请用 `"menu": false` 声明它们：这样的动作不会出现在卡片菜单中（从菜单运行时没有 `input`），不带 `input` 调用时会被拒绝。
+- 对话框打开期间，宿主会带着 `input` 对象（最多 1 MiB 的 JSON 对象，仅由应用窗口发送，从不作为会话身份）再次调用同一动作：不带 `input` 表示刷新审查，`{ offset }` 表示下一页文件（`nextOffset`），`{ agentSessionId, file, page }` 表示某个文件 diff 的一页（打开文件时为第 0 页）。接受会以 `{ agentSessionId?, files, resolutions? }` 调用 `acceptActionId`（所选文件；`resolutions` 把冲突路径映射为 `"current"` 或 `"agent"`；整个任务时不带 `agentSessionId`），拒绝会以 `{ agentSessionId? }` 调用 `rejectActionId`。接受和拒绝只在用户于对话框中确认后才发送。对修改请回答剩余的审查或一条消息。
+- `title` 最多 40 个字符。与清单中的 `description.ru`/`description.en` 一样，动作可以添加 `"title.ru"` 和 `"title.en"`（各最多 40 个字符）：卡片菜单显示应用语言对应的标题，否则显示 `title`。
 
 完整示例见 [`examples/plugins/collect-demo`](../examples/plugins/collect-demo)：在 `worktree` 环境（来自 `env-worktree`）的卡片上，动作 **Show changes** 显示 worktree 的 `git diff --stat` 并设置“N changed”标记；工具 `collect-demo__diffstat` 为编排器提供同样的信息，针对它自己的文件夹或某个子 agent 的文件夹（插件通过会话事件得知子 agent）。
 
