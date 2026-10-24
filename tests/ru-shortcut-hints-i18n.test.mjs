@@ -19,7 +19,7 @@ const allowedLatin = new Set([
   "Shift", "Command", "Super", "Ctrl", "Control", "Alt", "Option", "Meta",
   "Enter", "Escape", "Esc", "Space", "Tab", "Backspace", "Delete",
   "PageUp", "PageDown", "Mouse3", "Mouse4", "Mouse5",
-  "HOME", "Codex", "CLI", "TUI"
+  "HOME", "Codex", "Claude", "CLI", "TUI"
 ]);
 
 function latinWords(text) {
