@@ -42,6 +42,11 @@ export interface PluginServiceHost {
    */
   sessions?(pluginId: string, serviceId: string, method: string, params: unknown, permissions: readonly PluginPermission[]): unknown;
   /**
+   * Subscription limits (`limits.*`). Returns undefined for a method it does not know. `permissions` are the plugin's
+   * active manifest permissions and `dataDir` its data folder, both from the host's record of the service.
+   */
+  limits?(pluginId: string, serviceId: string, method: string, params: unknown, permissions: readonly PluginPermission[], dataDir: string): unknown;
+  /**
    * `providers.list`, already checked against the manifest for `providers:read`: the launchable providers as
    * list_providers gives them to an orchestrator. The host checks the registry again (a disabled plugin is refused).
    */
@@ -645,6 +650,10 @@ export class PluginServiceSupervisor {
     if (method === "cards.setBadge" && this.options.host.setBadge) {
       if (!spec.permissions.includes("cards:decorate")) throw new Error("Plugin does not have the cards:decorate permission.");
       return this.options.host.setBadge(spec.pluginId, params);
+    }
+    if (method.startsWith("limits.") && this.options.host.limits) {
+      const result = this.options.host.limits(spec.pluginId, spec.serviceId, method, params, spec.permissions, spec.dataDir);
+      if (result !== undefined) return result;
     }
     if (method.startsWith("sessions.") && this.options.host.sessions) {
       const result = this.options.host.sessions(spec.pluginId, spec.serviceId, method, params, spec.permissions);

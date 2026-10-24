@@ -244,6 +244,67 @@ export interface CanvasTTYToolCall {
 /** Answer to `canvastty.tools.call`: text (or JSON sent as text), masked and cut to 32 K characters. */
 export type CanvasTTYToolResult = { content: unknown; isError?: boolean } | string | null;
 
+/** One provider window in a limits snapshot (the `LimitsSnapshot` HOME uses). */
+export interface CanvasTTYLimitWindow {
+  id: string;
+  bucketId: string;
+  slot: "primary" | "secondary";
+  isDefaultBucket: boolean;
+  label: string | null;
+  usedPercent: number | null;
+  used: number | null;
+  limit: number | null;
+  windowMinutes: number | null;
+  /** Epoch milliseconds. */
+  resetsAt: number | null;
+}
+
+export type CanvasTTYLimitReason =
+  | "cli-not-found" | "not-authenticated" | "session-expired" | "subscription-required" | "unsupported-protocol" | "timeout" | "protocol-error" | "api-profile";
+
+export type CanvasTTYProviderLimits =
+  | { provider: string; state: "available"; source: string; fetchedAt: number; windows: CanvasTTYLimitWindow[] }
+  | { provider: string; state: "stale"; source: string; fetchedAt: number; failedAt: number; reason: CanvasTTYLimitReason; windows: CanvasTTYLimitWindow[] }
+  | { provider: string; state: "unavailable"; source: string; checkedAt: number; reason: CanvasTTYLimitReason };
+
+export interface CanvasTTYLimitsSnapshot {
+  fetchedAt: number;
+  providers: CanvasTTYProviderLimits[];
+}
+
+/**
+ * A window whose allowance came back before the reset time the previous snapshot announced: the used share dropped by
+ * at least 5 points and at least half (or to 5% or less by more than 2 points) while that time was over 5 minutes away.
+ */
+export interface CanvasTTYLimitEarlyReset {
+  provider: "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok";
+  /** The account home it was read for; absent for the default login. */
+  home?: string;
+  windowId: string;
+  slot: "primary" | "secondary";
+  windowLabel: string | null;
+  windowMinutes: number | null;
+  /** Used share in percent before and after the drop. */
+  usedBefore: number;
+  usedAfter: number;
+  /** Epoch milliseconds: the reset time announced before the drop, and the one reported after it (new, same, or none). */
+  announcedResetAt: number;
+  reportedResetAtAfter: number | null;
+  /** The provider still reports the old reset time; its arrival later is a normal reset. */
+  resetTimeKept: boolean;
+}
+
+/** Notification `canvastty.limits.changed`, after `limits.subscribe` (needs `limits:read`); at most once per 2 s. */
+export interface CanvasTTYLimitsChanged {
+  state: "ready";
+  snapshot: CanvasTTYLimitsSnapshot;
+  earlyReset: boolean;
+  earlyResets: CanvasTTYLimitEarlyReset[];
+  /** Only for an account home this plugin asked about with `limits.get { provider, home }`. */
+  provider?: "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok";
+  home?: string;
+}
+
 /** Notification `canvastty.sessions.event`, after `sessions.subscribe` (needs `sessions:events`). */
 export interface CanvasTTYSessionEvent {
   type: "created" | "restored" | "status" | "exited" | "closed";
@@ -607,6 +668,17 @@ export interface CanvasTTYServiceHostApi {
   "sessions.send"(params: { sessionId: string; text: string; submit?: boolean }): { sessionId: string; sent: boolean };
   /** Needs `sessions:control`; only cards this plugin created. Closes the card, keeps its environment data. */
   "sessions.stop"(params: { sessionId: string }): { sessionId: string; stopped: true };
+  /**
+   * Needs `limits:read`: the answer plugin surfaces get. Without params the default login (served from the host's
+   * cache; refreshed at most once per 5 minutes for all services when older than 60 s). With `{ provider, home }`
+   * (also needs `launch:contribute`): an existing folder strictly inside this plugin's data folder, no symbolic link;
+   * at most 32 homes per plugin, each read at most once per 3 minutes. Qwen homes are read passively and always
+   * answer `unavailable` (Qwen Code exposes no quota).
+   */
+  "limits.get"(params: Record<string, never> | { provider: "codex" | "claude" | "qwen" | "kimi" | "opencode" | "grok"; home: string }): { state: "ready"; snapshot: CanvasTTYLimitsSnapshot };
+  /** Needs `limits:read`. Starts no read. Changes follow as `canvastty.limits.changed`; call again after every start. */
+  "limits.subscribe"(params: Record<string, never>): { state: "ready"; snapshot: CanvasTTYLimitsSnapshot } | { state: "loading"; snapshot: null };
+  "limits.unsubscribe"(params: Record<string, never>): null;
   /** Needs `providers:read`. What `list_providers` gives an orchestrator, from cached reads only. */
   "providers.list"(params: Record<string, never>): CanvasTTYProviderDirectory;
   /** Needs `cards:decorate`. `null` removes this plugin's badge from the card. */

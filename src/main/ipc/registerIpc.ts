@@ -33,7 +33,7 @@ import type { TerminalManager } from "../services/TerminalManager";
 import type { GitCheckpoints } from "../services/GitCheckpoints";
 import { checkpointIpcHandlers } from "./checkpointIpc";
 import type { AgentChatHistoryService } from "../services/AgentChatHistoryService";
-import { withoutAccountScope, type LimitsService } from "../services/LimitsService";
+import { pluginLimitsResult, type LimitsService } from "../services/LimitsService";
 import type { UsageHistoryService } from "../services/UsageHistoryService";
 import { isClaudeDraftAction } from "../services/ClaudeDraftEditor";
 import type { PluginManager } from "../services/PluginManager";
@@ -748,7 +748,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     }
     if (method === "limits.get") {
       plugins.assertPermission(pluginId, "limits:read");
-      return { state: "ready", snapshot: withoutAccountScope(await limits.get()) };
+      return pluginLimitsResult(await limits.get());
     }
     if (method === "hermesHud.getState") {
       plugins.assertPermission(pluginId, "hermes:hud");
