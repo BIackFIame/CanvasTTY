@@ -1,0 +1,208 @@
+/* Animated Background Creator Modal */
+
+.animated-bg-dialog {
+  width: min(860px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+}
+
+.animated-bg-dialog .pixel-pack-dialog__header,
+.animated-bg-dialog .pixel-pack-dialog__footer {
+  min-height: 52px;
+  padding: 12px 18px;
+}
+
+.animated-bg-dialog .pixel-pack-dialog__body {
+  padding: 16px 18px;
+  overflow-y: auto;
+}
+
+/* Guide Banner */
+.animated-bg-guide {
+  margin-bottom: 12px;
+  padding: 12px 16px;
+  gap: 16px;
+  align-items: center;
+}
+
+.animated-bg-guide h3 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.animated-bg-guide ol {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.animated-bg-guide li + li {
+  margin-top: 4px;
+}
+
+.animated-bg-guide figure {
+  margin: 0;
+  max-width: 200px;
+}
+
+.animated-bg-guide img {
+  height: 110px;
+  aspect-ratio: auto;
+}
+
+.animated-bg-guide figcaption {
+  margin-top: 4px;
+  font-size: 10px;
+  text-align: center;
+}
+
+/* Upload zone */
+.mascot-dialog__upload.animated-bg-upload {
+  min-height: 44px;
+  padding: 10px 16px;
+  margin-bottom: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-size: 12px;
+  border-radius: 6px;
+}
+
+/* 3 Styles Grid */
+.animated-bg-section-label {
+  font-size: 12px;
+  font-weight: 700;
+  display: block;
+  margin-bottom: 8px;
+}
+
+.animated-bg-style-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.animated-bg-style-card {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 20%, transparent);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color .15s ease, background .15s ease, transform .12s ease;
+  color: var(--text);
+}
+
+.animated-bg-style-card:hover {
+  border-color: color-mix(in srgb, var(--primary) 70%, transparent);
+  background: color-mix(in srgb, var(--surface-soft) 85%, var(--primary));
+}
+
+.animated-bg-style-card--active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 22%, var(--surface-soft));
+  box-shadow: 0 0 0 1px var(--primary);
+}
+
+.animated-bg-style-card__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: #ffffff;
+}
+
+.animated-bg-style-card__badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+  color: #ffffff;
+}
+
+.animated-bg-style-card--active .animated-bg-style-card__badge {
+  background: var(--primary);
+  color: #ffffff;
+}
+
+.animated-bg-style-card__title {
+  margin: 0 0 4px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.animated-bg-style-card__desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #cdd6df;
+}
+
+/* Stacked Inputs */
+.animated-bg-inputs {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.animated-bg-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.animated-bg-field label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.animated-bg-field small {
+  font-size: 11px;
+  color: var(--text-muted-on-dark);
+}
+
+.animated-bg-field input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 22%, transparent);
+  border-radius: 6px;
+  background: var(--surface-soft);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.animated-bg-field input:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 1px;
+}
+
+.animated-bg-prompt-box {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 15%, transparent);
+  border-radius: 6px;
+  background: #080a0f;
+  font-family: Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  max-height: 180px;
+  overflow-y: auto;
+  user-select: text;
+}
+
+@media (max-width: 720px) {
+  .animated-bg-style-grid {
+    grid-template-columns: 1fr;
+  }
+}

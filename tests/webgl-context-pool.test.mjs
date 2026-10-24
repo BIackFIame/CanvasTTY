@@ -341,6 +341,23 @@ test("unregistering releases the context and hands the slot on; a stale unregist
   assert.equal(second.attached, true);
 });
 
+test("ASCII backgrounds release an existing GPU renderer immediately and restore it when disabled", async () => {
+  const source = await readFile(new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url), "utf8");
+  assert.match(source, /eligible: !hasAsciiBackground && !summaryMode && webglScaleAllowed/);
+  assert.match(source, /\[session\.id, focused, summaryMode, webglScaleAllowed, hasAsciiBackground\]/);
+  const h = harness({ budget: 1 });
+  const terminal = h.card("terminal", rect(0, 0, 400, 400), { focused: true });
+  h.advance(WEBGL_SETTLE_MS);
+  assert.equal(terminal.attached, true);
+  h.pool.update("terminal", { eligible: false, focused: true });
+  assert.equal(terminal.attached, false, "old GPU pixels must disappear before another animation frame");
+  h.advance(WEBGL_SETTLE_MS);
+  assert.equal(terminal.attached, false);
+  h.pool.update("terminal", { eligible: true, focused: true });
+  h.advance(WEBGL_SETTLE_MS);
+  assert.equal(terminal.attached, true, "ordinary terminals retain GPU acceleration");
+});
+
 test("TerminalCard routes its renderer through the pool and frees the context on release", async () => {
   const card = await readFile(new URL("../src/renderer/src/features/terminal/TerminalCard.tsx", import.meta.url), "utf8");
   assert.match(card, /pool\.register\(session\.id,/);

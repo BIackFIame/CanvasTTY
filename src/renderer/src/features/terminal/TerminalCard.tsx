@@ -1,4 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
+import type { TerminalBackgroundId } from "../../../../shared/terminalBackground";
+import { AsciiTerminalBackground } from "./AsciiTerminalBackground";
+import { attachTerminalTextBackdrop } from "./terminalTextBackdrop";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -76,6 +79,20 @@ interface TerminalCardProps {
   locale: LocaleId;
   palette: PaletteId;
   borderSkin: TerminalBorderSkinId;
+  background: TerminalBackgroundId;
+  backgroundBrightness: number;
+  backgroundContrast: number;
+  backgroundSaturation: number;
+  backgroundPaused: boolean;
+  backgroundSpeed: number;
+  backgroundScale: number;
+  backgroundOffsetX: number;
+  backgroundOffsetY: number;
+  backgroundReadability: boolean;
+  backgroundReadabilityStrength: number;
+  backgroundPauseOnOutput: boolean;
+  backgroundFocusDimming?: boolean;
+  backgroundSynchronized: boolean;
   skinDetail: PixelSkinPreferredDetail;
   /** The canvas camera: drags read its zoom when they move; rendering subscribes to what it needs. */
   camera: CameraStore;
@@ -157,6 +174,20 @@ function TerminalCardView({
   palette,
   shortcuts,
   borderSkin: selectedBorderSkin,
+  background,
+  backgroundBrightness,
+  backgroundContrast,
+  backgroundSaturation,
+  backgroundPaused,
+  backgroundSpeed,
+  backgroundScale,
+  backgroundOffsetX,
+  backgroundOffsetY,
+  backgroundReadability,
+  backgroundReadabilityStrength,
+  backgroundPauseOnOutput,
+  backgroundFocusDimming,
+  backgroundSynchronized,
   skinDetail,
   camera,
   stackIndex,
@@ -192,6 +223,7 @@ function TerminalCardView({
   const pixelPack = usePixelSkinPackSummary(isPixelSkinPackId(borderSkin) ? borderSkin : null);
   const pixelArtState = pixelSkinStateForSession(session.status, session.turnCompleted);
   const terminalHost = useRef<HTMLDivElement>(null);
+  const backgroundOutputActivity = useRef<(() => void) | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const shortcutsRef = useRef(shortcuts);
   shortcutsRef.current = shortcuts;
@@ -261,7 +293,10 @@ function TerminalCardView({
   const summaryScale = useCameraSelector(camera, (current) => summaryScaleForZoom(current.zoom));
   const summaryMode = summaryScale > 1;
   const webglScaleAllowed = useCameraSelector(camera, (current) => current.zoom <= WEBGL_MAX_SCALE);
-  const terminalColors = terminalTheme(palette, pixelSkinTheme);
+  const hasAsciiBackground = background !== "none";
+  const asciiBackgroundRef = useRef(hasAsciiBackground);
+  asciiBackgroundRef.current = hasAsciiBackground;
+  const terminalColors = terminalTheme(palette, pixelSkinTheme, hasAsciiBackground);
   const terminalBackground = terminalColors.background;
   const terminalForeground = terminalColors.foreground;
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -423,13 +458,14 @@ function TerminalCardView({
       // into the pinned row below it.
       scrollOnUserInput: false,
       allowTransparency: true,
+      minimumContrastRatio: hasAsciiBackground ? 7 : 1,
       macOptionClickForcesSelection: copyOnSelectRef.current,
       altClickMovesCursor: !(copyOnSelectRef.current && window.canvasTTY.window.isMacOS),
       // Search decorations (highlighting every match and reporting the match
       // count) are proposed API in xterm; without this flag findNext throws and
       // the counter never leaves 0/0. The flag only unlocks that surface.
       allowProposedApi: true,
-      theme: terminalTheme(palette, pixelSkinTheme),
+      theme: terminalTheme(palette, pixelSkinTheme, hasAsciiBackground),
       // OSC 8 hyperlinks are handled by xterm itself rather than WebLinksAddon.
       // Without an explicit handler, xterm shows its own confirm() prompt and
       // attempts window.open(), bypassing CanvasTTY's link destination chooser.
@@ -459,6 +495,7 @@ function TerminalCardView({
     terminal.loadAddon(webLinksAddon);
     const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
+    const detachTextBackdrop = attachTerminalTextBackdrop(terminal, host);
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
     pinnedInput.className = "terminal-card__pinned-input";
@@ -483,7 +520,15 @@ function TerminalCardView({
         pinnedInput.replaceChildren(...pinned.rows.map((text, rowIndex) => {
           const row = document.createElement("div");
           row.className = "terminal-card__pinned-input-row";
-          row.textContent = text;
+          for (const part of text.match(/\s+|\S+/gu) ?? []) {
+            if (/^\s+$/u.test(part)) {
+              row.append(document.createTextNode(part));
+            } else {
+              const word = document.createElement("span");
+              word.textContent = part;
+              row.append(word);
+            }
+          }
           if (rowIndex === pinned.cursorRow) {
             const cursorColumn = Math.min(pinned.cursorColumn, Math.max(0, terminal.cols - 1));
             row.classList.add("terminal-card__pinned-input-row--cursor");
@@ -537,6 +582,7 @@ function TerminalCardView({
       session.id,
       (data) => {
         pool.touch(session.id);
+        backgroundOutputActivity.current?.();
         terminal.write(data);
       },
       (error) => {
@@ -712,6 +758,7 @@ function TerminalCardView({
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
       fitRef.current = null;
+      detachTextBackdrop();
       restoreRendererTransition();
       unregisterWebgl();
       cancelAnimationFrame(frame);
@@ -744,8 +791,12 @@ function TerminalCardView({
 
   useEffect(() => {
     const terminal = terminalRef.current;
-    if (terminal) terminal.options.theme = terminalTheme(palette, pixelSkinTheme);
-  }, [palette, pixelSkinTheme]);
+    if (terminal) {
+      terminal.options.theme = terminalTheme(palette, pixelSkinTheme, hasAsciiBackground);
+      terminal.options.minimumContrastRatio = hasAsciiBackground ? 7 : 1;
+      terminal.refresh(0, terminal.rows - 1);
+    }
+  }, [palette, pixelSkinTheme, hasAsciiBackground, backgroundReadability, backgroundReadabilityStrength]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -755,6 +806,7 @@ function TerminalCardView({
   }, [copyOnSelect]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
+    if (asciiBackgroundRef.current) return false;
     if (webglAddonRef.current) return true;
     const transitionElement = beginRendererTransition(terminal);
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
@@ -790,7 +842,7 @@ function TerminalCardView({
   const disableWebgl = (terminal: Terminal): void => {
     const webgl = webglAddonRef.current;
     if (!webgl) return;
-    const transitionElement = fitRef.current ? beginRendererTransition(terminal) : null;
+    const transitionElement = fitRef.current && !asciiBackgroundRef.current ? beginRendererTransition(terminal) : null;
     webglAddonRef.current = null;
     // The WebGL canvas is the one xterm-screen child without a layer class (the link layer is a 2D canvas).
     const canvas = terminal.element?.querySelector<HTMLCanvasElement>(".xterm-screen > canvas:not([class])");
@@ -813,8 +865,9 @@ function TerminalCardView({
   useEffect(() => {
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
-    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
-  }, [session.id, focused, summaryMode, webglScaleAllowed]);
+    // Preserved WebGL frames blend transparent backgrounds over old glyphs; use xterm's DOM renderer for ASCII scenes.
+    webglContextPool().update(session.id, { eligible: !hasAsciiBackground && !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed, hasAsciiBackground]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
@@ -1196,6 +1249,7 @@ function TerminalCardView({
         "--summary-scale": summaryScale,
         "--summary-content-width": `${Math.max(0, ((pixelSurfaceBounds ? pixelSurfaceBounds.right - pixelSurfaceBounds.left : size.width) - 72) / summaryScale)}px`,
         "--terminal-background": terminalBackground,
+        "--terminal-text-backdrop-strength": backgroundReadabilityStrength / 100,
         "--terminal-foreground": terminalForeground,
         "--pixel-skin-left-inset": `${pixelSurfaceBounds?.left ?? 28}px`,
         "--pixel-skin-right-inset": `${size.width - (pixelSurfaceBounds?.right ?? (size.width - 28))}px`,
@@ -1289,7 +1343,13 @@ function TerminalCardView({
         </div>
         {!pixelControls && terminalActions}
       </header>
-      <div className="terminal-card__surface" data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost} />
+      <div className={`terminal-card__surface${hasAsciiBackground ? " terminal-card__surface--ascii" : ""}${hasAsciiBackground && backgroundReadability ? " terminal-card__surface--ascii-readable" : ""}`} data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost}>
+        {hasAsciiBackground && <AsciiTerminalBackground scene={background} brightness={backgroundBrightness} contrast={backgroundContrast} saturation={backgroundSaturation}
+          paused={backgroundPaused} speed={backgroundSpeed} scale={backgroundScale}
+          pauseOnOutput={backgroundPauseOnOutput} outputActivity={backgroundOutputActivity} synchronized={backgroundSynchronized}
+          focusDimming={backgroundFocusDimming} focused={focused}
+          offsetX={backgroundOffsetX} offsetY={backgroundOffsetY} live={surfaceIsLive(lifecycle)} />}
+      </div>
       {pixelSkinTheme && (
         <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}
           width={size.width} height={size.height} detail={pixelDetail} surfaceBounds={pixelSurfaceBounds ?? undefined} />
@@ -1437,8 +1497,8 @@ function TerminalCardView({
   );
 }
 
-function terminalTheme(palette: PaletteId, pixelSkin: string | null = null): { background: string; foreground: string; cursor: string; selectionBackground: string } {
-  const background = pixelSkin ? "#00000000" : palette === "night" ? "#171a24" : "#202430";
+function terminalTheme(palette: PaletteId, pixelSkin: string | null = null, ascii = false): { background: string; foreground: string; cursor: string; selectionBackground: string } {
+  const background = pixelSkin || ascii ? "#00000000" : palette === "night" ? "#171a24" : "#202430";
   return {
     background,
     foreground: "#f7f4ec",

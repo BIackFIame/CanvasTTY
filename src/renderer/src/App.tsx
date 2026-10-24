@@ -50,6 +50,8 @@ import {
   keyboardPresetShortcuts
 } from "../../shared/contracts";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
+import type { TerminalBackgroundId } from "../../shared/terminalBackground";
+import type { TerminalBackgroundAppearance } from "../../shared/terminalBackgroundAppearance";
 import {
   createTerminalBorderSkinStyleController,
   type TerminalBorderSkinStyleController
@@ -149,6 +151,25 @@ const FALLBACK_SETTINGS: AppSettings = {
   canvasBackground: "none",
   pattern: "dots",
   terminalBorderSkin: "classic",
+  terminalBackground: "none",
+  terminalBackgroundBrightness: 45,
+  terminalBackgroundContrast: 100,
+  terminalBackgroundSaturation: 100,
+  terminalBackgroundPaused: false,
+  terminalBackgroundSpeed: 1,
+  terminalBackgroundScale: 100,
+  terminalBackgroundOffsetX: 0,
+  terminalBackgroundOffsetY: 0,
+  terminalBackgroundReadability: true,
+  terminalBackgroundReadabilityStrength: 86,
+  terminalBackgroundPauseOnOutput: false,
+  terminalBackgroundFocusDimming: false,
+  terminalBackgroundSynchronized: false,
+  terminalBackgroundPauseInactive: false,
+  terminalBackgroundOverrides: {},
+  terminalBackgroundPresets: [],
+  terminalBackgroundFavorites: [],
+  terminalBackgroundDeleted: [],
   terminalSkinDetail: "detailed",
   terminalSkinAnimationEnabled: true,
   appSkin: "classic",
@@ -1862,6 +1883,38 @@ export function App(): React.JSX.Element {
     }
   }, [homeEditDraft, settings.locale, showToast]);
 
+  const stashedMomBackgrounds = useRef<{
+    background: TerminalBackgroundId;
+    overrides: Record<string, TerminalBackgroundAppearance>;
+  } | null>(null);
+
+  const toggleMomEntered = useCallback(() => {
+    const hasAny = settings.terminalBackground !== "none" || Object.keys(settings.terminalBackgroundOverrides).length > 0;
+    if (hasAny) {
+      stashedMomBackgrounds.current = {
+        background: settings.terminalBackground,
+        overrides: { ...settings.terminalBackgroundOverrides },
+      };
+      setSettings((current) => ({ ...current, terminalBackground: "none", terminalBackgroundOverrides: {} }));
+      void saveSettings({
+        terminalBackground: "none",
+        terminalBackgroundOverrides: {},
+      });
+      showToast(settings.locale === "ru" ? "Ой мама зашла!" : "Mom entered!");
+    } else {
+      const restoredBg = stashedMomBackgrounds.current?.background && stashedMomBackgrounds.current.background !== "none"
+        ? stashedMomBackgrounds.current.background
+        : "blade-runner-2049";
+      const restoredOverrides = stashedMomBackgrounds.current?.overrides ?? {};
+      setSettings((current) => ({ ...current, terminalBackground: restoredBg, terminalBackgroundOverrides: restoredOverrides }));
+      void saveSettings({
+        terminalBackground: restoredBg,
+        terminalBackgroundOverrides: restoredOverrides,
+      });
+      showToast(settings.locale === "ru" ? "Фоны включены" : "Backgrounds restored");
+    }
+  }, [saveSettings, settings.locale, settings.terminalBackground, settings.terminalBackgroundOverrides, showToast]);
+
   useEffect(() => {
     const performShortcut = (shortcut: "home" | "renameWindow" | "toggleFullscreen"): void => {
       if (shortcut === "toggleFullscreen") {
@@ -1903,6 +1956,12 @@ export function App(): React.JSX.Element {
         event.preventDefault();
         event.stopPropagation();
         performShortcut("renameWindow");
+        return;
+      }
+      if (matchesShortcut(event, settings.shortcuts.momEntered)) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleMomEntered();
       }
     };
 
@@ -1932,7 +1991,7 @@ export function App(): React.JSX.Element {
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
       stopTerminalFocus();
     };
-  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, usageHistoryOpen, toggleSessionFullscreen]);
+  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, shortcutReferenceOpen, showToast, usageHistoryOpen, toggleSessionFullscreen, toggleMomEntered]);
 
   const appearance = resolveAppearanceSettings(settings);
   const rootClasses = useMemo(
@@ -2109,6 +2168,7 @@ export function App(): React.JSX.Element {
           }}
         />
         <SettingsPanel
+          sessions={sessions}
           open={settingsOpen}
           openUpdatesRequest={openUpdatesRequest}
           settings={settings}
