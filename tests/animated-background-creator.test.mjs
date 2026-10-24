@@ -23,7 +23,7 @@ test("animatedBackgroundAgentPrompt generates complete instructions for all 3 st
   const promptDot = animatedBackgroundAgentPrompt({
     style: "dot-matrix",
     title: "Cyber Sunset",
-    sourceUrl: "C:/Users/test/clip.mp4",
+    sourceUrl: "/tmp/test/clip.mp4",
     locale: "ru",
   });
   assert.match(promptDot, /DOT MATRIX/);
