@@ -395,6 +395,7 @@ export function HomeZone({
             onFocus={() => onWidgetFocus(canvasWidgetId)}
             onHoverChange={(active) => onWidgetHoverChange(canvasWidgetId, active)}
             onOpenLauncher={openPluginLauncher}
+            onFocusSession={onFocusSession}
             onError={onPluginError}
           />
         </section>

@@ -37,6 +37,8 @@ interface PluginFrameProps {
   onFocus(): void;
   onHoverChange(active: boolean): void;
   onOpenLauncher(provider: ProviderId): void;
+  /** Brings an open card to the front (`sessions.focus`); a surface without it does not offer the method. */
+  onFocusSession?(session: SessionSnapshot): void;
   onError(message: string): void;
   onMascotDrag?(event: { phase: "start" | "move" | "end"; x: number; y: number; pointerId: number }): void;
   /**
@@ -74,6 +76,7 @@ export function PluginFrame({
   onFocus,
   onHoverChange,
   onOpenLauncher,
+  onFocusSession,
   onError,
   onMascotDrag,
   suspended = false
@@ -161,6 +164,8 @@ export function PluginFrame({
       if (typeof message.method !== "string" || message.method.length > 80) return;
 
       const mayReply = replies.received(message.requestId, event.source, plugin.manifest.id);
+      // The person is in this frame (they clicked or tabbed into it): only then may it move the canvas.
+      const personInFrame = frame.current !== null && document.activeElement === frame.current;
       void handleRequest({
         plugin,
         method: message.method,
@@ -169,7 +174,9 @@ export function PluginFrame({
         sessions,
         limits,
         canvasInstanceId,
-        onOpenLauncher
+        onOpenLauncher,
+        onFocusSession,
+        personInFrame
       }).then((value) => {
         if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
@@ -194,7 +201,7 @@ export function PluginFrame({
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onHoverChange, onOpenLauncher, onMascotDrag, plugin, replies, sessions]);
+  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onFocusSession, onHoverChange, onOpenLauncher, onMascotDrag, plugin, replies, sessions]);
 
   useEffect(() => {
     postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });
@@ -254,7 +261,9 @@ async function handleRequest({
   sessions,
   limits,
   canvasInstanceId,
-  onOpenLauncher
+  onOpenLauncher,
+  onFocusSession,
+  personInFrame = false
 }: {
   plugin: InstalledPlugin;
   method: string;
@@ -264,6 +273,9 @@ async function handleRequest({
   limits: LimitsSnapshot | null;
   canvasInstanceId?: string;
   onOpenLauncher(provider: ProviderId): void;
+  onFocusSession?(session: SessionSnapshot): void;
+  /** The frame had the person's focus when it asked (a click or key press inside it). */
+  personInFrame?: boolean;
 }): Promise<unknown> {
   const pluginId = plugin.manifest.id;
   if (method === "host.getContext") return context;
@@ -305,6 +317,15 @@ async function handleRequest({
       startedAt: session.startedAt,
       exitCode: session.exitCode
     }));
+  }
+  if (method === "sessions.focus") {
+    // Moves the camera to an open card the page may already list; see sessionToFocus for the rules. Loaded on the
+    // first request (a person's action), not at startup.
+    const { sessionToFocus } = await import("./sessionFocus");
+    onFocusSession?.(sessionToFocus({
+      permissions: plugin.manifest.permissions, sessions, sessionId: params.sessionId, personInFrame, available: Boolean(onFocusSession)
+    }));
+    return null;
   }
   if (method === "limits.get") {
     requirePermission(plugin, "limits:read");

@@ -328,6 +328,7 @@ interface PluginSessionEvent {
   session: {
     id: string; provider: string; role: "agent" | "orchestrator" | "subagent"; parentSessionId?: string;
     title: string; status: string; exitCode: number | null; startedAt: number;
+    model?: string; effort?: string; // 启动时向 CLI 指定的模型与推理强度（若有）
     cwd: string;               // 用户选择的文件夹
     workingDirectory: string;  // 实际运行的位置（worktree 环境会移动它）
     environment?: { pluginId: string; kind: string; label: string; ref: unknown };
@@ -403,7 +404,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 |:--|:--|:--|
 | `storage` | `storage.get`、`storage.set` | 隔离的 JSON 存储，每个插件 64 KB |
 | `secrets` | `secrets.get`、`secrets.set`、`secrets.delete`；服务的 `secrets.get` | 通过 Electron `safeStorage` 加密的字符串机密；操作系统没有受保护存储时会明确失败。受信任的服务只能读取自身插件的机密 |
-| `sessions:read` | `sessions.list` | 仅限 ID、服务商、标题、状态、开始时间、退出码 |
+| `sessions:read` | `sessions.list`、`sessions.focus` | 仅限 ID、服务商、标题、状态、开始时间、退出码；在用户操作时将列表中的卡片带到前台 |
 | `launch:contribute` | 服务的 `launch` 块和 `canvastty.launch.prepare` | 可以为用户以其选项启动的智能体添加环境变量、参数和文件；设置 `policy` 后可以拒绝任何智能体启动 |
 | `environment:provide` | 服务的 `environments` 和 `canvastty.environment.*` | 可以为用户在其环境中启动的卡片创建运行位置，并更改它们在那里运行的命令、参数、变量和文件夹 |
 | `decision:provide` | 服务的 `decide` 和 `canvastty.decide` | 在 agent 的命令和文件写入运行之前看到它们（含输入），可以拒绝或询问用户；允许需要第二次确认 |
@@ -465,7 +466,7 @@ if (library) {
 }
 ```
 
-支持的方法有 `host.getContext`、`storage.*`、`secrets.*`、`sessions.list`、`limits.get`、`launcher.open`、`canvas.open`、`external.open`、`browser.open`、`window.open`、`media.*` 和 `playlists.*`。`canvas.open` 会打开或聚焦同一插件的 `canvas-app`，并尽可能放在发起请求的画布卡片旁边。`browser.open` 仅在 workspace 创建或聚焦 Browser 卡片并完成一次导航后才会完成；它只接受规范化的 HTTP(S) URL，不接受自由文本搜索、`file:`、`data:`、`javascript:`、`about:` 或带凭据的 URL。`window.open` 只能以同一个插件声明的 `window` 贡献为目标。
+支持的方法有 `host.getContext`、`storage.*`、`secrets.*`、`sessions.list`、`limits.get`、`launcher.open`、`canvas.open`、`external.open`、`browser.open`、`window.open`、`sessions.focus`、`media.*` 和 `playlists.*`。`canvas.open` 会打开或聚焦同一插件的 `canvas-app`，并尽可能放在发起请求的画布卡片旁边。`browser.open` 仅在 workspace 创建或聚焦 Browser 卡片并完成一次导航后才会完成；它只接受规范化的 HTTP(S) URL，不接受自由文本搜索、`file:`、`data:`、`javascript:`、`about:` 或带凭据的 URL。`window.open` 只能以同一个插件声明的 `window` 贡献为目标。`sessions.focus` `{ sessionId }`（或 `host.canvas.focusSession(id)`；需要 `sessions:read`）将视图移到一个已打开的卡片并选中它，与 HOME 行的行为相同。仅在画布应用和 HOME 小部件中可用，且只在用户位于插件框架内时生效（响应其点击或按键）；它不会向卡片输入、启动或停止卡片。
 
 非敏感 JSON 偏好应使用 `storage`；OAuth 令牌、API 密钥等凭据应使用 `secrets`。每个插件最多保存 32 个字符串键，每个值最大 16 KB，总计最大 64 KB。卸载插件时会删除这些机密，并且绝不会退回明文存储；如果操作系统无法提供受保护的加密，调用会明确失败。
 

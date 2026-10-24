@@ -3437,7 +3437,8 @@ const PLUGIN_SDK_SOURCE = `(() => {
       delete: (key) => request("secrets.delete", { key })
     }),
     canvas: Object.freeze({
-      open: (contributionId) => request("canvas.open", { contributionId })
+      open: (contributionId) => request("canvas.open", { contributionId }),
+      focusSession: (sessionId) => request("sessions.focus", { sessionId })
     }),
     media: Object.freeze({
       pickLibrary: () => request("media.pickLibrary"),

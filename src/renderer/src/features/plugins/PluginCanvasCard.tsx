@@ -42,6 +42,7 @@ interface PluginCanvasCardProps {
   onBoundsChange(id: string, bounds: SessionBounds): void;
   onDispose(id: string): void;
   onOpenLauncher(provider: ProviderId): void;
+  onFocusSession?(session: SessionSnapshot): void;
   onError(message: string): void;
   captureCanvasWheelOverWidgets: boolean;
   onWidgetFocus(): void;
@@ -84,6 +85,7 @@ export function PluginCanvasCard({
   onBoundsChange,
   onDispose,
   onOpenLauncher,
+  onFocusSession,
   onError,
   captureCanvasWheelOverWidgets,
   onWidgetFocus,
@@ -306,6 +308,7 @@ export function PluginCanvasCard({
         onHoverChange={onWidgetHoverChange}
         canvasInstanceId={instance.id}
         onOpenLauncher={onOpenLauncher}
+        onFocusSession={onFocusSession}
         onError={onError}
         onMascotDrag={isMascot ? dragMascot : undefined}
         suspended={!surfaceIsLive(lifecycle)}
