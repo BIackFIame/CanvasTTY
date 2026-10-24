@@ -1435,6 +1435,10 @@ export class PluginManager {
     const currentRoot = join(this.pluginRoot, pluginId);
     let plugin: InstalledPlugin | undefined;
     let previous: InstalledPlugin | undefined;
+    /** This plugin's own shared-read approvals before the switch (for the audit line). */
+    let previousApprovals: Record<string, string> | undefined;
+    /** Approvals other plugins held for this plugin's shares; they were given for the old source's code. */
+    const droppedApprovals = new Map<string, Record<string, string>>();
     let backedUp = false;
     let swapped = false;
     try {
@@ -1444,9 +1448,19 @@ export class PluginManager {
         throw new Error("The plugin changed since the review. Inspect the repository again.");
       }
       previous = structuredClone(plugin);
+      previousApprovals = this.shareApprovals.get(pluginId);
       // Revocation is durable (and stops the plugin's services) before any file is replaced.
       plugin.enabledHooks = [];
       this.revokeNativeCode(plugin);
+      // Their fingerprint pins the source, so they would only be suspended; dropping them keeps a later switch
+      // back from silently reviving them.
+      for (const [consumer, approvals] of this.shareApprovals) {
+        const kept = Object.fromEntries(Object.entries(approvals).filter(([key]) => !key.startsWith(`${pluginId} `)));
+        if (Object.keys(kept).length !== Object.keys(approvals).length) {
+          droppedApprovals.set(consumer, approvals);
+          this.shareApprovals.set(consumer, kept);
+        }
+      }
       await this.persistRegistry();
 
       const { manifest } = preview;
@@ -1482,7 +1496,10 @@ export class PluginManager {
       const revoked = [
         ...(previous.nativeCodeTrusted ? ["native-code"] : []),
         ...(previous.decisionsMayAllow ? ["decisions-may-allow"] : []),
-        ...(previous.enabledHooks.length ? [`hooks:${previous.enabledHooks.length}`] : [])
+        ...(previous.mayStartOrchestrators ? ["may-start-orchestrators"] : []),
+        ...(previous.enabledHooks.length ? [`hooks:${previous.enabledHooks.length}`] : []),
+        ...(Object.keys(previousApprovals ?? {}).length ? [`shared-reads:${Object.keys(previousApprovals!).length}`] : []),
+        ...(droppedApprovals.size ? [`approvals-by-others:${droppedApprovals.size}`] : [])
       ];
       await this.audit({
         event: "plugin.source-changed",
@@ -1494,7 +1511,7 @@ export class PluginManager {
         revoked,
         kept: ["storage", "data", "secrets"]
       });
-      return structuredClone(activePlugin(changed));
+      return this.view(changed);
     } catch (error) {
       if (!previous) throw error;
       try {
@@ -3885,7 +3902,7 @@ function storedPreviousSource(record: StoredPluginRecord): { previousSourceUrl?:
 
 /**
  * What differs between the installed plugin and another source's package, compared on the parts that grant
- * something: permissions, native services and hooks, surfaces, decision services and launch policies.
+ * something: permissions, native services and hooks, surfaces, decision services, launch policies and shared reads.
  */
 export function pluginSourceChanges(current: PluginManifest, next: PluginManifest): PluginSourceChangeDiff[] {
   const parts = (manifest: PluginManifest): Record<string, string[]> => ({
@@ -3894,7 +3911,9 @@ export function pluginSourceChanges(current: PluginManifest, next: PluginManifes
     hooks: (manifest.hooks ?? []).map((hook) => hook.id),
     contributions: manifest.contributions.map((contribution) => `${contribution.kind}:${contribution.id}`),
     decide: (manifest.services ?? []).filter((service) => service.decide).map((service) => service.id),
-    launchPolicy: (manifest.services ?? []).filter((service) => service.launch?.policy).map((service) => service.id)
+    launchPolicy: (manifest.services ?? []).filter((service) => service.launch?.policy).map((service) => service.id),
+    uses: (manifest.uses ?? []).map((use) => `${use.plugin} ${use.method}`),
+    shares: (manifest.services ?? []).flatMap((service) => (service.shares ?? []).map((share) => share.method))
   });
   const before = parts(current);
   const after = parts(next);

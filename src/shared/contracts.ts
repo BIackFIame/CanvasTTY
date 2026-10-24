@@ -1435,7 +1435,7 @@ export interface PluginInstallPreview {
 
 /** One part of a plugin's manifest that differs between its installed source and a new one. */
 export interface PluginSourceChangeDiff {
-  /** permissions, services, hooks, contributions, decide (services that judge tool calls), launchPolicy. */
+  /** permissions, services, hooks, contributions, decide (services that judge tool calls), launchPolicy, uses, shares. */
   kind: string;
   added: string[];
   removed: string[];

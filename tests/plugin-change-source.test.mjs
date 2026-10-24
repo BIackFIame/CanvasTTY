@@ -364,3 +364,106 @@ test("the IPC channels check the sender, keep secrets and media, and the UI live
     assert.doesNotMatch(source, /Change source|Сменить источник|pluginSourceChangeText|PluginSourceChange\b/);
   }
 });
+
+const PROVIDER = "com.example.accounts";
+const CONSUMER = "com.example.assistant";
+
+/** Two plugins: a provider sharing `accounts.routes` and a consumer reading it that may start orchestrators. */
+async function sharedReadFixture(t) {
+  const root = await mkdtemp(join(tmpdir(), "canvastty-change-source-shares-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const userData = join(root, "userData");
+  const service = (id, extra = {}) => ({ id, title: id, entry: `services/${id}.mjs`, ...extra });
+  const manifests = {
+    "example/accounts": { id: PROVIDER, services: [service("main", { shares: [{ method: "accounts.routes", description: "Routes.", dataClass: "D1" }] })] },
+    "example/accounts-dev": { id: PROVIDER, version: "1.1.0", services: [service("main", { shares: [{ method: "accounts.routes", description: "Routes.", dataClass: "D1" }] })] },
+    "example/assistant": { id: CONSUMER, permissions: ["sessions:launch"], services: [service("router")], uses: [{ plugin: PROVIDER, method: "accounts.routes" }] },
+    "example/assistant-dev": { id: CONSUMER, version: "2.0.0", permissions: ["sessions:launch"], services: [service("router")], uses: [{ plugin: PROVIDER, method: "accounts.routes" }] }
+  };
+  const manager = new PluginManager(userData, async (url, destination) => {
+    const key = String(url).replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "");
+    const manifest = manifests[key];
+    if (!manifest) throw new Error(`no fixture for ${url}`);
+    await mkdir(join(destination, "services"), { recursive: true });
+    await writeFile(join(destination, "canvastty.plugin.json"), JSON.stringify({
+      apiVersion: 2, name: manifest.id, version: "1.0.0", description: "Fixture.", permissions: [], contributions: [], ...manifest
+    }));
+    for (const entry of manifest.services) await writeFile(join(destination, entry.entry), `// ${key}\n`);
+  });
+  t.after(() => manager.dispose());
+  await manager.load();
+  for (const repo of ["example/accounts", "example/assistant"]) {
+    await manager.install((await manager.previewInstall(`https://github.com/${repo}`)).token);
+  }
+  await manager.setNativeCodeTrusted(PROVIDER, true);
+  await manager.setNativeCodeTrusted(CONSUMER, true);
+  await manager.setSharedReadApproved(CONSUMER, PROVIDER, "accounts.routes", true);
+  await manager.setMayStartOrchestrators(CONSUMER, true);
+  assert.equal(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes").ok, true);
+  return { manager, userData };
+}
+
+test("switching a consumer's source revokes its orchestrator consent and shared-read approvals", async (t) => {
+  const { manager, userData } = await sharedReadFixture(t);
+  const review = await manager.previewSourceChange(CONSUMER, "https://github.com/example/assistant-dev");
+  const changed = await manager.changeSource(CONSUMER, "https://github.com/example/assistant-dev", review.token);
+  assert.equal(changed.nativeCodeTrusted, false);
+  assert.equal(changed.mayStartOrchestrators, false);
+  assert.equal(changed.sharedReads[0].state, "needs-approval");
+  assert.equal(manager.canStartOrchestrators(CONSUMER), false);
+  assert.deepEqual(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes"), { ok: false, reason: "consumer_unavailable" });
+  // Trusting the new code again does not bring the approvals back.
+  await manager.setNativeCodeTrusted(CONSUMER, true);
+  assert.deepEqual(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes"), { ok: false, reason: "not_approved" });
+  assert.equal(manager.canStartOrchestrators(CONSUMER), false);
+  const [line] = (await readFile(join(userData, "plugin-audit.log"), "utf8")).trim().split("\n").map((entry) => JSON.parse(entry));
+  assert.deepEqual(line.revoked, ["native-code", "may-start-orchestrators", "shared-reads:1"]);
+});
+
+test("switching a provider's source drops other plugins' approvals to read from it; switching back does not revive them", async (t) => {
+  const { manager, userData } = await sharedReadFixture(t);
+  const review = await manager.previewSourceChange(PROVIDER, "https://github.com/example/accounts-dev");
+  const changed = await manager.changeSource(PROVIDER, "https://github.com/example/accounts-dev", review.token);
+  assert.equal(changed.nativeCodeTrusted, false);
+  await manager.setNativeCodeTrusted(PROVIDER, true);
+  assert.deepEqual(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes"), { ok: false, reason: "not_approved" });
+  // The consumer itself keeps its own trust: only the approval to read from the switched plugin ended.
+  assert.equal(manager.list().find((plugin) => plugin.manifest.id === CONSUMER).nativeCodeTrusted, true);
+
+  const back = await manager.previewSourceChange(PROVIDER, changed.previousSourceUrl);
+  await manager.changeSource(PROVIDER, changed.previousSourceUrl, back.token);
+  await manager.setNativeCodeTrusted(PROVIDER, true);
+  assert.deepEqual(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes"), { ok: false, reason: "not_approved" },
+    "an approval given for the old code is not revived by switching back");
+  const registry = JSON.parse(await readFile(join(userData, "plugins.json"), "utf8"));
+  assert.equal(registry[CONSUMER].approvedShares, undefined);
+  const lines = (await readFile(join(userData, "plugin-audit.log"), "utf8")).trim().split("\n").map((entry) => JSON.parse(entry));
+  assert.deepEqual(lines[0].revoked, ["native-code", "approvals-by-others:1"]);
+});
+
+test("a failed provider switch fails closed: the approvals other plugins held stay dropped", async (t) => {
+  const { manager, userData } = await sharedReadFixture(t);
+  const review = await manager.previewSourceChange(PROVIDER, "https://github.com/example/accounts-dev");
+  await mkdir(join(userData, "plugin-versions.json.tmp"));
+  await assert.rejects(manager.changeSource(PROVIDER, "https://github.com/example/accounts-dev", review.token));
+  // The old package is back, but no grant on it comes back by itself (the person may have withdrawn one meanwhile).
+  assert.equal(manager.sharedReadRoute(CONSUMER, PROVIDER, "accounts.routes").ok, false);
+  assert.equal(manager.canStartOrchestrators(CONSUMER), true);
+  const registry = JSON.parse(await readFile(join(userData, "plugins.json"), "utf8"));
+  assert.ok(!Object.keys(registry[CONSUMER].approvedShares ?? {}).some((key) => key.startsWith(`${PROVIDER} `)));
+  assert.equal(registry[PROVIDER].sourceUrl, "https://github.com/example/accounts.git");
+});
+
+test("the review lists shared reads a new source adds or drops", () => {
+  const manifest = (uses, shares) => validatePluginManifest({
+    apiVersion: 2, id: CONSUMER, name: "A", version: "1.0.0", description: "d", permissions: [], contributions: [],
+    services: [{ id: "main", title: "Main", entry: "main.mjs", ...(shares.length ? { shares: shares.map((method) => ({ method, description: "x" })) } : {}) }],
+    ...(uses.length ? { uses: uses.map((method) => ({ plugin: PROVIDER, method })) } : {})
+  });
+  const kinds = Object.fromEntries(pluginSourceChanges(
+    manifest(["accounts.routes"], []),
+    manifest(["accounts.keys"], ["assistant.routes"])
+  ).map((change) => [change.kind, change]));
+  assert.deepEqual(kinds.uses, { kind: "uses", added: [`${PROVIDER} accounts.keys`], removed: [`${PROVIDER} accounts.routes`] });
+  assert.deepEqual(kinds.shares, { kind: "shares", added: ["assistant.routes"], removed: [] });
+});

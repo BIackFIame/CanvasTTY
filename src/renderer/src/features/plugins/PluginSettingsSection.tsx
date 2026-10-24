@@ -1213,7 +1213,7 @@ function PluginSourceChange({
   );
 }
 
-const KNOWN_SOURCE_CHANGE_KINDS = { permissions: 1, services: 1, hooks: 1, contributions: 1, decide: 1, launchPolicy: 1 };
+const KNOWN_SOURCE_CHANGE_KINDS = { permissions: 1, services: 1, hooks: 1, contributions: 1, decide: 1, launchPolicy: 1, uses: 1, shares: 1 };
 
 function PermissionList({ permissions, locale }: { permissions: PluginPermission[]; locale: LocaleId }): React.JSX.Element {
   return (
