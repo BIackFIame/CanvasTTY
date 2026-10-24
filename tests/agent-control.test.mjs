@@ -16,7 +16,7 @@ import { PixelSkinPackRegistry } from "../src/main/services/PixelSkinPackRegistr
 import { SettingsStore } from "../src/main/services/SettingsStore.ts";
 import { TerminalManager, terminalEnvironment } from "../src/main/services/TerminalManager.ts";
 import { TerminalSessionStore } from "../src/main/services/TerminalSessionStore.ts";
-import { AgentControlService } from "../src/main/services/AgentControlService.ts";
+import { AgentControlService, DelegationRefusal } from "../src/main/services/AgentControlService.ts";
 import { RuntimeGateway } from "../src/main/services/agent-runtime/RuntimeGateway.ts";
 import {
   AGENT_RUNTIME_ENV,
@@ -95,6 +95,19 @@ test("agent skin API lists and activates persistent themes", localSocket, async 
   assert.equal((await f.request("skin-list")).activeId, "matrix");
   assert.equal((await new SettingsStore(f.root, "en").load()).terminalBorderSkin, "matrix");
   await assert.rejects(f.request("skin-select", { skinId: "pixel:missing" }), (error) => error.code === "INVALID_PARAMS");
+});
+
+test("a scoped create reports an inherited-model conflict before creating any worker", localSocket, async (t) => {
+  const f = await fixture(t, { spawnSubagent: async () => {
+    throw new DelegationRefusal("The inherited plugin sets the model.", "MODEL_INHERITED");
+  } });
+  const parent = f.terminals.create({ provider: "codex", profile: "normal", cwd: f.root,
+    role: "orchestrator", position: { x: 0, y: 0 } });
+  const grant = f.gateway.grantSession(parent.id);
+  const before = f.calls.length;
+  await assert.rejects(controlRequest({ connectionPath: grant, clientPath: join(dirname(grant), "controller.json"),
+    method: "create", params: { provider: "codex", cwd: f.root, model: "jev/auto" } }), { code: "MODEL_INHERITED" });
+  assert.equal(f.calls.length, before);
 });
 
 test("agent ZIP import accepts per-level terminal openings from a JSON file", localSocket, async (t) => {

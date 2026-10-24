@@ -149,7 +149,7 @@ test("Codex uses embedded mode only for scoped config and keeps native resume ar
 test("Claude keeps launch-scoped adapter arguments in their supplied order", () => {
   const providerCli = available("claude", "/resolved/claude");
   const launch = resolveTerminalLaunch("claude", "normal", ["--mcp-config", "{}"], { providerCli });
-  assert.deepEqual(launch.args, ["--mcp-config", "{}"]);
+  assert.deepEqual(launch.args, ["--mcp-config", "{}", "--settings", '{"disableAgentView":true}']);
 });
 
 test("restored agent windows use each provider's native continue mode", () => {
@@ -168,7 +168,7 @@ test("restored agent windows use each provider's native continue mode", () => {
       providerCli: available(provider, `/resolved/${provider}`),
       resumePrevious: true
     });
-    assert.deepEqual(launch.args, ["--bridge", "--continue"]);
+    assert.deepEqual(launch.args, ["--bridge", ...(provider === "claude" ? ["--settings", '{"disableAgentView":true}'] : []), "--continue"]);
   }
   const hermes = resolveTerminalLaunch("hermes", "normal", ["--bridge"], {
     providerCli: available("hermes", "/resolved/hermes"),
@@ -235,7 +235,7 @@ test("Claude, OpenCode, Hermes and Qwen resume their own session by id", () => {
     resumePrevious: true,
     resumeThreadId: uuid.toUpperCase()
   });
-  assert.deepEqual(claude.args, ["--bridge", "--resume", uuid]);
+  assert.deepEqual(claude.args, ["--bridge", "--settings", '{"disableAgentView":true}', "--resume", uuid]);
 
   const opencode = resolveTerminalLaunch("opencode", "normal", [], {
     providerCli: available("opencode", "/resolved/opencode"),

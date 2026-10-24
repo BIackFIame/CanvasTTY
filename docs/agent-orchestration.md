@@ -57,6 +57,8 @@ The core applies these to every way an agent can start another one: `spawn_agent
 
 ## Agent isolation
 
+CanvasTTY 1.8.2 temporarily disables Claude agent view (`/bg`, `/background`, background dispatch) for its launches. A shared Claude daemon cannot inherit a card's OS sandbox or its private gateway identity. Existing cards need a restart; ordinary in-process subagents and background shell tasks are separate features. Hotkeys do not require disabling isolation.
+
 Settings → Agents → Agent isolation (on by default) wraps an agent's whole process tree (the CLI, its commands, its MCP servers and hooks) in an operating-system layer. It applies to every subagent, every agent a plugin starts, and every agent in a profile other than normal (manual), whoever launched it. Inside it:
 
 - files can be written only in the project folder (both spellings), the launch's own temporary folder (`TMPDIR`; for Claude also `CLAUDE_CODE_TMPDIR`, so its Bash tool and editor files stay out of the `/tmp/claude-<uid>` folder all Claude sessions share), the CLI's own state, configuration and cache folders, and the npm/bun caches; the project's git hooks and an existing repository's git config, and the CLI's own permission settings files (`~/.codex/config.toml`, `~/.claude/settings.json`, Kimi's `config.toml` in `~/.kimi-code` or `~/.kimi`, OpenCode's config) are not writable;

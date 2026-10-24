@@ -351,7 +351,7 @@ export class AgentControlService {
     if (model !== undefined && modelPlugins.length > 0) {
       const named = modelPlugins.map((pluginId) => pluginId.slice(0, 80)).join(", ");
       throw new DelegationRefusal(`This subagent inherits its orchestrator's ${named} launch options, which set its model; it cannot also take model ${model.slice(0, 80)}. `
-        + `Omit model, or pass launchOptions for ${named} that choose the model you want.`);
+        + `Omit model, or pass launchOptions for ${named} that choose the model you want.`, "MODEL_INHERITED");
     }
     // A plugin turned off since the orchestrator started is left out, unless it set the model: then the subagent would
     // run on its CLI's own default model and sign-in, so it is refused instead.
@@ -671,9 +671,12 @@ export const APPROVAL_REFUSAL = "This subagent is waiting for the person to answ
 
 /** A delegation rule refused the request; the text says why, for the orchestrator to adapt instead of retrying. */
 export class DelegationRefusal extends LaunchRefusal {
-  constructor(message: string) {
+  readonly code: string;
+
+  constructor(message: string, code = "REFUSED") {
     super(message);
     this.name = "DelegationRefusal";
+    this.code = code;
   }
 }
 

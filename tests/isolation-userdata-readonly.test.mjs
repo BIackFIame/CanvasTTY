@@ -36,7 +36,7 @@ function pathsFor(w, cwd, env = {}) {
   return isolationPaths({ provider: "codex", cwd, sessionTemp: join(w.temp, "s"), env: { ...w.env, ...env }, userDataPath: w.userData, sessionId: "s" });
 }
 
-test("the paths: a project that contains CanvasTTY's data folder leaves that folder read-only, its account home writable", async (t) => {
+test("the paths: a project that contains CanvasTTY's data folder leaves that folder read-only, its account home writable", { skip: process.platform === "win32" ? "seatbelt profiles require POSIX paths" : false }, async (t) => {
   const w = await world(t);
   const paths = pathsFor(w, w.home, { CODEX_HOME: w.accountHome });
   assert.ok(paths.writable.includes(w.home), "the project stays writable");

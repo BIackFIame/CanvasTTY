@@ -1,5 +1,6 @@
 import type { TerminalDataEvent } from "../../../shared/contracts";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { terminalEmulatorOptions } from "../../../shared/terminalCompatibility.ts";
 
 const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
 
@@ -20,7 +21,7 @@ export class SessionScreen {
     this.id = id;
     this.port = port;
     const geometry = port.geometry(id);
-    this.terminal = new (xterm().Terminal)({ cols: geometry.cols, rows: geometry.rows, allowProposedApi: true, scrollback: 200 });
+    this.terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), cols: geometry.cols, rows: geometry.rows, allowProposedApi: true, scrollback: 200 });
     const snapshot = port.readBuffer(id);
     this.offset = snapshot.outputOffset;
     this.ready = new Promise((resolve) => this.terminal.write(snapshot.buffer, resolve));

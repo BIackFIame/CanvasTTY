@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { terminalEmulatorOptions } from "../../../shared/terminalCompatibility.ts";
 import { NdjsonLineReader } from "../../../agent-runtime/ndjson.mjs";
 import { MAX_UNIX_SOCKET_PATH_BYTES, closeServer, listenOnEndpoint, tokenDigest, tokenMatches } from "../gatewaySocket.ts";
 import type { AgentProviderId, AppSettings, CreateSessionRequest, PixelSkinApertures, SessionMetadata, SessionSnapshot, TerminalBufferSnapshot } from "../../../shared/contracts.ts";
@@ -18,6 +19,7 @@ import { WindowsPipeHostTransport, type AgentGatewaySocket } from "../agent-brow
 import { CONTROL_PROVIDERS, controlCapabilities, isControlProvider } from "./controlCapabilities.ts";
 import { isLaunchProfile } from "../../../shared/autoMode.ts";
 import { LaunchRefusal } from "../launchRefusal.ts";
+import { DelegationRefusal } from "../AgentControlService.ts";
 import { MAX_PIXEL_SKIN_ARCHIVE_BYTES, type PixelSkinPackRegistry } from "../PixelSkinPackRegistry.ts";
 import type { SettingsStore } from "../SettingsStore.ts";
 import { listProviderDirectory, type ProviderDirectory } from "../providerDirectory.ts";
@@ -556,7 +558,7 @@ export class AgentControlGateway {
         throw error;
       }
       try {
-        const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+        const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
         const snapshot = this.options.terminals.readBuffer(session.id);
         const owned: OwnedSession = { owner, startedAt: session.startedAt, terminal,
           ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),
@@ -702,14 +704,15 @@ export class AgentControlGateway {
         ...(params.model !== undefined ? { model: params.model as string } : {}),
         ...(params.effort !== undefined ? { effort: params.effort as ReasoningEffort } : {}) });
     } catch (error) {
-      throw new ControlError("REFUSED", error instanceof Error ? error.message : "The subagent was not created.");
+      throw new ControlError(error instanceof DelegationRefusal ? error.code : "REFUSED",
+        error instanceof Error ? error.message : "The subagent was not created.");
     } finally {
       this.startingSubagents -= 1;
     }
     if (this.closed) throw new ControlError("CLOSED", "Agent control is shutting down.");
     const capabilities = controlCapabilities(provider);
     try {
-      const terminal = new (xterm().Terminal)({ ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
+      const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), ...this.options.terminals.geometry(session.id), scrollback: 200, allowProposedApi: true });
       const snapshot = this.options.terminals.readBuffer(session.id);
       this.sessions.set(session.id, { owner, startedAt: session.startedAt, terminal,
         ready: new Promise<void>((resolve) => terminal.write(snapshot.buffer, resolve)),

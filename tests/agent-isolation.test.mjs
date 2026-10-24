@@ -63,10 +63,10 @@ function isolation(w, options = {}) {
 }
 
 /** Runs `sh -c script` under the generated profile; returns stdout lines. */
-function run(w, script, { provider = "codex", env = {}, granted, cwd = w.project, taskProjectRoot, placedProjects } = {}) {
+function run(w, script, { provider = "codex", env = {}, granted, ownWritable, cwd = w.project, taskProjectRoot, placedProjects } = {}) {
   const wrapped = isolation(w).wrap({ sessionId: "s1", provider, cwd: cwd.normalize("NFC"), command: "/bin/sh", args: ["-c", script],
-    env: { ...w.env, ...env }, ...(granted ? { grantedPrivate: granted } : {}), ...(taskProjectRoot ? { taskProjectRoot } : {}),
-    ...(placedProjects ? { placedProjects } : {}) });
+    env: { ...w.env, ...env }, ...(granted ? { grantedPrivate: granted } : {}), ...(ownWritable ? { ownWritable } : {}),
+    ...(taskProjectRoot ? { taskProjectRoot } : {}), ...(placedProjects ? { placedProjects } : {}) });
   try {
     const result = spawnSync(wrapped.command, wrapped.args, { cwd, env: wrapped.env, encoding: "utf8", timeout: 20_000 });
     return { lines: result.stdout.split("\n").filter(Boolean), stderr: result.stderr, env: wrapped.env };
@@ -784,6 +784,47 @@ test("seatbelt, for real: the launch writes the account home it was handed, not 
   assert.equal(await readFile(join(own, "auth.json"), "utf8"), "refreshed\n");
 });
 
+test("the paths: a Claude card's own draft folder is writable and readable again; other cards' are hidden", async (t) => {
+  const w = await world(t);
+  const own = join(w.userData, "claude-draft", "s1");
+  const paths = isolationPaths({ provider: "claude", cwd: w.project, sessionTemp: join(w.temp, "s"), env: w.env,
+    userDataPath: w.userData, sessionId: "s1", ownWritable: [own] });
+  assert.ok(paths.writable.includes(own) && paths.readableAgain.includes(own));
+  assert.ok(paths.unreadable.includes(join(w.userData, "claude-draft")));
+  const without = isolationPaths({ provider: "claude", cwd: w.project, sessionTemp: join(w.temp, "s"), env: w.env, userDataPath: w.userData, sessionId: "s1" });
+  assert.ok(!without.writable.includes(own) && !without.readableAgain.includes(own));
+});
+
+test("seatbelt, for real: Claude's draft helper answers in its own card's folder and cannot reach another card's", onMac, async (t) => {
+  const w = await world(t);
+  const drafts = join(w.userData, "claude-draft");
+  const own = join(drafts, "s1");
+  const other = join(drafts, "s2");
+  const helper = new URL("../src/agent-runtime/draft-editor.sh", import.meta.url).pathname;
+  await mkdir(own, { recursive: true });
+  await mkdir(other, { recursive: true });
+  const prompt = join(w.project, "claude-prompt-t.md");
+  await writeFile(prompt, "черновик");
+  await writeFile(join(own, "req.1"), "copy\n");
+  await writeFile(join(other, "req.2"), "copy\n");
+  await writeFile(join(other, "draft.3"), "другая карточка");
+  const { lines } = run(w, [
+    `/bin/sh "${helper}" "${prompt}" && echo own`,
+    `printf 'clear\\n' > "${own}/req.2" && /bin/sh "${helper}" "${prompt}" && echo cleared`,
+    // Another card's request is hidden: with none of its own, this Ctrl+G opens the person's editor.
+    `/bin/sh "${helper}" "${prompt}"`,
+    `: > "${other}/req.9" 2>/dev/null && echo other-write`,
+    `cat "${other}/draft.3" 2>/dev/null && echo other-read`,
+    `ls "${drafts}" 2>/dev/null && echo listed`
+  ].join("; "), { provider: "claude", ownWritable: [own], env: { CANVASTTY_DRAFT_DIR: own, CANVASTTY_DRAFT_EDITOR: "echo editor" } });
+  assert.deepEqual(lines, ["own", "cleared", `editor ${prompt}`]);
+  assert.deepEqual((await readdir(own)).sort(), ["done.1", "done.2", "draft.1", "draft.2"]);
+  assert.equal(await readFile(join(own, "draft.1"), "utf8"), "черновик");
+  assert.equal(await readFile(join(own, "draft.2"), "utf8"), "черновик");
+  assert.equal(await readFile(prompt, "utf8"), "", "clear empties Claude's prompt file after copying");
+  assert.deepEqual((await readdir(other)).sort(), ["draft.3", "req.2"]);
+});
+
 test("seatbelt, for real: git init works, but no repository in the project gets a hook or attributes from the agent", onMac, async (t) => {
   const w = await world(t);
   const { lines, env } = run(w, [
@@ -836,14 +877,14 @@ test("an isolated Claude keeps its Bash and editor files in the launch's own tem
     ["seatbelt", isolation(w, { platform: "darwin", exists: () => true })],
     ["bubblewrap", isolation(w, { platform: "linux", bubblewrapPath: "/usr/bin/bwrap", bubblewrapProbe: () => null, exists: () => true })]
   ];
-  for (const [layer, isolated] of layers) {
+  for (const [layer, isolated] of layers.filter(([layer]) => process.platform !== "win32" || layer !== "seatbelt")) {
     // A CLAUDE_CODE_TMPDIR from the person's environment would point Claude back at a shared folder: replaced.
     const claude = isolated.wrap({ sessionId: "c", provider: "claude", cwd: w.project, command: "/usr/bin/claude", args: [], env: { ...w.env, CLAUDE_CODE_TMPDIR: "/tmp" } });
     const codex = isolated.wrap({ sessionId: "x", provider: "codex", cwd: w.project, command: "/usr/bin/codex", args: [], env: w.env });
     try {
       assert.equal(claude.env.CLAUDE_CODE_TMPDIR, claude.env.TMP, layer);
       assert.equal(`${claude.env.CLAUDE_CODE_TMPDIR}/`, claude.env.TMPDIR, layer);
-      assert.match(claude.env.TMP, new RegExp(`^${w.temp}/${ISOLATION_FOLDER_PREFIX}`, "u"), layer);
+      assert.ok(claude.env.TMP.startsWith(join(w.temp, ISOLATION_FOLDER_PREFIX)), layer);
       assert.equal(codex.env.CLAUDE_CODE_TMPDIR, undefined, `${layer}: only Claude reads it`);
       // The folder all of the person's Claude sessions share is not opened for writing.
       const text = layer === "seatbelt" ? readFileSync(claude.args[1], "utf8") : claude.args.join(" ");

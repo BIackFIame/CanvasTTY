@@ -27,6 +27,8 @@ export interface IsolationPathInput {
   sessionId: string;
   /** Folders under CanvasTTY's private data this launch was handed (its own control grant, its account home). */
   grantedPrivate?: readonly string[];
+  /** Folders under CanvasTTY's private data this launch may also write (its Claude draft folder); read again too. */
+  ownWritable?: readonly string[];
   /** Extra socket folders this launch may connect to (the control grant's endpoint folder). */
   socketFolders?: readonly string[];
   /**
@@ -193,7 +195,7 @@ export const PLUGIN_DATA_FOLDER = "plugin-data";
 export function privateAppData(userDataPath: string): string[] {
   return ["agent-control", "provider-secrets.bin", "plugin-secrets", "account-homes", "github-oauth.json", "launch-runs", PLUGIN_DATA_FOLDER,
     // Rollback points live in "checkpoints"; the two older names stay private in case an earlier build left them.
-    "checkpoints", "checkpoints.json", "checkpoint-objects"]
+    "checkpoints", "checkpoints.json", "checkpoint-objects", "claude-draft"]
     .map((name) => join(userDataPath, name));
 }
 
@@ -261,6 +263,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     // variable pointing at HOME or above the project would hide them, so it is not followed.
     .filter((folder) => !ownFolders.includes(folder) && !hides(folder));
   const privateData = privateAppData(input.userDataPath);
+  const ownWritable = input.ownWritable ?? [];
   // A validated linked worktree (a plugin environment's): the project is the whole registered worker tree, even when
   // the agent starts in a subfolder of it.
   const worktree = input.worktreeGitAccess && isWithin(input.cwd, input.worktreeGitAccess.cwd) ? input.worktreeGitAccess : null;
@@ -277,7 +280,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   if (projectDepth >= 2 && !(input.placedProjects ?? []).some((placed) => placesProject(pathSpellings, pluginDataRoot, placed, placedTarget))) {
     throw new Error(`The project ${project} is inside CanvasTTY's private plugin data, and CanvasTTY did not place this launch there. Only a plugin environment's own folder or a folder the person chose is opened inside plugin data.`);
   }
-  const grants = [...(input.grantedPrivate ?? []), join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
+  const grants = [...(input.grantedPrivate ?? []), ...ownWritable, join(input.userDataPath, "launch-runs", safeSegment(input.sessionId)),
     ...(projectDepth >= 2 ? [project] : [])];
   if (input.readOnlyProject && worktree) {
     // Plan in a worktree: no writable CLI state may sit inside or above the read-only worker tree.
@@ -336,6 +339,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
     ...(input.readOnlyProject ? [] : [project]),
     input.sessionTemp,
     ...ownFolders,
+    ...ownWritable,
     join(home, ".npm"), join(home, ".bun"), join(xdg.cache, "npm"), join(xdg.cache, "bun")
   ]);
   const userData = pathSpellings(input.userDataPath);
@@ -345,7 +349,7 @@ export function isolationPaths(input: IsolationPathInput): IsolationPaths {
   return {
     writable,
     readOnlyFolders,
-    fixedFolders: [...new Set(fixedFolders)],
+    fixedFolders: [...new Set([...fixedFolders, ...all(ownWritable)])],
     writableFiles: all(own.files),
     creatableFolders: all([...ownFolders, join(home, ".npm"), join(home, ".bun")].flatMap((folder) => ancestorsBelow(home, folder))),
     protectedWrites: all([

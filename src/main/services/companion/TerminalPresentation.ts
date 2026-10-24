@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { lazyRequire } from "../../lazyRequire.ts";
+import { terminalEmulatorOptions } from "../../../shared/terminalCompatibility.ts";
 import {
   IPC,
   type SessionMetadata,
@@ -90,6 +91,7 @@ export class TerminalPresentation {
     this.sweepIdle(screen.lastRead);
     if (!screen.terminal) {
       const terminal = new (xterm().Terminal)({
+        ...terminalEmulatorOptions(process.platform),
         ...this.port.geometry(id),
         allowProposedApi: true,
         scrollback: 300,

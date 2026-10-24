@@ -238,7 +238,7 @@ test("a card with options waits for its plugins; a refusal is shown on the card 
   assert.equal(started.exitCode, null);
   await waitFor(() => calls.length === 1);
   assert.equal(calls[0].options.env.EXTRA, "yes");
-  assert.deepEqual(calls[0].args, ["--verbose"]);
+  assert.deepEqual(calls[0].args, ["--verbose", "--settings", '{"disableAgentView":true}']);
   assert.equal(await readFile(calls[0].options.env.EXTRA_FILE, "utf8"), "x");
   calls[0].exit(0);
   await waitFor(() => stat(calls[0].options.env.EXTRA_FILE).then(() => false, () => true));

@@ -1,5 +1,6 @@
 import { lazyRequire } from "../lazyRequire.ts";
 import { terminalRowsText } from "./materials/sessionScreen.ts";
+import { terminalEmulatorOptions } from "../../shared/terminalCompatibility.ts";
 
 const xterm = lazyRequire<typeof import("@xterm/headless")>("@xterm/headless");
 
@@ -15,7 +16,7 @@ const DEFAULT_GEOMETRY = { cols: 120, rows: 40 };
  */
 export async function renderedTerminalText(data: string, geometry: { cols: number; rows: number } | null): Promise<string> {
   const { cols, rows } = geometry && geometry.cols > 0 && geometry.rows > 0 ? geometry : DEFAULT_GEOMETRY;
-  const terminal = new (xterm().Terminal)({ cols, rows, scrollback: SCROLLBACK_ROWS, allowProposedApi: true });
+  const terminal = new (xterm().Terminal)({ ...terminalEmulatorOptions(process.platform), cols, rows, scrollback: SCROLLBACK_ROWS, allowProposedApi: true });
   const rowsText = (): string => terminalRowsText(terminal, 0, terminal.buffer.active.length, true).replace(/\n+$/u, "");
   // A full-screen TUI leaves its alternate screen as it exits, which discards that screen: its last frame (often why it
   // stopped) is kept from the moment it leaves, before what it printed afterwards.

@@ -54,6 +54,10 @@ export function seatbeltProfile(paths: IsolationPaths): string {
   if (ownHidden.length > 0) {
     lines.push(`(allow file-write*${ownHidden.map((path) => ` (subpath ${quote(path)})`).join("")})`);
   }
+  // Reopening an own writable folder must not reopen replacement of that folder itself.
+  if (paths.fixedFolders.length > 0) {
+    lines.push(`(deny file-write-unlink${paths.fixedFolders.map((path) => ` (literal ${quote(path)})`).join("")})`);
+  }
   // After every allow: git hooks and attributes of any repository in the project (only `*.sample` hooks, what
   // `git init` writes), and the protected files.
   const hookRules = [

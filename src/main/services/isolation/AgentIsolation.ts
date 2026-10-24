@@ -87,6 +87,8 @@ export interface IsolationLaunch {
   gatewaySockets?: readonly string[];
   /** Folders CanvasTTY itself placed this launch in (an environment's worktree, the person's chosen folder). */
   placedProjects?: readonly PlacedProject[];
+  /** Folders under CanvasTTY's private data this launch may also write (its Claude draft folder). */
+  ownWritable?: readonly string[];
   /** The launch profile: in plan the project is not writable. */
   profile?: LaunchProfile;
 }
@@ -218,6 +220,7 @@ export class AgentIsolation {
         ...(granted.length > 0 ? { grantedPrivate: granted } : {}),
         ...(launch.gatewaySockets ? { gatewaySockets: launch.gatewaySockets } : {}),
         ...(launch.placedProjects ? { placedProjects: launch.placedProjects } : {}),
+        ...(launch.ownWritable ? { ownWritable: launch.ownWritable } : {}),
         ...(launch.profile === "plan" ? { readOnlyProject: true } : {})
       });
       // isolationPaths refused a project in plugin data that CanvasTTY did not place; one it placed must also be a linked

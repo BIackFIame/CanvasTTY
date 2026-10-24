@@ -298,7 +298,7 @@ function slowOpenCodeOrchestration(t, options) {
   return { cli, terminals, control, execute: (tool, args) => handler.execute(orchestrator.id, { tool, arguments: args }) };
 }
 
-test("spawn_agent: a slow-starting OpenCode gets its first prompt once its input field is up, exactly once", async (t) => {
+test("spawn_agent: a slow-starting OpenCode gets its first prompt once its input field is up, exactly once", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const f = slowOpenCodeOrchestration(t, { startupMs: 150 });
   const spawned = f.execute("spawn_agent", { provider: "opencode", cwd, prompt: "do part A" });
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -314,7 +314,7 @@ test("spawn_agent: a slow-starting OpenCode gets its first prompt once its input
   assert.deepEqual(f.cli.runs[0].accepted, ["do part A\r", "now part B\r"]);
 });
 
-test("spawn_agent: an OpenCode that exits before its input field is up fails the call with the reason", async (t) => {
+test("spawn_agent: an OpenCode that exits before its input field is up fails the call with the reason", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const f = slowOpenCodeOrchestration(t, { ready: false });
   const spawned = f.execute("spawn_agent", { provider: "opencode", cwd, prompt: "never typed" });
   await tick();
@@ -326,7 +326,7 @@ test("spawn_agent: an OpenCode that exits before its input field is up fails the
   assert.deepEqual(f.cli.runs[0].written, []);
 });
 
-test("OpenCode that never shows its input field gets no prompt and a bounded reason", async (t) => {
+test("OpenCode that never shows its input field gets no prompt and a bounded reason", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const cli = slowOpenCode({ ready: false });
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, cli.spawn);
   t.after(() => terminals.disposeAll());
@@ -339,7 +339,7 @@ test("OpenCode that never shows its input field gets no prompt and a bounded rea
   assert.deepEqual(cli.runs[0].written, [], "its home screen text alone is not readiness");
 });
 
-test("OpenCode readiness: a cursor shown before the alternate screen does not count; one cut across chunks does", async (t) => {
+test("OpenCode readiness: a cursor shown before the alternate screen does not count; one cut across chunks does", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const calls = [];
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, (command, args, options) => {
     const pty = spawner(calls, { auto: false })(command, args, options);
@@ -361,7 +361,7 @@ test("OpenCode readiness: a cursor shown before the alternate screen does not co
   assert.deepEqual(calls[0].written, ["split\r"]);
 });
 
-test("OpenCode readiness: a lifecycle hook counts only after a grace, and sends made while it starts arrive in order", async (t) => {
+test("OpenCode readiness: a lifecycle hook counts only after a grace, and sends made while it starts arrive in order", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const calls = [];
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, spawner(calls, { auto: false }));
   t.after(() => terminals.disposeAll());
@@ -379,7 +379,7 @@ test("OpenCode readiness: a lifecycle hook counts only after a grace, and sends 
   assert.deepEqual(calls[0].written, ["first\r", "second\r"]);
 });
 
-test("OpenCode readiness: a resumed card whose plugin reports before its input field is up gets the text on the cursor signal", async (t) => {
+test("OpenCode readiness: a resumed card whose plugin reports before its input field is up gets the text on the cursor signal", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const calls = [];
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, (command, args, options) => {
     const pty = spawner(calls, { auto: false })(command, args, options);
@@ -400,7 +400,7 @@ test("OpenCode readiness: a resumed card whose plugin reports before its input f
   assert.deepEqual(calls[0].written, ["resumed\r"]);
 });
 
-test("OpenCode readiness: a send cancelled while it waits behind another settles at once and is never typed", async (t) => {
+test("OpenCode readiness: a send cancelled while it waits behind another settles at once and is never typed", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const calls = [];
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, (command, args, options) => {
     const pty = spawner(calls, { auto: false })(command, args, options);
@@ -437,7 +437,7 @@ test("OpenCode readiness is not awaited on Windows, whose pseudo console may not
   assert.deepEqual(calls[0].written, ["windows\r"]);
 });
 
-test("spawn_agent and send_to_agent wait for delivery within a budget under the MCP client's deadline", async (t) => {
+test("spawn_agent and send_to_agent wait for delivery within a budget under the MCP client's deadline", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   assert.ok(AGENT_TOOL_DELIVERY_MS <= 45_000);
   const f = slowOpenCodeOrchestration(t, { ready: false });
   const waits = [];
@@ -457,7 +457,7 @@ test("spawn_agent and send_to_agent wait for delivery within a budget under the 
   assert.deepEqual(waits[1], ["send", AGENT_TOOL_DELIVERY_MS]);
 });
 
-test("OpenCode readiness: cancellation and a restart while it starts never deliver the queued text", async (t) => {
+test("OpenCode readiness: cancellation and a restart while it starts never deliver the queued text", { skip: process.platform === "win32" ? "cursor readiness is a POSIX-only contract; Windows delivery is covered separately" : false }, async (t) => {
   const cli = slowOpenCode({ startupMs: 80 });
   const terminals = new TerminalManager(() => {}, clis(), undefined, undefined, true, cli.spawn);
   t.after(() => terminals.disposeAll());

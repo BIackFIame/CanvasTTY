@@ -1,5 +1,7 @@
 # Terminal renderer transition check
 
+For Windows hotfix verification, also check a new terminal and Codex's hook-review menu before any conversation starts. Resize the card repeatedly, switch its DOM/WebGL renderer by zooming across 1x, then restart and restore the card. Old menu rows must not remain over the current menu. Repeat with a plain PowerShell terminal and a non-pixel theme. `scripts/smoke-windows-terminal.mjs` checks the packaged ConPTY runtime and three resize/redraw cycles without opening a window or launching a real agent; it does not verify GPU pixels.
+
 The terminal card keeps a short DOM snapshot while xterm switches between its DOM and WebGL renderers. Use this manual check when changing renderer lifecycle code.
 
 1. Start CanvasTTY with a clean or disposable profile and open a terminal card.
