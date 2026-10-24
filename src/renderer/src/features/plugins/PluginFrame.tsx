@@ -18,6 +18,7 @@ import { createFrameReplyGate } from "./frameReplies";
 import { pluginVisibilityMessage } from "../../../../shared/pluginVisibility";
 import { isProviderId } from "../../../../shared/providerCatalog.ts";
 import { contributionTitle, pluginName } from "../../../../shared/pluginLocalizedText.ts";
+import { pluginServiceNoticeKind, pluginServiceNoticeText } from "../../../../shared/pluginServiceNotice.ts";
 
 const storageListeners = new Map<string, Set<(key: string, value: unknown) => void>>();
 
@@ -187,7 +188,10 @@ export function PluginFrame({
           value
         });
       }).catch((error: unknown) => {
-        const description = safeError(error);
+        // Native code off / module off: the page and the host notice get the localized text with its way out.
+        const raw = safeError(error);
+        const notice = pluginServiceNoticeKind(raw);
+        const description = notice ? pluginServiceNoticeText(notice, locale) : raw;
         onError(description);
         if (!mayReply(frame.current?.contentWindow, servedPlugin.current)) return;
         postToFrame(frame.current, {
@@ -201,7 +205,7 @@ export function PluginFrame({
     };
     window.addEventListener("message", receive);
     return () => window.removeEventListener("message", receive);
-  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, onCanvasWheel, onError, onFocus, onFocusSession, onHoverChange, onOpenLauncher, onMascotDrag, plugin, replies, sessions]);
+  }, [canvasInstanceId, captureCanvasWheelOverWidgets, context, limits, locale, onCanvasWheel, onError, onFocus, onFocusSession, onHoverChange, onOpenLauncher, onMascotDrag, plugin, replies, sessions]);
 
   useEffect(() => {
     postToFrame(frame.current, { source: "canvastty-host", type: "context", value: context });

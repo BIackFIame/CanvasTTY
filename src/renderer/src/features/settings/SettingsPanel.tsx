@@ -178,6 +178,8 @@ const DEFAULT_PROFILE_LABELS: Record<DefaultLaunchProfile, TranslationKey> = {
 interface SettingsPanelProps {
   open: boolean;
   openUpdatesRequest: number;
+  /** Opens a section from outside (a plugin notice's "Open settings"); "agents" scrolls to Extension native code. */
+  openSectionRequest?: { section: "agents" | "plugins"; id: number } | null;
   settings: AppSettings;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
@@ -217,6 +219,7 @@ interface SettingsPanelProps {
 export function SettingsPanel({
   open,
   openUpdatesRequest,
+  openSectionRequest = null,
   settings,
   agentAvailability,
   onRecheckAgentClis,
@@ -300,6 +303,19 @@ export function SettingsPanel({
   useLayoutEffect(() => {
     if (open && contentRef.current) contentRef.current.scrollTop = 0;
   }, [open, section]);
+
+  const scrollToNativeCode = useRef(false);
+  useEffect(() => {
+    if (!openSectionRequest) return;
+    scrollToNativeCode.current = openSectionRequest.section === "agents";
+    setSection(openSectionRequest.section);
+  }, [openSectionRequest]);
+  // Once, after the section is shown (and its scroll reset): bring Extension native code into view.
+  useEffect(() => {
+    if (!open || section !== "agents" || !scrollToNativeCode.current) return;
+    scrollToNativeCode.current = false;
+    contentRef.current?.querySelector<HTMLElement>(".plugin-services")?.scrollIntoView({ block: "start" });
+  }, [open, openSectionRequest, section]);
 
   const openAgentInstall = (provider: AgentProviderId): void => {
     const url = PROVIDERS[provider].installUrl;
