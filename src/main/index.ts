@@ -21,6 +21,8 @@ import { registerDiagnosticIpc } from "./ipc/diagnosticIpc";
 import { DiagnosticLog } from "./services/DiagnosticLog";
 import { UpdateController, type UpdateAdapter } from "./services/updates/UpdateController";
 import { ManualReleaseAdapter } from "./services/updates/ManualReleaseAdapter";
+import { EdgeUpdateAdapter } from "./services/updates/EdgeUpdateAdapter";
+import { BUILD_COMMIT, EDITION, editionLabel } from "../shared/edition";
 import { registerMaterialIpc } from "./ipc/registerMaterialIpc";
 import { textResponse } from "./services/fileResponse";
 import { homedir } from "node:os";
@@ -113,6 +115,14 @@ import { mainWindowChromeOptions } from "./windowChrome";
 import { markMainBoot, mainBootMarks } from "./bootMarks";
 import { attachEditContextMenu } from "./editContextMenu";
 import { macApplicationMenuTemplate } from "./macApplicationMenu";
+
+// CanvasTTY Edge runs next to the official app: its own name (menus, keychain item) and its own data folder, so it
+// never opens the official profile. CANVASTTY_USER_DATA_DIR below still overrides the folder (tests, a second profile).
+app.setName(EDITION.name);
+app.setPath("userData", join(app.getPath("appData"), EDITION.dataFolder));
+// Test runs only: the window is never shown and the Dock icon is hidden (no window, no focus taken).
+const hiddenWindow = process.env.CANVASTTY_HIDDEN_WINDOW === "1";
+delete process.env.CANVASTTY_HIDDEN_WINDOW;
 
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
@@ -259,7 +269,8 @@ function createWindow(): BrowserWindow {
     height: 900,
     minWidth: 920,
     minHeight: 620,
-    show: true,
+    show: !hiddenWindow,
+    title: editionLabel(app.getVersion()),
     ...mainWindowChromeOptions(),
     backgroundColor: "#aaa7a2",
     webPreferences: {
@@ -270,6 +281,8 @@ function createWindow(): BrowserWindow {
     }
   });
   mainWindow = window;
+  // The title names the edition, version and commit; the page's own <title> does not replace it.
+  window.on("page-title-updated", (event) => event.preventDefault());
   markMainBoot("windowCreated");
   observeMainWindowState?.(window);
   appSurfaceReady = false;
@@ -1078,7 +1091,10 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   ipc.handle(IPC.evenG2Command, async (event, command) => { assertCompanionSender(event); return evenG2!.command(command); });
   const manuallyInstalled = !app.isPackaged || (process.platform === "win32" && Boolean(process.env.PORTABLE_EXECUTABLE_FILE));
   let updateAdapter: UpdateAdapter;
-  if (manuallyInstalled || (process.platform === "darwin" && process.arch !== "arm64")) {
+  if (!EDITION.selfUpdates) {
+    // Edge: the official update channels would replace it with the official app.
+    updateAdapter = new EdgeUpdateAdapter();
+  } else if (manuallyInstalled || (process.platform === "darwin" && process.arch !== "arm64")) {
     updateAdapter = new ManualReleaseAdapter();
   } else if (process.platform === "darwin") {
     const { MacSparkleUpdater } = await import("./services/updates/MacSparkleUpdater");
@@ -1116,12 +1132,12 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       const locale = settings.get().locale;
       if (locale === installedLocale) return;
       Menu.setApplicationMenu(Menu.buildFromTemplate(
-        macApplicationMenuTemplate("CanvasTTY", locale, () => checkUpdatesFromMenu?.())
+        macApplicationMenuTemplate(EDITION.name, locale, () => checkUpdatesFromMenu?.())
       ));
       installedLocale = locale;
     };
   }
-  if (app.isPackaged) {
+  if (app.isPackaged && EDITION.selfUpdates) {
     updateTimer = setTimeout(() => {
       if (update.status().type !== "idle") return;
       void update.check().catch(error => console.warn("Automatic update check failed:", error));
@@ -1169,6 +1185,8 @@ async function runStartupSmokes(window: BrowserWindow): Promise<void> {
     await window.webContents.executeJavaScript(
       "new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
     );
+    console.log(`CANVASTTY_EDITION ${JSON.stringify({ name: app.getName(), version: app.getVersion(), commit: BUILD_COMMIT,
+      title: window.getTitle(), userData: app.getPath("userData"), visible: window.isVisible() })}`);
     console.log("CANVASTTY_SMOKE_READY");
     app.quit();
   }
@@ -1342,7 +1360,7 @@ async function showStartupFailure(window: BrowserWindow, error: unknown): Promis
     // this very load would otherwise log a failure the user never saw, which is
     // the same false signal as the dialog it replaced.
     console.error("CanvasTTY startup failed.", error);
-    window.show();
+    if (!hiddenWindow) window.show();
   } catch {
     // The window went away while the failure page was loading: there is nobody
     // left to read the dialog, so it must not become the last thing on screen.
@@ -1365,6 +1383,8 @@ if (hasSingleInstanceLock) {
   void app.whenReady()
     .then(() => {
       markMainBoot("appReady");
+      if (hiddenWindow && process.platform === "darwin") app.dock?.hide();
+      app.setAboutPanelOptions({ applicationName: EDITION.name, applicationVersion: app.getVersion(), version: `edge ${BUILD_COMMIT}` });
       protocol.handle(MATERIAL_SCHEME, (request) => materialService?.protocolResponse(request)
         ?? Promise.resolve(textResponse("Materials are starting.", 503)));
       return startApplication();

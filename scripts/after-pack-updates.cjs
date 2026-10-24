@@ -14,7 +14,8 @@ exports.default = async function afterPack(context) {
     for (const file of ["conpty.dll", "OpenConsole.exe"]) copyFileSync(join(source, file), join(destination, file));
     return;
   }
-  if (context.electronPlatformName !== "darwin") return;
+  // CanvasTTY Edge does not update itself: no Sparkle key or feed goes into its Info.plist.
+  if (context.electronPlatformName !== "darwin" || process.env.CANVASTTY_EDGE_SPARKLE !== "1") return;
   const key = process.env.SPARKLE_PUBLIC_ED_KEY;
   if (!key || !/^[A-Za-z0-9+/]{43}=$/.test(key) || Buffer.from(key, "base64").length !== 32) {
     throw new Error("SPARKLE_PUBLIC_ED_KEY must be the owner's 32-byte Ed25519 public key in base64");

@@ -1,5 +1,7 @@
-appId: io.github.howdeploy.canvastty
-productName: CanvasTTY
+# CanvasTTY Edge: a separate app next to the official CanvasTTY (own name, bundle id and data folder, see
+# src/shared/edition.ts). It does not update itself, so no Sparkle framework, feed or publish target is packaged.
+appId: io.github.howdeploy.canvastty.edge
+productName: CanvasTTY Edge
 
 directories:
   buildResources: build
@@ -126,7 +128,7 @@ npmRebuild: true
 # downloading a pristine prebuild here would silently restore the macOS leak.
 buildDependenciesFromSource: true
 compression: normal
-artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+artifactName: CanvasTTY-Edge-${version}-${os}-${arch}.${ext}
 
 # Avoid the maximum-XZ startup stall while retaining AppImageLauncher 2.x compatibility.
 appImage:
@@ -151,23 +153,16 @@ win:
     - portable
 
 nsis:
-  artifactName: ${productName}-${version}-windows-${arch}-setup.${ext}
+  artifactName: CanvasTTY-Edge-${version}-windows-${arch}-setup.${ext}
   oneClick: false
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: always
   createStartMenuShortcut: true
 
 portable:
-  artifactName: ${productName}-${version}-windows-${arch}-portable.${ext}
+  artifactName: CanvasTTY-Edge-${version}-windows-${arch}-portable.${ext}
 
 mac:
-  extraFiles:
-    - from: artifacts/sparkle/Sparkle.framework
-      to: Frameworks/Sparkle.framework
-    - from: artifacts/sparkle/canvastty-update-helper
-      to: MacOS/canvastty-update-helper
-    - from: src/native/updates/mac-update-server.mjs
-      to: Resources/updates/mac-update-server.mjs
   extraResources:
     - from: artifacts/companion-speech/${arch}
       to: companion/speech
@@ -189,7 +184,5 @@ mac:
 dmg:
   format: UDBZ
 
-publish:
-  provider: github
-  owner: howdeploy
-  repo: CanvasTTY
+# No publish target: an app-update.yml pointing at the official releases would let an updater replace Edge.
+publish: null

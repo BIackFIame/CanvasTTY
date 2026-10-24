@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { LocaleId, UpdateStatus } from "../../../../shared/contracts";
+import { EDITION, editionLabel } from "../../../../shared/edition";
 
 export function UpdateSettings({ locale }: { locale: LocaleId }): React.JSX.Element {
   const [status, setStatus] = useState<UpdateStatus>({ type: "idle" });
@@ -26,8 +27,11 @@ export function UpdateSettings({ locale }: { locale: LocaleId }): React.JSX.Elem
 
   return (
     <section className="update-settings" aria-live="polite">
-      <h3>{ru ? "Обновления CanvasTTY" : "CanvasTTY updates"}</h3>
-      <p>{ru ? "Текущая версия" : "Current version"}: {currentVersion || "…"}</p>
+      <h3>{ru ? `Обновления ${EDITION.name}` : `${EDITION.name} updates`}</h3>
+      <p>{ru ? "Текущая версия" : "Current version"}: {currentVersion ? editionLabel(currentVersion) : "…"}</p>
+      {!EDITION.selfUpdates && <p>{ru
+        ? "Эта сборка не обновляется сама: официальные обновления заменили бы её официальным CanvasTTY. Её пересобирают из ветки edge."
+        : "This build does not update itself: official updates would replace it with the official CanvasTTY. It is rebuilt from the edge branch."}</p>}
       {status.type === "checking" && <p>{ru ? "Проверяем обновления…" : "Checking for updates…"}</p>}
       {status.type === "upToDate" && <p>{ru ? "Установлена последняя версия." : "You have the latest version."}</p>}
       {status.type === "available" && <>
@@ -41,7 +45,7 @@ export function UpdateSettings({ locale }: { locale: LocaleId }): React.JSX.Elem
       {status.type === "ready" && <p>{ru ? `Версия ${version} готова к установке.` : `Version ${version} is ready to install.`}</p>}
       {status.type === "installing" && <p>{ru ? "Устанавливаем обновление…" : "Installing update…"}</p>}
       {status.type === "error" && <p role="alert">{ru ? "Ошибка обновления" : "Update error"}: {status.message}</p>}
-      <div className="update-settings__actions">
+      {EDITION.selfUpdates && <div className="update-settings__actions">
         <button type="button" disabled={busy || status.type === "ready"} onClick={() => invoke(window.canvasTTY.update.check)}>
           {ru ? "Проверить обновления" : "Check for updates"}
         </button>
@@ -53,7 +57,7 @@ export function UpdateSettings({ locale }: { locale: LocaleId }): React.JSX.Elem
         {status.type === "ready" && <button type="button" onClick={() => invoke(window.canvasTTY.update.install)}>
           {ru ? "Установить и перезапустить" : "Restart to update"}
         </button>}
-      </div>
+      </div>}
     </section>
   );
 }
