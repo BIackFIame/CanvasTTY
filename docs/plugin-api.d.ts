@@ -670,9 +670,11 @@ export interface CanvasTTYServiceHostApi {
   "sessions.unsubscribe"(params: Record<string, never>): null;
   /** Needs `sessions:events`. */
   "sessions.list"(params: { ownedOnly?: boolean }): { sessions: Array<CanvasTTYSessionSummary & { owned: boolean }> };
-  /** Needs `sessions:launch`. An `agent` card through the normal launch pipeline; at most 16 per plugin. */
+  /** Needs `sessions:launch`. An `agent` card through the normal launch pipeline; at most 16 per plugin. `role:
+   * "orchestrator"` also needs the person's "May start orchestrators" for this plugin and never takes `yolo`. */
   "sessions.create"(params: {
     provider: CanvasTTYProviderId; cwd: string; profile?: "normal" | "yolo" | "auto"; title?: string;
+    role?: "agent" | "orchestrator";
     launchOptions?: Record<string, Record<string, boolean | string>>;
     environment?: { pluginId: string; kind: string; options?: Record<string, boolean | string> };
   }): { sessionId: string };

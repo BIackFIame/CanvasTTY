@@ -725,7 +725,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   // Plugin services see card events and control only the cards they start (EP-4).
   const sessionsForPlugins = new PluginSessions({
     terminals: terminalManager,
-    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params)
+    notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params),
+    mayStartOrchestrators: (pluginId) => pluginManager!.canStartOrchestrators(pluginId)
   });
   pluginSessions = sessionsForPlugins;
   // Services read the same subscription limits plugin surfaces read (limits:read), from LimitsService's cache. Created

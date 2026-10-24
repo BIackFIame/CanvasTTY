@@ -163,6 +163,8 @@ interface StoredPluginRecord {
   trustedServices?: Record<string, string>;
   /** The user let the plugin's decision service allow tool calls (kept only with trustedServices). */
   decisionsMayAllow?: boolean;
+  /** The user let the plugin start orchestrator cards (kept only with trustedServices). */
+  mayStartOrchestrators?: boolean;
 }
 
 export interface RuntimePluginHookRegistration {
@@ -308,7 +310,8 @@ export class PluginManager {
             ))
             : [],
           nativeCodeTrusted: false,
-          decisionsMayAllow: false
+          decisionsMayAllow: false,
+          mayStartOrchestrators: false
         });
         if (record.enabled && record.trustedServices) {
           const trust = await this.currentServiceTrust(pluginId, active).catch(() => null);
@@ -318,6 +321,7 @@ export class PluginManager {
             const plugin = this.plugins.get(pluginId)!;
             plugin.nativeCodeTrusted = true;
             plugin.decisionsMayAllow = record.decisionsMayAllow === true && Boolean(active.services?.some((service) => service.decide));
+            plugin.mayStartOrchestrators = record.mayStartOrchestrators === true && active.permissions.includes("sessions:launch");
           }
         }
       } catch (error) {
@@ -448,7 +452,7 @@ export class PluginManager {
         replaced = true;
         const installed: InstalledPlugin = {
           manifest, sourceUrl: `mascot:${projectId}`, enabled: true, installedAt: Date.now(),
-          selectedModules: [], enabledHooks: [], nativeCodeTrusted: false, decisionsMayAllow: false
+          selectedModules: [], enabledHooks: [], nativeCodeTrusted: false, decisionsMayAllow: false, mayStartOrchestrators: false
         };
         this.plugins.set(manifest.id, installed);
         await this.persistRegistry();
@@ -496,7 +500,8 @@ export class PluginManager {
         selectedModules: modules,
         enabledHooks: [],
         nativeCodeTrusted: false,
-        decisionsMayAllow: false
+        decisionsMayAllow: false,
+        mayStartOrchestrators: false
       };
       this.plugins.set(installed.manifest.id, installed);
       await this.persistRegistry();
@@ -610,6 +615,41 @@ export class PluginManager {
       throw error;
     }
     return structuredClone(activePlugin(plugin));
+  }
+
+  /**
+   * The second confirmation for `sessions.create` with role "orchestrator": the person lets this plugin start
+   * orchestrator cards, which can start subagents of their own. Needs native code trust and `sessions:launch`;
+   * revoked with the trust (update, module change, disable).
+   */
+  async setMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    if (allowed) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (!activeManifest(plugin.manifest, plugin.selectedModules).permissions.includes("sessions:launch")) {
+        throw new Error("Plugin does not have the sessions:launch permission.");
+      }
+    }
+    const previous = plugin.mayStartOrchestrators;
+    plugin.mayStartOrchestrators = Boolean(allowed);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      plugin.mayStartOrchestrators = previous;
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    return structuredClone(activePlugin(plugin));
+  }
+
+  /**
+   * Whether this plugin may start an orchestrator now: enabled, native code trusted, `sessions:launch` in its active
+   * manifest, and the person's confirmation. Asked by `sessions.create` on every call, so a revoke applies at once.
+   */
+  canStartOrchestrators(pluginId: string): boolean {
+    const plugin = this.plugins.get(pluginId);
+    if (!plugin || !plugin.enabled || !plugin.nativeCodeTrusted || !plugin.mayStartOrchestrators) return false;
+    return activeManifest(plugin.manifest, plugin.selectedModules).permissions.includes("sessions:launch");
   }
 
   /** Called with the trusted services after every registry change (the supervisor's desired set). */
@@ -1120,7 +1160,8 @@ export class PluginManager {
         // Updated native hook and service code must be reviewed and trusted again.
         enabledHooks: [],
         nativeCodeTrusted: false,
-        decisionsMayAllow: false
+        decisionsMayAllow: false,
+        mayStartOrchestrators: false
       };
       this.plugins.set(pluginId, updated);
       await this.persistRegistry();
@@ -1405,7 +1446,11 @@ export class PluginManager {
       selectedModules: plugin.selectedModules,
       enabledHooks: plugin.enabledHooks,
       ...(plugin.nativeCodeTrusted && this.serviceTrust.has(id)
-        ? { trustedServices: { ...this.serviceTrust.get(id)! }, ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}) }
+        ? {
+          trustedServices: { ...this.serviceTrust.get(id)! },
+          ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}),
+          ...(plugin.mayStartOrchestrators ? { mayStartOrchestrators: true } : {})
+        }
         : {})
     }] satisfies [string, StoredPluginRecord]));
     const snapshot = JSON.stringify(registry, null, 2);
@@ -1443,6 +1488,7 @@ export class PluginManager {
   private revokeNativeCode(plugin: InstalledPlugin): void {
     plugin.nativeCodeTrusted = false;
     plugin.decisionsMayAllow = false;
+    plugin.mayStartOrchestrators = false;
     this.serviceTrust.delete(plugin.manifest.id);
   }
 
@@ -3253,6 +3299,7 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       && Object.values(value.trustedServices).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
     && (value.decisionsMayAllow === undefined || typeof value.decisionsMayAllow === "boolean")
+    && (value.mayStartOrchestrators === undefined || typeof value.mayStartOrchestrators === "boolean")
   );
 }
 

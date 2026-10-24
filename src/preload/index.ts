@@ -204,6 +204,9 @@ const api: CanvasTTYApi = {
     setDecisionsMayAllow: (pluginId: string, allowed: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetDecisionsMayAllow, pluginId, allowed)
     ),
+    setMayStartOrchestrators: (pluginId: string, allowed: boolean) => (
+      ipcRenderer.invoke(IPC.pluginsSetMayStartOrchestrators, pluginId, allowed)
+    ),
     serviceReport: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsServiceReport, pluginId),
     serviceRequest: (pluginId: string, serviceId: string, method: string, params: unknown) => (
       ipcRenderer.invoke(IPC.pluginsServiceRequest, pluginId, serviceId, method, params)

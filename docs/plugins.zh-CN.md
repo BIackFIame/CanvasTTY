@@ -357,11 +357,13 @@ interface PluginSessionEvent {
 
 | 请求 | 条件 | 效果 |
 |:--|:--|:--|
-| `sessions.create` `{ provider, cwd, profile?, title?, launchOptions?, environment? }` | `sessions:launch` | 通过常规启动流程启动一张 `agent` 卡片（包括启动选项和环境；拒绝原因显示在卡片上）。卡片可见且从不抢占焦点。每个插件最多 16 张。回答 `{ sessionId }` |
+| `sessions.create` `{ provider, cwd, profile?, title?, role?, launchOptions?, environment? }` | `sessions:launch` | 通过常规启动流程启动一张 `agent` 卡片（包括启动选项和环境；拒绝原因显示在卡片上）。卡片可见且从不抢占焦点。每个插件最多 16 张。回答 `{ sessionId }`。`role: "orchestrator"` 还需要用户的同意（见下文） |
 | `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | 向本插件启动的卡片输入文本（除非 `submit: false`，否则带回车）。启动仍由插件准备中的卡片在启动开始后收到文本；启动未成功时 `sent` 为 false（文本被丢弃） |
 | `sessions.stop` `{ sessionId }` | `sessions:control` | 关闭本插件启动的卡片；保留其环境数据 |
 
 他人的或未知的 id 得到相同的错误，因此插件无法探测其他卡片。没有删除操作，也没有读取屏幕的控制调用。
+
+**编排器。** 使用 `"role": "orchestrator"` 时，卡片是一个编排器：它获得与用户启动的编排器相同的编排工具（`spawn_agent`、`wait_for_agent` 等），其子智能体也遵循相同的委派规则（只能使用可委派的启动选项，配置文件不宽于它自己的，隔离与任何委派启动相同）。由于它会自行启动智能体，仅有 `sessions:launch` 不够：用户需要在信任插件的原生代码之后，在“设置”的“扩展原生代码”部分中为该插件开启 **可以启动编排器**。没有该同意，或插件已禁用、不再受信任时，调用会被拒绝，不会创建卡片；更新、更改模块、禁用插件或撤销信任都会再次关闭该同意。这样的编排器从不以 `yolo` 运行。它的卡片显示“启动者”和插件 id（恢复后也是如此），其子智能体从不获得用户的 `trustedFolder`（文件夹是插件选择的，而不是用户）。撤销同意不会关闭已在运行的编排器；由用户关闭它们。`role` 默认为 `"agent"`，行为与以前完全相同。
 
 ### 卡片标记与动作（`cards:decorate`）
 
@@ -465,7 +467,7 @@ host.onStorageChange(listener) 会把 host.storage.set 的写入通知给同一�
 | `tools:agents` | 服务的 `tools` 和 `canvastty.tools.call` | 向所列角色的 agent 提供工具；接收其参数和调用方卡片的摘要 |
 | `sessions:events` | `sessions.subscribe`、`sessions.list` | 卡片元数据：服务商、角色、父级、标题、状态、文件夹、环境 ref；不含屏幕文本 |
 | `sessions:read-screen` | status 和 exited 事件中的 `screen` | 每张卡片输出的末尾（已遮蔽）：私人数据 |
-| `sessions:launch` | `sessions.create` | 通过常规启动流程启动可见的 agent 卡片 |
+| `sessions:launch` | `sessions.create` | 通过常规启动流程启动可见的 agent 卡片；编排器卡片仅在用户单独开启“可以启动编排器”之后 |
 | `sessions:control` | `sessions.send`、`sessions.stop` | 只能向本插件启动的卡片输入文本并关闭它们 |
 | `cards:decorate` | `cards.setBadge`、服务的 `cardActions`、`canvastty.cards.invoke` | 卡片上的纯文本标记及其菜单中的动作 |
 | `browser:engine` | 服务的 `browserEngine` 和 `canvastty.browserEngine.*` | 接收 agent 后台标签页的 URL 并用自己的引擎打开；没有 cookie、配置文件或凭据 |
