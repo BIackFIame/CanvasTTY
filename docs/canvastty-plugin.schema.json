@@ -39,7 +39,7 @@
       "type": "array",
       "maxItems": 12,
       "uniqueItems": true,
-      "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "providers:read", "usage:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide", "decision:provide", "tools:agents", "sessions:events", "sessions:read-screen", "sessions:launch", "sessions:control", "cards:decorate", "browser:engine"] }
+      "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "accounts:broker", "providers:read", "usage:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide", "decision:provide", "tools:agents", "sessions:events", "sessions:read-screen", "sessions:launch", "sessions:control", "cards:decorate", "browser:engine"] }
     },
     "contributions": {
       "type": "array",
@@ -100,7 +100,7 @@
           "type": "array",
           "maxItems": 12,
           "uniqueItems": true,
-          "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "providers:read", "usage:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide", "decision:provide", "tools:agents", "sessions:events", "sessions:read-screen", "sessions:launch", "sessions:control", "cards:decorate", "browser:engine"] }
+          "items": { "enum": ["storage", "secrets", "sessions:read", "limits:read", "accounts:broker", "providers:read", "usage:read", "launcher:open", "external:open", "browser:open", "media:library", "playlists:read", "playlists:write", "hermes:hud", "network", "launch:contribute", "environment:provide", "decision:provide", "tools:agents", "sessions:events", "sessions:read-screen", "sessions:launch", "sessions:control", "cards:decorate", "browser:engine"] }
         },
         "files": { "type": "array", "minItems": 1, "maxItems": 500, "items": { "$ref": "#/$defs/moduleAsset" } }
       }
@@ -183,6 +183,10 @@
               "dataClass": { "description": "D0 (public) to D3 (most sensitive), shown with the approval and passed to the reader.", "enum": ["D0", "D1", "D2", "D3"] }
             }
           }
+        },
+        "brokerable": {
+          "description": "The service offers accounts other plugins' services may send model requests through (canvastty.broker.offer, .admit, .settle) without seeing their keys; each caller -> account pair needs the person's grant. Needs secrets; at most one service per plugin.",
+          "type": "boolean"
         }
       }
     },

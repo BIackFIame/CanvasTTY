@@ -847,6 +847,7 @@ export type PluginPermission =
   | "limits:read"
   | "providers:read"
   | "usage:read"
+  | "accounts:broker"
   | "launcher:open"
   | "external:open"
   | "browser:open"
@@ -947,6 +948,11 @@ export interface PluginService {
   browserEngine?: PluginBrowserEngine;
   /** Read-only data this service answers for other plugins' services (`canvastty.shares.read`), pair by pair. */
   shares?: PluginShare[];
+  /**
+   * The service offers accounts other plugins may send model requests through (`canvastty.broker.*`) without seeing
+   * their keys; each caller -> account pair needs the person's grant. Needs `secrets`.
+   */
+  brokerable?: boolean;
 }
 
 /** Data classes a share may be labelled with (the same D0–D3 scale plugins use for their own data rules). */
@@ -983,6 +989,30 @@ export interface PluginSharedReadStatus {
   state: "approved" | "needs-approval" | "changed" | "not-shared";
   /** Both plugins are enabled with native code trusted. */
   providerReady: boolean;
+}
+
+/** One account a plugin offers for other plugins' brokered model requests, as the person sees it (never its key). */
+export interface PluginBrokerAccount {
+  ref: string;
+  owner: string;
+  ownerName: string;
+  id: string;
+  label: string;
+  protocol: "openai" | "anthropic";
+  origin: string;
+  paths: string[];
+  models: string[];
+  flatRate: boolean;
+}
+
+/** An owner's offered accounts, the plugins that may ask for them, and each granted pair's state. */
+export interface PluginBrokerAccounts {
+  /** The owner's service is running and answered its offer. */
+  available: boolean;
+  accounts: PluginBrokerAccount[];
+  callers: Array<{ pluginId: string; name: string; ready: boolean }>;
+  /** `changed`: granted before, but the account's origin, protocol or auth scheme (or the owner's source) changed. */
+  grants: Array<{ caller: string; account: string; state: "granted" | "changed" }>;
 }
 
 /** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */
@@ -2215,6 +2245,9 @@ export interface CanvasTTYApi {
     setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     setMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin>;
+    /** What an owner offers to other plugins' brokered requests now, and the person's grants (no keys). */
+    brokerAccounts(ownerId: string): Promise<PluginBrokerAccounts>;
+    setBrokerGrant(callerId: string, ownerId: string, accountId: string, granted: boolean): Promise<PluginBrokerAccounts>;
     serviceReport(pluginId: string): Promise<PluginServiceReport>;
     serviceRequest(pluginId: string, serviceId: string, method: string, params: unknown): Promise<unknown>;
     onServiceEvent(listener: (event: PluginServiceEvent) => void): () => void;
@@ -2417,6 +2450,8 @@ export const IPC = {
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
   pluginsSetMayStartOrchestrators: "plugins:set-may-start-orchestrators",
   pluginsSetSharedReadApproved: "plugins:set-shared-read-approved",
+  pluginsBrokerAccounts: "plugins:broker-accounts",
+  pluginsSetBrokerGrant: "plugins:set-broker-grant",
   pluginsServiceReport: "plugins:service-report",
   pluginsServiceRequest: "plugins:service-request",
   pluginsServiceEvent: "plugins:service-event",

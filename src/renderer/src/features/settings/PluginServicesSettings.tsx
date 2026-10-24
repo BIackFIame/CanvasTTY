@@ -10,6 +10,7 @@ import { sharedReadText } from "./sharedReadText";
 import { t, type TranslationKey } from "../../lib/i18n";
 import { pluginName } from "../../../../shared/pluginLocalizedText.ts";
 import { pollWhileOpen } from "./settingsPolling";
+import { PluginBrokerGrants } from "./PluginBrokerGrants";
 
 interface PluginServicesSettingsProps {
   locale: LocaleId;
@@ -57,6 +58,8 @@ export function PluginServicesSettings({
   const [error, setError] = useState<string | null>(null);
   const [reports, setReports] = useState<Record<string, PluginServiceReport>>({});
   const trustedKey = rows.map((plugin) => `${plugin.manifest.id}:${plugin.nativeCodeTrusted}`).join(",");
+  // Any plugin's trust or enabled state can change who may ask for an owner's accounts.
+  const brokerKey = plugins.map((plugin) => `${plugin.manifest.id}:${plugin.enabled}:${plugin.nativeCodeTrusted}:${plugin.manifest.version}`).join(",");
 
   useEffect(() => {
     let cancelled = false;
@@ -307,6 +310,15 @@ export function PluginServicesSettings({
                     );
                   })}
                 </div>
+              )}
+              {trusted && plugin.manifest.services?.some((service) => service.brokerable) && (
+                <PluginBrokerGrants
+                  locale={locale}
+                  ownerId={pluginId}
+                  refreshKey={brokerKey}
+                  busy={busy !== null}
+                  onError={setError}
+                />
               )}
               {!plugin.enabled && <p className="agent-hooks__disabled">{t(locale, "pluginHookDisabledPlugin")}</p>}
               {confirming === pluginId && (

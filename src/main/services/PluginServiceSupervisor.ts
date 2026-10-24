@@ -63,6 +63,11 @@ export interface PluginServiceHost {
   plugins?(pluginId: string, serviceId: string, method: string, params: unknown): unknown;
   /** `cards.setBadge` (EP-7), already checked for `cards:decorate`. */
   setBadge?(pluginId: string, params: unknown): unknown;
+  /**
+   * Brokered model requests (`accounts.*`), already checked against the manifest for `accounts:broker`. Returns
+   * undefined for a method it does not know. The handler checks the registry and the person's grants on every call.
+   */
+  accounts?(pluginId: string, serviceId: string, method: string, params: unknown): unknown;
   /** The service process ended (stopped, crashed or removed): its subscriptions end with it. */
   stopped?(pluginId: string, serviceId: string): void;
 }
@@ -384,7 +389,7 @@ export class PluginServiceSupervisor {
     return { services, log: structuredClone(this.logs.get(pluginId) ?? []) };
   }
 
-  /** A host line in the plugin's bounded log (shared-read audit); ignored for a service the supervisor does not run. */
+  /** A host line in the plugin's bounded log (shared-read and brokered-request audits); ignored for a service the supervisor does not run. */
   audit(pluginId: string, serviceId: string, level: PluginServiceLogEntry["level"], message: string): void {
     const record = this.services.get(serviceKey(pluginId, serviceId));
     if (record) this.log(record.spec, "host", level, message);
@@ -681,6 +686,11 @@ export class PluginServiceSupervisor {
     }
     if (method.startsWith("plugins.") && this.options.host.plugins) {
       const result = this.options.host.plugins(spec.pluginId, spec.serviceId, method, params);
+      if (result !== undefined) return result;
+    }
+    if (method.startsWith("accounts.") && this.options.host.accounts) {
+      if (!spec.permissions.includes("accounts:broker")) throw new Error("Plugin does not have the accounts:broker permission.");
+      const result = this.options.host.accounts(spec.pluginId, spec.serviceId, method, params);
       if (result !== undefined) return result;
     }
     if (method.startsWith("sessions.") && this.options.host.sessions) {
