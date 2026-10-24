@@ -210,7 +210,9 @@ test("background plugin requests never activate the desktop window", async () =>
 test("startup window is visible immediately and failures remain visible", async () => {
   const source = await readFile(mainPath, "utf8");
 
-  assert.match(source, /show: true/);
+  // Edge: shown at once, except in a test run that asks for a hidden window (CANVASTTY_HIDDEN_WINDOW).
+  assert.match(source, /show: !hiddenWindow,/);
+  assert.match(source, /const hiddenWindow = process\.env\.CANVASTTY_HIDDEN_WINDOW === "1";/);
   // One navigation at startup: the application surface itself, no intermediate startup page to race.
   const createWindow = source.slice(source.indexOf("function createWindow"), source.indexOf("function shellWindowGone"));
   assert.doesNotMatch(createWindow, /loadURL|loadFile/);
