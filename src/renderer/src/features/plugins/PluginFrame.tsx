@@ -333,7 +333,7 @@ async function handleRequest({
   }
   if (method === "grants.request" || method === "settings.open") {
     // One CanvasTTY consent dialog for a set of grants (C2), or one Settings section opened on the person's action;
-    // rules and limits in grantsPlan. Loaded on first use.
+    // the rules are in grantsPlan. Loaded on first use.
     const pages = await import("./grantsRequest");
     return method === "settings.open" ? pages.openSettings(params, personInFrame)
       : pages.requestGrants({ plugin, params, personInFrame, locale: (context as { appearance: { locale: LocaleId } }).appearance.locale });

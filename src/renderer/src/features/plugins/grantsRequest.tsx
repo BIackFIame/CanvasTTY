@@ -139,7 +139,10 @@ export function GrantsDialog({ plan, plugins, locale, onDone }: {
                   <input
                     type="checkbox"
                     checked={ticks[position]}
-                    onChange={(event) => setTicks((current) => current.map((value, index) => index === position ? event.target.checked : value))}
+                    onChange={(event) => {
+                      const checked = event.currentTarget.checked;
+                      setTicks((current) => current.map((value, index) => index === position ? checked : value));
+                    }}
                   />
                   <span>
                     <strong>{rowTitle}</strong>
