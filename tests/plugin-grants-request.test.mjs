@@ -203,7 +203,7 @@ test("gate: one dialog at a time, 3 per plugin in 10 minutes, 60 s pause after e
 test("wiring: only a frame the person is in may ask; the dialog is CanvasTTY's own, lazy, and starts on Cancel", async () => {
   const frame = await readFile(new URL("../src/renderer/src/features/plugins/PluginFrame.tsx", import.meta.url), "utf8");
   const dialog = await readFile(new URL("../src/renderer/src/features/plugins/grantsRequest.tsx", import.meta.url), "utf8");
-  assert.match(frame, /method === "grants\.request"[\s\S]{0,200}await import\("\.\/grantsRequest"\)/u);
+  assert.match(frame, /method === "grants\.request"[\s\S]{0,400}await import\("\.\/grantsRequest"\)/u);
   assert.match(dialog, /if \(!input\.personInFrame\) throw/u);
   assert.match(dialog, /cancel\.current\?\.focus\(\)/u);
   assert.match(dialog, /"canvastty:grants-dialog"/u);
@@ -214,4 +214,16 @@ test("wiring: only a frame the person is in may ask; the dialog is CanvasTTY's o
   // A separate plugin window has no path to it: its preload forwards to the main process, which does not answer it.
   const main = await readFile(new URL("../src/main/index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(main, /grants\.request/u);
+});
+
+test("settings.open: known sections only, on the person's action, through the lazily loaded part", async () => {
+  const frame = await readFile(new URL("../src/renderer/src/features/plugins/PluginFrame.tsx", import.meta.url), "utf8");
+  const pages = await readFile(new URL("../src/renderer/src/features/plugins/grantsRequest.tsx", import.meta.url), "utf8");
+  const app = await readFile(new URL("../src/renderer/src/App.tsx", import.meta.url), "utf8");
+  assert.match(frame, /method === "settings\.open" \? pages\.openSettings\(params, personInFrame\)/u);
+  assert.match(pages, /\{ agents: "agents", "native-code": "agents", plugins: "plugins", appearance: "appearance" \}/u);
+  assert.match(pages, /if \(!personInFrame\) throw new Error\("settings\.open answers only/u);
+  assert.match(app, /\["canvastty:open-settings", section\]/u);
+  const sdk = await readFile(new URL("../src/main/services/PluginManager.ts", import.meta.url), "utf8");
+  assert.match(sdk, /open: \(section\) => request\("settings\.open", \{ section \}\)/u);
 });

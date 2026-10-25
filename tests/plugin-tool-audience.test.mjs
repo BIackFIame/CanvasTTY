@@ -134,3 +134,14 @@ test("terminal manager and orchestration handler: only the plugin's own card get
   await assert.rejects(handler.execute(child.id, { id: "3", tool: name, arguments: {} }), /not available/u);
   for (const id of [person.id, own, lead, child.id]) terminals.dispose(id);
 });
+
+test("manifest: 16 tools for every card plus up to 16 more for the plugin's own cards, per service", () => {
+  const tools = (count, extra = {}, prefix = "t") => Array.from({ length: count }, (_, index) => ({
+    name: `${prefix}${index}`, description: "x", inputSchema: { type: "object" }, roles: ["agent"], ...extra
+  }));
+  const withTools = (list) => ({ ...manifest({}), services: [{ ...manifest({}).services[0], tools: list }] });
+  assert.equal(validatePluginManifest(withTools([...tools(16), ...tools(16, { audience: "own-cards" }, "o")])).services[0].tools.length, 32);
+  assert.throws(() => validatePluginManifest(withTools(tools(17))), /between 1 and 16/u);
+  assert.throws(() => validatePluginManifest(withTools(tools(17, { audience: "own-cards" }))), /between 1 and 16/u);
+  assert.throws(() => validatePluginManifest(withTools([...tools(16), ...tools(17, { audience: "own-cards" }, "o")])), /between 1 and 16/u);
+});

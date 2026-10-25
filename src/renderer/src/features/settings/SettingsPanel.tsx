@@ -179,7 +179,7 @@ interface SettingsPanelProps {
   open: boolean;
   openUpdatesRequest: number;
   /** Opens a section from outside (a plugin notice's "Open settings"); "agents" scrolls to Extension native code. */
-  openSectionRequest?: { section: "agents" | "plugins"; id: number } | null;
+  openSectionRequest?: { section: "agents" | "plugins" | "appearance"; id: number } | null;
   settings: AppSettings;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;

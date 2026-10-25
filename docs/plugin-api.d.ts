@@ -47,6 +47,8 @@ export interface CanvasTTYPluginHost {
     /** `sessions.focus`: moves the camera to an open card (sessions:read; on the person's action only). */
     focusSession(sessionId: string): Promise<null>;
   };
+  /** `settings.open`: opens Settings at `agents` / `native-code`, `plugins` or `appearance` (on the person's action only). */
+  settings: { open(section: "agents" | "native-code" | "plugins" | "appearance"): Promise<null> };
   /** `grants.request`: one CanvasTTY consent dialog for several grants (on the person's action in this frame only). */
   grants: {
     request(request: { reason?: string; items: CanvasTTYGrantItem[] }): Promise<{

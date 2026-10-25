@@ -231,3 +231,16 @@ export async function requestGrants(input: {
     gate.leave(pluginId, allDeclined);
   }
 }
+
+/**
+ * `settings.open { section }` from a plugin page: opens CanvasTTY's Settings at `agents` (also `native-code`: scrolled
+ * to Extension native code), `plugins` or `appearance` (HOME composition). Only on the person's action in the frame;
+ * it only shows the section, it changes nothing there.
+ */
+export function openSettings(params: Record<string, unknown>, personInFrame: boolean): null {
+  const section = ({ agents: "agents", "native-code": "agents", plugins: "plugins", appearance: "appearance" } as Record<string, string>)[String(params.section)];
+  if (!section) throw new Error("settings.open takes section agents, native-code, plugins or appearance.");
+  if (!personInFrame) throw new Error("settings.open answers only an action of the person in this plugin surface.");
+  window.dispatchEvent(new CustomEvent("canvastty:open-settings", { detail: section }));
+  return null;
+}

@@ -2601,10 +2601,12 @@ const MAX_TOOL_SCHEMA_BYTES = 8 * 1024;
 const SESSION_ROLES = new Set<string>(["orchestrator", "agent", "subagent"]);
 
 function validateServiceTools(value: unknown): PluginAgentTool[] {
-  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_AGENT_TOOLS) {
-    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items.`);
+  // 16 tools every card of their roles sees, and separately up to 16 for the plugin's own cards only: a card never
+  // sees more than 16 of one service's tools unless the plugin started it.
+  if (!Array.isArray(value) || value.length === 0 || value.length > 2 * MAX_AGENT_TOOLS) {
+    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items (and up to ${MAX_AGENT_TOOLS} more with audience "own-cards").`);
   }
-  return value.map((candidate): PluginAgentTool => {
+  const tools = value.map((candidate): PluginAgentTool => {
     if (!isRecord(candidate)) throw new Error("Every plugin agent tool must be an object.");
     assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles", "audience"], "Plugin agent tool");
     const name = requiredString(candidate.name, "tool name", 40);
@@ -2630,6 +2632,11 @@ function validateServiceTools(value: unknown): PluginAgentTool[] {
       ...(candidate.audience === "own-cards" ? { audience: "own-cards" as const } : {})
     };
   });
+  const own = tools.filter((tool) => tool.audience === "own-cards").length;
+  if (tools.length - own > MAX_AGENT_TOOLS || own > MAX_AGENT_TOOLS) {
+    throw new Error(`Plugin service tools must contain between 1 and ${MAX_AGENT_TOOLS} items (and up to ${MAX_AGENT_TOOLS} more with audience "own-cards").`);
+  }
+  return tools;
 }
 
 const BROWSER_ENGINE_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
@@ -4385,6 +4392,9 @@ const PLUGIN_SDK_SOURCE = `(() => {
     canvas: Object.freeze({
       open: (contributionId) => request("canvas.open", { contributionId }),
       focusSession: (sessionId) => request("sessions.focus", { sessionId })
+    }),
+    settings: Object.freeze({
+      open: (section) => request("settings.open", { section })
     }),
     grants: Object.freeze({
       request: (params) => request("grants.request", params)

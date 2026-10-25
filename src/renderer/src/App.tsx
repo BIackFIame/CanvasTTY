@@ -371,7 +371,7 @@ export function App(): React.JSX.Element {
   const [launchPosition, setLaunchPosition] = useState<Point | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [openUpdatesRequest, setOpenUpdatesRequest] = useState(0);
-  const [openSectionRequest, setOpenSectionRequest] = useState<{ section: "agents" | "plugins"; id: number } | null>(null);
+  const [openSectionRequest, setOpenSectionRequest] = useState<{ section: "agents" | "plugins" | "appearance"; id: number } | null>(null);
   const [shortcutReferenceOpen, setShortcutReferenceOpen] = useState(false);
   const [usageHistoryOpen, setUsageHistoryOpen] = useState(false);
   /** App root outside the canvas transform; overlays portal here to inherit the theme tokens. */
@@ -1697,12 +1697,14 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     const changed = (): void => void refreshPlugins().catch(() => undefined);
     const open = (event: Event): void => setGrantsOpen((event as CustomEvent<boolean>).detail === true);
-    window.addEventListener("canvastty:plugins-changed", changed);
-    window.addEventListener("canvastty:grants-dialog", open);
-    return () => {
-      window.removeEventListener("canvastty:plugins-changed", changed);
-      window.removeEventListener("canvastty:grants-dialog", open);
+    // A plugin page's settings.open (the person's click there).
+    const section = (event: Event): void => {
+      setSettingsOpen(true);
+      setOpenSectionRequest((current) => ({ section: (event as CustomEvent<"agents">).detail, id: (current?.id ?? 0) + 1 }));
     };
+    const events: Array<[string, (event: Event) => void]> = [["canvastty:plugins-changed", changed], ["canvastty:grants-dialog", open], ["canvastty:open-settings", section]];
+    for (const [name, listener] of events) window.addEventListener(name, listener);
+    return () => { for (const [name, listener] of events) window.removeEventListener(name, listener); };
   }, [refreshPlugins]);
 
   /** One plugin record changed in main: show the answer, or the registry again when the change failed. */
