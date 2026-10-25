@@ -311,7 +311,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   });
   ipcMain.on(IPC.canvasNavigationOwnerWheel, (event, input: unknown) => {
     assertMainRenderer(event, getMainWindow);
-    browser.beginRendererWheelSequence(input);
+    browser.beginRendererWheelSequence(input, event.sender.getZoomFactor());
     event.returnValue = true;
   });
   ipcMain.on(IPC.canvasNavigationPointerGesture, (event, active: boolean) => {
@@ -890,7 +890,7 @@ export function registerIpc(ipcMain: IpcRegistrar, {
   });
   ipcMain.on(IPC.browserSetViewport, (event, bounds) => {
     assertMainRenderer(event, getMainWindow);
-    browser.setViewport(bounds);
+    browser.setViewport(bounds, event.sender.getZoomFactor());
   });
   ipcMain.on(IPC.browserPageWheelDecision, (event, input: unknown) => {
     event.returnValue = browser.decidePageWheel(event.sender, input);
