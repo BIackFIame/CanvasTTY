@@ -4386,6 +4386,9 @@ const PLUGIN_SDK_SOURCE = `(() => {
       open: (contributionId) => request("canvas.open", { contributionId }),
       focusSession: (sessionId) => request("sessions.focus", { sessionId })
     }),
+    grants: Object.freeze({
+      request: (params) => request("grants.request", params)
+    }),
     media: Object.freeze({
       pickLibrary: () => request("media.pickLibrary"),
       listLibraries: () => request("media.listLibraries"),

@@ -47,6 +47,12 @@ export interface CanvasTTYPluginHost {
     /** `sessions.focus`: moves the camera to an open card (sessions:read; on the person's action only). */
     focusSession(sessionId: string): Promise<null>;
   };
+  /** `grants.request`: one CanvasTTY consent dialog for several grants (on the person's action in this frame only). */
+  grants: {
+    request(request: { reason?: string; items: CanvasTTYGrantItem[] }): Promise<{
+      results: Array<CanvasTTYGrantItem & { result: "granted" | "declined" | "failed" | "already"; reason?: string }>;
+    }>;
+  };
   media: {
     pickLibrary(): Promise<CanvasTTYPluginMediaLibrary | null>;
     listLibraries(): Promise<CanvasTTYPluginMediaLibrary[]>;
@@ -933,3 +939,12 @@ export interface CanvasTTYUsageSummary {
   truncated: boolean;
   coverage: CanvasTTYUsageCoverage;
 }
+
+/** One grant a page may ask for with `grants.request`. */
+export type CanvasTTYGrantItem =
+  | { kind: "nativeCode"; plugin: string }
+  | { kind: "mayStartOrchestrators" }
+  | { kind: "decisionsMayAllow" }
+  | { kind: "sharedRead"; provider: string; method: string }
+  | { kind: "brokerGrant"; owner: string; account: string }
+  | { kind: "trustUpdates"; plugin: string };

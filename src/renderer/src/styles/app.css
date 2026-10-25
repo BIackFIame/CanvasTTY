@@ -1788,3 +1788,19 @@ button { border: 0; }
 .launcher-button--plugin { position: relative; gap: .2em; align-content: center; color: var(--home-launcher-text); }
 .launcher-button--plugin .launcher-button__label { max-width: 100%; overflow: hidden; padding: 0 .4em; font-size: .78em; line-height: 1.15; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
 .launcher-button--plugin:disabled { cursor: progress; opacity: .7; }
+.grants-dialog { width: min(640px, 100%); max-height: min(80vh, 760px); overflow: auto; padding: 22px 24px; border-radius: var(--radius-xl); color: var(--text-dark); background: var(--primary); box-shadow: var(--shadow-lg); font-size: calc(13px * var(--ui-scale, 1)); animation: dialog-in .2s cubic-bezier(.2,.8,.2,1) both; }
+.grants-dialog h2 { margin: 0 0 8px; font-size: 1.35em; }
+.grants-dialog__intro { margin: 0 0 10px; line-height: 1.45; }
+.grants-dialog__reason { margin: 0 0 12px; padding: 8px 10px; border-left: 3px solid var(--accent, currentColor); border-radius: 6px; background: rgba(0,0,0,.06); overflow-wrap: anywhere; }
+.grants-dialog__reason small { display: block; opacity: .75; }
+.grants-dialog__list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.grants-dialog__item label { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: start; padding: 9px 10px; border-radius: 10px; background: rgba(255,255,255,.35); cursor: pointer; }
+.grants-dialog__item input { margin-top: .2em; }
+.grants-dialog__item strong, .grants-dialog__item small { display: block; overflow-wrap: anywhere; }
+.grants-dialog__item small { margin-top: 3px; opacity: .85; line-height: 1.4; }
+.grants-dialog__item--blocked label { opacity: .6; }
+.grants-dialog__needs { color: var(--danger); font-weight: 700; }
+.grants-dialog__actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.grants-dialog__actions button { padding: .55em 1em; border-radius: 9px; font-weight: 700; }
+.grants-dialog__allow { color: white; background: var(--surface); }
+.grants-dialog__allow:disabled { opacity: .5; }

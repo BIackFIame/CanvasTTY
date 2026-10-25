@@ -331,6 +331,11 @@ async function handleRequest({
     }));
     return null;
   }
+  if (method === "grants.request") {
+    // One CanvasTTY consent dialog for a set of grants (C2); rules and limits in grantsPlan. Loaded on first use.
+    const { requestGrants } = await import("./grantsRequest");
+    return requestGrants({ plugin, params, personInFrame, locale: (context as { appearance: { locale: LocaleId } }).appearance.locale });
+  }
   if (method === "limits.get") {
     requirePermission(plugin, "limits:read");
     return pluginLimitsResponse(limits);

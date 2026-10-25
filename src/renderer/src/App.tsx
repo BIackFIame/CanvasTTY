@@ -385,7 +385,9 @@ export function App(): React.JSX.Element {
   const CheckpointsHost = usePreloadedSurface(checkpointsHostSurface, checkpointsFor !== null);
   useEffect(() => preloadWhenIdle([pluginReviewHostSurface, checkpointsHostSurface]), []);
   // A modal dialog owns the keyboard: no canvas shortcut fires underneath it and the native Browser is hidden.
-  const modalDialogOpen = shortcutReferenceOpen || pluginReview !== null || checkpointsFor !== null;
+  // A plugin's consent dialog (grants.request) is open; it lives outside this tree and says so with an event.
+  const [grantsOpen, setGrantsOpen] = useState(false);
+  const modalDialogOpen = shortcutReferenceOpen || pluginReview !== null || checkpointsFor !== null || grantsOpen;
   const [homeEditDraft, setHomeEditDraft] = useState<HomeEditDraft | null>(null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [browserSelected, setBrowserSelected] = useState(false);
@@ -1691,6 +1693,17 @@ export function App(): React.JSX.Element {
   const refreshPlugins = useCallback(async (): Promise<void> => {
     setPlugins(await window.canvasTTY.plugins.list());
   }, []);
+  // A plugin's consent dialog (grants.request) changed grants outside Settings.
+  useEffect(() => {
+    const changed = (): void => void refreshPlugins().catch(() => undefined);
+    const open = (event: Event): void => setGrantsOpen((event as CustomEvent<boolean>).detail === true);
+    window.addEventListener("canvastty:plugins-changed", changed);
+    window.addEventListener("canvastty:grants-dialog", open);
+    return () => {
+      window.removeEventListener("canvastty:plugins-changed", changed);
+      window.removeEventListener("canvastty:grants-dialog", open);
+    };
+  }, [refreshPlugins]);
 
   /** One plugin record changed in main: show the answer, or the registry again when the change failed. */
   const applyPluginChange = useCallback(async (pluginId: string, change: Promise<InstalledPlugin>, refreshOthers = false): Promise<void> => {
