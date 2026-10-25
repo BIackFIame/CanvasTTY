@@ -1011,8 +1011,14 @@ export interface PluginBrokerAccounts {
   available: boolean;
   accounts: PluginBrokerAccount[];
   callers: Array<{ pluginId: string; name: string; ready: boolean }>;
-  /** `changed`: granted before, but the account's origin, protocol or auth scheme (or the owner's source) changed. */
-  grants: Array<{ caller: string; account: string; state: "granted" | "changed" }>;
+  /**
+   * `granted`: its own grant, or the all-accounts grant covers its address. `changed`: granted before, but the
+   * account's origin, protocol or auth scheme (or the owner's source) changed. `new-address`: the all-accounts grant
+   * is on, but this account's address was not offered when the person allowed it.
+   */
+  grants: Array<{ caller: string; account: string; state: "granted" | "changed" | "new-address" }>;
+  /** Callers holding the all-accounts grant for this owner; `changed`: the owner's source changed since. */
+  allGrants?: Array<{ caller: string; state: "on" | "changed" }>;
 }
 
 /** A browser engine a plugin service runs: it hands the core one local CDP WebSocket per agent background tab. */

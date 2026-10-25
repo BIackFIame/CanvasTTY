@@ -11,6 +11,10 @@ import { BrokerAddressError, createBrokerTransport, type BrokerTransport } from 
  *   account the owner stops offering, or an owner that stops running or is no longer trusted, ends at once.
  * - The person grants each caller -> account pair (PluginManager stores it). The grant pins the owner's source and
  *   the account's origin, protocol and auth scheme; a change suspends it until the person allows it again.
+ * - Or the person grants a caller every account one owner offers (`account: "*"`, C1). That grant pins the owner's
+ *   source and the set of addresses (origin, protocol, auth scheme) it offered at that moment: a new account on one
+ *   of those addresses is covered at once, an account on a new address waits until the person allows the grant
+ *   again (which adds the addresses offered then). The owner offers only the accounts the person marked for it.
  * - The host builds the request itself: POST (GET for /models) to the offer's base URL plus an allowed path, with
  *   only content-type, accept, the auth header and anthropic-version, the key read here in the main process. No
  *   caller header, query, method or destination exists in the request; a model outside the offer is refused.
@@ -147,7 +151,10 @@ export interface PluginAccountBrokerDeps {
   owners(): BrokerOwner[];
   /** Plugins that declare accounts:broker (for the person's grant list), with whether they may call now. */
   callers(): BrokerCaller[];
-  /** The stored grant fingerprint of a caller -> account pair (PluginManager), if any. */
+  /**
+   * The stored grant fingerprint of a caller -> account pair (PluginManager), if any. The all-accounts grant is
+   * stored under `*` (its marker) and `*.<16 hex>` (one per allowed address) with the same call.
+   */
   grant(callerId: string, ownerId: string, accountId: string): string | undefined;
   /** Stores (or with null removes) a grant; PluginManager checks the caller and the owner itself. */
   saveGrant(callerId: string, ownerId: string, accountId: string, fingerprint: string | null): Promise<void>;
@@ -173,6 +180,8 @@ interface OpenRequest {
   owner: BrokerOwner;
   accountId: string;
   fingerprint: string;
+  /** The account's address pin under the all-accounts grant (covered when the person allowed that address). */
+  addressPin: string;
   pair: string;
   controller: AbortController;
   /** Why the request was ended from outside (revoked, cancelled, owner gone); null while it runs. */
@@ -226,9 +235,7 @@ export class PluginAccountBroker {
     await Promise.all(this.deps.owners().map(async (owner) => {
       const offers = await this.offers(owner).catch(() => [] as BrokerOffer[]);
       for (const offer of offers) {
-        if (this.deps.grant(callerId, owner.pluginId, offer.id) === brokerGrantFingerprint(owner.sourceUrl, offer)) {
-          accounts.push(viewOf(owner, offer));
-        }
+        if (this.grantState(callerId, owner, offer) === "granted") accounts.push(viewOf(owner, offer));
       }
     }));
     accounts.sort((left, right) => left.ref.localeCompare(right.ref));
@@ -243,24 +250,54 @@ export class PluginAccountBroker {
     available: boolean;
     accounts: BrokerAccountView[];
     callers: BrokerCaller[];
-    grants: Array<{ caller: string; account: string; state: "granted" | "changed" }>;
+    grants: Array<{ caller: string; account: string; state: BrokerPairState }>;
+    allGrants: Array<{ caller: string; state: "on" | "changed" }>;
   }> {
     const owner = this.deps.owners().find((candidate) => candidate.pluginId === ownerId);
     const callers = this.deps.callers().filter((caller) => caller.pluginId !== ownerId);
-    if (!owner || !this.deps.running(owner.pluginId, owner.serviceId)) return { available: false, accounts: [], callers, grants: [] };
+    if (!owner || !this.deps.running(owner.pluginId, owner.serviceId)) return { available: false, accounts: [], callers, grants: [], allGrants: [] };
     const offers = await this.offers(owner).catch(() => null);
-    if (!offers) return { available: false, accounts: [], callers, grants: [] };
-    const grants: Array<{ caller: string; account: string; state: "granted" | "changed" }> = [];
+    if (!offers) return { available: false, accounts: [], callers, grants: [], allGrants: [] };
+    const grants: Array<{ caller: string; account: string; state: BrokerPairState }> = [];
+    const allGrants: Array<{ caller: string; state: "on" | "changed" }> = [];
     for (const caller of callers) {
+      const marker = this.deps.grant(caller.pluginId, ownerId, ALL_ACCOUNTS);
+      if (marker) allGrants.push({ caller: caller.pluginId, state: marker === brokerAllGrantMarker(owner.sourceUrl) ? "on" : "changed" });
       for (const offer of offers) {
-        const stored = this.deps.grant(caller.pluginId, ownerId, offer.id);
-        if (stored) grants.push({ caller: caller.pluginId, account: offer.id, state: stored === brokerGrantFingerprint(owner.sourceUrl, offer) ? "granted" : "changed" });
+        const state = this.grantState(caller.pluginId, owner, offer);
+        if (state) grants.push({ caller: caller.pluginId, account: offer.id, state });
       }
     }
-    return { available: true, accounts: offers.map((offer) => viewOf(owner, offer)), callers, grants };
+    return { available: true, accounts: offers.map((offer) => viewOf(owner, offer)), callers, grants, allGrants };
   }
 
-  /** The person allows (or withdraws) one caller -> account pair; the pin is taken from the offer as it is now. */
+  /**
+   * How a caller stands with one offered account: `granted` (its own grant, or the all-accounts grant covering the
+   * account's address), `changed` (its own grant, but the address, protocol, auth scheme or owner's source changed),
+   * `new-address` (the all-accounts grant is on, but this address was not offered when the person allowed it), or
+   * null (nothing granted).
+   */
+  private grantState(callerId: string, owner: BrokerOwner, offer: BrokerOffer): BrokerPairState | null {
+    const stored = this.deps.grant(callerId, owner.pluginId, offer.id);
+    if (stored === brokerGrantFingerprint(owner.sourceUrl, offer)) return "granted";
+    const all = this.allGrantState(callerId, owner.pluginId, owner.sourceUrl, brokerAddressPin(owner.sourceUrl, offer));
+    if (all === "covered") return "granted";
+    if (stored) return "changed";
+    return all === "new-address" ? "new-address" : null;
+  }
+
+  /** The all-accounts grant for one address pin: covered, on but not for this address, or not on. */
+  private allGrantState(callerId: string, ownerId: string, ownerSourceUrl: string, pin: string): "covered" | "new-address" | null {
+    if (this.deps.grant(callerId, ownerId, ALL_ACCOUNTS) !== brokerAllGrantMarker(ownerSourceUrl)) return null;
+    return this.deps.grant(callerId, ownerId, brokerAddressKey(pin)) === pin ? "covered" : "new-address";
+  }
+
+  /**
+   * The person allows (or withdraws) one caller -> account pair; the pin is taken from the offer as it is now.
+   * `accountId` "*" is the all-accounts grant: allowing it pins every address offered now (adding to the addresses
+   * allowed before), and the marker is written last, so a failure part-way leaves nothing new in force. Withdrawing
+   * it removes the marker first (PluginManager also removes its address pins).
+   */
   async setGrant(callerId: string, ownerId: string, accountId: string, granted: boolean): Promise<void> {
     if (!granted) {
       await this.deps.saveGrant(callerId, ownerId, accountId, null);
@@ -269,6 +306,12 @@ export class PluginAccountBroker {
     }
     const owner = this.deps.owners().find((candidate) => candidate.pluginId === ownerId);
     if (!owner || !this.deps.running(owner.pluginId, owner.serviceId)) throw new Error("The plugin that owns the account is not running.");
+    if (accountId === ALL_ACCOUNTS) {
+      const pins = [...new Set((await this.offers(owner)).map((offer) => brokerAddressPin(owner.sourceUrl, offer)))];
+      for (const pin of pins) await this.deps.saveGrant(callerId, ownerId, brokerAddressKey(pin), pin);
+      await this.deps.saveGrant(callerId, ownerId, ALL_ACCOUNTS, brokerAllGrantMarker(owner.sourceUrl));
+      return;
+    }
     const offer = (await this.offers(owner)).find((candidate) => candidate.id === accountId);
     if (!offer) throw new Error("That account is not offered.");
     await this.deps.saveGrant(callerId, ownerId, accountId, brokerGrantFingerprint(owner.sourceUrl, offer));
@@ -315,9 +358,9 @@ export class PluginAccountBroker {
     const owner = this.deps.owners().find((candidate) => candidate.pluginId === open.owner.pluginId);
     if (!owner || owner.serviceId !== open.owner.serviceId || owner.sourceUrl !== open.owner.sourceUrl) return "owner_unavailable";
     const stored = this.deps.grant(open.callerId, owner.pluginId, open.accountId);
-    if (!stored) return "not_granted";
-    if (stored !== open.fingerprint) return "grant_changed";
-    return null;
+    if (stored === open.fingerprint) return null;
+    if (this.allGrantState(open.callerId, owner.pluginId, owner.sourceUrl, open.addressPin) === "covered") return null;
+    return stored ? "grant_changed" : "not_granted";
   }
 
   private async offers(owner: BrokerOwner): Promise<BrokerOffer[]> {
@@ -400,7 +443,8 @@ export class PluginAccountBroker {
     if (this.open.has(uploadKey)) return this.refuse(callerId, callerServiceId, label, "invalid_request", "That requestId is already open.");
     const owner = this.deps.owners().find((candidate) => candidate.pluginId === ownerId);
     const stored = this.deps.grant(callerId, ownerId, accountId);
-    if (!stored) return this.refuse(callerId, callerServiceId, label, owner ? "not_granted" : "account_unknown");
+    const allMarker = this.deps.grant(callerId, ownerId, ALL_ACCOUNTS);
+    if (!stored && !allMarker) return this.refuse(callerId, callerServiceId, label, owner ? "not_granted" : "account_unknown");
     if (!owner || !this.deps.running(owner.pluginId, owner.serviceId)) return this.refuse(callerId, callerServiceId, label, "owner_unavailable");
     let offers: BrokerOffer[];
     try {
@@ -411,7 +455,15 @@ export class PluginAccountBroker {
     const offer = offers.find((candidate) => candidate.id === accountId);
     if (!offer) return this.refuse(callerId, callerServiceId, label, "owner_unavailable", "The plugin that owns the account no longer offers it.");
     const fingerprint = brokerGrantFingerprint(owner.sourceUrl, offer);
-    if (stored !== fingerprint) return this.refuse(callerId, callerServiceId, label, "grant_changed");
+    const addressPin = brokerAddressPin(owner.sourceUrl, offer);
+    if (stored !== fingerprint) {
+      const all = this.allGrantState(callerId, ownerId, owner.sourceUrl, addressPin);
+      if (all === "new-address" && !stored) {
+        return this.refuse(callerId, callerServiceId, label, "not_granted",
+          "This account is on an address the person has not allowed yet; they allow it again in Settings (all accounts).");
+      }
+      if (all !== "covered") return this.refuse(callerId, callerServiceId, label, stored ? "grant_changed" : "not_granted");
+    }
     if (!offer.paths.includes(path)) return this.refuse(callerId, callerServiceId, label, "path_refused");
 
     // The body: given inline, or sent before in parts (accounts.body).
@@ -485,7 +537,7 @@ export class PluginAccountBroker {
     if (this.open.has(uploadKey)) return this.refuse(callerId, callerServiceId, label, "invalid_request", "That requestId is already open.");
 
     const open: OpenRequest = {
-      requestId, callerId, callerServiceId, owner, accountId, fingerprint, pair, controller: new AbortController(), ended: null
+      requestId, callerId, callerServiceId, owner, accountId, fingerprint, addressPin, pair, controller: new AbortController(), ended: null
     };
     // Recheck after every wait above: a grant withdrawn or a plugin turned off meanwhile gets nothing.
     const reason = this.standing(open);
@@ -737,6 +789,27 @@ export class UsageMeter {
   value(): BrokerUsage {
     return { input: this.input, output: this.output, cached: this.cached };
   }
+}
+
+/** The account id the all-accounts grant is stored under (never a valid offer id). */
+export const ALL_ACCOUNTS = "*";
+
+/** `granted`, `changed` (own grant, address changed), `new-address` (all-accounts grant on, address not allowed yet). */
+export type BrokerPairState = "granted" | "changed" | "new-address";
+
+/** The all-accounts grant's marker: it pins the owner's source, so a source change suspends it. */
+export function brokerAllGrantMarker(ownerSourceUrl: string): string {
+  return createHash("sha256").update(JSON.stringify(["broker-grant-all-v1", ownerSourceUrl])).digest("hex");
+}
+
+/** One address the all-accounts grant covers: the owner's source and an origin, protocol and auth scheme. */
+export function brokerAddressPin(ownerSourceUrl: string, offer: Pick<BrokerOffer, "origin" | "protocol" | "auth">): string {
+  return createHash("sha256").update(JSON.stringify(["broker-grant-address-v1", ownerSourceUrl, offer.origin, offer.protocol, offer.auth])).digest("hex");
+}
+
+/** Where an address pin is stored next to the marker. */
+export function brokerAddressKey(pin: string): string {
+  return `${ALL_ACCOUNTS}.${pin.slice(0, 16)}`;
 }
 
 /** The grant's pin: the owner's source and the account's origin, protocol and auth scheme (not its models). */

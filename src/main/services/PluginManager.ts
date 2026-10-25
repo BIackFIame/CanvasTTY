@@ -1686,11 +1686,14 @@ export class PluginManager {
       }
       if (callerId === ownerId) throw new Error("A plugin uses its own accounts directly.");
       if (!this.brokerOwners().some((owner) => owner.pluginId === ownerId)) throw new Error("The other plugin does not offer accounts now.");
-      if (!/^[a-f0-9]{64}$/.test(fingerprint) || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(accountId)) throw new Error("The grant is invalid.");
+      // An account id, or the all-accounts grant: its marker `*` and one `*.<16 hex>` pin per allowed address.
+      if (!/^[a-f0-9]{64}$/.test(fingerprint) || !/^(?:[a-z0-9][a-z0-9._-]{0,63}|\*|\*\.[a-f0-9]{16})$/.test(accountId)) throw new Error("The grant is invalid.");
       if (!(key in next) && Object.keys(next).length >= MAX_BROKER_GRANTS) throw new Error(`At most ${MAX_BROKER_GRANTS} accounts per plugin.`);
       next[key] = fingerprint;
     } else {
       delete next[key];
+      // Withdrawing the all-accounts grant also forgets the addresses it was allowed for.
+      if (accountId === "*") for (const stored of Object.keys(next)) if (stored.startsWith(`${ownerId} *.`)) delete next[stored];
     }
     this.brokerGrants.set(callerId, next);
     try {

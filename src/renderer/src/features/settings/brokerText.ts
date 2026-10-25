@@ -16,7 +16,16 @@ const ru = {
   confirm: "Расширение сможет отправлять запросы к модели через эту учётную запись, пока работают его сервисы. Ключ оно не увидит, но запросы расходуют квоту или деньги этой учётной записи. Проверьте, что условия тарифа это допускают.",
   allow: "Разрешить",
   origin: "Адрес",
-  models: "Модели"
+  models: "Модели",
+  allTitle: "Все учётные записи этого расширения",
+  allDescription: "Одно разрешение на все учётные записи, которые это расширение предлагает другим (те, что вы отметили на его странице), включая добавленные позже на уже разрешённых адресах.",
+  allConfirm: "Расширение сможет отправлять запросы через каждую учётную запись, которую это расширение предлагает сейчас или предложит позже на этих адресах. Учётная запись на новом адресе будет ждать вашего разрешения. Запросы расходуют квоту или деньги этих учётных записей.",
+  allAddresses: "Адреса сейчас:",
+  allNone: "сейчас нет ни одной учётной записи; первая на новом адресе будет ждать разрешения",
+  covered: "входит в разрешение на все учётные записи",
+  newAddress: "новый адрес: разрешите все учётные записи снова, чтобы включить его",
+  allowNewAddress: "Разрешить новые адреса",
+  allChanged: "источник расширения изменился: разрешите снова"
 };
 
 const en: Record<keyof typeof ru, string> = {
@@ -31,7 +40,16 @@ const en: Record<keyof typeof ru, string> = {
   confirm: "The extension can send model requests through this account whenever its services run. It never sees the key, but the requests use this account's quota or money. Check that the plan's terms allow it.",
   allow: "Allow",
   origin: "Address",
-  models: "Models"
+  models: "Models",
+  allTitle: "Every account of this extension",
+  allDescription: "One grant for every account this extension offers to others (the ones you marked on its page), including accounts added later on addresses already allowed.",
+  allConfirm: "The extension can send requests through every account this extension offers now, or offers later on these addresses. An account on a new address waits for your permission. Requests use these accounts' quota or money.",
+  allAddresses: "Addresses now:",
+  allNone: "no account is offered now; the first one on a new address will wait for your permission",
+  covered: "covered by the grant for every account",
+  newAddress: "new address: allow every account again to include it",
+  allowNewAddress: "Allow the new addresses",
+  allChanged: "the extension's source changed: allow it again"
 };
 
 export function brokerText(locale: LocaleId, key: keyof typeof ru): string {

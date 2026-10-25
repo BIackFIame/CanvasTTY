@@ -25,14 +25,14 @@ export function PluginBrokerGrants({ locale, ownerId, refreshKey, busy, onError 
     let cancelled = false;
     void window.canvasTTY.plugins.brokerAccounts(ownerId).then(
       (next) => { if (!cancelled) setState(next); },
-      () => { if (!cancelled) setState({ available: false, accounts: [], callers: [], grants: [] }); }
+      () => { if (!cancelled) setState({ available: false, accounts: [], callers: [], grants: [], allGrants: [] }); }
     );
     return () => { cancelled = true; };
   }, [ownerId, refreshKey]);
 
   if (!state || state.callers.length === 0) return null;
 
-  const setGrant = async (callerId: string, account: PluginBrokerAccount, granted: boolean): Promise<void> => {
+  const setGrant = async (callerId: string, account: Pick<PluginBrokerAccount, "id">, granted: boolean): Promise<void> => {
     setSaving(true);
     onError(null);
     try {
@@ -52,6 +52,68 @@ export function PluginBrokerGrants({ locale, ownerId, refreshKey, busy, onError 
         <small>{brokerText(locale, "description")}</small>
       </span>
       {!state.available && <small>{brokerText(locale, "unavailable")}</small>}
+      {state.available && state.callers.map((caller) => {
+        // The all-accounts grant (one switch per caller): new accounts on allowed addresses are covered.
+        const key = `${caller.pluginId} *`;
+        const all = state.allGrants?.find((entry) => entry.caller === caller.pluginId);
+        const on = all?.state === "on";
+        const waiting = on && state.grants.some((entry) => entry.caller === caller.pluginId && entry.state === "new-address");
+        const note = all?.state === "changed" ? brokerText(locale, "allChanged") : !caller.ready ? brokerText(locale, "callerOff") : null;
+        const origins = [...new Set(state.accounts.map((account) => account.origin))];
+        return (
+          <div key={key}>
+            <div className="agent-hooks__row-main">
+              <span className="agent-hooks__copy">
+                <strong>{brokerText(locale, "allTitle")} · {caller.name}</strong>
+                <small>{brokerText(locale, "allDescription")}{note ? ` · ${note}` : ""}</small>
+              </span>
+              <button
+                className={`agent-hooks__toggle${on ? " agent-hooks__toggle--on" : ""}`}
+                type="button"
+                role="switch"
+                aria-checked={on}
+                aria-label={`${brokerText(locale, "allTitle")}: ${caller.name}`}
+                disabled={busy || saving || (!on && !caller.ready)}
+                onClick={() => {
+                  if (on) void setGrant(caller.pluginId, { id: "*" }, false);
+                  else setConfirming(key);
+                }}
+              >
+                <span aria-hidden="true" />
+                {t(locale, on ? "on" : "off")}
+              </button>
+            </div>
+            {waiting && confirming !== key && (
+              <div className="agent-hooks__confirm">
+                <p>{brokerText(locale, "newAddress")}</p>
+                <div>
+                  <button type="button" disabled={busy || saving || !caller.ready} onClick={() => setConfirming(key)}>
+                    {brokerText(locale, "allowNewAddress")}
+                  </button>
+                </div>
+              </div>
+            )}
+            {confirming === key && (
+              <div className="agent-hooks__confirm">
+                <p>{brokerText(locale, "allConfirm")}</p>
+                <p>
+                  <strong>{caller.name}</strong> → {brokerText(locale, "allAddresses")}{" "}
+                  {origins.length ? origins.map((origin) => <code key={origin}>{origin} </code>) : brokerText(locale, "allNone")}
+                </p>
+                <div>
+                  <button type="button" onClick={() => setConfirming(null)}>{t(locale, "cancel")}</button>
+                  <button
+                    className="agent-hooks__trust"
+                    type="button"
+                    disabled={busy || saving}
+                    onClick={() => void setGrant(caller.pluginId, { id: "*" }, true)}
+                  >{brokerText(locale, "allow")}</button>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
       {state.available && state.accounts.length === 0 && <small>{brokerText(locale, "none")}</small>}
       {state.accounts.map((account) => (
         <div key={account.id}>
@@ -66,7 +128,11 @@ export function PluginBrokerGrants({ locale, ownerId, refreshKey, busy, onError 
             const key = `${caller.pluginId} ${account.id}`;
             const grant = state.grants.find((entry) => entry.caller === caller.pluginId && entry.account === account.id);
             const granted = grant?.state === "granted";
-            const note = grant?.state === "changed" ? brokerText(locale, "changed") : !caller.ready ? brokerText(locale, "callerOff") : null;
+            const covered = state.allGrants?.some((entry) => entry.caller === caller.pluginId && entry.state === "on") === true;
+            const note = grant?.state === "changed" ? brokerText(locale, "changed")
+              : grant?.state === "new-address" ? brokerText(locale, "newAddress")
+                : granted && covered ? brokerText(locale, "covered")
+                  : !caller.ready ? brokerText(locale, "callerOff") : null;
             return (
               <div key={key}>
                 <div className="agent-hooks__row-main">
@@ -80,7 +146,7 @@ export function PluginBrokerGrants({ locale, ownerId, refreshKey, busy, onError 
                     role="switch"
                     aria-checked={granted}
                     aria-label={`${brokerText(locale, "title")}: ${caller.name} · ${account.label}`}
-                    disabled={busy || saving || (!granted && !caller.ready)}
+                    disabled={busy || saving || (!granted && !caller.ready) || (granted && covered)}
                     onClick={() => {
                       if (granted) void setGrant(caller.pluginId, account, false);
                       else setConfirming(key);

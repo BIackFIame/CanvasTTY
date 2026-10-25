@@ -11,6 +11,9 @@ import {
   KeyMask,
   PluginAccountBroker,
   UsageMeter,
+  brokerAddressKey,
+  brokerAddressPin,
+  brokerAllGrantMarker,
   brokerGrantFingerprint,
   validateBrokerOffer
 } from "../src/main/services/PluginAccountBroker.ts";
@@ -803,4 +806,113 @@ test("loopback: a keyed offer on plain http is refused and a process squatting t
   assert.equal(squatter.requests[0].headers["x-api-key"], undefined);
   assert.deepEqual(state.registered, [], "no key was even read");
   assert.ok(!squatter.requests.some((entry) => JSON.stringify(entry).includes(KEY)));
+});
+
+// ---- C1: one grant for every account an owner offers ----
+
+test("all-accounts grant: covers every offered account and new ones on allowed addresses; a new address waits for the person", async (t) => {
+  const upstream = await startFakeModelUpstream();
+  t.after(() => upstream.close());
+  const CHINA = "https://open.bigmodel.example";
+  let offers = [offerFor(HTTPS)];
+  const { broker, request, finished } = brokerFixture(t, { transport: upstream.transport, offers: () => offers });
+  const go = (requestId, account, caller = CALLER) => request({ requestId, ref: `${OWNER}:${account}`, path: "/chat/completions", body: chat("m-json"), stream: false }, caller);
+  assert.equal(await reasonOf(go("a0", "glm-1")), "not_granted", "nothing by default");
+
+  await broker.setGrant(CALLER, OWNER, "*", true);
+  assert.equal(await reasonOf(go("a1", "glm-1")), "ok");
+  await finished("a1");
+  // A new account on an address the person allowed: covered without another click.
+  offers = [offerFor(HTTPS), offerFor(HTTPS, { id: "glm-2", label: "GLM plan 2" })];
+  assert.deepEqual((await broker.handle(CALLER, "router", "accounts.list", {})).accounts.map((account) => account.id), ["glm-1", "glm-2"]);
+  assert.equal(await reasonOf(go("a2", "glm-2")), "ok");
+  await finished("a2");
+  // Another caller holds nothing.
+  assert.equal(await reasonOf(go("o1", "glm-2", OTHER)), "not_granted");
+
+  // A new account on a new address: suspended until the person allows the grant again.
+  offers = [...offers, offerFor(CHINA, { id: "glm-cn", label: "GLM China" })];
+  let refusal = null;
+  try { await go("a3", "glm-cn"); } catch (error) { refusal = error; }
+  assert.equal(refusal?.reason, "not_granted");
+  assert.match(refusal.message, /address the person has not allowed yet/u);
+  assert.deepEqual((await broker.handle(CALLER, "router", "accounts.list", {})).accounts.map((account) => account.id), ["glm-1", "glm-2"]);
+  const view = await broker.ownerAccounts(OWNER);
+  assert.deepEqual(view.allGrants, [{ caller: CALLER, state: "on" }]);
+  assert.deepEqual(view.grants, [
+    { caller: CALLER, account: "glm-1", state: "granted" },
+    { caller: CALLER, account: "glm-2", state: "granted" },
+    { caller: CALLER, account: "glm-cn", state: "new-address" }
+  ]);
+  await broker.setGrant(CALLER, OWNER, "*", true);
+  assert.equal(await reasonOf(go("a4", "glm-cn")), "ok");
+  await finished("a4");
+  // The same origin with another protocol or auth scheme is another address.
+  offers = [offerFor(HTTPS, { id: "glm-4", auth: "x-api-key" })];
+  assert.equal(await reasonOf(go("a5", "glm-4")), "not_granted");
+});
+
+test("all-accounts grant: withdrawing it ends running requests at once; an account's own grant is untouched", async (t) => {
+  const upstream = await startFakeModelUpstream();
+  t.after(() => upstream.close());
+  const { broker, state, request, finished } = brokerFixture(t, {
+    transport: upstream.transport, offers: [offerFor(HTTPS), offerFor(HTTPS, { id: "glm-2" })], limits: { recheckMs: 50 }
+  });
+  await broker.setGrant(CALLER, OWNER, "*", true);
+  await broker.setGrant(CALLER, OWNER, "glm-2", true);
+  await request({ requestId: "h1", ref: `${OWNER}:glm-1`, path: "/chat/completions", body: chat("m-hang") });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await broker.setGrant(CALLER, OWNER, "*", false);
+  assert.equal((await finished("h1")).at(-1).params.error.reason, "not_granted");
+  assert.equal(await reasonOf(request({ requestId: "h2", ref: `${OWNER}:glm-1`, path: "/chat/completions", body: chat("m-json") })), "not_granted");
+  assert.equal(await reasonOf(request({ requestId: "h3", ref: `${OWNER}:glm-2`, path: "/chat/completions", body: chat("m-json"), stream: false })), "ok");
+  await finished("h3");
+  // A pin left without its marker is not enough, and a marker without the pin is not either (PluginManager removes
+  // the pins with the marker; this fixture does not, so clear them here).
+  for (const key of [...state.grants.keys()]) if (key.includes(" *.")) state.grants.delete(key);
+  const pin = brokerAddressPin(SOURCE, offerFor(HTTPS));
+  state.grants.set(`${CALLER} ${OWNER} ${brokerAddressKey(pin)}`, pin);
+  assert.equal(await reasonOf(request({ requestId: "h4", ref: `${OWNER}:glm-1`, path: "/chat/completions", body: chat("m-json") })), "not_granted");
+  state.grants.delete(`${CALLER} ${OWNER} ${brokerAddressKey(pin)}`);
+  state.grants.set(`${CALLER} ${OWNER} *`, brokerAllGrantMarker(SOURCE));
+  assert.equal(await reasonOf(request({ requestId: "h5", ref: `${OWNER}:glm-1`, path: "/chat/completions", body: chat("m-json") })), "not_granted");
+  // A marker for another source (the owner switched repositories) covers nothing.
+  state.grants.set(`${CALLER} ${OWNER} ${brokerAddressKey(pin)}`, pin);
+  state.grants.set(`${CALLER} ${OWNER} *`, brokerAllGrantMarker("https://github.com/someone-else/accounts.git"));
+  assert.equal(await reasonOf(request({ requestId: "h6", ref: `${OWNER}:glm-1`, path: "/chat/completions", body: chat("m-json") })), "not_granted");
+  assert.deepEqual((await broker.ownerAccounts(OWNER)).allGrants, [{ caller: CALLER, state: "changed" }]);
+  assert.notEqual(brokerAddressPin(SOURCE, offerFor(HTTPS)), brokerAddressPin("https://github.com/someone-else/accounts.git", offerFor(HTTPS)));
+});
+
+test("all-accounts grant in the registry: only * and *.<16 hex> keys; withdrawing * removes its addresses; it goes with the caller's trust", async (t) => {
+  const userData = await mkdtemp(join(tmpdir(), "canvastty-broker-all-"));
+  t.after(() => rm(userData, { recursive: true, force: true }));
+  const packages = {
+    [`https://github.com/example/${OWNER}`]: () => ({ manifest: ownerManifest(), files: { "services/accounts.mjs": "// owner\n" } }),
+    [`https://github.com/example/${CALLER}`]: () => ({ manifest: callerManifest(), files: { "services/router.mjs": "// caller\n" } })
+  };
+  let manager = await managerWith(userData, packages);
+  t.after(() => manager.dispose());
+  await install(manager, OWNER);
+  await install(manager, CALLER);
+  await manager.setNativeCodeTrusted(OWNER, true);
+  await manager.setNativeCodeTrusted(CALLER, true);
+  for (const bad of ["**", "*.", "*.abc", `*.${"g".repeat(16)}`, `*.${"a".repeat(17)}`, "*x"]) {
+    await assert.rejects(manager.setBrokerGrant(CALLER, OWNER, bad, FP), /invalid/u, bad);
+  }
+  const pinKey = `*.${"b".repeat(16)}`;
+  await manager.setBrokerGrant(CALLER, OWNER, pinKey, "b".repeat(64));
+  await manager.setBrokerGrant(CALLER, OWNER, "*", FP);
+  await manager.setBrokerGrant(CALLER, OWNER, "glm-1", "c".repeat(64));
+  await manager.dispose();
+  manager = await managerWith(userData, packages);
+  assert.equal(manager.brokerGrant(CALLER, OWNER, "*"), FP, "kept over a restart");
+  assert.equal(manager.brokerGrant(CALLER, OWNER, pinKey), "b".repeat(64));
+  await manager.setBrokerGrant(CALLER, OWNER, "*", null);
+  assert.equal(manager.brokerGrant(CALLER, OWNER, "*"), undefined);
+  assert.equal(manager.brokerGrant(CALLER, OWNER, pinKey), undefined, "its addresses go with it");
+  assert.equal(manager.brokerGrant(CALLER, OWNER, "glm-1"), "c".repeat(64), "an account's own grant stays");
+  await manager.setBrokerGrant(CALLER, OWNER, "*", FP);
+  await manager.setNativeCodeTrusted(CALLER, false);
+  assert.equal(manager.brokerGrant(CALLER, OWNER, "*"), undefined, "revoked with the caller's native code trust");
 });
