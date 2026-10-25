@@ -7,7 +7,9 @@
   "author": "howdeploy",
   "license": "MIT",
   "homepage": "https://github.com/howdeploy/CanvasTTY",
-  "diagnostics": { "reportUrl": "https://canvastty.deploychan.webcam/canvastty/reports" },
+  "diagnostics": {
+    "reportUrl": "https://canvastty.deploychan.webcam/canvastty/reports"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/howdeploy/CanvasTTY.git"
@@ -50,6 +52,7 @@
   },
   "dependencies": {
     "@xterm/headless": "6.0.0",
+    "ascii.rest": "^0.4.0",
     "electron-updater": "6.8.9",
     "hast-util-to-jsx-runtime": "2.3.6",
     "lowlight": "3.3.0",

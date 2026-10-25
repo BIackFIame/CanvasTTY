@@ -1,4 +1,4 @@
-import type { AsciiPiece } from "../../vendor/ascii-rest/mount.js";
+import type { AsciiPiece } from "../../../../shared/terminalBackground";
 import { drawAsciiFrame } from "./asciiFrameCanvas";
 import { createAsciiGpuRenderer } from "./asciiFrameGpu";
 import { synchronizedBackgroundDelay, synchronizedBackgroundTime, type BackgroundSyncClock } from "./backgroundSyncClock.ts";
@@ -67,7 +67,7 @@ self.onmessage = async ({ data }: MessageEvent<BackgroundWorkerMessage>): Promis
   if (data.type === "init") {
     canvas = data.canvas;
     pixelRatio = data.pixelRatio ?? 1;
-    piece = await import(`../../vendor/ascii-rest/pieces/${data.scene}.js`);
+    piece = await import(`../../../../../node_modules/ascii.rest/dist/pieces/${data.scene}.js`);
     gpu = createAsciiGpuRenderer(canvas, piece.meta);
     ctx = gpu ? null : canvas.getContext("2d", { alpha: false });
     frame = piece.default({ ...piece.meta.options });

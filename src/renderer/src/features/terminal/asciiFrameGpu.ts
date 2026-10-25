@@ -1,4 +1,4 @@
-import type { AsciiPiece } from "../../vendor/ascii-rest/mount.js";
+import type { AsciiPiece } from "../../../../shared/terminalBackground";
 import { appendFineDots } from "./asciiFineDots.ts";
 import { asciiFrameBounds, type AsciiFrameTransform } from "./asciiFrameBounds.ts";
 

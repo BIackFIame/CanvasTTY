@@ -1,4 +1,4 @@
-import type { AsciiPiece } from "../../vendor/ascii-rest/mount.js";
+import type { AsciiPiece } from "../../../../shared/terminalBackground";
 
 export interface AsciiFrameTransform { scale: number; offsetX: number; offsetY: number }
 

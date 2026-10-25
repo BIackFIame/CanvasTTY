@@ -68,7 +68,7 @@ test("favorite controls are separate from selecting a scene and expose saved sta
   assert.doesNotMatch(html, /\stitle=/);
 });
 
-test("all 240 previews ship as valid local WebP posters", async () => {
+test("all 217 previews ship as valid local WebP posters", async () => {
   for (const { id } of TERMINAL_BACKGROUND_CATALOG) {
     const data = await readFile(new URL(`../src/renderer/src/assets/ascii-posters/${id}.webp`, import.meta.url));
     assert.equal(data.toString("ascii", 0, 4), "RIFF", id);

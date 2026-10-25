@@ -1,5 +1,5 @@
 import { fineDotSvgDefinitions } from "./asciiFineDots.ts";
-import type { AsciiPiece } from "../../vendor/ascii-rest/mount.js";
+import type { AsciiPiece } from "../../../../shared/terminalBackground";
 
 const escape = (value: string): string => value.replaceAll("&", "&amp;")
   .replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");

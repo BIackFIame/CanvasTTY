@@ -31,12 +31,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the mountain in a hexagon, scanned now and then"
   },
   {
-    "id": "amer-fort",
-    "name": "amer fort",
-    "category": "scenes",
-    "note": "amer fort floodlit gold on its hill, mirrored in maota lake at night"
-  },
-  {
     "id": "analog-clock",
     "name": "analog clock",
     "category": "objects",
@@ -95,12 +89,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "black hole",
     "category": "space",
     "note": "a black hole, its lensed disk turning, one side brighter"
-  },
-  {
-    "id": "black-prism",
-    "name": "black prism",
-    "category": "scenes",
-    "note": "the vercel triangle as a glass prism, splitting white light to a rainbow"
   },
   {
     "id": "bonsai",
@@ -175,12 +163,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "four coloured squares in a star, scanned now and then"
   },
   {
-    "id": "chat",
-    "name": "chat",
-    "category": "ui",
-    "note": "a chat in bubbles: typed, sent, three dots, then the reply streaming"
-  },
-  {
     "id": "cherry-blossom",
     "name": "cherry blossom",
     "category": "nature",
@@ -197,12 +179,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "clojure",
     "category": "logos",
     "note": "a lambda in a green and blue circle, glinting now and then"
-  },
-  {
-    "id": "cloud-sea",
-    "name": "cloud sea",
-    "category": "scenes",
-    "note": "the sun sinks into a drifting sea of orange cloud at dusk"
   },
   {
     "id": "cloudflare",
@@ -227,12 +203,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "collabute",
     "category": "companies",
     "note": "the disc shading white to black, in a black ring, glinting now and then"
-  },
-  {
-    "id": "command-city",
-    "name": "command city",
-    "category": "scenes",
-    "note": "a night city whose boulevards trace the command key in streetlight"
   },
   {
     "id": "command-code",
@@ -373,12 +343,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the moon slides over the sun; diamond ring, then corona"
   },
   {
-    "id": "edge-orbit",
-    "name": "edge orbit",
-    "category": "scenes",
-    "note": "the night earth from orbit, cloudflare requests arcing city to city"
-  },
-  {
     "id": "elementary-os",
     "name": "elementary os",
     "category": "distros",
@@ -505,12 +469,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a tilted spiral galaxy turning, its inner stars the fastest"
   },
   {
-    "id": "gangaur-ghat",
-    "name": "gangaur ghat",
-    "category": "scenes",
-    "note": "udaipur at night, a lit gateway on lake pichola and diyas on the water"
-  },
-  {
     "id": "gauge",
     "name": "gauge",
     "category": "data",
@@ -521,12 +479,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "gentoo",
     "category": "distros",
     "note": "the lavender g, scanned now and then"
-  },
-  {
-    "id": "git-graph",
-    "name": "git graph",
-    "category": "ui",
-    "note": "git log --graph scrolling, branches forking off main and merging back"
   },
   {
     "id": "glider-gun",
@@ -551,12 +503,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "go",
     "category": "logos",
     "note": "go with its speed lines, glinting now and then"
-  },
-  {
-    "id": "green-storm",
-    "name": "green storm",
-    "category": "scenes",
-    "note": "a thunderstorm at sea, the lightning striking in the supabase bolt"
   },
   {
     "id": "greptile",
@@ -613,12 +559,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the six-point asterisk, in blue, glinting now and then"
   },
   {
-    "id": "helixdb",
-    "name": "helixdb",
-    "category": "companies",
-    "note": "the stepped rungs of a helix between two posts, glinting now and then"
-  },
-  {
     "id": "helmcode",
     "name": "helmcode",
     "category": "companies",
@@ -647,12 +587,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "icosahedron",
     "category": "shapes",
     "note": "a wireframe icosahedron turning, its hidden edges dotted"
-  },
-  {
-    "id": "jal-mahal",
-    "name": "jal mahal",
-    "category": "scenes",
-    "note": "the jaipur water palace floating on a misty lake at sunrise"
   },
   {
     "id": "java",
@@ -685,12 +619,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a julia set changing shape as its constant c goes round"
   },
   {
-    "id": "jungle-falls",
-    "name": "jungle falls",
-    "category": "scenes",
-    "note": "a tiered waterfall in a rainforest gorge, spray, a rainbow and macaws"
-  },
-  {
     "id": "kali-linux",
     "name": "kali linux",
     "category": "distros",
@@ -709,12 +637,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a diamond kite riding the wind, its string sagging in lulls"
   },
   {
-    "id": "kite-festival",
-    "name": "kite festival",
-    "category": "scenes",
-    "note": "sankranti kites crowding a golden sky over the pink roofs of jaipur"
-  },
-  {
     "id": "kotlin",
     "name": "kotlin",
     "category": "logos",
@@ -725,12 +647,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "kyoto dusk",
     "category": "scenes",
     "note": "a pagoda at dusk behind a cherry tree lit by a stone lantern"
-  },
-  {
-    "id": "lake-pichola",
-    "name": "lake pichola",
-    "category": "scenes",
-    "note": "sunset on lake pichola, udaipur's palaces glowing over the water"
   },
   {
     "id": "landscape",
@@ -755,12 +671,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "lava lamp",
     "category": "objects",
     "note": "wax blobs rising, merging and sinking in a lit glass"
-  },
-  {
-    "id": "lava-wall",
-    "name": "lava wall",
-    "category": "scenes",
-    "note": "a wall of lava lamps under the glowing orange cloud, watched by a camera"
   },
   {
     "id": "lighthouse",
@@ -871,12 +781,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a lighthouse turning its beam under moonlit clouds over a dark sea"
   },
   {
-    "id": "night-highway",
-    "name": "night highway",
-    "category": "scenes",
-    "note": "a desert highway at dusk, rushing toward the mountains and last light"
-  },
-  {
     "id": "nixos",
     "name": "nixos",
     "category": "distros",
@@ -943,22 +847,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "php in its purple oval, glinting now and then"
   },
   {
-    "id": "pipeline",
-    "name": "pipeline",
-    "category": "ui",
-    "note": "a ci run going stage by stage, one run failing its tests, then green"
-  },
-  {
     "id": "planet",
     "name": "planet",
     "category": "space",
     "note": "a banded ringed planet turning, with shadows both ways"
-  },
-  {
-    "id": "planet-scale",
-    "name": "planet scale",
-    "category": "scenes",
-    "note": "a dark planet cut into the planetscale mark, backlit, a moon circling"
   },
   {
     "id": "planetscale",
@@ -1001,12 +893,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "pop!_os",
     "category": "distros",
     "note": "the p! in a teal circle, scanned now and then"
-  },
-  {
-    "id": "prism-city",
-    "name": "prism city",
-    "category": "scenes",
-    "note": "a black spire and an orange cloud over a blue hour city and its river"
   },
   {
     "id": "progress-bar",
@@ -1093,22 +979,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the r in its cog, in ferris orange, glinting now and then"
   },
   {
-    "id": "salt-flat",
-    "name": "salt flat",
-    "category": "scenes",
-    "note": "the vercel triangle over a mirror of salt, the sun rising behind its tip"
-  },
-  {
     "id": "saptarishi",
     "name": "saptarishi",
     "category": "space",
     "note": "the big dipper at true positions in a twinkling sky"
-  },
-  {
-    "id": "saturn-rise",
-    "name": "saturn rise",
-    "category": "scenes",
-    "note": "saturn and its rings hanging over the cracked ice and geysers of a moon"
   },
   {
     "id": "scala",
@@ -1157,12 +1031,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "snake",
     "category": "creatures",
     "note": "a snake slithering along an s-curve, flicking its tongue"
-  },
-  {
-    "id": "snow-train",
-    "name": "snow train",
-    "category": "scenes",
-    "note": "a lit train crossing a snowy stone viaduct at night as snow falls"
   },
   {
     "id": "snowfall",
@@ -1385,12 +1253,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "void linux",
     "category": "distros",
     "note": "the green ring, cut through, scanned now and then"
-  },
-  {
-    "id": "volcano-night",
-    "name": "volcano night",
-    "category": "scenes",
-    "note": "a volcano erupting at night, lava rivers, an ash plume full of lightning"
   },
   {
     "id": "voronoi",

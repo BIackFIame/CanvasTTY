@@ -72,19 +72,21 @@ test("vector frames keep cell alignment, escape text and fill arbitrary terminal
   assert(!svg.includes('<canvas'));
 });
 
-test("the complete catalogue has a local selectable module for each of its 240 pieces", async () => {
-  const files = await readdir(new URL("../src/renderer/src/vendor/ascii-rest/pieces/", import.meta.url));
-  assert.equal(TERMINAL_BACKGROUNDS.length, 240);
-  assert.equal(new Set(TERMINAL_BACKGROUNDS).size, 240);
+test("the complete catalogue has a local selectable module for each of its 217 pieces", async () => {
+  const files = await readdir(new URL("../node_modules/ascii.rest/dist/pieces/", import.meta.url));
+  assert.equal(TERMINAL_BACKGROUNDS.length, 217);
+  assert.equal(new Set(TERMINAL_BACKGROUNDS).size, 217);
   assert.equal(new Set(TERMINAL_BACKGROUND_CATALOG.map((piece) => piece.category)).size, 15);
-  assert.deepEqual(files.filter((file) => file.endsWith(".js")).map((file) => file.slice(0, -3)).sort(), [...TERMINAL_BACKGROUNDS].sort());
-  for (const id of TERMINAL_BACKGROUNDS) assert(isTerminalBackgroundId(id), id);
+  for (const id of TERMINAL_BACKGROUNDS) {
+    assert(files.includes(`${id}.js`), id);
+    assert(isTerminalBackgroundId(id), id);
+  }
   assert(!isTerminalBackgroundId("../remote"));
 });
 
 test("every bundled animation renders and coloured scenes produce valid changing frames", async () => {
   for (const scene of TERMINAL_BACKGROUNDS) {
-    const { meta, default: make } = await import(`../src/renderer/src/vendor/ascii-rest/pieces/${scene}.js`);
+    const { meta, default: make } = await import(`ascii.rest/pieces/${scene}`);
     const frame = make({});
     const color = new Uint8Array((meta.cols ?? 80) * (meta.rows ?? 24));
     const env = { paper: false, color };
