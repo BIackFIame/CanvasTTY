@@ -1,3 +1,4 @@
+import { CanvasLinkSettings } from "./CanvasLinkSettings";
 import { EvenG2Controls } from "./EvenG2Controls";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
@@ -121,7 +122,7 @@ import {
 } from "../../../../shared/autoMode";
 import { MascotsSettings } from "./MascotsSettings";
 
-type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "browser" | "plugins" | "mascots" | "updates" | "about";
+type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "canvasLink" | "browser" | "plugins" | "mascots" | "updates" | "about";
 
 const SHORTCUT_LABELS = {
   home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
@@ -143,6 +144,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "agents", icon: "terminal" },
   { id: "controls", icon: "sliders-horizontal" },
   { id: "externalIntegrations", icon: "blocks" },
+  { id: "canvasLink", icon: "app-window" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
   { id: "mascots", icon: "image-plus" },
@@ -1156,6 +1158,8 @@ export function SettingsPanel({
               </SettingGroup>
             </>
           )}
+
+          {section === "canvasLink" && <CanvasLinkSettings locale={locale} open={open} />}
 
           {section === "externalIntegrations" && (
             <EvenG2Controls locale={locale} open={open} />

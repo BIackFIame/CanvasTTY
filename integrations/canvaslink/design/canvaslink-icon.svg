@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Original geometry created for CanvasLink. No external artwork, fonts or libraries. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108" role="img" aria-labelledby="title desc">
+  <title id="title">CanvasLink — linked windows</title>
+  <desc id="desc">A wide remote window and a square touch surface interlock through two open rails. Critical geometry stays within the central 66dp adaptive safe circle.</desc>
+  <rect id="background" width="108" height="108" fill="#121814"/>
+  <path id="desktop-window" fill="#edf1e6" d="M64 43V37Q64 31 58 31H35Q29 31 29 37V55Q29 61 35 61H57V54H36V38H57V43Z"/>
+  <path id="touch-window" fill="#d6ef88" d="M46 52V51Q46 45 52 45H73Q79 45 79 51V72Q79 78 73 78H52Q46 78 46 72V64H53V71H72V52H53Z"/>
+</svg>

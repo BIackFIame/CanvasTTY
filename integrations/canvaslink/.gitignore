@@ -1,0 +1,7 @@
+node_modules/
+build/
+dist/
+.runtime/
+*.log
+verification/*.png
+verification/icon-previews.json
