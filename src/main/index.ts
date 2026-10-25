@@ -775,7 +775,8 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   const sessionsForPlugins = new PluginSessions({
     terminals: terminalManager,
     notify: (pluginId, serviceId, method, params) => pluginServices!.notify(pluginId, serviceId, method, params),
-    mayStartOrchestrators: (pluginId) => pluginManager!.canStartOrchestrators(pluginId)
+    mayStartOrchestrators: (pluginId) => pluginManager!.canStartOrchestrators(pluginId),
+    privateDataFolder: userDataPath
   });
   pluginSessions = sessionsForPlugins;
   // Services read the same subscription limits plugin surfaces read (limits:read), from LimitsService's cache. Created

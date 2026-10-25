@@ -400,7 +400,7 @@ Control follows the agent-control gateway's model: the service is one controller
 
 | Request | Gate | Effect |
 |:--|:--|:--|
-| `sessions.create` `{ provider, cwd, profile?, title?, role?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }`. `role: "orchestrator"` needs the person's consent too (below) |
+| `sessions.create` `{ provider, cwd, profile?, title?, role?, launchOptions?, environment? }` | `sessions:launch` | Starts an `agent` card through the normal launch pipeline (launch options and environments included; a refusal shows on the card). The card is visible and never takes focus. At most 16 per plugin. Answer `{ sessionId }`. `role: "orchestrator"` needs the person's consent too (below). A `cwd` inside CanvasTTY's own data folder (tokens, account homes, plugins' data, rollback points; checked as the disk resolves it, through links and both Unicode spellings) is refused |
 | `sessions.send` `{ sessionId, text, submit? }` | `sessions:control` | Types the text (Enter unless `submit: false`) into a card this plugin started. A card whose launch its plugins still prepare gets it once that launch started; `sent` is false when the launch did not start (the text is dropped) |
 | `sessions.stop` `{ sessionId }` | `sessions:control` | Closes a card this plugin started; its environment data is kept |
 
