@@ -1958,7 +1958,7 @@ export function App(): React.JSX.Element {
         performShortcut("renameWindow");
         return;
       }
-      if (matchesShortcut(event, settings.shortcuts.momEntered)) {
+      if (settings.shortcuts.momEntered && matchesShortcut(event, settings.shortcuts.momEntered)) {
         event.preventDefault();
         event.stopPropagation();
         toggleMomEntered();
