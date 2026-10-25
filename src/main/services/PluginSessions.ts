@@ -249,7 +249,7 @@ export class PluginSessions {
     const owned = this.deps.terminals.listMetadata().filter((metadata) => this.owner(metadata.id) === pluginId).length;
     if (owned >= MAX_OWNED_PER_PLUGIN) throw new Error(`A plugin can run at most ${MAX_OWNED_PER_PLUGIN} cards of its own.`);
     if (typeof values.provider !== "string" || typeof values.cwd !== "string") throw new Error("provider and cwd are required.");
-    this.refusePrivateFolder(values.cwd);
+    const cwd = this.canonicalFolder(values.cwd);
     const profile = values.profile === undefined ? "normal" : values.profile;
     if (!PROFILES.has(profile as LaunchProfileId)) throw new Error("profile must be auto, normal, acceptEdits, plan or yolo.");
     if (role === "orchestrator" && profile === "yolo") throw new Error("A plugin never starts an orchestrator in YOLO; use auto, normal, acceptEdits or plan.");
@@ -259,7 +259,7 @@ export class PluginSessions {
     const cascade = 40 * (owned + 1);
     const created = this.deps.terminals.create({
       provider: values.provider as ProviderId,
-      cwd: values.cwd,
+      cwd,
       profile: profile as LaunchProfileId,
       position: { x: 80 + cascade, y: 80 + cascade },
       role,
@@ -295,27 +295,32 @@ export class PluginSessions {
   }
 
   /**
-   * C6: the folder is checked by the host as the disk sees it (through links, in both Unicode spellings), not as the
-   * plugin spelled it. A folder that does not exist is left for the launch's own check to refuse.
+   * C6: the folder a plugin names is resolved by the host as the disk sees it (through links, in both Unicode
+   * spellings) and that canonical path, not the plugin's spelling, is what the card is created with, so a link changed
+   * after the check cannot move the launch. Fail closed: a relative path or one that does not resolve is refused, and
+   * a folder that is CanvasTTY's data folder or inside it is refused.
    */
-  private refusePrivateFolder(cwd: string): void {
-    const data = this.deps.privateDataFolder;
-    if (!data) return;
+  private canonicalFolder(cwd: string): string {
+    if (!isAbsolute(cwd)) throw new Error("cwd must be an absolute path to an existing folder.");
     const real = (path: string): string | null => {
       for (const spelling of [path, ...otherSpellings(path)]) {
         try { return realpathSync.native(spelling); } catch { /* the next spelling */ }
       }
       return null;
     };
-    const folder = isAbsolute(cwd) ? real(onDiskPath(cwd)) : null;
-    if (!folder) return;
-    const bases = new Set([resolve(data), real(resolve(data))].filter((base): base is string => Boolean(base)));
-    for (const base of bases) {
-      if (isPathInside(base, folder) || isPathInside(base.normalize("NFC"), folder.normalize("NFC"))
-        || isPathInside(base.normalize("NFD"), folder.normalize("NFD"))) {
-        throw new Error("A plugin cannot start a card in CanvasTTY's own data folder (tokens, account homes, plugins' data). Only the person can start an agent there.");
+    const folder = real(onDiskPath(cwd));
+    if (!folder) throw new Error("cwd must be an absolute path to an existing folder.");
+    const data = this.deps.privateDataFolder;
+    if (data) {
+      const bases = new Set([resolve(data), real(resolve(data))].filter((base): base is string => Boolean(base)));
+      for (const base of bases) {
+        if (isPathInside(base, folder) || isPathInside(base.normalize("NFC"), folder.normalize("NFC"))
+          || isPathInside(base.normalize("NFD"), folder.normalize("NFD"))) {
+          throw new Error("A plugin cannot start a card in CanvasTTY's own data folder (tokens, account homes, plugins' data). Only the person can start an agent there.");
+        }
       }
     }
+    return folder;
   }
 
   private mayStartOrchestrators(pluginId: string): boolean {

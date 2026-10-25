@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { InstalledPlugin, LocaleId } from "../../../../shared/contracts";
 import { pluginName } from "../../../../shared/pluginLocalizedText.ts";
 import {
+  GRANT_LIMITS,
   GrantGate,
   applyGrants,
   declinedResults,
@@ -110,6 +111,29 @@ export function GrantsDialog({ plan, plugins, locale, onDone }: {
   const text: Text = TEXT[locale === "ru" ? "ru" : "en"];
   const [ticks, setTicks] = useState(() => plan.rows.map((row) => row.ticked));
   const cancel = useRef<HTMLButtonElement>(null);
+  const dialog = useRef<HTMLElement>(null);
+  // Allow is armed 1 s after the dialog appears and again 1 s after any re-layout (size change), so a click aimed at
+  // the page underneath, or at a moving button, cannot land on it.
+  const [armed, setArmed] = useState(false);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const rearm = (): void => {
+      setArmed(false);
+      clearTimeout(timer);
+      timer = setTimeout(() => setArmed(true), GRANT_LIMITS.armMs);
+    };
+    rearm();
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(rearm) : null;
+    if (dialog.current) observer?.observe(dialog.current);
+    window.addEventListener("resize", rearm);
+    window.addEventListener("blur", rearm);
+    return () => {
+      clearTimeout(timer);
+      observer?.disconnect();
+      window.removeEventListener("resize", rearm);
+      window.removeEventListener("blur", rearm);
+    };
+  }, []);
   useEffect(() => {
     // Focus starts on Cancel, so a stray Enter never allows anything.
     cancel.current?.focus();
@@ -122,7 +146,7 @@ export function GrantsDialog({ plan, plugins, locale, onDone }: {
   const title = fill(text.title, { plugin: pluginName(plan.requester.manifest, locale) });
   return (
     <div className="dialog-backdrop" role="presentation">
-      <section className="grants-dialog" role="dialog" aria-modal="true" aria-label={title}>
+      <section ref={dialog} className="grants-dialog" role="dialog" aria-modal="true" aria-label={title}>
         <h2>{title}</h2>
         <p className="grants-dialog__intro">{text.intro}</p>
         {plan.reason && <blockquote className="grants-dialog__reason"><small>{text.says}</small> “{plan.reason}”</blockquote>}
@@ -161,7 +185,7 @@ export function GrantsDialog({ plan, plugins, locale, onDone }: {
           <button
             className="grants-dialog__allow"
             type="button"
-            disabled={!plan.rows.some((row) => rowApplies(plan, ticks, row, plugins))}
+            disabled={!armed || !plan.rows.some((row) => rowApplies(plan, ticks, row, plugins))}
             onClick={() => onDone(ticks)}
           >{text.allow}</button>
         </div>
@@ -200,9 +224,14 @@ export async function requestGrants(input: {
   plugin: InstalledPlugin;
   params: unknown;
   personInFrame: boolean;
+  /** CanvasTTY's window has transient user activation (read first thing here when not given). */
+  activated?: boolean;
   locale: LocaleId;
 }): Promise<{ results: GrantResult[] }> {
-  if (!input.personInFrame) throw new Error("grants.request answers only an action of the person in this plugin surface.");
+  // A fresh click or key press of the person in this frame: focus alone can be old, and a page cannot fake the
+  // activation of CanvasTTY's own window (its click in the frame passes up to it for about 5 s).
+  const activated = input.activated ?? navigator.userActivation?.isActive === true;
+  if (!input.personInFrame || !activated) throw new Error("grants.request answers only an action of the person in this plugin surface, within a few seconds.");
   const request = parseGrantRequest(input.params);
   const pluginId = input.plugin.manifest.id;
   gate.enter(pluginId);

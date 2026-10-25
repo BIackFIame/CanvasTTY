@@ -96,10 +96,14 @@ test("plan: rows come from the registry; trust updates start unticked; impossibl
     { kind: "nativeCode", plugin: "canvastty-widget" }, { kind: "nativeCode", plugin: "not-installed" },
     { kind: "sharedRead", provider: ACCOUNTS, method: "accounts.quota" }, { kind: "sharedRead", provider: ACCOUNTS, method: "other.read" }
   ] }), plugins, noBroker);
+  // Only low-impact rows start ticked: the requester's own native code and its shared read. Another plugin's native
+  // code, may start orchestrators, every account of an owner and trusting updates are ticked by the person.
   assert.deepEqual(plan.rows.map((row) => [row.item.kind, row.ticked]), [
-    ["nativeCode", true], ["nativeCode", true], ["nativeCode", true], ["mayStartOrchestrators", true], ["sharedRead", true],
-    ["brokerGrant", true], ["trustUpdates", false], ["trustUpdates", false]
+    ["nativeCode", false], ["nativeCode", true], ["nativeCode", false], ["mayStartOrchestrators", false], ["sharedRead", true],
+    ["brokerGrant", false], ["trustUpdates", false], ["trustUpdates", false]
   ]);
+  const single = await planGrants(ASSISTANT, parseGrantRequest({ items: [{ kind: "nativeCode", plugin: ASSISTANT }, { kind: "brokerGrant", owner: ACCOUNTS, account: "glm-1" }, { kind: "decisionsMayAllow" }] }), registry(), noBroker);
+  assert.deepEqual(single.rows.map((row) => row.ticked), [true, true, false], "one named account stays ticked; allowing agent actions does not");
   assert.deepEqual(plan.settled.map(({ result }) => [result.result, result.reason]), [
     ["failed", "has no native code"], ["failed", "not installed or disabled"], ["failed", "the other plugin does not share it"],
     ["failed", "not declared in this plugin's uses"]
@@ -129,7 +133,8 @@ test("an untrusted plugin must ask for its own native code first, and gets nothi
 test("apply: native code first (the requester's own first), then the rest, in the request's order; unticked stays off", async () => {
   const plugins = registry();
   const plan = await planGrants(ASSISTANT, parseGrantRequest({ items: SETUP }), plugins, noBroker);
-  const ticks = plan.rows.map((row) => row.ticked || (row.item.kind === "trustUpdates" && row.item.plugin === ENVIRONMENTS));
+  // The person ticks everything except trusting the Assistant's updates.
+  const ticks = plan.rows.map((row) => !(row.item.kind === "trustUpdates" && row.item.plugin === ASSISTANT));
   const { api, calls } = fakeApi(plugins, { ownerStartsAfter: 2 });
   const results = await applyGrants(plan, ticks, plugins, api);
   assert.deepEqual(calls, [
@@ -204,7 +209,8 @@ test("wiring: only a frame the person is in may ask; the dialog is CanvasTTY's o
   const frame = await readFile(new URL("../src/renderer/src/features/plugins/PluginFrame.tsx", import.meta.url), "utf8");
   const dialog = await readFile(new URL("../src/renderer/src/features/plugins/grantsRequest.tsx", import.meta.url), "utf8");
   assert.match(frame, /method === "grants\.request"[\s\S]{0,400}await import\("\.\/grantsRequest"\)/u);
-  assert.match(dialog, /if \(!input\.personInFrame\) throw/u);
+  assert.match(dialog, /if \(!input\.personInFrame \|\| !activated\) throw/u);
+  assert.match(dialog, /navigator\.userActivation\?\.isActive === true/u);
   assert.match(dialog, /cancel\.current\?\.focus\(\)/u);
   assert.match(dialog, /"canvastty:grants-dialog"/u);
   // The plugin's own text is shown only as the quoted reason.

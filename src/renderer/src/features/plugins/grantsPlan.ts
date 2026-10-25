@@ -10,6 +10,11 @@ import type { InstalledPlugin, PluginBrokerAccounts } from "../../../../shared/c
  * ask). The requester must already have its native code trusted, or ask for it as one of the items: if the person
  * does not grant it, nothing else in the request is applied.
  *
+ * A fresh click is required: CanvasTTY reads its own window's transient user activation (Chromium passes a click or
+ * key press inside a frame up to the frames above it, for about 5 s), which a page cannot fake, together with the
+ * frame having focus. The dialog's Allow button stays disabled for 1 s after it appears and after any re-layout, so
+ * a click aimed at the page cannot land on it.
+ *
  * Limits: one dialog at a time in the whole app; at most 3 dialogs per plugin in 10 minutes; after the person declines
  * everything (Cancel, Escape, or nothing ticked), that plugin is refused for 60 seconds; at most 24 items. Items
  * already granted are not shown. Nothing is ever accepted without the person's click on the dialog's own button.
@@ -31,7 +36,11 @@ export interface GrantRow {
   item: GrantItem;
   /** Plugin ids whose native code must be trusted (now, or by a ticked row of this dialog) for this row to apply. */
   needs: string[];
-  /** Ticked when the dialog opens: everything except trusting updates. */
+  /**
+   * Ticked when the dialog opens: only the low-impact rows (the requester's own native code and shared reads, one named
+   * account). High-impact rows start unticked, so the person ticks each one: another plugin's native code, may start
+   * orchestrators, may allow agent actions, every account of an owner (`*`), trusting updates.
+   */
   ticked: boolean;
   /** The plugin the row is about, as installed. */
   subject: InstalledPlugin;
@@ -49,7 +58,7 @@ export interface GrantPlan {
   settled: Array<{ index: number; result: GrantResult }>;
 }
 
-export const GRANT_LIMITS = Object.freeze({ maxItems: 24, perWindow: 3, windowMs: 10 * 60_000, declinedMs: 60_000, reasonChars: 200, ownerWaitMs: 10_000 });
+export const GRANT_LIMITS = Object.freeze({ armMs: 1_000, maxItems: 24, perWindow: 3, windowMs: 10 * 60_000, declinedMs: 60_000, reasonChars: 200, ownerWaitMs: 10_000 });
 
 const PLUGIN_ID = /^[a-z0-9](?:[a-z0-9.-]{0,78}[a-z0-9])?$/u;
 const SHARE_METHOD = /^[a-z][a-z0-9_]{0,31}(?:\.[a-z][a-z0-9_]{0,31}){0,3}$/u;
@@ -144,7 +153,7 @@ export async function planGrants(
       if (!subject || !subject.enabled) { fail("not installed or disabled"); continue; }
       if (!subject.manifest.services?.length) { fail("has no native code"); continue; }
       if (subject.nativeCodeTrusted) { already(); continue; }
-      rows.push({ index, item, needs: item.plugin === requesterId ? [] : withRequester([]), ticked: true, subject });
+      rows.push({ index, item, needs: item.plugin === requesterId ? [] : withRequester([]), ticked: item.plugin === requesterId, subject });
     } else if (item.kind === "trustUpdates") {
       const subject = find(item.plugin);
       if (!subject || !subject.enabled || !subject.manifest.services?.length) { fail("not installed, disabled or without native code"); continue; }
@@ -154,11 +163,11 @@ export async function planGrants(
     } else if (item.kind === "mayStartOrchestrators") {
       if (!requester.manifest.permissions.includes("sessions:launch")) { fail("needs the sessions:launch permission"); continue; }
       if (requester.mayStartOrchestrators) { already(); continue; }
-      rows.push({ index, item, needs: own(requester), ticked: true, subject: requester });
+      rows.push({ index, item, needs: own(requester), ticked: false, subject: requester });
     } else if (item.kind === "decisionsMayAllow") {
       if (!requester.manifest.services?.some((service) => service.decide)) { fail("has no decision service"); continue; }
       if (requester.decisionsMayAllow) { already(); continue; }
-      rows.push({ index, item, needs: own(requester), ticked: true, subject: requester });
+      rows.push({ index, item, needs: own(requester), ticked: false, subject: requester });
     } else if (item.kind === "sharedRead") {
       const status = requester.sharedReads?.find((read) => read.plugin === item.provider && read.method === item.method);
       if (!status) { fail("not declared in this plugin's uses"); continue; }
@@ -185,7 +194,7 @@ export async function planGrants(
         fail("that account is not offered"); continue;
       }
       rows.push({
-        index, item, needs: [requesterId, item.owner], ticked: true, subject: requester, other: owner,
+        index, item, needs: [requesterId, item.owner], ticked: item.account !== "*", subject: requester, other: owner,
         accounts: (accounts?.accounts ?? []).filter((account) => item.account === "*" || account.id === item.account)
       });
     }
