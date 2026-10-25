@@ -50,7 +50,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     const session = this.control.status(sessionId);
     return [
       ...(session.role === "orchestrator" ? ORCHESTRATION_TOOL_DEFINITIONS : []),
-      ...(this.plugins?.list(session.role, session.provider) ?? [])
+      ...(this.plugins?.list(session.role, session.provider, sessionId) ?? [])
     ];
   }
 
@@ -103,7 +103,7 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     session: { role: SessionRole; provider: ProviderId },
     request: OrchestrationRequest
   ): Promise<Record<string, unknown>> {
-    if (!this.plugins?.list(session.role, session.provider).some((tool) => tool.name === request.tool)) {
+    if (!this.plugins?.list(session.role, session.provider, sessionId).some((tool) => tool.name === request.tool)) {
       throw orchestrationBridgeError("INVALID_REQUEST", "That plugin tool is not available to this session.", false);
     }
     try {
@@ -118,8 +118,8 @@ export class ScopedOrchestrationHandler implements OrchestrationCommandHandler {
     try { await this.providers.refreshEnvironments?.(); } catch { /* the listing shows no servers then */ }
   }
 
-  private listProviders(session: { role: SessionRole; provider: ProviderId }): Record<string, unknown> {
-    const pluginTools = this.plugins?.list(session.role, session.provider).map((tool) => tool.name) ?? [];
+  private listProviders(session: { id: string; role: SessionRole; provider: ProviderId }): Record<string, unknown> {
+    const pluginTools = this.plugins?.list(session.role, session.provider, session.id).map((tool) => tool.name) ?? [];
     return listProviderDirectory(this.providers, pluginTools) as unknown as Record<string, unknown>;
   }
 

@@ -223,6 +223,10 @@
         "roles": {
           "type": "array", "minItems": 1, "uniqueItems": true,
           "items": { "enum": ["orchestrator", "agent", "subagent"] }
+        },
+        "audience": {
+          "description": "own-cards: only cards this plugin started itself (sessions.create) see and may call the tool, not their subagents or any other card. all (the default): every card of a listed role.",
+          "enum": ["all", "own-cards"]
         }
       }
     },

@@ -331,7 +331,7 @@ export class TerminalManager {
   private lifecycleHooksEnabled: boolean;
   private agentOrchestration: OrchestrationLaunchCoordinator | null = null;
   // Plugin tools a session of this role and agent gets in canvastty_agents (EP-6), read at launch.
-  private pluginToolNames: (role: SessionRole, provider: ProviderId) => string[] = () => [];
+  private pluginToolNames: (role: SessionRole, provider: ProviderId, owner: string | null) => string[] = () => [];
   private launchPipeline: (Pick<LaunchPipeline, "normalizeOptions" | "unavailable" | "prepare" | "forgetSession"> & Partial<Pick<LaunchPipeline, "hasPolicy">>) | null = null;
   private sessionStore: TerminalSessionStore | null = null;
   private sessionRestoreMode: SessionRestoreMode = "off";
@@ -449,7 +449,7 @@ export class TerminalManager {
   }
 
   /** Plugin agent tools: a session any of them applies to gets the canvastty_agents bridge. */
-  configureAgentTools(names: ((role: SessionRole, provider: ProviderId) => string[]) | null): void {
+  configureAgentTools(names: ((role: SessionRole, provider: ProviderId, owner: string | null) => string[]) | null): void {
     this.pluginToolNames = names ?? (() => []);
   }
 
@@ -2318,7 +2318,9 @@ export class TerminalManager {
         ...(answerCaptureGrantExpiresAt === undefined ? {} : { answerCaptureGrantExpiresAt }) }) ?? null;
     let pluginTools: string[] = [];
     try {
-      pluginTools = provider === "terminal" ? [] : this.pluginToolNames(role, provider);
+      // The plugin that started the card (own-cards tools are listed only to its cards).
+      const owner = this.sessions.get(id)?.extras.ownerPluginId ?? this.startingOwners.get(id) ?? null;
+      pluginTools = provider === "terminal" ? [] : this.pluginToolNames(role, provider, owner);
     } catch {
       // Plugins never block a launch; the session simply gets no plugin tools.
     }

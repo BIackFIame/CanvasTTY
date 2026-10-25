@@ -325,6 +325,8 @@ export interface CanvasTTYAgentTool {
   inputSchema: { type: "object"; properties?: Record<string, unknown>; required?: string[]; additionalProperties?: boolean; [key: string]: unknown };
   /** Session roles that see the tool. */
   roles: CanvasTTYSessionRole[];
+  /** `own-cards`: only cards this plugin started itself see and may call the tool (not their subagents). Default `all`. */
+  audience?: "all" | "own-cards";
 }
 
 /** A card as services see it (session events, tool callers, card actions). Never screen text. */

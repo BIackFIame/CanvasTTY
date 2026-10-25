@@ -805,6 +805,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
       .filter((provider) => pluginServices!.running(provider.pluginId, provider.serviceId)),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices!.hostCall(pluginId, serviceId, method, params, timeoutMs),
     caller: (sessionId) => sessionsForPlugins.summary(sessionId),
+    owner: (sessionId) => terminalManager?.pluginContext(sessionId)?.owner ?? null,
     redact: (text) => redaction.redact(text)
   });
   // Card badges and actions (EP-7).
@@ -866,7 +867,7 @@ async function initializeServices(ipc: IpcRegistrar): Promise<void> {
   });
   await orchestrationGateway.start();
   terminalManager.configureOrchestration(new OrchestrationBridge(orchestrationGateway));
-  terminalManager.configureAgentTools((role, provider) => pluginTools.names(role, provider));
+  terminalManager.configureAgentTools((role, provider, owner) => pluginTools.names(role, provider, owner));
 
   const launchPipeline = new LaunchPipeline({
     contributors: () => pluginManager!.launchContributors(),

@@ -2443,7 +2443,7 @@ function validateServiceTools(value: unknown): PluginAgentTool[] {
   }
   return value.map((candidate): PluginAgentTool => {
     if (!isRecord(candidate)) throw new Error("Every plugin agent tool must be an object.");
-    assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles"], "Plugin agent tool");
+    assertOnlyKeys(candidate, ["name", "description", "inputSchema", "roles", "audience"], "Plugin agent tool");
     const name = requiredString(candidate.name, "tool name", 40);
     if (!/^[a-z][a-z0-9_]{0,39}$/.test(name)) throw new Error(`Plugin agent tool name is invalid: ${name}.`);
     const description = requiredString(candidate.description, "tool description", 1_000);
@@ -2459,7 +2459,13 @@ function validateServiceTools(value: unknown): PluginAgentTool[] {
     if (!Array.isArray(candidate.roles) || candidate.roles.length === 0 || candidate.roles.some((role) => !SESSION_ROLES.has(role as string))) {
       throw new Error(`Plugin agent tool ${name} roles must list orchestrator, agent or subagent.`);
     }
-    return { name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])] };
+    if (candidate.audience !== undefined && candidate.audience !== "all" && candidate.audience !== "own-cards") {
+      throw new Error(`Plugin agent tool ${name} audience must be "all" or "own-cards".`);
+    }
+    return {
+      name, description, inputSchema: structuredClone(schema), roles: [...new Set(candidate.roles as PluginAgentTool["roles"])],
+      ...(candidate.audience === "own-cards" ? { audience: "own-cards" as const } : {})
+    };
   });
 }
 

@@ -23,6 +23,11 @@ export interface PluginAgentToolsDependencies {
   call(pluginId: string, serviceId: string, method: "canvastty.tools.call", params: unknown, timeoutMs: number): Promise<unknown>;
   /** The calling session as plugins see it (EP-4 summary); null when it is gone. */
   caller(sessionId: string): PluginSessionSummary | null;
+  /**
+   * The plugin that started this card (`sessions.create`), or null. Tools with `audience: "own-cards"` are listed to
+   * and callable from only that plugin's cards; without this dependency no card sees them.
+   */
+  owner?(sessionId: string): string | null;
   /** EP-8: every text an agent reads back passes through it. */
   redact(text: string): string;
   timeoutMs?: number;
@@ -76,22 +81,34 @@ export class PluginAgentTools {
     this.deps = deps;
   }
 
-  /** The tools a session of this role (and agent) sees, in plugin-id order. */
-  list(role: SessionRole, provider?: ProviderId): AgentToolDefinition[] {
+  /**
+   * The tools a session of this role (and agent) sees, in plugin-id order. `sessionId` names the session, so tools
+   * with `audience: "own-cards"` are listed only when the plugin started it; without it they are never listed.
+   */
+  list(role: SessionRole, provider?: ProviderId, sessionId?: string): AgentToolDefinition[] {
+    return this.listFor(role, provider, sessionId === undefined ? null : this.ownerOf(sessionId));
+  }
+
+  /**
+   * The same list for a card that is starting (no session to look up yet): `owner` is the plugin that started it,
+   * or null for a card the person started.
+   */
+  listFor(role: SessionRole, provider: ProviderId | undefined, owner: string | null): AgentToolDefinition[] {
     if (provider !== undefined && !PLUGIN_TOOL_PROVIDERS.has(provider)) return [];
-    return this.entries(role).map(({ name, provider, tool }) => ({
+    return this.entries(role, owner).map(({ name, provider, tool }) => ({
       name,
       description: `${tool.description} (CanvasTTY plugin "${provider.pluginName}")`,
       inputSchema: structuredClone(tool.inputSchema)
     }));
   }
 
-  names(role: SessionRole, provider?: ProviderId): string[] {
-    return this.list(role, provider).map((tool) => tool.name);
+  names(role: SessionRole, provider?: ProviderId, owner: string | null = null): string[] {
+    return this.listFor(role, provider, owner).map((tool) => tool.name);
   }
 
   async call(callerSessionId: string, role: SessionRole, name: string, input: unknown): Promise<{ content: string; isError: boolean }> {
-    const entry = this.entries(role).find((candidate) => candidate.name === name);
+    // The owner is read again on every call: a stale tool list never lets another card call an own-cards tool.
+    const entry = this.entries(role, this.ownerOf(callerSessionId)).find((candidate) => candidate.name === name);
     if (!entry) throw new Error("That plugin tool is not available to this session.");
     const caller = this.deps.caller(callerSessionId);
     if (!caller) throw new Error("The calling session no longer exists.");
@@ -148,8 +165,20 @@ export class PluginAgentTools {
     return cut ? `${result}\n[cut: the plugin answer was too long]` : result;
   }
 
-  /** In plugin-id order; a name two tools would share is listed for neither (never a guess which one runs). */
-  private entries(role: SessionRole): Array<{ name: string; provider: AgentToolProvider; tool: PluginAgentTool }> {
+  private ownerOf(sessionId: string): string | null {
+    try {
+      return this.deps.owner?.(sessionId) ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * In plugin-id order; a name two tools would share is listed for neither (never a guess which one runs). A tool
+   * with `audience: "own-cards"` is in the list only for cards its plugin started (`owner`); never for their
+   * subagents or any other card.
+   */
+  private entries(role: SessionRole, owner: string | null): Array<{ name: string; provider: AgentToolProvider; tool: PluginAgentTool }> {
     let providers: AgentToolProvider[];
     try {
       providers = this.deps.providers();
@@ -159,7 +188,7 @@ export class PluginAgentTools {
     const entries = [...providers]
       .sort((left, right) => left.pluginId.localeCompare(right.pluginId))
       .flatMap((provider) => provider.tools
-        .filter((tool) => tool.roles.includes(role))
+        .filter((tool) => tool.roles.includes(role) && (tool.audience !== "own-cards" || owner === provider.pluginId))
         .map((tool) => ({ name: pluginToolName(provider.pluginId, tool.name), provider, tool })));
     const counts = new Map<string, number>();
     for (const { name } of entries) counts.set(name, (counts.get(name) ?? 0) + 1);

@@ -1034,6 +1034,11 @@ export interface PluginAgentTool {
   inputSchema: Record<string, unknown>;
   /** Session roles that see the tool. */
   roles: SessionRole[];
+  /**
+   * `own-cards`: only cards this plugin started itself (`sessions.create`) see and may call the tool; their subagents
+   * and every other card do not. Absent: every card of a listed role (the default).
+   */
+  audience?: "own-cards";
 }
 
 /** Which cards show a plugin's card action; every listed key must match (a missing key matches all). */
