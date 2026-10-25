@@ -1904,7 +1904,7 @@ export function App(): React.JSX.Element {
     } else {
       const restoredBg = stashedMomBackgrounds.current?.background && stashedMomBackgrounds.current.background !== "none"
         ? stashedMomBackgrounds.current.background
-        : "blade-runner-2049";
+        : "matrix-rain";
       const restoredOverrides = stashedMomBackgrounds.current?.overrides ?? {};
       setSettings((current) => ({ ...current, terminalBackground: restoredBg, terminalBackgroundOverrides: restoredOverrides }));
       void saveSettings({

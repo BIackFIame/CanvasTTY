@@ -79,7 +79,7 @@ test("Settings and the launch/link dialogs are split out of the app's static imp
   // Before this change, App.tsx bundled to a single ~1.6 MB chunk with no on-demand chunk for
   // Settings, materials, and Files have on-demand UI, so first-paint code stays bounded.
   assert.ok(
-    eagerBytes < 1_850_000,
+    eagerBytes < 1_750_000,
     `code statically reachable from App.js should stay bounded now that heavy UI loads on demand, got ${eagerBytes} bytes`
   );
 });

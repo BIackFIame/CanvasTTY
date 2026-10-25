@@ -72,10 +72,10 @@ test("vector frames keep cell alignment, escape text and fill arbitrary terminal
   assert(!svg.includes('<canvas'));
 });
 
-test("the complete catalogue has a local selectable module for each of its 297 pieces", async () => {
+test("the complete catalogue has a local selectable module for each of its 240 pieces", async () => {
   const files = await readdir(new URL("../src/renderer/src/vendor/ascii-rest/pieces/", import.meta.url));
-  assert.equal(TERMINAL_BACKGROUNDS.length, 297);
-  assert.equal(new Set(TERMINAL_BACKGROUNDS).size, 297);
+  assert.equal(TERMINAL_BACKGROUNDS.length, 240);
+  assert.equal(new Set(TERMINAL_BACKGROUNDS).size, 240);
   assert.equal(new Set(TERMINAL_BACKGROUND_CATALOG.map((piece) => piece.category)).size, 15);
   assert.deepEqual(files.filter((file) => file.endsWith(".js")).map((file) => file.slice(0, -3)).sort(), [...TERMINAL_BACKGROUNDS].sort());
   for (const id of TERMINAL_BACKGROUNDS) assert(isTerminalBackgroundId(id), id);

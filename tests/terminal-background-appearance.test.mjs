@@ -108,17 +108,17 @@ test("disabling all terminal backgrounds clears root background and all terminal
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = new SettingsStore(dir, "ru");
   await store.load();
-  const appearance1 = normalizeBackgroundAppearance({ terminalBackground: "blade-runner-2049" });
-  const appearance2 = normalizeBackgroundAppearance({ terminalBackground: "moon-astronaut" });
+  const appearance1 = normalizeBackgroundAppearance({ terminalBackground: "matrix-rain" });
+  const appearance2 = normalizeBackgroundAppearance({ terminalBackground: "night-coast" });
   await store.update({
-    terminalBackground: "kill-la-kill",
+    terminalBackground: "earth",
     terminalBackgroundOverrides: {
       "session-1": appearance1,
       "session-2": appearance2,
     },
   });
   let state = store.get();
-  assert.equal(state.terminalBackground, "kill-la-kill");
+  assert.equal(state.terminalBackground, "earth");
   assert.equal(Object.keys(state.terminalBackgroundOverrides).length, 2);
 
   // Apply disable all action

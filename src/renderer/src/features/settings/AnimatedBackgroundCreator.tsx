@@ -6,7 +6,7 @@ import {
   animatedBackgroundAgentPrompt,
   type TerminalBackgroundStyleType
 } from "./animatedBackgroundPrompt";
-import bladeRunnerPreview from "../../assets/ascii-animations/blade-runner-2049.webp";
+import matrixRainPreview from "../../assets/ascii-animations/matrix-rain.webp";
 import nightCoastPreview from "../../assets/ascii-animations/night-coast.webp";
 import earthPreview from "../../assets/ascii-animations/earth.webp";
 import "./animatedBackgroundCreator.css";
@@ -61,7 +61,7 @@ export function AnimatedBackgroundCreator({ locale }: AnimatedBackgroundCreatorP
 
   const currentPreview =
     style === "fine-dots"
-      ? bladeRunnerPreview
+      ? matrixRainPreview
       : style === "dot-matrix"
       ? nightCoastPreview
       : earthPreview;

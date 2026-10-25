@@ -864,21 +864,15 @@ export class HermesRuntimeHooks {
     const journalPath = join(home, ".canvastty-runtime-hermes.json");
     const journal = readJournal(journalPath);
     if (!journal) return;
-    try {
-      cleanupHermes(join(home, "config.yaml"), journal);
-    } finally {
-      removeJournal(journalPath, journal);
-    }
+    cleanupHermes(join(home, "config.yaml"), journal);
+    removeJournal(journalPath, journal);
   }
 
   cleanup(): void {
     if (this.cleaned) return;
-    try {
-      cleanupHermes(this.path, this.journal);
-    } finally {
-      removeJournal(this.journalPath, this.journal);
-      this.cleaned = true;
-    }
+    cleanupHermes(this.path, this.journal);
+    removeJournal(this.journalPath, this.journal);
+    this.cleaned = true;
   }
 }
 

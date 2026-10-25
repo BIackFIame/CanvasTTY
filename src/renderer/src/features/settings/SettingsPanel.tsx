@@ -893,7 +893,7 @@ export function SettingsPanel({
                         if (hasAny) {
                           await onChange({ terminalBackground: "none", terminalBackgroundOverrides: {} });
                         } else {
-                          await onChange({ terminalBackground: appearance.terminalBackground !== "none" ? appearance.terminalBackground : "blade-runner-2049" });
+                          await onChange({ terminalBackground: appearance.terminalBackground !== "none" ? appearance.terminalBackground : "matrix-rain" });
                         }
                       }}>
                       {settings.terminalBackground === "none" && Object.keys(settings.terminalBackgroundOverrides).length === 0
