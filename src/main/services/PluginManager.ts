@@ -26,6 +26,7 @@ import type {
   PluginAgentHookEvent,
   PluginContribution,
   PluginInstallPreview,
+  PluginLauncherEntry,
   PluginManifest,
   PluginSourceChangeDiff,
   PluginSourceChangePreview,
@@ -1758,6 +1759,19 @@ export class PluginManager {
   }
 
   /**
+   * The service answering a plugin's launcher entry now (C5): enabled, native code trusted for that service, the
+   * entry and `sessions:launch` in the active manifest. Anything else throws.
+   */
+  launcherEntryService(pluginId: string): string {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    const manifest = activeManifest(plugin.manifest, plugin.selectedModules);
+    const service = manifest.services?.find((candidate) => candidate.launcherEntry);
+    if (!service || !manifest.permissions.includes("sessions:launch")) throw new Error("This plugin has no launcher entry.");
+    if (!plugin.nativeCodeTrusted || !this.serviceTrust.get(pluginId)?.[service.id]) throw new Error(PLUGIN_NATIVE_CODE_OFF_ERROR);
+    return service.id;
+  }
+
+  /**
    * Owners whose brokerable service may offer accounts now: enabled, native code trusted (that service included) and
    * holding `secrets`. The broker asks each one's offer; nothing here is cached.
    */
@@ -2242,6 +2256,9 @@ export function validatePluginManifest(candidate: unknown): PluginManifest {
     if (service.browserEngine && !permissions.includes("browser:engine") && !granted?.includes("browser:engine")) {
       throw new Error(`Plugin service ${service.id} contributes a browser engine and needs the browser:engine permission.`);
     }
+    if (service.launcherEntry && !permissions.includes("sessions:launch") && !granted?.includes("sessions:launch")) {
+      throw new Error(`Plugin service ${service.id} declares a launcher entry and needs the sessions:launch permission.`);
+    }
     if (service.brokerable && !permissions.includes("secrets") && !granted?.includes("secrets")) {
       throw new Error(`Plugin service ${service.id} offers brokered accounts and needs the secrets permission.`);
     }
@@ -2443,7 +2460,7 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     if (!isRecord(candidate)) throw new Error("Every plugin service must be an object.");
     assertOnlyKeys(candidate, [
       "id", "title", "description", "entry", "module", "launch", "environments", "decide", "tools", "cardActions", "browserEngine",
-      "shares", "brokerable"
+      "shares", "brokerable", "launcherEntry"
     ], "Plugin service");
     const id = requiredString(candidate.id, "service id", 64);
     if (!isContributionId(id) || ids.has(id)) throw new Error(`Plugin service id is invalid or duplicated: ${id}.`);
@@ -2468,6 +2485,7 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
     if (candidate.brokerable !== undefined && typeof candidate.brokerable !== "boolean") {
       throw new Error("Plugin service brokerable must be true or false.");
     }
+    const launcherEntry = candidate.launcherEntry === undefined ? undefined : validateLauncherEntry(candidate.launcherEntry);
     return {
       id, title, ...(description ? { description } : {}), entry, ...(module ? { module } : {}),
       ...(launch ? { launch } : {}),
@@ -2477,9 +2495,12 @@ function validateServices(value: unknown, moduleIds: ReadonlySet<string>): Plugi
       ...(cardActions ? { cardActions } : {}),
       ...(browserEngine ? { browserEngine } : {}),
       ...(shares ? { shares } : {}),
-      ...(candidate.brokerable === true ? { brokerable: true } : {})
+      ...(candidate.brokerable === true ? { brokerable: true } : {}),
+      ...(launcherEntry ? { launcherEntry } : {})
     };
   });
+  // HOME's launcher shows one entry per plugin.
+  if (services.filter((service) => service.launcherEntry).length > 1) throw new Error("Only one plugin service may declare a launcher entry.");
   // Consumers name a share by plugin and method, so one service answers for each method.
   const shareMethods = services.flatMap((service) => service.shares ?? []).map((share) => share.method);
   if (new Set(shareMethods).size !== shareMethods.length) throw new Error("Plugin share methods must be unique across its services.");
@@ -2558,6 +2579,21 @@ function validateServiceDecide(value: unknown): PluginServiceDecide {
     appliesTo = [...new Set(value.appliesTo as AgentProviderId[])];
   }
   return { events: ["pre-tool"], ...(appliesTo ? { appliesTo } : {}), ...(value.timeoutMs !== undefined ? { timeoutMs: value.timeoutMs as number } : {}) };
+}
+
+function validateLauncherEntry(value: unknown): PluginLauncherEntry {
+  if (!isRecord(value)) throw new Error("Plugin service launcherEntry must be an object.");
+  assertOnlyKeys(value, ["title", "title.ru", "title.en", "description", "description.ru", "description.en"], "Plugin launcher entry");
+  const entry: PluginLauncherEntry = { title: requiredString(value.title, "launcher entry title", 40) };
+  for (const key of ["title.ru", "title.en"] as const) {
+    const text = optionalString(value[key], `launcher entry ${key}`, 40);
+    if (text) entry[key] = text;
+  }
+  for (const key of ["description", "description.ru", "description.en"] as const) {
+    const text = optionalString(value[key], `launcher entry ${key}`, 160);
+    if (text) entry[key] = text;
+  }
+  return entry;
 }
 
 const MAX_AGENT_TOOLS = 16;

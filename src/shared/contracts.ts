@@ -953,6 +953,24 @@ export interface PluginService {
    * their keys; each caller -> account pair needs the person's grant. Needs `secrets`.
    */
   brokerable?: boolean;
+  /**
+   * One entry first in HOME's launcher (C5, needs `sessions:launch`; at most one service per plugin). Choosing it
+   * sends the host-only `canvastty.launcher.entry` to this service, which starts or focuses its card itself with
+   * `sessions.create`; the launcher asks for no CLI, folder or options. Shown only while the native code is trusted.
+   */
+  launcherEntry?: PluginLauncherEntry;
+}
+
+/** What HOME's launcher shows for a plugin's entry. */
+export interface PluginLauncherEntry {
+  /** At most 40 characters. */
+  title: string;
+  "title.ru"?: string;
+  "title.en"?: string;
+  /** At most 160 characters (the button's tooltip). */
+  description?: string;
+  "description.ru"?: string;
+  "description.en"?: string;
 }
 
 /** Data classes a share may be labelled with (the same D0–D3 scale plugins use for their own data rules). */
@@ -2293,6 +2311,8 @@ export interface CanvasTTYApi {
     setMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     /** "Trust updates from this repository" (C3), off by default; needs native code trust. */
     setTrustUpdates(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
+    /** The person chose a plugin's launcher entry (C5): its service starts or focuses its card. */
+    launcherEntry(pluginId: string): Promise<void>;
     setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin>;
     /** What an owner offers to other plugins' brokered requests now, and the person's grants (no keys). */
     brokerAccounts(ownerId: string): Promise<PluginBrokerAccounts>;
@@ -2501,6 +2521,7 @@ export const IPC = {
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
   pluginsSetMayStartOrchestrators: "plugins:set-may-start-orchestrators",
   pluginsSetTrustUpdates: "plugins:set-trust-updates",
+  pluginsLauncherEntry: "plugins:launcher-entry",
   pluginsSetSharedReadApproved: "plugins:set-shared-read-approved",
   pluginsBrokerAccounts: "plugins:broker-accounts",
   pluginsSetBrokerGrant: "plugins:set-broker-grant",

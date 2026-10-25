@@ -239,6 +239,11 @@ export interface CanvasTTYLimitExhaustedActivity {
   resetAt?: number;
   /** Offers accounts for other plugins' brokered model requests (`canvastty.broker.*`); needs `secrets`; one service per plugin. */
   brokerable?: boolean;
+  /**
+   * One entry first in HOME's launcher; needs `sessions:launch`, one service per plugin. Choosing it sends the
+   * host-only `canvastty.launcher.entry { locale }`; the service starts or focuses its card with `sessions.create`.
+   */
+  launcherEntry?: { title: string; "title.ru"?: string; "title.en"?: string; description?: string; "description.ru"?: string; "description.en"?: string };
 }
 
 /** One account a brokerable service offers (`canvastty.broker.offer` answers up to 32). Only accounts the person marked. */

@@ -215,6 +215,7 @@ const api: CanvasTTYApi = {
     setTrustUpdates: (pluginId: string, trusted: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetTrustUpdates, pluginId, trusted)
     ),
+    launcherEntry: (pluginId: string) => ipcRenderer.invoke(IPC.pluginsLauncherEntry, pluginId),
     brokerAccounts: (ownerId: string) => ipcRenderer.invoke(IPC.pluginsBrokerAccounts, ownerId),
     setBrokerGrant: (callerId: string, ownerId: string, accountId: string, granted: boolean) => (
       ipcRenderer.invoke(IPC.pluginsSetBrokerGrant, callerId, ownerId, accountId, granted)

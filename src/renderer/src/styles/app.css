@@ -1785,3 +1785,6 @@ button { border: 0; }
 }
 
 .canvas-minimap__entity--files { background: rgba(184,207,153,.92); }
+.launcher-button--plugin { position: relative; gap: .2em; align-content: center; color: var(--home-launcher-text); }
+.launcher-button--plugin .launcher-button__label { max-width: 100%; overflow: hidden; padding: 0 .4em; font-size: .78em; line-height: 1.15; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+.launcher-button--plugin:disabled { cursor: progress; opacity: .7; }

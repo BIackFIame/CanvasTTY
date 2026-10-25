@@ -54,6 +54,7 @@ import type { HermesHudService } from "../services/HermesHudService";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { readHomeMedia } from "../services/homeMedia";
 import { openTerminalFile } from "../services/terminalFileEditor";
+import { createLauncherEntryHandler } from "../services/pluginLauncherEntry";
 
 interface CriticalDependencies {
   settings: SettingsStore;
@@ -536,6 +537,17 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
     return plugins.setDecisionsMayAllow(pluginId, allowed);
+  });
+  // C5: only the app's own launcher (HOME) asks; one call per plugin at a time.
+  const launcherEntry = createLauncherEntryHandler({
+    service: (pluginId) => plugins.launcherEntryService(pluginId),
+    running: (pluginId, serviceId) => pluginServices.running(pluginId, serviceId),
+    call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices.hostCall(pluginId, serviceId, method, params, timeoutMs),
+    locale: () => settings.get().locale
+  });
+  ipcMain.handle(IPC.pluginsLauncherEntry, (event, pluginId: unknown) => {
+    assertMainRenderer(event, getMainWindow);
+    return launcherEntry(pluginId);
   });
   ipcMain.handle(IPC.pluginsSetTrustUpdates, (event, pluginId: string, trusted: boolean) => {
     // Only the app's own Settings and its consent dialog reach this: a plugin page never can.

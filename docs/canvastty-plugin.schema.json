@@ -187,6 +187,20 @@
         "brokerable": {
           "description": "The service offers accounts other plugins' services may send model requests through (canvastty.broker.offer, .admit, .settle) without seeing their keys; each caller -> account pair needs the person's grant. Needs secrets; at most one service per plugin.",
           "type": "boolean"
+        },
+        "launcherEntry": {
+          "description": "One entry first in HOME's launcher (needs sessions:launch; at most one service per plugin; shown only while native code is trusted). Choosing it sends the host-only canvastty.launcher.entry { locale } to this service, which starts or focuses its card with sessions.create.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["title"],
+          "properties": {
+            "title": { "type": "string", "minLength": 1, "maxLength": 40 },
+            "title.ru": { "type": "string", "maxLength": 40 },
+            "title.en": { "type": "string", "maxLength": 40 },
+            "description": { "type": "string", "maxLength": 160 },
+            "description.ru": { "type": "string", "maxLength": 160 },
+            "description.en": { "type": "string", "maxLength": 160 }
+          }
         }
       }
     },

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type {
   AgentProviderId,
   AppSettings,
@@ -52,6 +52,9 @@ import {
   type LimitsLoadState
 } from "./homeModel";
 import { homeCanvasWidgetId } from "../workspace/canvasWidgetFocus";
+
+// C5: loaded only when a trusted plugin declares a launcher entry.
+const PluginLauncherEntries = lazy(() => import("./PluginLauncherEntries").then((module) => ({ default: module.PluginLauncherEntries })));
 
 interface HomeZoneProps {
   settings: AppSettings;
@@ -122,6 +125,8 @@ export function HomeZone({
 }: HomeZoneProps): React.JSX.Element {
   const locale = settings.locale;
   const launcherProviders = resolveHomeLauncherProviders(settings);
+  const entryCount = plugins.filter((plugin) => plugin.enabled && plugin.nativeCodeTrusted
+    && plugin.manifest.permissions.includes("sessions:launch") && plugin.manifest.services?.some((service) => service.launcherEntry)).length;
   const limitProviders = resolveHomeLimitProviders(settings);
   const [now, setNow] = useState(() => new Date());
   const home = useMemo(
@@ -342,8 +347,9 @@ export function HomeZone({
       return (
         <section
           className="tile launcher-dock"
-          style={{ "--launcher-columns": homeLauncherColumnCount(launcherProviders) } as React.CSSProperties}
+          style={{ "--launcher-columns": homeLauncherColumnCount(launcherProviders) + entryCount } as React.CSSProperties}
         >
+          {entryCount > 0 && <Suspense fallback={null}><PluginLauncherEntries plugins={plugins} locale={locale} onError={onPluginError} /></Suspense>}
           <button className="launcher-button launcher-button--terminal" type="button" onClick={() => onOpenTerminal()} title={t(locale, "terminal")}>
             <ProviderIcon provider="terminal" size="large" />
           </button>
