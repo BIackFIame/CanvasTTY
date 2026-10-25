@@ -2312,7 +2312,7 @@ export interface CanvasTTYApi {
     /** "Trust updates from this repository" (C3), off by default; needs native code trust. */
     setTrustUpdates(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     /** The person chose a plugin's launcher entry (C5): its service starts or focuses its card. */
-    launcherEntry(pluginId: string): Promise<void>;
+    launcherEntry(pluginId: string): Promise<{ focus: string } | null>;
     setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin>;
     /** What an owner offers to other plugins' brokered requests now, and the person's grants (no keys). */
     brokerAccounts(ownerId: string): Promise<PluginBrokerAccounts>;

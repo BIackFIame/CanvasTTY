@@ -125,8 +125,8 @@ export function HomeZone({
 }: HomeZoneProps): React.JSX.Element {
   const locale = settings.locale;
   const launcherProviders = resolveHomeLauncherProviders(settings);
-  const entryCount = plugins.filter((plugin) => plugin.enabled && plugin.nativeCodeTrusted
-    && plugin.manifest.permissions.includes("sessions:launch") && plugin.manifest.services?.some((service) => service.launcherEntry)).length;
+  // Trusted plugins with a launcher entry (disabling revokes trust; PluginLauncherEntries checks the rest).
+  const entryCount = plugins.filter((plugin) => plugin.nativeCodeTrusted && plugin.manifest.services?.some((service) => service.launcherEntry)).length;
   const limitProviders = resolveHomeLimitProviders(settings);
   const [now, setNow] = useState(() => new Date());
   const home = useMemo(
@@ -349,7 +349,7 @@ export function HomeZone({
           className="tile launcher-dock"
           style={{ "--launcher-columns": homeLauncherColumnCount(launcherProviders) + entryCount } as React.CSSProperties}
         >
-          {entryCount > 0 && <Suspense fallback={null}><PluginLauncherEntries plugins={plugins} locale={locale} onError={onPluginError} /></Suspense>}
+          {entryCount > 0 && <Suspense fallback={null}><PluginLauncherEntries plugins={plugins} locale={locale} sessions={sessions} onError={onPluginError} onFocusSession={onFocusSession} /></Suspense>}
           <button className="launcher-button launcher-button--terminal" type="button" onClick={() => onOpenTerminal()} title={t(locale, "terminal")}>
             <ProviderIcon provider="terminal" size="large" />
           </button>

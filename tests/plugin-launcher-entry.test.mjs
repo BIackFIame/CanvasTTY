@@ -54,7 +54,8 @@ test("choosing the entry sends canvastty.launcher.entry once; a stopped service 
     service: (pluginId) => { if (pluginId !== ID) throw new Error("This plugin has no launcher entry."); return "main"; },
     running: () => running,
     call: (pluginId, serviceId, method, params) => { calls.push({ pluginId, serviceId, method, params }); return new Promise((resolve) => { release = resolve; }); },
-    locale: () => "ru"
+    locale: () => "ru",
+    owner: () => null
   });
   await assert.rejects(handler(42), /identifier/u);
   await assert.rejects(handler("com.example.other"), /no launcher entry/u);
@@ -64,7 +65,7 @@ test("choosing the entry sends canvastty.launcher.entry once; a stopped service 
   const first = handler(ID);
   await handler(ID); // a double click while the first is answered: nothing more is sent
   release(null);
-  await first;
+  assert.equal(await first, null);
   assert.deepEqual(calls, [{ pluginId: ID, serviceId: "main", method: "canvastty.launcher.entry", params: { locale: "ru" } }]);
 });
 
@@ -77,4 +78,25 @@ test("HOME shows the entries first, only for trusted plugins, from a lazily load
   assert.match(entries, /window\.canvasTTY\.plugins\.launcherEntry\(id\)/u);
   const ipc = await readFile(new URL("../src/main/ipc/registerIpc.ts", import.meta.url), "utf8");
   assert.match(ipc, /IPC\.pluginsLauncherEntry, \(event, pluginId: unknown\) => \{\n\s+assertMainRenderer\(event, getMainWindow\);/u);
+});
+
+test("an answer { open } focuses that card only when the plugin started it", async () => {
+  const owners = new Map([["own-card", ID], ["person-card", null], ["other-card", "com.example.other"]]);
+  let answer = null;
+  const handler = createLauncherEntryHandler({
+    service: () => "main", running: () => true, call: async () => answer, locale: () => "en",
+    owner: (id) => { if (id === "broken") throw new Error("gone"); return owners.get(id) ?? null; }
+  });
+  answer = { open: "own-card" };
+  assert.deepEqual(await handler(ID), { focus: "own-card" });
+  for (const open of ["person-card", "other-card", "missing", "broken", 42, "", "x".repeat(201)]) {
+    answer = { open };
+    assert.equal(await handler(ID), null, String(open));
+  }
+  for (const other of [null, "own-card", ["own-card"], { focus: "own-card" }]) {
+    answer = other;
+    assert.equal(await handler(ID), null, JSON.stringify(other));
+  }
+  const entries = await readFile(new URL("../src/renderer/src/features/home/PluginLauncherEntries.tsx", import.meta.url), "utf8");
+  assert.match(entries, /sessions\.find\(\(session\) => session\.id === answer\.focus\)/u);
 });

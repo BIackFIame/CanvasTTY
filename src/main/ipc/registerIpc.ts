@@ -543,7 +543,8 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     service: (pluginId) => plugins.launcherEntryService(pluginId),
     running: (pluginId, serviceId) => pluginServices.running(pluginId, serviceId),
     call: (pluginId, serviceId, method, params, timeoutMs) => pluginServices.hostCall(pluginId, serviceId, method, params, timeoutMs),
-    locale: () => settings.get().locale
+    locale: () => settings.get().locale,
+    owner: (sessionId) => terminals.pluginContext(sessionId)?.owner ?? null
   });
   ipcMain.handle(IPC.pluginsLauncherEntry, (event, pluginId: unknown) => {
     assertMainRenderer(event, getMainWindow);

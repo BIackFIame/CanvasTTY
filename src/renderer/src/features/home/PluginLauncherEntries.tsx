@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { InstalledPlugin, LocaleId, PluginLauncherEntry } from "../../../../shared/contracts";
+import type { InstalledPlugin, LocaleId, PluginLauncherEntry, SessionSnapshot } from "../../../../shared/contracts";
 import { UiIcon } from "../../components/UiIcon";
 import { pluginName } from "../../../../shared/pluginLocalizedText.ts";
 
@@ -20,10 +20,13 @@ function text(entry: PluginLauncherEntry, key: "title" | "description", locale: 
  * The entries first in HOME's launcher. Choosing one only asks the plugin's service (`canvastty.launcher.entry`) to
  * start or focus its card; nothing else is chosen here. Loaded only when a trusted plugin declares one.
  */
-export function PluginLauncherEntries({ plugins, locale, onError }: {
+export function PluginLauncherEntries({ plugins, locale, sessions, onError, onFocusSession }: {
   plugins: readonly InstalledPlugin[];
   locale: LocaleId;
+  sessions: readonly SessionSnapshot[];
   onError(message: string): void;
+  /** The plugin's card already runs (its answer `{ open }`, checked by the host to be that plugin's card). */
+  onFocusSession(session: SessionSnapshot): void;
 }): React.JSX.Element {
   const [busy, setBusy] = useState<string | null>(null);
   return (
@@ -43,6 +46,10 @@ export function PluginLauncherEntries({ plugins, locale, onError }: {
             onClick={() => {
               setBusy(id);
               void window.canvasTTY.plugins.launcherEntry(id)
+                .then((answer) => {
+                  const card = answer ? sessions.find((session) => session.id === answer.focus) : undefined;
+                  if (card) onFocusSession(card);
+                })
                 .catch((error: unknown) => onError(error instanceof Error ? error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/u, "") : String(error)))
                 .finally(() => setBusy(null));
             }}
