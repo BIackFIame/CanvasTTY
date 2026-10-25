@@ -57,11 +57,38 @@ is **unverified**; the installed prototype remains the only user-accepted runtim
 
 Real packaged-build acceptance for this source port remains pending. CI and
 synthetic fixtures do not prove GPU capture, Android IME, TalkBack, rotation,
-host firewalls or real device input on Windows/Linux. Public release signing,
-store distribution and a 30 FPS guarantee are outside this alpha.
+host firewalls or real device input on Windows/Linux. Official desktop release
+signing, store distribution and a 30 FPS guarantee are outside this alpha.
 
 The `CanvasLink alpha` workflow runs the contracts and builds a downloadable
 development APK. Its CI signature is ephemeral; it is not an update channel.
 Run `node scripts/smoke-canvaslink.mjs` after the desktop build to exercise real
 Electron preload/IPC and host enable/revoke/disable against a disposable hidden
 fixture. It does not send input to user terminals or provide video acceptance.
+
+## Community APK distribution and onboarding (2026-10-26)
+
+- [CanvasLink](https://github.com/teo-nex/CanvasLink) is a separate public
+  distribution repository; application source remains in this PR.
+- Version `0.3.0-alpha.1` is the APK from successful CI run `40235936427`, source
+  commit `eba7baf1f3db716b6600a605f1fda07c39e9119f`, re-signed locally with a
+  persistent distribution key. All ZIP entries outside `META-INF` match the CI
+  input byte for byte. Normal APKs contain no acceptance instrumentation.
+- Distribution APK SHA-256:
+  `0534857896b2e22d7e832a8aaa6146b3fc6acb19f3df857cc9d3e8c1caf5a760`.
+  Public signing certificate SHA-256:
+  `0235b1aee591e4f0e24e59484927ead112889521a1b92e40959076d03635b3cb`.
+  The private key and password remain outside both repositories.
+- Settings can copy a bilingual, pinned installation prompt and open the guide.
+  Copying does not enable the host, mutate pairing, install an APK or expose the
+  pairing code/device name. Three handler tests cover both locales and clipboard
+  failure; all passed. They use the repository's React test stand-in, not a live
+  desktop clipboard or physical Android device.
+- The 103 integration tests, TypeScript checks, production build and source/built
+  output secret audit passed again after the settings change.
+- The agent prompt selects one ADB device, verifies the APK hash, preserves app
+  data and stops on signature/downgrade conflicts. USB debugging and the initial
+  Android RSA confirmation belong to the device owner.
+- Earlier debug signatures may conflict with the new distribution signature.
+  No APK was installed on the accepted tablet and no installed desktop was replaced.
+  Publication is distinct from physical acceptance of this exact APK/desktop port.

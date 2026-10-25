@@ -1,14 +1,26 @@
 import { useEffect, useRef, useState } from "react";
 import type { LocaleId } from "../../../../shared/contracts";
 import type { CanvasLinkCommand, CanvasLinkState } from "../../../../shared/canvasLink";
+import { CANVASLINK_ANDROID_RELEASE, canvasLinkInstallPrompt } from "../../../../shared/canvasLinkInstall";
 import "./CanvasLinkSettings.css";
 
 export function CanvasLinkSettings({ locale, open }: { locale: LocaleId; open: boolean }) {
   const [state, setState] = useState<CanvasLinkState | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [promptCopied, setPromptCopied] = useState(false);
   const revision = useRef(0);
   const text = (ru: string, en: string) => locale === "ru" ? ru : en;
+
+  function copyInstallPrompt() {
+    try {
+      window.canvasTTY.clipboard.writeText(canvasLinkInstallPrompt(locale));
+      setPromptCopied(true);
+    } catch {
+      setPromptCopied(false);
+      setError(text("Не удалось скопировать промпт. Откройте инструкцию.", "Could not copy the prompt. Open the installation guide."));
+    }
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -54,6 +66,16 @@ export function CanvasLinkSettings({ locale, open }: { locale: LocaleId; open: b
       <p className="canvaslink-settings__eyebrow">{text("ТЕЛЕФОН И ПЛАНШЕТ", "PHONE AND TABLET")}</p>
       <h3>{text("Ваш CanvasTTY на Android", "Your CanvasTTY on Android")}</h3>
       <p>{text("Работайте в этом окне с планшета или телефона. Оба устройства должны быть в одной локальной сети.", "Use this window from your tablet or phone. Both devices must be on the same local network.")}</p>
+    </section>
+    <section className="canvaslink-settings__card">
+      <h3>{text("Установить на Android", "Install on Android")}</h3>
+      <p>{text("Подключите телефон или планшет по USB, включите USB-отладку и подтвердите запрос на Android. Скопируйте промпт своему агенту — он проверит APK и установит приложение. После установки USB не нужен.", "Connect your phone or tablet over USB, enable USB debugging and approve the Android prompt. Copy the prompt to your agent: it will verify the APK and install the app. USB is not needed after installation.")}</p>
+      <div className="canvaslink-settings__install-actions">
+        <button type="button" className="canvaslink-settings__button" onClick={copyInstallPrompt}>{text("Скопировать промпт агенту", "Copy prompt for agent")}</button>
+        <button type="button" className="canvaslink-settings__button" onClick={() => void window.canvasTTY.external.openUrl(locale === "ru" ? CANVASLINK_ANDROID_RELEASE.guideRuUrl : CANVASLINK_ANDROID_RELEASE.guideUrl)}>{text("Инструкция и APK", "Guide and APK")}</button>
+      </div>
+      {promptCopied && <p className="canvaslink-settings__note" role="status">{text("Промпт скопирован. Вставьте его в чат с агентом на этом компьютере.", "Prompt copied. Paste it into your agent chat on this computer.")}</p>}
+      <p className="canvaslink-settings__note">{text(`Android 8+ · ${CANVASLINK_ANDROID_RELEASE.version} · экспериментальная версия`, `Android 8+ · ${CANVASLINK_ANDROID_RELEASE.version} · experimental version`)}</p>
     </section>
     <section className="canvaslink-settings__card">
       <div className="canvaslink-settings__row">

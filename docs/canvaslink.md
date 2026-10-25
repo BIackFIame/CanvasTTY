@@ -11,7 +11,13 @@ and Even G2 integration retain their separate pairing and permissions.
 
 ## Connect
 
-1. Install the development APK from a trusted build of this branch (Android 8+).
+1. Install the [pinned Android alpha](https://github.com/teo-nex/CanvasLink#installation)
+   (Android 8+). **Settings → CanvasLink → Copy prompt for agent** copies USB/ADB
+   installation instructions with the exact APK URL and checksum. Enable USB
+   debugging and approve the RSA dialog on Android yourself. The agent installs
+   on one selected device and preserves data; it must stop on signing conflicts.
+   The desktop must be built from this PR; the official stable release does not
+   contain this integration yet.
 2. Open Settings → CanvasLink on the desktop and choose **Enable access**.
 3. Open CanvasLink on Android, select the discovered computer and enter the six
    digits shown on the desktop. The code expires after two minutes and is used
@@ -73,8 +79,15 @@ Java dependencies are downloaded by the build script. A local development key
 is generated under the ignored `.runtime` directory. CI produces an APK artifact
 with an ephemeral development signature. Different builds can have different
 keys and may not install as an update over one another. Keep your existing app
-and its data until you have planned the transition. Release signing/distribution
-is not configured by this PR.
+and its data until you have planned the transition.
+
+The separate community [CanvasLink distribution repository](https://github.com/teo-nex/CanvasLink)
+publishes a pinned alpha APK and bilingual installation prompts. Its APK is the
+verified CI payload re-signed with a persistent local distribution key; provenance,
+SHA-256 and the public certificate fingerprint are recorded there. No private
+signing key enters either repository. Source CI still produces ephemeral debug
+signatures; the distribution release is a separate maintained publication, not
+an official CanvasTTY release or automatic stable update channel.
 
 ## Quality and platform status
 
