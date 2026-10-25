@@ -20,6 +20,33 @@ interface PluginServicesSettingsProps {
   onSetDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onSetMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<void>;
   onSetSharedReadApproved?(pluginId: string, provider: string, method: string, approved: boolean): Promise<void>;
+  onSetTrustUpdates?(pluginId: string, trusted: boolean): Promise<void>;
+}
+
+/** "Trust updates from this repository" (C3): settings-only text, kept in this lazily loaded chunk. */
+const UPDATE_TRUST_TEXT = {
+  ru: {
+    title: "Доверять обновлениям из",
+    description: "Пока обновления не просят новых прав, после обновления ничего не нужно включать заново. Выключено по умолчанию.",
+    risk: "Если кто-то получит доступ к этому репозиторию, его код запустится у вас при следующем обновлении.",
+    enable: "Доверять обновлениям",
+    kept: "Обновлено {from} → {to}, доверие сохранено.",
+    revoke: "Отозвать"
+  },
+  en: {
+    title: "Trust updates from",
+    description: "While updates ask for no new permissions, nothing has to be turned on again after an update. Off by default.",
+    risk: "If someone gets access to this repository, their code runs on your computer at the next update.",
+    enable: "Trust updates",
+    kept: "Updated {from} → {to}, trust kept.",
+    revoke: "Revoke"
+  }
+} as const;
+
+/** `owner/repo` of a GitHub source, or the source itself. */
+export function repositoryLabel(sourceUrl: string): string {
+  const match = /^https:\/\/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/iu.exec(sourceUrl);
+  return match ? match[1] : sourceUrl;
 }
 
 /** The orchestrator consent's text lives with this lazily loaded settings chunk, not in the startup bundle. */
@@ -50,7 +77,8 @@ export function PluginServicesSettings({
   onSetNativeCodeTrusted,
   onSetDecisionsMayAllow,
   onSetMayStartOrchestrators,
-  onSetSharedReadApproved
+  onSetSharedReadApproved,
+  onSetTrustUpdates
 }: PluginServicesSettingsProps): React.JSX.Element | null {
   const rows = plugins.filter((plugin) => plugin.manifest.services?.length);
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -105,6 +133,20 @@ export function PluginServicesSettings({
   };
 
   const orchestratorText = ORCHESTRATOR_TEXT[locale === "ru" ? "ru" : "en"];
+  const updateTrustText = UPDATE_TRUST_TEXT[locale === "ru" ? "ru" : "en"];
+  const setTrustUpdates = async (plugin: InstalledPlugin, trustedUpdates: boolean): Promise<void> => {
+    if (!onSetTrustUpdates) return;
+    setBusy(plugin.manifest.id);
+    setError(null);
+    try {
+      await onSetTrustUpdates(plugin.manifest.id, trustedUpdates);
+      setConfirming(null);
+    } catch {
+      setError(t(locale, "pluginHookChangeFailed"));
+    } finally {
+      setBusy(null);
+    }
+  };
   const setMayStartOrchestrators = async (plugin: InstalledPlugin, allowed: boolean): Promise<void> => {
     setBusy(plugin.manifest.id);
     setError(null);
@@ -250,6 +292,51 @@ export function PluginServicesSettings({
                       disabled={busy !== null}
                       onClick={() => void setMayStartOrchestrators(plugin, true)}
                     >{orchestratorText.enable}</button>
+                  </div>
+                </div>
+              )}
+              {trusted && plugin.trustKeptOnUpdate && (
+                <div className="agent-hooks__confirm" role="status">
+                  <p>{updateTrustText.kept.replace("{from}", plugin.trustKeptOnUpdate.fromVersion).replace("{to}", plugin.trustKeptOnUpdate.toVersion)}</p>
+                  <div>
+                    <button type="button" disabled={busy !== null} onClick={() => void setTrusted(plugin, false)}>{updateTrustText.revoke}</button>
+                  </div>
+                </div>
+              )}
+              {trusted && onSetTrustUpdates && plugin.sourceUrl.startsWith("https://github.com/") && (
+                <div className="agent-hooks__row-main">
+                  <span className="agent-hooks__copy">
+                    <strong>{updateTrustText.title} <code>{repositoryLabel(plugin.sourceUrl)}</code></strong>
+                    <small>{updateTrustText.description} {updateTrustText.risk}</small>
+                  </span>
+                  <button
+                    className={`agent-hooks__toggle${plugin.trustUpdates ? " agent-hooks__toggle--on" : ""}`}
+                    type="button"
+                    role="switch"
+                    aria-checked={plugin.trustUpdates === true}
+                    aria-label={`${updateTrustText.title} ${repositoryLabel(plugin.sourceUrl)}: ${pluginName(plugin.manifest, locale)}`}
+                    disabled={busy !== null}
+                    onClick={() => {
+                      if (plugin.trustUpdates) void setTrustUpdates(plugin, false);
+                      else setConfirming(`${pluginId}:updates`);
+                    }}
+                  >
+                    <span aria-hidden="true" />
+                    {t(locale, plugin.trustUpdates ? "on" : "off")}
+                  </button>
+                </div>
+              )}
+              {confirming === `${pluginId}:updates` && (
+                <div className="agent-hooks__confirm">
+                  <p>{updateTrustText.risk}</p>
+                  <div>
+                    <button type="button" onClick={() => setConfirming(null)}>{t(locale, "cancel")}</button>
+                    <button
+                      className="agent-hooks__trust"
+                      type="button"
+                      disabled={busy !== null}
+                      onClick={() => void setTrustUpdates(plugin, true)}
+                    >{updateTrustText.enable}</button>
                   </div>
                 </div>
               )}

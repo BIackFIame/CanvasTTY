@@ -1716,6 +1716,8 @@ export function App(): React.JSX.Element {
     applyPluginChange(pluginId, window.canvasTTY.plugins.setMayStartOrchestrators(pluginId, allowed))), [applyPluginChange]);
   const setPluginSharedReadApproved = useCallback((pluginId: string, provider: string, method: string, approved: boolean) => (
     applyPluginChange(pluginId, window.canvasTTY.plugins.setSharedReadApproved(pluginId, provider, method, approved))), [applyPluginChange]);
+  const setPluginTrustUpdates = useCallback((pluginId: string, trusted: boolean) => (
+    applyPluginChange(pluginId, window.canvasTTY.plugins.setTrustUpdates(pluginId, trusted))), [applyPluginChange]);
 
   const setPluginModules = useCallback(async (pluginId: string, selectedModules: string[]): Promise<void> => {
     let updated: InstalledPlugin;
@@ -1783,7 +1785,9 @@ export function App(): React.JSX.Element {
       throw error;
     }
     setPlugins((current) => current.map((plugin) => plugin.manifest.id === pluginId ? updated : plugin));
-    showToast(`${t(settings.locale, "pluginUpdated")}: ${pluginName(updated.manifest, settings.locale)}`);
+    showToast(`${t(settings.locale, "pluginUpdated")}: ${pluginName(updated.manifest, settings.locale)}${updated.trustKeptOnUpdate ? ` · ${t(settings.locale, "pluginUpdateTrustKept")}` : ""}`);
+    // Other plugins' views of its shares and grants follow a kept trust.
+    if (updated.trustKeptOnUpdate) void refreshPlugins().catch(() => undefined);
   }, [refreshPlugins, settings.locale, showToast]);
 
   const openPluginCanvasContribution = useCallback(async (
@@ -2169,6 +2173,7 @@ export function App(): React.JSX.Element {
           onSetPluginDecisionsMayAllow={setPluginDecisionsMayAllow}
           onSetPluginMayStartOrchestrators={setPluginMayStartOrchestrators}
           onSetPluginSharedReadApproved={setPluginSharedReadApproved}
+          onSetPluginTrustUpdates={setPluginTrustUpdates}
           onUninstallPlugin={uninstallPlugin}
           onOpenPluginContribution={openPluginContribution}
           onPluginChanged={(changed) => setPlugins((current) => current.map((plugin) => plugin.manifest.id === changed.manifest.id ? changed : plugin))}

@@ -203,6 +203,7 @@ interface SettingsPanelProps {
   onSetPluginDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<void>;
   onSetPluginMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<void>;
   onSetPluginSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<void>;
+  onSetPluginTrustUpdates?(pluginId: string, trusted: boolean): Promise<void>;
   onUninstallPlugin(pluginId: string): Promise<void>;
   onOpenPluginContribution(plugin: InstalledPlugin, contribution: PluginContribution): Promise<void>;
   onPluginChanged?(plugin: InstalledPlugin): void;
@@ -243,6 +244,7 @@ export function SettingsPanel({
   onSetPluginDecisionsMayAllow,
   onSetPluginMayStartOrchestrators,
   onSetPluginSharedReadApproved,
+  onSetPluginTrustUpdates,
   onUninstallPlugin,
   onOpenPluginContribution,
   onPluginChanged,
@@ -1026,6 +1028,7 @@ export function SettingsPanel({
                 onSetDecisionsMayAllow={onSetPluginDecisionsMayAllow}
                 onSetMayStartOrchestrators={onSetPluginMayStartOrchestrators}
                 onSetSharedReadApproved={onSetPluginSharedReadApproved}
+                onSetTrustUpdates={onSetPluginTrustUpdates}
               />
               <SettingGroup
                 label={t(locale, "agentControlEnabled")}

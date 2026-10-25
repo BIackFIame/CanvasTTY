@@ -15,7 +15,7 @@ Installing a plugin is equivalent to allowing third-party browser code to run lo
 - Every privileged SDK method is gated by a manifest permission. Permissions are shown before the user confirms installation.
 - Sandboxed web contributions never receive provider credentials, PTY buffers, working directories, raw provider responses, or filesystem access.
 - Disabling or uninstalling a plugin immediately stops serving its assets and closes its separate windows.
-- Declared services follow the same rule as hooks, per plugin: install never starts them, and update, module changes, disabling, or a changed entry file revokes the confirmation. Services run out of process; no plugin code runs in the CanvasTTY main process.
+- Declared services follow the same rule as hooks, per plugin: install never starts them, and update, module changes, disabling, or a changed entry file revokes the confirmation (unless the person opted in to [trusting updates from that repository](#trusting-updates-from-a-repository)). Services run out of process; no plugin code runs in the CanvasTTY main process.
 - Declared agent hooks are never enabled by install, update, or module changes. Enabling one is equivalent to running that repository's JavaScript as a native application with the current user's OS privileges, access to the provider event payload, and potential access to user-readable configuration or credentials. Updating the plugin, replacing modules, or disabling the plugin revokes every enabled hook so changed code must be trusted again.
 
 CanvasTTY does not embed arbitrary native OS windows. A `window` contribution is a sandboxed CanvasTTY-owned `BrowserWindow`. Native reparenting is not portable or reliable across Wayland, macOS, Windows, DPI modes, popups, and GPU surfaces.
@@ -682,6 +682,15 @@ An installed plugin's row in **Settings → Plugins** shows its source repositor
 - Refused: another plugin id, a non-`https://github.com/owner/repository` URL, the repository already installed (use **Update**), an invalid package, or a review older than 10 minutes or made before an update.
 - A failure puts the previous package and source back. What was revoked stays revoked (fail closed); the error says so, and you allow it again if you still want it.
 - The previous source is remembered: **Switch back to …** runs the same review. Each switch adds a line to `<userData>/plugin-audit.log` (plugin, from, to, versions, what was revoked; no data).
+
+### Trusting updates from a repository
+
+Every **Update** normally revokes native code trust and the confirmations that need it, so new code never runs before the person looks again. Under **Settings → Agents → Extension native code** a trusted plugin with a GitHub source has **Trust updates from owner/repo**, off by default; turning it on asks once more, with the risk in one sentence: if someone gets access to that repository, their code runs on this computer at the next update.
+
+- While it is on, an Update **from the same repository** whose manifest asks for **nothing new** keeps native code trust (pinned again to the new service entries), "may allow agent actions", "may start orchestrators", its shared-read approvals and its broker grants. The toast says "trust kept", the plugin's row shows "Updated a → b, trust kept" with **Revoke**, and `<userData>/plugin-audit.log` gets a `plugin.update-trust-kept` line (plugin, source, versions, digests of the granting parts, what was kept).
+- "Nothing new" is decided by the host from the manifests: permissions, services, each decision service's agents, each tool's roles and audience, shares with their data class, brokerable services, launch contributions, environment kinds, card actions, browser engines, launcher entries, hooks, uses and contributions. Display text does not count; removing something or narrowing it (for example a tool going to `own-cards`, a decision service for fewer agents) does not count; anything added or changed does. Then everything is revoked as without the opt-in, the opt-in goes too, and the audit line `plugin.update-trust-revoked` lists what was added.
+- Enabled hooks are turned off by every update, as before. A source change, turning native code off, disabling or uninstalling the plugin drop the opt-in; trusting again starts with it off. Updates stay person-triggered (CanvasTTY Edge has no automatic plugin updates).
+- Residual risk: "the same permissions" is not "the same behaviour". An update inside the existing permissions can still do anything the old code could (for a plugin that holds keys, read them). Leave it off for such plugins.
 
 ## Author checklist
 

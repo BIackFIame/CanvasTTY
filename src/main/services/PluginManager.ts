@@ -187,6 +187,11 @@ interface StoredPluginRecord {
   previousSourceUrl?: string;
   /** Brokered accounts the person granted: `<owner> <account>` -> fingerprint (kept only with trustedServices). */
   brokerGrants?: Record<string, string>;
+  /**
+   * The person opted in to "trust updates from this repository" (C3): the repository they trusted it for. Kept only
+   * with trustedServices; an update from that repository that asks for nothing new keeps the trust.
+   */
+  trustUpdatesFrom?: string;
 }
 
 /** The host's answer to where a shared read goes (see PluginManager.sharedReadRoute). */
@@ -256,6 +261,10 @@ export class PluginManager {
   private readonly shareApprovals = new Map<string, Record<string, string>>();
   /** Caller plugin id -> granted `<owner> <account>` -> fingerprint. Present only while native code is trusted. */
   private readonly brokerGrants = new Map<string, Record<string, string>>();
+  /** Plugin id -> the repository its updates are trusted from (C3). Present only while native code is trusted. */
+  private readonly trustUpdates = new Map<string, string>();
+  /** Plugin id -> the last update that kept the trust (shown once in Settings; not persisted). */
+  private readonly keptUpdates = new Map<string, { fromVersion: string; toVersion: string; at: number }>();
   private serviceObserver: ((specs: PluginServiceSpec[]) => Promise<void>) | null = null;
   private readonly pending = new Map<string, PendingInstall>();
   private readonly pendingSourceChanges = new Map<string, PendingSourceChange>();
@@ -330,6 +339,7 @@ export class PluginManager {
     this.serviceTrust.clear();
     this.shareApprovals.clear();
     this.brokerGrants.clear();
+    this.trustUpdates.clear();
     for (const [pluginId, record] of Object.entries(registry)) {
       if (!isStoredRecord(record) || !isPluginId(pluginId)) continue;
       try {
@@ -369,6 +379,7 @@ export class PluginManager {
             plugin.mayStartOrchestrators = record.mayStartOrchestrators === true && active.permissions.includes("sessions:launch");
             if (record.approvedShares) this.shareApprovals.set(pluginId, { ...record.approvedShares });
             if (record.brokerGrants && active.permissions.includes("accounts:broker")) this.brokerGrants.set(pluginId, { ...record.brokerGrants });
+            if (record.trustUpdatesFrom && record.trustUpdatesFrom === plugin.sourceUrl) this.trustUpdates.set(pluginId, record.trustUpdatesFrom);
           }
         }
       } catch (error) {
@@ -390,7 +401,15 @@ export class PluginManager {
   private view(plugin: InstalledPlugin): InstalledPlugin {
     const active = activePlugin(plugin);
     const sharedReads = this.sharedReadStatus(plugin);
-    return structuredClone({ ...active, ...(sharedReads.length ? { sharedReads } : {}) });
+    const id = plugin.manifest.id;
+    const trustUpdates = plugin.nativeCodeTrusted && this.trustUpdates.get(id) === plugin.sourceUrl;
+    const kept = this.keptUpdates.get(id);
+    return structuredClone({
+      ...active,
+      ...(sharedReads.length ? { sharedReads } : {}),
+      ...(trustUpdates ? { trustUpdates: true } : {}),
+      ...(trustUpdates && kept ? { trustKeptOnUpdate: kept } : {})
+    });
   }
 
   async previewInstall(sourceUrl: string): Promise<PluginInstallPreview> {
@@ -789,6 +808,36 @@ export class PluginManager {
       await this.persistRegistry().catch(() => undefined);
       throw error;
     }
+    return this.view(plugin);
+  }
+
+  /**
+   * "Trust updates from this repository" (C3), the person's opt-in per plugin, off by default. While it is on, an
+   * Update from the same repository whose manifest asks for nothing new keeps native code trust and the
+   * confirmations that need it (see performPluginUpdate). Needs native code trust and is revoked with it; a source
+   * change drops it. A local plugin (no repository) cannot have it.
+   */
+  async setTrustUpdates(pluginId: string, trusted: boolean): Promise<InstalledPlugin> {
+    const plugin = this.requireEnabledPlugin(pluginId);
+    if (trusted) {
+      if (!plugin.nativeCodeTrusted) throw new Error("Trust the plugin's native code first.");
+      if (isLocalMascotSource(plugin.sourceUrl)) throw new Error("A local plugin has no repository to trust updates from.");
+    }
+    const previous = this.trustUpdates.get(pluginId);
+    if (trusted) this.trustUpdates.set(pluginId, plugin.sourceUrl);
+    else {
+      this.trustUpdates.delete(pluginId);
+      this.keptUpdates.delete(pluginId);
+    }
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      if (previous) this.trustUpdates.set(pluginId, previous);
+      else this.trustUpdates.delete(pluginId);
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    await this.audit({ event: trusted ? "plugin.trust-updates-on" : "plugin.trust-updates-off", plugin: pluginId, source: plugin.sourceUrl });
     return this.view(plugin);
   }
 
@@ -1275,6 +1324,19 @@ export class PluginManager {
 
   private async performPluginUpdate(pluginId: string): Promise<InstalledPlugin> {
     const plugin = this.requirePlugin(pluginId);
+    // C3: what may be carried over if the person trusts this repository's updates and the update asks for nothing
+    // new. Taken before the revocation below, which still happens first (services stop before files are replaced).
+    const carried = plugin.enabled && plugin.nativeCodeTrusted && this.serviceTrust.has(pluginId)
+      && this.trustUpdates.get(pluginId) === plugin.sourceUrl && !isLocalMascotSource(plugin.sourceUrl)
+      ? {
+        manifest: activeManifest(plugin.manifest, plugin.selectedModules),
+        decisionsMayAllow: plugin.decisionsMayAllow,
+        mayStartOrchestrators: plugin.mayStartOrchestrators,
+        shareApprovals: { ...(this.shareApprovals.get(pluginId) ?? {}) },
+        brokerGrants: { ...(this.brokerGrants.get(pluginId) ?? {}) }
+      }
+      : null;
+    this.keptUpdates.delete(pluginId);
     if (plugin.enabledHooks.length > 0 || plugin.nativeCodeTrusted) {
       plugin.enabledHooks = [];
       this.revokeNativeCode(plugin);
@@ -1335,6 +1397,7 @@ export class PluginManager {
           checkedAt: Date.now()
         };
       });
+      if (carried) await this.carryTrustOverUpdate(updated, plugin.manifest.version, carried);
       return this.view(updated);
     } catch (error) {
       if (currentBackedUp) {
@@ -1537,6 +1600,64 @@ export class PluginManager {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  }
+
+  /**
+   * C3, after an update from the trusted repository was installed: if its manifest asks for nothing the old one did
+   * not (pluginTrustWidening), the native code trust is pinned again to the new entries and the confirmations that
+   * need it come back as they were; otherwise everything stays revoked, as for any update. Hooks stay off either way.
+   * One audit line records the decision.
+   */
+  private async carryTrustOverUpdate(updated: InstalledPlugin, fromVersion: string, carried: {
+    manifest: PluginManifest;
+    decisionsMayAllow: boolean;
+    mayStartOrchestrators: boolean;
+    shareApprovals: Record<string, string>;
+    brokerGrants: Record<string, string>;
+  }): Promise<void> {
+    const pluginId = updated.manifest.id;
+    const next = activeManifest(updated.manifest, updated.selectedModules);
+    const widened = pluginTrustWidening(carried.manifest, next);
+    const base = {
+      plugin: pluginId, source: updated.sourceUrl, fromVersion, toVersion: updated.manifest.version,
+      fromDigest: pluginTrustDigest(carried.manifest), toDigest: pluginTrustDigest(next)
+    };
+    if (widened.length > 0 || !updated.enabled || !next.services?.length) {
+      await this.audit({ event: "plugin.update-trust-revoked", ...base, widened: widened.slice(0, 40) });
+      return;
+    }
+    let trust: Record<string, string>;
+    try {
+      trust = await this.currentServiceTrust(pluginId, next);
+    } catch {
+      await this.audit({ event: "plugin.update-trust-revoked", ...base, widened: ["service entries unreadable"] });
+      return;
+    }
+    this.serviceTrust.set(pluginId, trust);
+    updated.nativeCodeTrusted = true;
+    updated.decisionsMayAllow = carried.decisionsMayAllow && Boolean(next.services.some((service) => service.decide));
+    updated.mayStartOrchestrators = carried.mayStartOrchestrators && next.permissions.includes("sessions:launch");
+    if (Object.keys(carried.shareApprovals).length) this.shareApprovals.set(pluginId, carried.shareApprovals);
+    if (Object.keys(carried.brokerGrants).length && next.permissions.includes("accounts:broker")) this.brokerGrants.set(pluginId, carried.brokerGrants);
+    this.trustUpdates.set(pluginId, updated.sourceUrl);
+    try {
+      await this.persistRegistry();
+    } catch (error) {
+      this.revokeNativeCode(updated);
+      await this.persistRegistry().catch(() => undefined);
+      throw error;
+    }
+    this.keptUpdates.set(pluginId, { fromVersion, toVersion: updated.manifest.version, at: Date.now() });
+    await this.audit({
+      event: "plugin.update-trust-kept", ...base,
+      kept: [
+        "native-code",
+        ...(updated.decisionsMayAllow ? ["decisions-may-allow"] : []),
+        ...(updated.mayStartOrchestrators ? ["may-start-orchestrators"] : []),
+        ...(this.shareApprovals.get(pluginId) ? [`shared-reads:${Object.keys(this.shareApprovals.get(pluginId)!).length}`] : []),
+        ...(this.brokerGrants.get(pluginId) ? [`broker-grants:${Object.keys(this.brokerGrants.get(pluginId)!).length}`] : [])
+      ]
+    });
   }
 
   /** One JSON line per plugin lifecycle decision the person made; kept next to the registry, bounded. */
@@ -1913,7 +2034,8 @@ export class PluginManager {
           ...(plugin.decisionsMayAllow ? { decisionsMayAllow: true } : {}),
           ...(plugin.mayStartOrchestrators ? { mayStartOrchestrators: true } : {}),
           ...(Object.keys(this.shareApprovals.get(id) ?? {}).length ? { approvedShares: { ...this.shareApprovals.get(id)! } } : {}),
-          ...(Object.keys(this.brokerGrants.get(id) ?? {}).length ? { brokerGrants: { ...this.brokerGrants.get(id)! } } : {})
+          ...(Object.keys(this.brokerGrants.get(id) ?? {}).length ? { brokerGrants: { ...this.brokerGrants.get(id)! } } : {}),
+          ...(this.trustUpdates.get(id) === plugin.sourceUrl ? { trustUpdatesFrom: plugin.sourceUrl } : {})
         }
         : {})
     }] satisfies [string, StoredPluginRecord]));
@@ -1958,6 +2080,8 @@ export class PluginManager {
     this.shareApprovals.delete(plugin.manifest.id);
     // Broker grants are a second confirmation on top of native code trust and go with it.
     this.brokerGrants.delete(plugin.manifest.id);
+    // So does trusting its updates (C3): a later trust starts with it off.
+    this.trustUpdates.delete(plugin.manifest.id);
   }
 
   private async currentServiceTrust(pluginId: string, manifest: PluginManifest): Promise<Record<string, string>> {
@@ -3907,6 +4031,7 @@ function isStoredRecord(value: unknown): value is StoredPluginRecord {
       && Object.keys(value.brokerGrants).length <= MAX_BROKER_GRANTS
       && Object.values(value.brokerGrants).every((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash))
     ))
+    && (value.trustUpdatesFrom === undefined || (typeof value.trustUpdatesFrom === "string" && value.trustUpdatesFrom.length <= 400))
   );
 }
 
@@ -3944,6 +4069,70 @@ export function pluginSourceChanges(current: PluginManifest, next: PluginManifes
     if (added.length || removed.length) changes.push({ kind, added, removed });
   }
   return changes;
+}
+
+/** Keys whose values are only text shown to the person; a change there grants nothing. */
+const TRUST_TEXT_KEY = /^(?:label|title|description|placeholder|hint|help)(?:\.[a-zA-Z-]+)?$/u;
+
+function withoutTexts(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutTexts);
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(Object.entries(value)
+    .filter(([key]) => !TRUST_TEXT_KEY.test(key))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, entry]) => [key, withoutTexts(entry)]));
+}
+
+/**
+ * The parts of a manifest that grant something, as single items (C3): permissions, services, each decision
+ * service's agents, each tool's roles and audience, shares with their data class, brokerable services, launch
+ * contributions, environment kinds, card actions, browser engines, launcher entries, hooks, uses and contributions.
+ * Display text is left out. An update keeps trusted-updates trust only if it adds no item; any added item (or a
+ * changed one, which shows as added) counts as asking for more.
+ */
+export function pluginTrustSurface(manifest: PluginManifest): string[] {
+  const items = new Set<string>();
+  for (const permission of manifest.permissions) items.add(`permission:${permission}`);
+  for (const hook of manifest.hooks ?? []) items.add(`hook:${hook.id}:${hook.entry}:${[...hook.providers].sort().join(",")}:${[...hook.events].sort().join(",")}`);
+  for (const use of manifest.uses ?? []) items.add(`use:${use.plugin} ${use.method}`);
+  for (const contribution of manifest.contributions) items.add(`contribution:${contribution.kind}:${contribution.id}`);
+  for (const service of manifest.services ?? []) {
+    const id = service.id;
+    items.add(`service:${id}`);
+    if (service.decide) {
+      for (const event of service.decide.events) {
+        // No list means every agent: spelled out, so a narrower list later is not mistaken for a wider one.
+        for (const provider of service.decide.appliesTo ?? AGENT_PROVIDERS) items.add(`decide:${id}:${event}:${provider}`);
+      }
+    }
+    for (const tool of service.tools ?? []) {
+      for (const role of tool.roles) {
+        // Own cards are a part of every card: a tool that becomes visible to all adds an item, the reverse does not.
+        items.add(`tool:${id}:${tool.name}:${role}:own-cards`);
+        if (tool.audience !== "own-cards") items.add(`tool:${id}:${tool.name}:${role}:all`);
+      }
+    }
+    for (const share of service.shares ?? []) items.add(`share:${share.method}:${share.dataClass ?? "-"}`);
+    if (service.brokerable) items.add(`brokerable:${id}`);
+    if (service.launch) items.add(`launch:${id}:${JSON.stringify(withoutTexts(service.launch))}`);
+    for (const kind of service.environments ?? []) items.add(`environment:${id}:${JSON.stringify(withoutTexts(kind))}`);
+    for (const action of service.cardActions ?? []) items.add(`card-action:${id}:${JSON.stringify(withoutTexts(action))}`);
+    if (service.browserEngine) items.add(`browser-engine:${id}:${JSON.stringify(withoutTexts(service.browserEngine))}`);
+    const entry = (service as { launcherEntry?: unknown }).launcherEntry;
+    if (entry) items.add(`launcher-entry:${id}`);
+  }
+  return [...items].sort();
+}
+
+/** What `next` asks for that `current` did not (empty: nothing new). */
+export function pluginTrustWidening(current: PluginManifest, next: PluginManifest): string[] {
+  const before = new Set(pluginTrustSurface(current));
+  return pluginTrustSurface(next).filter((item) => !before.has(item));
+}
+
+/** A digest of the trust surface, for the audit line. */
+export function pluginTrustDigest(manifest: PluginManifest): string {
+  return createHash("sha256").update(JSON.stringify(pluginTrustSurface(manifest))).digest("hex");
 }
 
 function sameServiceTrust(current: Record<string, string>, stored: Record<string, string>): boolean {

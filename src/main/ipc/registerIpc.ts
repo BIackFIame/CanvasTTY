@@ -537,6 +537,12 @@ export function registerIpc(ipcMain: IpcRegistrar, {
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin decision state is invalid.");
     return plugins.setDecisionsMayAllow(pluginId, allowed);
   });
+  ipcMain.handle(IPC.pluginsSetTrustUpdates, (event, pluginId: string, trusted: boolean) => {
+    // Only the app's own Settings and its consent dialog reach this: a plugin page never can.
+    assertMainRenderer(event, getMainWindow);
+    if (typeof pluginId !== "string" || typeof trusted !== "boolean") throw new Error("Plugin update trust state is invalid.");
+    return plugins.setTrustUpdates(pluginId, trusted);
+  });
   ipcMain.handle(IPC.pluginsSetMayStartOrchestrators, (event, pluginId: string, allowed: boolean) => {
     assertMainRenderer(event, getMainWindow);
     if (typeof pluginId !== "string" || typeof allowed !== "boolean") throw new Error("Plugin orchestrator state is invalid.");

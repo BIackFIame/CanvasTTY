@@ -1435,6 +1435,13 @@ export interface InstalledPlugin {
   sharedReads?: PluginSharedReadStatus[];
   /** The repository it was installed from before the person last changed its source ("switch back"). */
   previousSourceUrl?: string;
+  /**
+   * The person trusts updates from this repository (C3, off by default): an Update from the same repository that
+   * asks for nothing new keeps native code trust and its confirmations. Revoked with native code trust.
+   */
+  trustUpdates?: boolean;
+  /** The last Update kept the trust this way (since the app started). */
+  trustKeptOnUpdate?: { fromVersion: string; toVersion: string; at: number };
 }
 
 export interface PluginInstallPreview {
@@ -2284,6 +2291,8 @@ export interface CanvasTTYApi {
     setNativeCodeTrusted(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     setDecisionsMayAllow(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
     setMayStartOrchestrators(pluginId: string, allowed: boolean): Promise<InstalledPlugin>;
+    /** "Trust updates from this repository" (C3), off by default; needs native code trust. */
+    setTrustUpdates(pluginId: string, trusted: boolean): Promise<InstalledPlugin>;
     setSharedReadApproved(pluginId: string, provider: string, method: string, approved: boolean): Promise<InstalledPlugin>;
     /** What an owner offers to other plugins' brokered requests now, and the person's grants (no keys). */
     brokerAccounts(ownerId: string): Promise<PluginBrokerAccounts>;
@@ -2491,6 +2500,7 @@ export const IPC = {
   pluginsSetNativeCodeTrusted: "plugins:set-native-code-trusted",
   pluginsSetDecisionsMayAllow: "plugins:set-decisions-may-allow",
   pluginsSetMayStartOrchestrators: "plugins:set-may-start-orchestrators",
+  pluginsSetTrustUpdates: "plugins:set-trust-updates",
   pluginsSetSharedReadApproved: "plugins:set-shared-read-approved",
   pluginsBrokerAccounts: "plugins:broker-accounts",
   pluginsSetBrokerGrant: "plugins:set-broker-grant",
