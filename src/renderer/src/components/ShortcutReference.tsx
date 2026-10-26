@@ -20,6 +20,7 @@ export function ShortcutReference({ settings, onClose }: {
       [[bindings.commandPalette], "commandPalette"],
       [[bindings.openSettings], "settings"],
       [[bindings.toggleDetail], "keyboardToggleDetail"],
+      [[bindings.momEntered], "keyboardMomEntered"],
       [[t(locale, "shortcutShiftDrag")], "marqueeSelectionHint"]
     ] },
     { title: "keyboardNavigation", shortcuts: [

@@ -1,4 +1,7 @@
+import { CanvasLinkSettings } from "./CanvasLinkSettings";
 import { EvenG2Controls } from "./EvenG2Controls";
+import { BackgroundAppearanceManager } from "./BackgroundAppearanceManager";
+import { TerminalBackgroundChoices } from "./TerminalBackgroundChoices";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   AppSettings,
@@ -123,7 +126,7 @@ import {
 } from "../../../../shared/autoMode";
 import { MascotsSettings } from "./MascotsSettings";
 
-type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "browser" | "plugins" | "mascots" | "updates" | "about";
+type SettingsSection = "general" | "keyboardShortcuts" | "appearance" | "agents" | "controls" | "externalIntegrations" | "canvasLink" | "browser" | "plugins" | "mascots" | "updates" | "about";
 
 const SHORTCUT_LABELS = {
   home: "homeShortcut", renameWindow: "renameWindow", toggleFullscreen: "toggleFullscreen",
@@ -136,7 +139,8 @@ const SHORTCUT_LABELS = {
   codexCopy: "keyboardClaudeCopy", codexCut: "keyboardClaudeCut", codexClear: "keyboardClaudeClear",
   claudeSubmit: "keyboardSubmit", claudeNewline: "keyboardNewline", claudeNewlineAlternate: "keyboardNewlineAlternate",
   claudeSelectAll: "keyboardSelectDraft",
-  claudeCopy: "keyboardClaudeCopy", claudeCut: "keyboardClaudeCut", claudeClear: "keyboardClaudeClear"
+  claudeCopy: "keyboardClaudeCopy", claudeCut: "keyboardClaudeCut", claudeClear: "keyboardClaudeClear",
+  momEntered: "keyboardMomEntered"
 } as const;
 
 const SETTINGS_SECTIONS: ReadonlyArray<{
@@ -149,6 +153,7 @@ const SETTINGS_SECTIONS: ReadonlyArray<{
   { id: "agents", icon: "terminal" },
   { id: "controls", icon: "sliders-horizontal" },
   { id: "externalIntegrations", icon: "blocks" },
+  { id: "canvasLink", icon: "app-window" },
   { id: "browser", icon: "browser" },
   { id: "plugins", icon: "blocks" },
   { id: "mascots", icon: "image-plus" },
@@ -176,11 +181,14 @@ const DEFAULT_PROFILE_LABELS: Record<DefaultLaunchProfile, TranslationKey> = {
 };
 
 interface SettingsPanelProps {
+  sessions: import("../../../../shared/contracts").SessionSnapshot[];
   open: boolean;
   openUpdatesRequest: number;
   /** Opens a section from outside (a plugin notice's "Open settings"); "agents" scrolls to Extension native code. */
   openSectionRequest?: { section: "agents" | "plugins" | "appearance"; id: number } | null;
   settings: AppSettings;
+  backgroundsSuspended?: boolean;
+  onToggleMomEntered?(): void;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
   plugins: InstalledPlugin[];
@@ -218,10 +226,13 @@ interface SettingsPanelProps {
 }
 
 export function SettingsPanel({
+  sessions,
   open,
   openUpdatesRequest,
   openSectionRequest = null,
   settings,
+  backgroundsSuspended,
+  onToggleMomEntered,
   agentAvailability,
   onRecheckAgentClis,
   plugins,
@@ -631,7 +642,7 @@ export function SettingsPanel({
               <div className="keyboard-shortcuts">
                 <p>{t(locale, "keyboardCaptureHint")}</p>
                 {([
-                  ["keyboardCanvas", ["home", "renameWindow", "toggleFullscreen", "commandPalette", "openSettings", "focusUp", "focusDown", "focusLeft", "focusRight", "toggleDetail"]],
+                  ["keyboardCanvas", ["home", "renameWindow", "toggleFullscreen", "commandPalette", "openSettings", "focusUp", "focusDown", "focusLeft", "focusRight", "toggleDetail", "momEntered"]],
                   ["keyboardTerminal", ["terminalCopy", "terminalPaste", "terminalSearch", "terminalRestart", "terminalPageUp", "terminalPageDown"]],
                   ["keyboardCodex", window.canvasTTY.window.isMacOS
                     ? ["codexSubmit", "codexNewline", "codexNewlineAlternate", "codexSelectAll", "codexCopy", "codexCut", "codexClear"] as ShortcutAction[]
@@ -811,6 +822,133 @@ export function SettingsPanel({
                   onChange={(terminalSkinDetail) => void onChange({ terminalSkinDetail: terminalSkinDetail as PixelSkinPreferredDetail })}
                 />
               </SettingGroup>
+              <BackgroundAppearanceManager settings={settings} sessions={sessions} onChange={onChange} active={open}>
+                {(appearance, change, tab, disableAll) => tab === "catalog" ? <>
+              <SettingGroup label={locale === "ru" ? "Каталог фонов" : "Background catalog"}
+                layout="stacked"
+                description={locale === "ru" ? "Выберите категорию. Наведите курсор на карточку для анимации и нажмите, чтобы выбрать фон." : "Choose a category. Hover or focus a card to preview its animation; click to select."}>
+                <TerminalBackgroundChoices locale={locale} value={appearance.terminalBackground} paused={appearance.terminalBackgroundPaused}
+                  favorites={settings.terminalBackgroundFavorites}
+                  onFavoritesChange={(terminalBackgroundFavorites) => void onChange({ terminalBackgroundFavorites })}
+                  deleted={settings.terminalBackgroundDeleted}
+                  onDeletedChange={(terminalBackgroundDeleted) => void onChange({ terminalBackgroundDeleted })}
+                  onChange={(terminalBackground) => change({ terminalBackground })}
+                  onDisableAll={disableAll} />
+                <div style={{ marginTop: "14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "10px 14px", borderRadius: "6px", background: "var(--surface-soft)", border: "1px solid color-mix(in srgb, var(--text) 16%, transparent)" }}>
+                  <div>
+                    <strong style={{ fontSize: "12px", display: "block", color: "var(--text)" }}>
+                      {locale === "ru" ? "Быстро скрыть фоны: «Ой мама зашла»" : "Quick hide backgrounds: \"Mom entered\""}
+                    </strong>
+                    <span style={{ fontSize: "11px", color: "var(--text-muted-on-dark)" }}>
+                      {locale === "ru" ? "Мгновенно гасит фоны со всех окон терминалов и возвращает назад. Настроить бинд можно в «Горячие клавиши»." : "Instantly hides all backgrounds and restores them back. Rebind in Hotkeys."}
+                    </span>
+                  </div>
+                  <span className="border-skin-choice" style={{ padding: "4px 10px", fontSize: "12px", fontFamily: "monospace", fontWeight: 700, whiteSpace: "nowrap" }}>
+                    {settings.shortcuts.momEntered || "F8"}
+                  </span>
+                </div>
+              </SettingGroup>
+              </> : <>
+              {appearance.terminalBackground !== "none" ? <>
+                <h4 className="background-appearance-subheading">{locale === "ru" ? "Цвет и читаемость" : "Color and readability"}</h4>
+                <SettingGroup label={locale === "ru" ? "Читаемость текста" : "Text readability"}
+                  description={locale === "ru" ? "Затемняет фон только под словами, сохраняя яркость остальной анимации." : "Darkens the background only behind words, preserving the rest of the animation's brightness."}>
+                  <Segmented value={appearance.terminalBackgroundReadability ? "on" : "off"}
+                    options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                    onChange={(value) => change({ terminalBackgroundReadability: value === "on" })} />
+                </SettingGroup>
+                <SettingGroup label={locale === "ru" ? "Затемнение под текстом" : "Darkness behind text"}>
+                  <label className="ui-scale-setting">
+                    <input type="range" min={0} max={100} step={1} aria-label={locale === "ru" ? "Сила затемнения под текстом" : "Text backdrop strength"}
+                      disabled={!appearance.terminalBackgroundReadability} value={appearance.terminalBackgroundReadabilityStrength}
+                      onChange={event => change({ terminalBackgroundReadabilityStrength: Number(event.currentTarget.value) })} />
+                    <output>{appearance.terminalBackgroundReadabilityStrength}%</output>
+                  </label>
+                </SettingGroup>
+                <SettingGroup label={locale === "ru" ? "Яркость фона терминалов" : "Terminal background brightness"}>
+                  <label className="ui-scale-setting">
+                    <input type="range" min={10} max={100} step={5}
+                      aria-label={locale === "ru" ? "Яркость фона терминалов" : "Terminal background brightness"}
+                      value={appearance.terminalBackgroundBrightness}
+                      onChange={(event) => change({ terminalBackgroundBrightness: Number(event.currentTarget.value) })} />
+                    <output>{appearance.terminalBackgroundBrightness}%</output>
+                  </label>
+                </SettingGroup>
+                {([
+                  ["terminalBackgroundContrast", "Контраст фона", "Background contrast"],
+                  ["terminalBackgroundSaturation", "Насыщенность фона", "Background saturation"],
+                ] as const).map(([key, ru, en]) => (
+                  <SettingGroup key={key} label={locale === "ru" ? ru : en}>
+                    <label className="ui-scale-setting">
+                      <input type="range" min={0} max={200} step={5}
+                        aria-label={locale === "ru" ? ru : en} value={appearance[key]}
+                        onChange={event => change({ [key]: Number(event.currentTarget.value) })} />
+                      <output>{appearance[key]}%</output>
+                    </label>
+                  </SettingGroup>
+                ))}
+                <button className="border-skin-choice terminal-background-reset" type="button"
+                  disabled={appearance.terminalBackgroundContrast === 100 && appearance.terminalBackgroundSaturation === 100}
+                  onClick={() => change({ terminalBackgroundContrast: 100, terminalBackgroundSaturation: 100 })}>
+                  <UiIcon name="reset" size="1.2em" />
+                  {locale === "ru" ? "Сбросить контраст и насыщенность" : "Reset contrast and saturation"}
+                </button>
+                <h4 className="background-appearance-subheading">{locale === "ru" ? "Масштаб и положение" : "Scale and position"}</h4>
+                {([
+                  ["terminalBackgroundScale", "Масштаб фона", "Background scale", 25, 300, 5],
+                  ["terminalBackgroundOffsetX", "Смещение по горизонтали", "Horizontal offset", -50, 50, 1],
+                  ["terminalBackgroundOffsetY", "Смещение по вертикали", "Vertical offset", -50, 50, 1],
+                ] as const).map(([key, ru, en, min, max, step]) => (
+                  <SettingGroup key={key} label={locale === "ru" ? ru : en}>
+                    <label className="ui-scale-setting">
+                      <input type="range" min={min} max={max} step={step}
+                        aria-label={locale === "ru" ? ru : en} value={appearance[key]}
+                        onChange={(event) => change({ [key]: Number(event.currentTarget.value) })} />
+                      <output>{appearance[key]}%</output>
+                    </label>
+                  </SettingGroup>
+                ))}
+                <button className="border-skin-choice terminal-background-reset" type="button"
+                  disabled={appearance.terminalBackgroundScale === 100 && appearance.terminalBackgroundOffsetX === 0 && appearance.terminalBackgroundOffsetY === 0}
+                  onClick={() => change({ terminalBackgroundScale: 100, terminalBackgroundOffsetX: 0, terminalBackgroundOffsetY: 0 })}>
+                  <UiIcon name="reset" size="1.2em" />
+                  {locale === "ru" ? "Сбросить масштаб и положение" : "Reset scale and position"}
+                </button>
+                <h4 className="background-appearance-subheading">{locale === "ru" ? "Воспроизведение" : "Playback"}</h4>
+                <SettingGroup label={locale === "ru" ? "Анимация фона терминалов" : "Terminal background animation"}>
+                  <Segmented value={appearance.terminalBackgroundPaused ? "off" : "on"}
+                    options={[["on", t(locale, "on")], ["off", t(locale, "off")]]}
+                    onChange={(value) => change({ terminalBackgroundPaused: value === "off" })} />
+                </SettingGroup>
+                <SettingGroup label={locale === "ru" ? "Скорость анимации фона" : "Background animation speed"}>
+                  <label className="ui-scale-setting">
+                    <input type="range" min={0.25} max={2} step={0.25}
+                      aria-label={locale === "ru" ? "Скорость анимации фона" : "Background animation speed"}
+                      value={appearance.terminalBackgroundSpeed} disabled={appearance.terminalBackgroundPaused}
+                      onChange={(event) => change({ terminalBackgroundSpeed: Number(event.currentTarget.value) })} />
+                    <output>{appearance.terminalBackgroundSpeed.toLocaleString(locale, { maximumFractionDigits: 2 })}×</output>
+                  </label>
+                </SettingGroup>
+                <h4 className="background-appearance-subheading">{locale === "ru" ? "Экстренное скрытие" : "Panic toggle"}</h4>
+                <SettingGroup label={locale === "ru" ? "Ой мама зашла" : "Mom entered"}
+                  description={locale === "ru" ? "Горячая клавиша для мгновенного скрытия всех фонов терминалов и возврата их обратно. Чтобы переназначить клавишу, перейдите в раздел «Горячие клавиши»." : "Quick hotkey to instantly hide all terminal backgrounds and restore them back. Rebind in Hotkeys."}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                    <span className="border-skin-choice" style={{ padding: "4px 12px", fontSize: "13px", fontFamily: "monospace", fontWeight: 700, letterSpacing: "0.04em" }}>
+                      {settings.shortcuts.momEntered || "F8"}
+                    </span>
+                    <button type="button" className="border-skin-choice" style={{ padding: "5px 14px", fontSize: "12px", cursor: "pointer" }}
+                      onClick={() => {
+                        onToggleMomEntered?.();
+                      }}>
+                      {backgroundsSuspended
+                        ? (locale === "ru" ? "Включить фоны обратно (F8)" : "Restore backgrounds (F8)")
+                        : (locale === "ru" ? "Скрыть все фоны сейчас (F8)" : "Hide all backgrounds now (F8)")}
+                    </button>
+                  </div>
+                </SettingGroup>
+              </> : <p className="setting-group__description">{locale === "ru" ? "Выберите фон во вкладке «Каталог», чтобы настроить его оформление." : "Choose a background in the Catalog tab to adjust its appearance."}</p>}
+                </>}
+              </BackgroundAppearanceManager>
               <SettingGroup label={t(locale, "appSkin")} layout="stacked">
                 <AppSkinChoices
                   locale={locale}
@@ -1070,7 +1208,7 @@ export function SettingsPanel({
                   })}
                   <CanvasMenuDivider />
                   <CanvasMenuRow
-                    icon="home"
+                    icon="reset"
                     muted
                     onClick={() => void onChange({ canvasLauncherItems: [...DEFAULT_CANVAS_LAUNCHER_ITEMS] })}
                   >{t(locale, "resetCanvasLauncher")}</CanvasMenuRow>
@@ -1201,6 +1339,8 @@ export function SettingsPanel({
               </SettingGroup>
             </>
           )}
+
+          {section === "canvasLink" && <CanvasLinkSettings locale={locale} open={open} />}
 
           {section === "externalIntegrations" && (
             <EvenG2Controls locale={locale} open={open} />
@@ -1653,55 +1793,7 @@ function PlacementChoices({
   );
 }
 
-function SettingGroup({
-  label,
-  description,
-  layout = "field",
-  children
-}: {
-  label: string;
-  description?: string;
-  layout?: "field" | "stacked";
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <section className={`setting-group setting-group--field${layout === "stacked" ? " setting-group--stacked" : ""}`}>
-      <div className="setting-group__copy">
-        <h3>{label}</h3>
-        {description && <p className="setting-group__description">{description}</p>}
-      </div>
-      <div className="setting-group__control">{children}</div>
-    </section>
-  );
-}
 
-function Segmented({
-  value,
-  options,
-  wrap = false,
-  disabled = false,
-  onChange
-}: {
-  value: string;
-  options: [string, string][];
-  wrap?: boolean;
-  disabled?: boolean;
-  onChange(value: string): void;
-}): React.JSX.Element {
-  return (
-    <div className={`segmented ${wrap ? "segmented--wrap" : ""}`}>
-      {options.map(([optionValue, label]) => (
-        <button
-          className={value === optionValue ? "segmented__button segmented__button--active" : "segmented__button"}
-          type="button"
-          key={optionValue}
-          disabled={disabled}
-          onClick={() => onChange(optionValue)}
-        >{label}</button>
-      ))}
-    </div>
-  );
-}
 
 const BACKGROUND_ASSETS = import.meta.glob<string>("../../assets/theme-backgrounds/*.avif", {
   eager: true, query: "?url", import: "default"
@@ -2199,5 +2291,55 @@ function ColorField({
         />
       </span>
     </label>
+  );
+}
+
+export function SettingGroup({
+  label,
+  description,
+  layout = "field",
+  children
+}: {
+  label: string;
+  description?: string;
+  layout?: "field" | "stacked";
+  children: React.ReactNode;
+}): React.JSX.Element {
+  return (
+    <section className={`setting-group setting-group--field${layout === "stacked" ? " setting-group--stacked" : ""}`}>
+      <div className="setting-group__copy">
+        <h3>{label}</h3>
+        {description && <p className="setting-group__description">{description}</p>}
+      </div>
+      <div className="setting-group__control">{children}</div>
+    </section>
+  );
+}
+
+export function Segmented({
+  value,
+  options,
+  wrap = false,
+  disabled = false,
+  onChange
+}: {
+  value: string;
+  options: [string, string][];
+  wrap?: boolean;
+  disabled?: boolean;
+  onChange(value: string): void;
+}): React.JSX.Element {
+  return (
+    <div className={`segmented ${wrap ? "segmented--wrap" : ""}`}>
+      {options.map(([optionValue, label]) => (
+        <button
+          className={value === optionValue ? "segmented__button segmented__button--active" : "segmented__button"}
+          type="button"
+          key={optionValue}
+          disabled={disabled}
+          onClick={() => onChange(optionValue)}
+        >{label}</button>
+      ))}
+    </div>
   );
 }

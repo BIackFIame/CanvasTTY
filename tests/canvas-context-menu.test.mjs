@@ -34,7 +34,7 @@ test("launcher submenu chooses its side before it is mounted", async () => {
   assert.equal(chooseCanvasSubmenuSide({ left: 740, right: 990 }, viewport, 247, 8), "left");
   assert.equal(chooseCanvasSubmenuSide({ left: 480, right: 650 }, { left: 300, right: 720 }, 247, 8), "left");
 
-  const component = await readFile(contextMenuComponentPath, "utf8");
+  const component = (await readFile(contextMenuComponentPath, "utf8")).replace(/\r\n/g, "\n");
   const sideChoice = component.indexOf("setSubmenuSide(chooseCanvasSubmenuSide(");
   const firstRender = component.indexOf("setLauncherOpen(true)", sideChoice);
   assert.ok(sideChoice >= 0 && firstRender > sideChoice);
@@ -64,7 +64,7 @@ test("a context menu opened near a corner panel moves up off it, and its submenu
   assert.equal(canvasMenuTopClearOfPanels(menu, [controls, { left: 18, top: 480, right: 170, bottom: 520 }], 12, 8), 480 - 8 - 325);
   assert.equal(canvasMenuTopClearOfPanels(menu, [controls, { left: 18, top: 300, right: 170, bottom: 520 }], 12, 8), 531);
 
-  const component = await readFile(contextMenuComponentPath, "utf8");
+  const component = (await readFile(contextMenuComponentPath, "utf8")).replace(/\r\n/g, "\n");
   assert.match(component, /useLayoutEffect\(\(\) => \{[\s\S]*canvasMenuPlacementClearOfPanels\([\s\S]*\}, \[kind, position\.x, position\.y\]\);/);
   assert.match(component, /useLayoutEffect\(\(\) => \{\n    chooseSubmenuSide\(\);\n  \}, \[kind, place\.left, place\.top\]\);/);
   assert.match(component, /style=\{\{ left: place\.left, top: place\.top \}\}/);
@@ -125,6 +125,6 @@ test("a submenu opens where it covers no corner panel, wherever Settings put the
   const everywhere = { left: 0, top: 44, right: 1440, bottom: 900 };
   assert.deepEqual(chooseCanvasSubmenuPlacement(tools, size, area, [everywhere], metrics, true), { side: "right", up: true });
 
-  const component = await readFile(contextMenuComponentPath, "utf8");
+  const component = (await readFile(contextMenuComponentPath, "utf8")).replace(/\r\n/g, "\n");
   assert.match(component, /chooseCanvasSubmenuPlacement\(anchor\.getBoundingClientRect\(\),[\s\S]*cornerPanelRects\(workspace\)[\s\S]*toolsOpen\);\n    setSubmenuSide\(placement\.side\);\n    if \(toolsOpen\) setToolsUp\(placement\.up\);\n  \}, \[launcherOpen, toolsOpen, ToolsMenu, place\.left, place\.top\]\);/);
 });

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MIT; original CanvasLink linked-window geometry. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+  <path android:name="desktop_window" android:fillColor="#EDF1E6"
+      android:pathData="M64 43V37Q64 31 58 31H35Q29 31 29 37V55Q29 61 35 61H57V54H36V38H57V43Z"/>
+  <path android:name="touch_window" android:fillColor="#D6EF88"
+      android:pathData="M46 52V51Q46 45 52 45H73Q79 45 79 51V72Q79 78 73 78H52Q46 78 46 72V64H53V71H72V52H53Z"/>
+</vector>

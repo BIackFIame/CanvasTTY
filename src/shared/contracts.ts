@@ -207,6 +207,7 @@ export interface ShortcutBindings {
   claudeCopy: string;
   claudeCut: string;
   claudeClear: string;
+  momEntered: string;
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutBindings = {
@@ -241,7 +242,8 @@ export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   claudeSelectAll: "Meta+A",
   claudeCopy: "Meta+C",
   claudeCut: "Meta+X",
-  claudeClear: "Backspace"
+  claudeClear: "Backspace",
+  momEntered: "F8"
 };
 
 /** The owned Codex frontend reads its editor keys this way on a macOS host only; elsewhere they stay as they were. */
@@ -272,6 +274,7 @@ export function keyboardPresetShortcuts(
 
 /** Claude editor actions are a context of their own: they act only while Claude's prompt box is on screen. */
 export function shortcutsShareContext(left: ShortcutAction, right: ShortcutAction): boolean {
+  if (left === "momEntered" || right === "momEntered") return true;
   if (CODEX_DRAFT_SHORTCUTS.includes(left) || CODEX_DRAFT_SHORTCUTS.includes(right)) {
     return left === "toggleDetail" || right === "toggleDetail" || (left.startsWith("codex") && right.startsWith("codex"));
   }
@@ -553,6 +556,25 @@ export interface AppSettings {
   canvasBackground: CanvasBackgroundId;
   pattern: CanvasPatternId;
   terminalBorderSkin: TerminalBorderSkinId;
+  terminalBackground: import("./terminalBackground.ts").TerminalBackgroundId;
+  terminalBackgroundBrightness: number;
+  terminalBackgroundContrast: number;
+  terminalBackgroundSaturation: number;
+  terminalBackgroundPaused: boolean;
+  terminalBackgroundSpeed: number;
+  terminalBackgroundScale: number;
+  terminalBackgroundOffsetX: number;
+  terminalBackgroundOffsetY: number;
+  terminalBackgroundReadability: boolean;
+  terminalBackgroundReadabilityStrength: number;
+  terminalBackgroundPauseOnOutput: boolean;
+  terminalBackgroundFocusDimming: boolean;
+  terminalBackgroundSynchronized: boolean;
+  terminalBackgroundPauseInactive: boolean;
+  terminalBackgroundOverrides: Record<string, import("./terminalBackgroundAppearance.ts").TerminalBackgroundAppearance>;
+  terminalBackgroundPresets: import("./terminalBackgroundAppearance.ts").TerminalBackgroundPreset[];
+  terminalBackgroundFavorites: Exclude<import("./terminalBackground.ts").TerminalBackgroundId, "none">[];
+  terminalBackgroundDeleted: string[];
   terminalSkinDetail: PixelSkinPreferredDetail;
   terminalSkinAnimationEnabled: boolean;
   appSkin: AppSkinId;
@@ -2205,6 +2227,7 @@ export interface CanvasTTYApi {
     onStatus(listener: (status: UpdateStatus) => void): () => void;
   };
   evenG2: import('./evenG2.ts').EvenG2Api;
+  canvasLink: import('./canvasLink.ts').CanvasLinkApi;
   appVersion(): Promise<string>;
   clipboard: {
     readText(): Promise<string>;

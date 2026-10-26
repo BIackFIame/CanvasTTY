@@ -92,6 +92,17 @@ function gestureHarness() {
   };
 }
 
+test("renderer wheel origins use native coordinates when the app is zoomed", () => {
+  const harness = gestureHarness();
+  // CSS (88, 88) is outside the native slot; at 125% it is DIP (110, 110), inside it.
+  harness.controller.beginRendererSequence({ clientX: 88, clientY: 88 }, 1.25);
+  assert.equal(harness.controller.surfaceDecision("tab-1", {
+    x: 100, y: 100, width: 800, height: 600
+  }, { width: 1200, height: 900 }).kind, "frozen");
+  assert.equal(harness.controller.isFreezeActive, true);
+  harness.controller.endSequence(false);
+});
+
 test("BrowserCanvasGestureController latches focus-aware page ownership until reset", () => {
   const harness = gestureHarness();
   harness.setFocused(true);

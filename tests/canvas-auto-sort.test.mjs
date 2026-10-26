@@ -9,7 +9,7 @@ import {
   canvasAutoSortUndoTargets
 } from "../src/renderer/src/features/workspace/canvasAutoSortScope.ts";
 
-const source = (path) => readFile(new URL(`../${path}`, import.meta.url), "utf8");
+const source = async (path) => (await readFile(new URL(`../${path}`, import.meta.url), "utf8")).replace(/\r\n/g, "\n");
 const card = (x = 0, y = 0, width = 700, height = 430) => ({ position: { x, y }, size: { width, height } });
 const overlaps = (a, b) => a.position.x < b.position.x + b.size.width
   && a.position.x + a.size.width > b.position.x

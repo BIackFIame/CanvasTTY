@@ -196,6 +196,7 @@ type RegionMovePreview = {
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
+  backgroundsSuspended?: boolean;
   /**
    * False for the first frame after startup: restored terminals (xterm), plugin canvas iframes and the browser card
    * mount right after that frame was painted, so HOME and the canvas show without waiting for them. Their layout
@@ -295,7 +296,7 @@ const FileBrowserCard = lazy(() => import("../files/FileBrowserCard").then((modu
 
 export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element {
   const {
-    settings, mediaData, sessions, limits, limitsLoadState, plugins, browser,
+    settings, backgroundsSuspended = false, mediaData, sessions, limits, limitsLoadState, plugins, browser,
     browserViewVisible, homeEditing, camera, onCameraChange, onGoHome,
     onOpenSettings, onOpenAgent, onOpenTerminal, onOpenBrowser, onOpenTerminalUrl, onPluginReview, onOpenCheckpoints, onFocusSession,
     activeSessionId, browserSelected, renamingSessionId, fullscreenSessionId, onToggleFullscreen, onSelectSession,
@@ -1088,6 +1089,27 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     isPixelSkinPackId(settings.canvasBackground) ? settings.canvasBackground : null
   )?.background;
 
+  const getTerminalBackground = (sessionId: string) => {
+    const o = settings.terminalBackgroundOverrides[sessionId];
+    return {
+      background: o?.terminalBackground ?? settings.terminalBackground,
+      backgroundBrightness: o?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness,
+      backgroundContrast: o?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast,
+      backgroundSaturation: o?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation,
+      backgroundPaused: (o?.terminalBackgroundPaused ?? settings.terminalBackgroundPaused)
+        || (settings.terminalBackgroundPauseInactive && activeSessionId !== sessionId),
+      backgroundSpeed: o?.terminalBackgroundSpeed ?? settings.terminalBackgroundSpeed,
+      backgroundScale: o?.terminalBackgroundScale ?? settings.terminalBackgroundScale,
+      backgroundOffsetX: o?.terminalBackgroundOffsetX ?? settings.terminalBackgroundOffsetX,
+      backgroundOffsetY: o?.terminalBackgroundOffsetY ?? settings.terminalBackgroundOffsetY,
+      backgroundReadability: o?.terminalBackgroundReadability ?? settings.terminalBackgroundReadability,
+      backgroundReadabilityStrength: o?.terminalBackgroundReadabilityStrength ?? settings.terminalBackgroundReadabilityStrength,
+      backgroundPauseOnOutput: o?.terminalBackgroundPauseOnOutput ?? settings.terminalBackgroundPauseOnOutput,
+      backgroundFocusDimming: o?.terminalBackgroundFocusDimming ?? settings.terminalBackgroundFocusDimming,
+      backgroundSynchronized: settings.terminalBackgroundSynchronized,
+    };
+  };
+
   return (
     <div
       ref={viewport}
@@ -1245,6 +1267,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
+              {...getTerminalBackground(session.id)}
+              backgroundsSuspended={backgroundsSuspended}
               skinDetail={settings.terminalSkinDetail}
               camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
@@ -1441,6 +1465,8 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
+              {...getTerminalBackground(session.id)}
+              backgroundsSuspended={backgroundsSuspended}
               skinDetail={settings.terminalSkinDetail}
               camera={FULLSCREEN_CAMERA}
               stackIndex={9999}
@@ -1495,7 +1521,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       {homeEditing && (
         <div className="home-editor-toolbar" data-interactive="true">
           <strong>{t(settings.locale, "homeEditor")}</strong>
-          <button type="button" onClick={onResetHomeLayout}>{t(settings.locale, "resetHome")}</button>
+          <button className="button-with-icon" type="button" onClick={onResetHomeLayout}><UiIcon name="reset" size={15} />{t(settings.locale, "resetHome")}</button>
           <button className="home-editor-toolbar__done" type="button" disabled={!homeLayoutValid}
             title={homeLayoutValid ? undefined : t(settings.locale, "homeLayoutOutside")}
             onClick={onFinishHomeEdit}>{t(settings.locale, "doneEditing")}</button>

@@ -515,8 +515,8 @@ test("palette changes retheme the live xterm without recreating it", async () =>
   const mountDependencies = effectDependenciesContaining(source, "new Terminal({");
 
   assert.equal(mountDependencies, "session.id");
-  assert.match(source, /terminal\.options\.theme = terminalTheme\(palette, pixelSkinTheme\)/);
-  assert.match(source, /\}, \[palette, pixelSkinTheme\]\);/);
+  assert.match(source, /terminal\.options\.theme = terminalTheme\(palette, pixelSkinTheme(?:, hasAsciiBackground)?\)/);
+  assert.match(source, /\}, \[palette, pixelSkinTheme(?:, hasAsciiBackground, backgroundReadability, backgroundReadabilityStrength)?\]\);/);
 });
 
 test("terminal copy shortcuts write the xterm selection without reaching the PTY", async () => {

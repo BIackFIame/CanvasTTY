@@ -145,6 +145,22 @@ jobs:
         with:
           path: release-artifacts
           merge-multiple: true
+      - name: Include the pinned CanvasLink installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          canvaslink_version="$(node -p "require('./integrations/canvaslink/package.json').version")"
+          gh release download "canvaslink-v${canvaslink_version}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.apk' --pattern 'canvaslink-release.json' --dir release-artifacts
+          node --input-type=module <<'JS'
+          import { createHash } from 'node:crypto';
+          import { readFileSync } from 'node:fs';
+          import { CANVASLINK_ANDROID_RELEASE as release } from './src/shared/canvasLinkInstall.ts';
+          const apk = readFileSync(`release-artifacts/CanvasLink-${release.version}.apk`);
+          if (createHash('sha256').update(apk).digest('hex') !== release.sha256) {
+            throw new Error('CanvasLink APK does not match the pinned installation checksum');
+          }
+          JS
       - name: Verify release tag and artifact set
         run: node scripts/verify-release-artifacts.mjs "${GITHUB_REF_NAME}" release-artifacts
       - name: Create GitHub release

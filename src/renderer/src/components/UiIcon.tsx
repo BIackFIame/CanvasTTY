@@ -32,6 +32,8 @@ import plusIcon from "../assets/icons/lucide/plus.svg";
 import paletteIcon from "../assets/icons/lucide/palette.svg";
 import pencilIcon from "../assets/icons/lucide/pencil.svg";
 import searchIcon from "../assets/icons/lucide/search.svg";
+import reloadIcon from "../assets/icons/lucide/rotate-cw.svg";
+import resetIcon from "../assets/icons/lucide/rotate-ccw.svg";
 import sendIcon from "../assets/icons/lucide/send.svg";
 import settingsIcon from "../assets/icons/lucide/settings.svg";
 import slidersHorizontalIcon from "../assets/icons/lucide/sliders-horizontal.svg";
@@ -64,6 +66,7 @@ export type UiIconName =
   | "bring-to-front"
   | "terminal"
   | "reload"
+  | "reset"
   | "arrow"
   | "chevron"
   | "download"
@@ -118,7 +121,8 @@ const ICONS: Record<UiIconName, string> = {
   browser: browserIcon,
   "bring-to-front": bringToFrontIcon,
   terminal: terminalIcon,
-  reload: workingIcon,
+  reload: reloadIcon,
+  reset: resetIcon,
   arrow: arrowIcon,
   chevron: chevronIcon,
   download: downloadIcon,

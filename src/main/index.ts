@@ -115,6 +115,9 @@ import { mainWindowChromeOptions } from "./windowChrome";
 import { markMainBoot, mainBootMarks } from "./bootMarks";
 import { attachEditContextMenu } from "./editContextMenu";
 import { macApplicationMenuTemplate } from "./macApplicationMenu";
+import { configureCanvasLinkStartup, installCanvasLink } from "./services/canvasLink";
+
+configureCanvasLinkStartup(app);
 
 // CanvasTTY Edge runs next to the official app: its own name (menus, keychain item) and its own data folder, so it
 // never opens the official profile. CANVASTTY_USER_DATA_DIR below still overrides the folder (tests, a second profile).
@@ -1382,6 +1385,7 @@ function attentionStatusLabel(status: "needs_approval" | "failed", locale: Local
 }
 
 if (hasSingleInstanceLock) {
+  installCanvasLink(() => mainWindow);
   void app.whenReady()
     .then(() => {
       markMainBoot("appReady");

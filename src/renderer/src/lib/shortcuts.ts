@@ -43,14 +43,16 @@ export function shortcutFromPointerEvent(event: Omit<ShortcutEvent, "key"> & { b
   return [...activeCanvasNavigationModifiers(event), button].join("+");
 }
 
-export function matchesShortcut(event: ShortcutEvent, shortcut: string): boolean {
+export function matchesShortcut(event: ShortcutEvent, shortcut?: string | null): boolean {
+  if (!shortcut) return false;
   return shortcutFromKeyboardEvent(event)?.toLowerCase() === shortcut.toLowerCase();
 }
 
 export function matchesPointerShortcut(
   event: Omit<ShortcutEvent, "key"> & { button: number },
-  shortcut: string
+  shortcut?: string | null
 ): boolean {
+  if (!shortcut) return false;
   return shortcutFromPointerEvent(event)?.toLowerCase() === shortcut.toLowerCase();
 }
 

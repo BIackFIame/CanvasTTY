@@ -116,7 +116,7 @@ test("preloadWhenIdle loads after the first paint when the app is idle; a failed
 });
 
 test("the canvas renders the menu and the palette through the preloaded surfaces, not lazy() and Suspense", async () => {
-  const source = await readFile(join(root, "src/renderer/src/features/workspace/WorkspaceCanvas.tsx"), "utf8");
+  const source = (await readFile(join(root, "src/renderer/src/features/workspace/WorkspaceCanvas.tsx"), "utf8")).replace(/\r\n/g, "\n");
   assert.doesNotMatch(source, /lazy\(\(\) => import\("\.\/Canvas(ContextMenu|CommandPalette)"\)/u);
   assert.doesNotMatch(source, /import \{ Canvas(ContextMenu|CommandPalette) \} from/u, "no static import either");
   assert.match(source, /usePreloadedSurface\(canvasContextMenuSurface, contextMenu !== null\)/u);

@@ -33,6 +33,14 @@ npm run dev
 
 Launch modes are **Auto** (the default), **Manual**, **Accept edits**, **Plan** and **Bypass**, each offered only where that CLI supports it; the protection layers around them are described in [Installing and security](installing-and-security.md#agent-protection-layers). **Bypass** (YOLO) disables provider safety prompts where the provider supports such a mode, still inside base protection and agent isolation. For OpenCode, CanvasTTY applies a launch-only inline `permission: "allow"` override while preserving the rest of the merged OpenCode configuration. Hermes receives its native `--yolo` flag, while Grok Build receives its native `--always-approve` flag for that launch. CanvasTTY asks you to acknowledge it once per CLI and never gives it to a subagent; use it only in a directory you are willing to let the agent modify.
 
+## Animated terminal backgrounds
+
+Choose a background in **Settings → Appearance → Terminal backgrounds**. To see the animation in OpenCode, you must select its system theme: enter `/theme` inside OpenCode and choose **system**. It uses the terminal's default background; regular OpenCode themes paint their own opaque background over the animation. See [OpenCode themes](https://docs.opencode.ai/docs/themes/).
+
+For other TUI agents that paint their own screen background, choose the equivalent system-theme, terminal-default-background or transparency mode, where supported. This is needed to show the animated background, not to run the agent normally in CanvasTTY. Individual TUI panels, input fields and selections may retain their own backgrounds.
+
+**Terminal backgrounds → Adjust → Text readability** adds a dark backdrop behind text. If it looks like dark strips over the animation, reduce **Darkness behind text** or turn readability off to compare. Clipped or missing parts of the glyphs themselves are not an expected effect.
+
 ## Terminal input and controls
 
 - Press any live terminal card to select and focus it. Input focus is independent from selection, so future multi-selection can keep one unambiguous keyboard and wheel target.

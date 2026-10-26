@@ -51,6 +51,8 @@ import {
 } from "../../shared/contracts";
 import { normalizeExternalUrl } from "../../shared/externalUrl";
 import { pluginName } from "../../shared/pluginLocalizedText.ts";
+import type { TerminalBackgroundId } from "../../shared/terminalBackground";
+import type { TerminalBackgroundAppearance } from "../../shared/terminalBackgroundAppearance";
 import {
   createTerminalBorderSkinStyleController,
   type TerminalBorderSkinStyleController
@@ -156,6 +158,25 @@ const FALLBACK_SETTINGS: AppSettings = {
   canvasBackground: "none",
   pattern: "dots",
   terminalBorderSkin: "classic",
+  terminalBackground: "none",
+  terminalBackgroundBrightness: 45,
+  terminalBackgroundContrast: 100,
+  terminalBackgroundSaturation: 100,
+  terminalBackgroundPaused: false,
+  terminalBackgroundSpeed: 1,
+  terminalBackgroundScale: 100,
+  terminalBackgroundOffsetX: 0,
+  terminalBackgroundOffsetY: 0,
+  terminalBackgroundReadability: true,
+  terminalBackgroundReadabilityStrength: 86,
+  terminalBackgroundPauseOnOutput: false,
+  terminalBackgroundFocusDimming: false,
+  terminalBackgroundSynchronized: false,
+  terminalBackgroundPauseInactive: false,
+  terminalBackgroundOverrides: {},
+  terminalBackgroundPresets: [],
+  terminalBackgroundFavorites: [],
+  terminalBackgroundDeleted: [],
   terminalSkinDetail: "detailed",
   terminalSkinAnimationEnabled: true,
   appSkin: "classic",
@@ -541,6 +562,11 @@ export function App(): React.JSX.Element {
       if (!active) return;
       removedBeforeList.add(id);
       setSessions((current) => current.filter((session) => session.id !== id));
+      setSettings((current) => {
+        if (!current.terminalBackgroundOverrides[id]) return current;
+        const { [id]: _, ...rest } = current.terminalBackgroundOverrides;
+        return { ...current, terminalBackgroundOverrides: rest };
+      });
       setActiveSessionId((current) => current === id ? null : current);
       setRenamingSessionId((current) => current === id ? null : current);
     });
@@ -1573,6 +1599,11 @@ export function App(): React.JSX.Element {
   const disposeSession = useCallback((id: string, keepEnvironmentData?: boolean): void => {
     void window.canvasTTY.terminal.dispose(id, keepEnvironmentData === undefined ? undefined : { keepEnvironmentData });
     setSessions((current) => current.filter((session) => session.id !== id));
+    setSettings((current) => {
+      if (!current.terminalBackgroundOverrides[id]) return current;
+      const { [id]: _, ...rest } = current.terminalBackgroundOverrides;
+      return { ...current, terminalBackgroundOverrides: rest };
+    });
     setActiveSessionId((current) => current === id ? null : current);
     setRenamingSessionId((current) => current === id ? null : current);
   }, []);
@@ -1910,6 +1941,25 @@ export function App(): React.JSX.Element {
     }
   }, [homeEditDraft, settings.locale, showToast]);
 
+  const [backgroundsSuspended, setBackgroundsSuspended] = useState(false);
+
+  const toggleMomEntered = useCallback(() => {
+    const hasAny = settings.terminalBackground !== "none" || Object.keys(settings.terminalBackgroundOverrides).length > 0;
+    if (!hasAny && !backgroundsSuspended) {
+      showToast(settings.locale === "ru" ? "Фоны не настроены" : "No backgrounds configured");
+      return;
+    }
+    setBackgroundsSuspended((prev) => {
+      const next = !prev;
+      showToast(
+        next
+          ? (settings.locale === "ru" ? "Ой мама зашла!" : "Mom entered!")
+          : (settings.locale === "ru" ? "Фоны возвращены" : "Backgrounds restored")
+      );
+      return next;
+    });
+  }, [settings.locale, settings.terminalBackground, settings.terminalBackgroundOverrides, backgroundsSuspended, showToast]);
+
   useEffect(() => {
     const performShortcut = (shortcut: "home" | "renameWindow" | "toggleFullscreen"): void => {
       if (shortcut === "toggleFullscreen") {
@@ -1932,9 +1982,15 @@ export function App(): React.JSX.Element {
       if (modalDialogOpen) return;
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
       if (handoffRemarkIds !== null) return;
-      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (usageHistoryOpen) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
+      if (settings.shortcuts.momEntered && matchesShortcut(event, settings.shortcuts.momEntered)) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleMomEntered();
+        return;
+      }
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();
         event.stopPropagation();
@@ -1951,6 +2007,7 @@ export function App(): React.JSX.Element {
         event.preventDefault();
         event.stopPropagation();
         performShortcut("renameWindow");
+        return;
       }
     };
 
@@ -1980,7 +2037,7 @@ export function App(): React.JSX.Element {
       window.removeEventListener("pointerdown", handlePointerShortcut, true);
       stopTerminalFocus();
     };
-  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, modalDialogOpen, showToast, usageHistoryOpen, toggleSessionFullscreen]);
+  }, [activeSessionId, fullscreenSessionId, goHome, handoffRemarkIds, homeEditDraft, launchProvider, pendingTerminalUrl, settings.locale, settings.shortcuts, settingsOpen, modalDialogOpen, showToast, usageHistoryOpen, toggleSessionFullscreen, toggleMomEntered]);
 
   const appearance = resolveAppearanceSettings(settings);
   const rootClasses = useMemo(
@@ -2030,6 +2087,7 @@ export function App(): React.JSX.Element {
         {ready && <WorkspaceCanvas
           surfacesMounted={surfacesMounted}
           settings={workspaceSettings}
+          backgroundsSuspended={backgroundsSuspended}
           mediaData={mediaData}
           sessions={sessions}
           limits={limits}
@@ -2162,10 +2220,13 @@ export function App(): React.JSX.Element {
           }}
         />
         <SettingsPanel
+          sessions={sessions}
           open={settingsOpen}
           openUpdatesRequest={openUpdatesRequest}
           openSectionRequest={openSectionRequest}
           settings={settings}
+          backgroundsSuspended={backgroundsSuspended}
+          onToggleMomEntered={toggleMomEntered}
           agentAvailability={agentAvailability}
           onRecheckAgentClis={recheckAgentClis}
           plugins={plugins}
