@@ -813,6 +813,7 @@ function TerminalCardView({
   }, [copyOnSelect]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
+    if (asciiBackgroundRef.current) return false;
     if (webglAddonRef.current) return true;
     const transitionElement = beginRendererTransition(terminal);
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
@@ -872,8 +873,8 @@ function TerminalCardView({
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
     // Preserved WebGL frames blend transparent backgrounds over old glyphs; use xterm's DOM renderer for ASCII scenes.
-    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
-  }, [session.id, focused, summaryMode, webglScaleAllowed]);
+    webglContextPool().update(session.id, { eligible: !hasAsciiBackground && !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed, hasAsciiBackground]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
