@@ -19,7 +19,7 @@ async function host(){
  let event;
  const context={window:{CanvasLinkFrames:require('../host/frames.js'),host:{state:async()=>({embedded:true,source:'Owned target',addresses:[],connected:[],width:100,height:100}),permissions:async()=>({platform:'linux'}),sources:async()=>[{id:'owned',name:'Owned target'}],select:async()=>{},onEvent:handler=>event=handler,report(){},captureFallback:async()=>{},inputSession:async(...args)=>sessions.push(args),signal:async(...args)=>signals.push(args)}},document:{getElementById:element,createElement:()=>({})},navigator:{mediaDevices:{getDisplayMedia:()=>new Promise((resolve,reject)=>captures.push({resolve,reject}))}},RTCPeerConnection:Peer,RTCRtpSender:{getCapabilities:()=>({codecs:[]})},setInterval(){},setTimeout:fn=>{const t={fn};timers.push(t);return t;},clearTimeout:t=>{if(t)t.cancelled=true;}};
  vm.runInNewContext(source,context);await tick();
- return {event,captures,peers,signals,sessions,stream,timers,fallbacks};
+ return {event,captures,peers,signals,sessions,stream,timers,fallbacks,bridge:context.window.host};
 }
 test('Overlapping reconnect capture resolves only the newest generation',async()=>{
  const h=await host(),first=h.event({type:'signal',id:'device',message:{type:'ping'}});await tick();
@@ -64,4 +64,13 @@ test('An old initial-frame watchdog cannot replace a reconnected capture',async(
  run=h.event({type:'signal',id:'device',message:{type:'ping'}});await tick();const capture=h.stream();h.captures[1].resolve(capture);await run;
  resolve(new Map());await waiting;
  assert.equal(h.timers[0].cancelled,true);assert.equal(h.fallbacks.length,0);assert.equal(h.peers[1].track,capture.track);
+});
+test('Revocation stops tracks and control before any settings refresh, even if refresh fails',async()=>{
+ const h=await host(),run=h.event({type:'signal',id:'device',message:{type:'ping'}});await tick();
+ const capture=h.stream();h.captures[0].resolve(capture);await run;
+ let refresh;h.bridge.state=()=>new Promise((resolve,reject)=>refresh={reject});
+ const revoke=h.event({type:'revoke',id:'device'}).catch(error=>error);
+ assert.equal(capture.track.stopped,true,'revocation waited for UI state');assert.equal(h.peers[0].closed,true);
+ assert.equal(h.sessions.at(-1)[1],null);
+ refresh.reject(Error('state-unavailable'));await revoke;
 });

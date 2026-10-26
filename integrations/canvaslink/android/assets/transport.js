@@ -1,6 +1,6 @@
 /* Public designer API v2. This file owns secure transport and delivery state. */
 (()=>{
- let pc,dc,video,paired=false,move,moveFrame,stats={},lastFrames=0,lastFrameAt=0,draftTouched=false;
+ let pc,dc,video,paired=false,acceptPairing=true,move,moveFrame,peerEpoch=0,stats={},lastFrames=0,lastFrameAt=0,draftTouched=false;
  const listeners=new Set(),computers=new Map();
  let state={version:2,connection:'idle',discovery:'searching',computers:[],computer:'',error:'',pending:0,delivery:null,stats:{},source:null,draft:''};
  const snapshot=()=>JSON.parse(JSON.stringify(state));
@@ -8,9 +8,11 @@
  const signal=message=>Native.signal(JSON.stringify(message));
  const delivery=new CanvasLinkDelivery.Delivery({channel:()=>dc,onChange:value=>{if(['pointer','scroll'].includes(value.kind)){state.pending=value.pending;return;}update({delivery:value,pending:value.pending});}});
  const raw=value=>{if(dc?.readyState==='open'&&dc.bufferedAmount<65536)dc.send(JSON.stringify(value));};
- function close(){delivery.close();dc=null;pc?.close();pc=null;stats={};lastFrames=0;lastFrameAt=0;window.CanvasLink.stats={};update({stats:{},source:null});if(video)video.srcObject=null;}
+ function close(){peerEpoch++;if(moveFrame)cancelAnimationFrame(moveFrame);moveFrame=null;move=null;delivery.close();dc=null;const previous=pc;pc=null;previous?.close();stats={};lastFrames=0;lastFrameAt=0;window.CanvasLink.stats={};update({stats:{},source:null});if(video)video.srcObject=null;}
  async function offer(message){
    close();update({connection:'connecting',error:''});
+   const epoch=peerEpoch;
+   try{
    const current=pc=new RTCPeerConnection({iceServers:[]});
    current.ontrack=event=>{if(current!==pc)return;if(video){video.srcObject=event.streams[0];video.play().catch(()=>{});}};
    current.ondatachannel=event=>{
@@ -34,15 +36,18 @@
        setTimeout(()=>{if(paired&&current===pc&&current.connectionState!=='connected')signal({type:'ping'});},2500);
      }
    };
-   await current.setRemoteDescription(message);await current.setLocalDescription(await current.createAnswer());
+   await current.setRemoteDescription(message);if(current!==pc)return;
+   const answer=await current.createAnswer();if(current!==pc)return;
+   await current.setLocalDescription(answer);if(current!==pc)return;
    await new Promise((resolve,reject)=>{if(current.iceGatheringState==='complete')return resolve();const timer=setTimeout(()=>reject(Error('ice-timeout')),12000);current.onicegatheringstatechange=()=>{if(current.iceGatheringState==='complete'){clearTimeout(timer);resolve();}};});
    if(current===pc)signal({type:'answer',sdp:current.localDescription.sdp});
+   }catch(error){if(epoch===peerEpoch){close();update({connection:'error',error:error.message});}}
  }
  function connect({code,computerId,host}={}){
    const address=host||computers.get(computerId)?.host||(computers.size===1?[...computers.values()][0].host:'');
    if(!address){update({error:computers.size?'choose-computer':'computer-not-found'});return false;}
    if(!/^\d{6}$/.test(code||'')){update({error:'invalid-code'});return false;}
-   update({connection:'pairing',computer:address,error:''});Native.connect(address,code);return true;
+   acceptPairing=true;update({connection:'pairing',computer:address,error:''});Native.connect(address,code);return true;
  }
  function sendInput(input){
    if(input.type==='pointer'&&input.action==='move'){
@@ -55,7 +60,7 @@
  const api=window.CanvasLinkClient=Object.freeze({
    version:2,getState:snapshot,subscribe(listener){listeners.add(listener);listener(snapshot());return()=>listeners.delete(listener);},
    attachVideo(element){video=element;},connect,discover(){update({discovery:'searching'});Native.discover();},
-   disconnect(){paired=false;close();Native.disconnect();update({connection:'idle'});},
+   disconnect(){acceptPairing=false;paired=false;close();Native.disconnect();update({connection:'idle'});},
    sendInput,sendText(text){if(typeof text!=='string'||!text.length||text.length>8000)return Promise.reject(Error('invalid-text'));return sendInput({type:'text',text});},
    sendKey(key,modifiers=[]){return sendInput({type:'key',key,modifiers});},
    setDraft(text){draftTouched=true;state.draft=String(text).slice(0,8000);return Native.saveDraft(state.draft);},
@@ -67,9 +72,10 @@
    if(event.type==='lost'){computers.delete(value);update({computers:[...computers.values()]});}
    if(event.type==='discovery')update({discovery:value});
    if(event.type==='draft'&&!draftTouched)update({draft:value||''});
-   if(event.type==='paired'){paired=true;update({connection:'connecting',computer:value.host,error:''});}
+   if(event.type==='paired'){if(!acceptPairing)return;paired=true;update({connection:'connecting',computer:value.host,error:''});}
    if(event.type==='signal'){
-     if(value.type==='offer')offer(value).catch(error=>update({connection:'error',error:error.message}));
+     if(!paired||document.hidden)return;
+     if(value.type==='offer')void offer(value);
      if(value.type==='disconnect'){close();update({connection:'reconnecting'});}
    }
    if(event.type==='error')update({connection:paired?'reconnecting':'error',error:String(value)});

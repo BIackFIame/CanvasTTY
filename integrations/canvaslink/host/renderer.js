@@ -125,11 +125,16 @@ window.host.onEvent(async event => {
     if (e.type === 'pointer') { fixturePointer = e; if (e.action === 'down') fixtureClicks++; }
     return;
   }
+  // Revocation must stop media and input before a fallible asynchronous UI read.
+  if (event.type === 'revoke') {
+    if (activeId === event.id) { closePeer(); report('waiting'); }
+    try { await refreshState(); } catch (error) { $('error').textContent = error.message; }
+    return;
+  }
   await refreshState();
   if (event.type === 'paired' || event.type === 'source') {
     if (state.connected[0] && state.source) await start(state.connected[0].id);
   }
-  if (event.type === 'revoke' && activeId === event.id) closePeer();
   if (event.type === 'signal') {
     if (event.message.type === 'answer' && peer && activeId === event.id) await peer.setRemoteDescription(event.message);
     if (event.message.type === 'ping') await start(event.id);

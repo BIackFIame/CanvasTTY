@@ -37,12 +37,22 @@ class Pairing {
     this.sessions = new Map(); this.rotate();
   }
   rotate() {
-    for (const id of this.sessions.keys()) this.onRevoke(id);
-    this.sessions.clear(); this.pending = new Map(); this.attempts = 0; this.starts = 0;
+    const revoked = [...this.sessions.keys()];
+    this.sessions.clear();
+    for (const id of revoked) this.onRevoke(id);
+    this.pending = new Map(); this.attempts = 0; this.starts = 0;
     this.pin = String(crypto.randomInt(0, 1000000)).padStart(6, '0');
     this.expires = this.now() + 120000;
     this.salt = client.generateSalt();
     this.verifier = client.deriveVerifier(client.derivePrivateKey(this.salt, USER, this.pin));
+  }
+  expire() {
+    const now = this.now();
+    for (const [id, session] of this.sessions) {
+      if (session.expires > now) continue;
+      this.sessions.delete(id); this.onRevoke(id);
+    }
+    for (const [id, pending] of this.pending) if (pending.until <= now) this.pending.delete(id);
   }
   start(body, address) {
     if (this.now() >= this.expires || this.attempts >= 5 || this.starts >= 30) throw Error('pairing-closed');
@@ -70,6 +80,7 @@ class Pairing {
     return { id, proof: result.proof };
   }
   receive(packet, address, handle) {
+    this.expire();
     const session = this.sessions.get(packet?.id);
     if (!session || session.expires <= this.now() || session.address !== address || packet.seq <= session.incoming)
       throw Error('unauthorized');
@@ -79,6 +90,7 @@ class Pairing {
     return seal(session.key, session.id, packet.seq, 'response', result);
   }
   queue(id, message) {
+    this.expire();
     const session = this.sessions.get(id);
     if (session && session.queue.length < 16) session.queue.push(message);
   }

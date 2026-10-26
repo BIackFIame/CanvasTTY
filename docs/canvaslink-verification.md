@@ -1,5 +1,10 @@
 # CanvasLink alpha: verification scope
 
+Follow-up: [2026-10-26 security/failure-path audit](canvaslink-security-audit-2026-10-26.md)
+records six fixed findings, 115 passing integration tests, dependency issues and
+the remaining native/runtime acceptance gaps. The older counts below describe
+the earlier source-port and distribution snapshots.
+
 The source port is based on upstream commit
 `0fa6895d3675b40ec4dc75886826dd2db234c234` (package version 1.8.1).
 It does not replace the user's installed CanvasTTY 1.8.2 or its active preview.

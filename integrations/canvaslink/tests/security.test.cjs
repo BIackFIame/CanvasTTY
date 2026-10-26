@@ -53,3 +53,19 @@ test('counter gaps after Android crash are accepted; old replies and expired ses
   now+=12*3600000;
   assert.throws(()=>p.receive(seal(c.key,c.id,10002,'request',{}),'192.168.2.23',()=>({})),/unauthorized/);
 });
+test('Expired sessions revoke live access once, including without a client request',()=>{
+  let now=1000;const revoked=[];
+  const p=new Pairing({now:()=>now,onRevoke:id=>{assert.equal(p.sessions.has(id),false);revoked.push(id);}}),c=authenticate(p);
+  now+=12*3600000-1;p.expire();assert.deepEqual(revoked,[]);
+  now++;p.expire();p.expire();p.rotate();
+  assert.deepEqual(revoked,[c.id]);assert.equal(p.sessions.size,0);
+});
+test('Neither requests nor queued signals retain expired sessions',()=>{
+  for(const operation of ['request','queue']){
+    let now=1000;const revoked=[],p=new Pairing({now:()=>now,onRevoke:id=>revoked.push(id)}),c=authenticate(p);
+    now+=12*3600000;
+    if(operation==='request')assert.throws(()=>p.receive(seal(c.key,c.id,1,'request',{}),'192.168.2.23',()=>assert.fail('expired operation executed')),/unauthorized/);
+    else p.queue(c.id,{type:'offer',sdp:'expired'});
+    assert.deepEqual(revoked,[c.id]);assert.equal(p.sessions.size,0);
+  }
+});

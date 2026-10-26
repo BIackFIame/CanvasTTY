@@ -26,10 +26,14 @@
    if(value.type==='notice'){window.dispatchEvent(new CustomEvent('canvaslink:notice',{detail:value.text}));return;}
    if(value.type==='paste'){control=false;notify();send({type:'text',text:value.text}).catch(()=>{});return;}
    if(value.type==='text'){
-    if(control&&[...value.text].length===1&&/^[a-z]$/i.test(value.text)){control=false;notify();send({type:'key',key:value.text.toLowerCase(),modifiers:['control']}).catch(()=>{});}
+    const useControl=control;control=false;notify();
+    if(useControl&&[...value.text].length===1&&/^[a-z]$/i.test(value.text)){send({type:'key',key:value.text.toLowerCase(),modifiers:['control']}).catch(()=>{});}
     else send({type:'text',text:value.text}).catch(()=>{});
    }
-   if(value.type==='key')send({type:'key',key:value.key,modifiers:value.modifiers||[]}).catch(()=>{});
+   if(value.type==='key'){
+    let modifiers=value.modifiers||[];if(control&&!modifiers.includes('control'))modifiers=[...modifiers,'control'];
+    control=false;notify();send({type:'key',key:value.key,modifiers}).catch(()=>{});
+   }
   },
   active:()=>!!token
  });

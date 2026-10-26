@@ -31,6 +31,15 @@ test('Cursor following never overrides a manual view or opens a new keyboard',as
 });
 
 test('Explicit paste is literal even when one-shot Ctrl was latched',async t=>{const {page}=await typing(t);await page.locator('#ctrl').click();await page.evaluate(()=>__uiFixture.configure({clipboard:'a'}));await page.locator('#paste').click();assert.deepEqual(await commands(page),[{type:'text',text:'a'}]);assert.equal(await page.locator('#ctrl').getAttribute('aria-pressed'),'false');});
+test('One-shot Ctrl cannot leak through a Unicode commit or native key into the next letter',async t=>{
+ const {page}=await typing(t);
+ for(const text of ['Ж','🙂','word']){
+  await page.locator('#ctrl').click();await page.evaluate(text=>{__uiFixture.ime({type:'text',text});__uiFixture.ime({type:'text',text:'c'});},text);
+  assert.equal(await page.locator('#ctrl').getAttribute('aria-pressed'),'false');
+ }
+ await page.locator('#ctrl').click();await page.evaluate(()=>{__uiFixture.ime({type:'key',key:'ArrowLeft',modifiers:[]});__uiFixture.ime({type:'text',text:'c'});});
+ assert.deepEqual(await commands(page),['Ж','c','🙂','c','word','c'].map(text=>({type:'text',text})).concat([{type:'key',key:'ArrowLeft',modifiers:['control']},{type:'text',text:'c'}]));
+});
 
 test('Initial terminal framing is visual only and overview stays under user control',async t=>{
  const ui=await openUI({connected:true,width:1024,height:768,touch:true});t.after(()=>ui.browser.close());
