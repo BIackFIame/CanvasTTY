@@ -226,8 +226,134 @@ export async function runBrowserElectronSmoke(
     if (stale.ok || stale.error?.code !== "STALE_REF") {
       throw new Error(`Old element reference was not rejected: ${JSON.stringify(stale)}`);
     }
+    await assertBrowserRendererZoom(service, `${origin}/next`);
   } finally {
     service.core.agentDisconnected(actor);
+  }
+}
+
+/** A non-default View > Zoom affects CSS pixels, but not native child-view coordinates. */
+async function assertBrowserRendererZoom(service: BrowserService, url: string): Promise<void> {
+  const contents = webContents.getAllWebContents().find((candidate) => candidate.getURL().startsWith(url));
+  const owner = BrowserWindow.getAllWindows().find((candidate) => candidate.getParentWindow() === null);
+  if (!contents || !owner) throw new Error("Browser zoom smoke could not resolve its WebContents.");
+  const initialZoom = owner.webContents.getZoomFactor();
+  try {
+    // Use the actual sandboxed preload/IPC bridge and a transformed DOM slot, as BrowserCard does.
+    await owner.webContents.executeJavaScript(`
+      (() => {
+        const slot = document.createElement('div');
+        slot.id = 'browser-zoom-smoke-slot';
+        slot.style.cssText = 'position:fixed;left:200px;top:160px;width:420px;height:260px;transform-origin:0 0';
+        document.body.append(slot);
+        globalThis.__canvasttyZoomPointers = [];
+        globalThis.__canvasttyZoomFreeze = [];
+        globalThis.__canvasttyZoomPointerOff = window.canvasTTY.browser.onCanvasPointer((event) => {
+          globalThis.__canvasttyZoomPointers.push(event);
+        });
+        globalThis.__canvasttyZoomFreezeOff = window.canvasTTY.browser.onCanvasFreezeFrame((event) => {
+          globalThis.__canvasttyZoomFreeze.push(event.active);
+        });
+      })();
+    `);
+    for (const zoom of [1.2 ** -0.5, 0.8, 1, 1.25]) {
+      owner.webContents.setZoomFactor(zoom);
+      for (const canvasScale of [0.5, 1, 1.4]) {
+        const rect = await owner.webContents.executeJavaScript(`
+          (() => {
+            const slot = document.getElementById('browser-zoom-smoke-slot');
+            slot.style.transform = 'scale(${canvasScale})';
+            const rect = slot.getBoundingClientRect();
+            window.canvasTTY.browser.setViewport({ x: rect.x, y: rect.y,
+              width: rect.width, height: rect.height, surface: 'native', canvasScale: ${canvasScale},
+              clipBounds: { x: 0, y: 0, width: window.innerWidth, height: window.innerHeight } });
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          })()
+        `) as { x: number; y: number; width: number; height: number };
+        const expected = {
+          x: Math.floor(rect.x * zoom), y: Math.floor(rect.y * zoom),
+          width: Math.ceil((rect.x + rect.width) * zoom) - Math.floor(rect.x * zoom),
+          height: Math.ceil((rect.y + rect.height) * zoom) - Math.floor(rect.y * zoom)
+        };
+        await waitUntil(async () => {
+          const clip = owner.contentView.children.find((view) => view.children.some(
+            (child) => 'webContents' in child && child.webContents === contents
+          ));
+          if (!clip) return false;
+          const actual = clip.getBounds();
+          return Object.entries(expected).every(([key, value]) => actual[key as keyof typeof actual] === value)
+            && Math.abs(contents.getZoomFactor() - zoom * canvasScale) < 0.001;
+        }).catch(() => {
+          const bounds = owner.contentView.children.map((view) => view.getBounds());
+          throw new Error(`Browser native bounds mismatch at renderer zoom ${zoom}, canvas ${canvasScale}: `
+            + JSON.stringify({ expected, actual: bounds, pageZoom: contents.getZoomFactor() }));
+        });
+      }
+      const clip = owner.contentView.children.find((view) => view.children.some(
+        (child) => 'webContents' in child && child.webContents === contents
+      ));
+      if (!clip) throw new Error("Browser zoom smoke lost the native clip.");
+      const bounds = clip.getBounds();
+      await owner.webContents.executeJavaScript("globalThis.__canvasttyZoomPointers = []; void 0;");
+      contents.sendInputEvent({ type: "mouseDown", x: 30, y: 30, button: "left", clickCount: 1 });
+      contents.sendInputEvent({ type: "mouseUp", x: 30, y: 30, button: "left", clickCount: 1 });
+      await waitUntil(async () => owner.webContents.executeJavaScript(
+        "globalThis.__canvasttyZoomPointers.some((event) => event.type === 'down')"
+      ));
+      const pointer = await owner.webContents.executeJavaScript(
+        "globalThis.__canvasttyZoomPointers.find((event) => event.type === 'down')"
+      ) as { clientX: number; clientY: number };
+      if (Math.abs(pointer.clientX - (bounds.x + 30) / zoom) > 0.001
+        || Math.abs(pointer.clientY - (bounds.y + 30) / zoom) > 0.001) {
+        throw new Error(`Browser pointer used native coordinates in the zoomed renderer: ${JSON.stringify(pointer)}`);
+      }
+      await owner.webContents.executeJavaScript(`
+        (() => {
+          globalThis.__canvasttyZoomFreeze = [];
+          const rect = document.getElementById('browser-zoom-smoke-slot').getBoundingClientRect();
+          window.canvasTTY.canvasNavigation.armOwnerWheelSequence(
+            ${zoom < 1 ? "rect.right - 2" : "rect.left + 2"}, rect.top + rect.height / 2);
+        })();
+      `);
+      await waitUntil(async () => owner.webContents.executeJavaScript("globalThis.__canvasttyZoomFreeze.includes(true)"));
+      await waitForWheelIdle();
+    }
+    // Also let the real React card report its own rectangle when View > Zoom changes.
+    owner.webContents.setZoomFactor(1.2 ** -0.5);
+    await owner.webContents.executeJavaScript(`
+      document.getElementById('browser-zoom-smoke-slot')?.remove();
+      document.querySelector('.launcher-button--browser').click();
+      void 0;
+    `);
+    await waitUntil(async () => {
+      const rect = await owner.webContents.executeJavaScript(`
+        (() => {
+          const slot = document.querySelector('.browser-card__viewport');
+          if (!slot) return null;
+          const rect = slot.getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+        })()
+      `) as { x: number; y: number; width: number; height: number } | null;
+      const clip = owner.contentView.children.find((view) => view.children.some(
+        (child) => 'webContents' in child && child.webContents === contents
+      ));
+      if (!rect || !clip) return false;
+      const zoom = owner.webContents.getZoomFactor();
+      const actual = clip.getBounds();
+      return actual.x === Math.floor(rect.x * zoom) && actual.y === Math.floor(rect.y * zoom)
+        && actual.width === Math.ceil((rect.x + rect.width) * zoom) - actual.x
+        && actual.height === Math.ceil((rect.y + rect.height) * zoom) - actual.y;
+    });
+    console.log("CANVASTTY_BROWSER_ZOOM_SMOKE_READY");
+  } finally {
+    owner.webContents.setZoomFactor(initialZoom);
+    await owner.webContents.executeJavaScript(`
+      document.getElementById('browser-zoom-smoke-slot')?.remove();
+      globalThis.__canvasttyZoomPointerOff?.();
+      globalThis.__canvasttyZoomFreezeOff?.();
+      void 0;
+    `);
+    service.setViewport({ x: 0, y: 0, width: 820, height: 620, surface: "native", canvasScale: 1 });
   }
 }
 

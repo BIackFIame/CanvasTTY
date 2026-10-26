@@ -7,25 +7,27 @@ import type {
 const MIN_BROWSER_PAGE_SCALE = 0.5;
 const MAX_BROWSER_PAGE_SCALE = 3;
 
-export function normalizeBrowserViewportBounds(value: unknown): BrowserViewportBounds | null {
+/** Renderer rectangles are CSS pixels; Electron View bounds are device-independent pixels. */
+export function normalizeBrowserViewportBounds(value: unknown, rendererZoomFactor = 1): BrowserViewportBounds | null {
+  if (!Number.isFinite(rendererZoomFactor) || rendererZoomFactor <= 0) return null;
   if (!value || typeof value !== "object") return null;
   const bounds = value as BrowserViewportBounds;
   if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return null;
   if (bounds.surface !== "native" && bounds.surface !== "placeholder" && bounds.surface !== "hidden") {
     return null;
   }
-  const clipBounds = normalizeClipBounds(bounds.clipBounds);
+  const clipBounds = normalizeClipBounds(bounds.clipBounds, rendererZoomFactor);
   if (bounds.clipBounds !== undefined && !clipBounds) return null;
 
-  const width = Math.max(0, bounds.width);
-  const height = Math.max(0, bounds.height);
-  const left = Math.floor(bounds.x);
-  const top = Math.floor(bounds.y);
-  const right = width === 0 ? left : Math.ceil(bounds.x + width);
-  const bottom = height === 0 ? top : Math.ceil(bounds.y + height);
+  const width = Math.max(0, bounds.width) * rendererZoomFactor;
+  const height = Math.max(0, bounds.height) * rendererZoomFactor;
+  const left = Math.floor(bounds.x * rendererZoomFactor);
+  const top = Math.floor(bounds.y * rendererZoomFactor);
+  const right = width === 0 ? left : Math.ceil(bounds.x * rendererZoomFactor + width);
+  const bottom = height === 0 ? top : Math.ceil(bounds.y * rendererZoomFactor + height);
   const canvasScale = Number.isFinite(bounds.canvasScale)
-    ? Math.min(MAX_BROWSER_PAGE_SCALE, Math.max(MIN_BROWSER_PAGE_SCALE, bounds.canvasScale!))
-    : undefined;
+    ? Math.min(MAX_BROWSER_PAGE_SCALE, Math.max(MIN_BROWSER_PAGE_SCALE, bounds.canvasScale!)) * rendererZoomFactor
+    : rendererZoomFactor === 1 ? undefined : rendererZoomFactor;
 
   return {
     x: left,
@@ -66,18 +68,23 @@ export function clipBrowserViewportBounds(
   return { x: left, y: top, width: right - left, height: bottom - top };
 }
 
-function normalizeClipBounds(value: unknown): BrowserViewportClipBounds | undefined | null {
+/** Native pointer relays return to the renderer's CSS coordinate space, including the zoom anchor. */
+export function browserCanvasEventToCss<T extends { clientX: number; clientY: number }>(event: T, rendererZoomFactor: number): T {
+  return { ...event, clientX: event.clientX / rendererZoomFactor, clientY: event.clientY / rendererZoomFactor };
+}
+
+function normalizeClipBounds(value: unknown, rendererZoomFactor: number): BrowserViewportClipBounds | undefined | null {
   if (value === undefined) return undefined;
   if (!value || typeof value !== "object") return null;
   const bounds = value as BrowserViewportClipBounds;
   if (![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return null;
 
-  const width = Math.max(0, bounds.width);
-  const height = Math.max(0, bounds.height);
-  const left = Math.ceil(bounds.x);
-  const top = Math.ceil(bounds.y);
-  const right = width === 0 ? left : Math.floor(bounds.x + width);
-  const bottom = height === 0 ? top : Math.floor(bounds.y + height);
+  const width = Math.max(0, bounds.width) * rendererZoomFactor;
+  const height = Math.max(0, bounds.height) * rendererZoomFactor;
+  const left = Math.ceil(bounds.x * rendererZoomFactor);
+  const top = Math.ceil(bounds.y * rendererZoomFactor);
+  const right = width === 0 ? left : Math.floor(bounds.x * rendererZoomFactor + width);
+  const bottom = height === 0 ? top : Math.floor(bounds.y * rendererZoomFactor + height);
   return {
     x: left,
     y: top,

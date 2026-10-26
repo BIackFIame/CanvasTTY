@@ -40,7 +40,7 @@ import { BrowserCanvasPointerRouter } from "./browser/BrowserCanvasPointerRouter
 import { BrowserCanvasSinkViewportController } from "./browser/BrowserCanvasSinkViewport.ts";
 import { BrowserAuditStore } from "./browser/BrowserAuditStore.ts";
 import { browserPageWheelReply, type BrowserPageWheelReply } from "./browser/BrowserCanvasWheel.ts";
-import { clipBrowserViewportBounds, normalizeBrowserViewportBounds, sameBrowserViewport } from "./browser/BrowserViewport.ts";
+import { browserCanvasEventToCss, clipBrowserViewportBounds, normalizeBrowserViewportBounds, sameBrowserViewport } from "./browser/BrowserViewport.ts";
 import { BrowserCore, type BrowserCoreHost, type BrowserCoreTab, type BrowserOpenedTab } from "./browser/BrowserCore.ts";
 import { BrowserEngineTabs, type BrowserEngineProvider } from "./browser/BrowserEngineTabs.ts";
 import type { EngineFallbackReason } from "./browser/BrowserErrors.ts";
@@ -83,7 +83,7 @@ const BACKGROUND_TAB_SIZE = { width: 1280, height: 800 };
 // Mirrors the `.browser-card { border-radius: 17px }` declaration in src/renderer/src/styles/app.css: the
 // stylesheet owns this visual property, so the two have to stay in sync by hand.
 const CARD_CORNER_RADIUS = 17;
-// normalizeBrowserViewportBounds clamps canvasScale to 0.5..3; this bound only guards a bogus payload.
+// Bound the native corner radius even when renderer zoom multiplies the canvas scale.
 const MAX_PAGE_CORNER_RADIUS = CARD_CORNER_RADIUS * 3;
 
 /** Card corner radius in device-independent pixels at the current canvas scale. */
@@ -271,7 +271,8 @@ export class BrowserService {
       shouldDeferIdleEnd: () => this.canvasPointers.hasFreezePointerRelay,
       sendWheel: (payload) => {
         const owner = this.getOwner();
-        if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.browserCanvasWheel, payload);
+        if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.browserCanvasWheel,
+          browserCanvasEventToCss(payload, owner.webContents.getZoomFactor()));
       },
       sendFreezeFrame: (payload) => {
         const owner = this.getOwner();
@@ -297,7 +298,8 @@ export class BrowserService {
       endWheelSequence: () => this.canvasGestures.endSequence(),
       sendNavigationPointer: (payload) => {
         const owner = this.getOwner();
-        if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.browserCanvasNavigationPointer, payload);
+        if (owner && !owner.isDestroyed()) owner.webContents.send(IPC.browserCanvasNavigationPointer,
+          browserCanvasEventToCss(payload, owner.webContents.getZoomFactor()));
       }
     });
 
@@ -403,8 +405,8 @@ export class BrowserService {
     this.canvasGestures.handlePageWheel(sender, input);
   }
 
-  beginRendererWheelSequence(input: unknown): void {
-    this.canvasGestures.beginRendererSequence(input);
+  beginRendererWheelSequence(input: unknown, rendererZoomFactor = 1): void {
+    this.canvasGestures.beginRendererSequence(input, rendererZoomFactor);
   }
 
   async setRestoreTabs(enabled: boolean): Promise<void> {
@@ -537,8 +539,8 @@ export class BrowserService {
     return this.getState();
   }
 
-  setViewport(bounds: BrowserViewportBounds): void {
-    const normalized = normalizeBrowserViewportBounds(bounds);
+  setViewport(bounds: BrowserViewportBounds, rendererZoomFactor = 1): void {
+    const normalized = normalizeBrowserViewportBounds(bounds, rendererZoomFactor);
     if (!normalized) return;
     const previous = this.viewport;
     // The card reports its rectangle on every camera step, resize and layout pass; one that rounds to the same
@@ -987,7 +989,7 @@ export class BrowserService {
           clientY: this.viewport.y + mouse.y,
           clickCount: pointerType === "down" || pointerType === "up" ? Math.max(1, mouse.clickCount ?? 1) : 0
         };
-        owner.webContents.send(IPC.browserCanvasPointer, payload);
+        owner.webContents.send(IPC.browserCanvasPointer, browserCanvasEventToCss(payload, owner.webContents.getZoomFactor()));
       }
 
     });

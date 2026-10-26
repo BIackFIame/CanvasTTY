@@ -148,15 +148,16 @@ export class BrowserCanvasGestureController {
     });
   }
 
-  beginRendererSequence(input: unknown): void {
+  beginRendererSequence(input: unknown, rendererZoomFactor = 1): void {
+    if (!Number.isFinite(rendererZoomFactor) || rendererZoomFactor <= 0) return;
     if (!input || typeof input !== "object" || Array.isArray(input)) return;
     const values = input as Record<string, unknown>;
     if (!Number.isFinite(values.clientX) || !Number.isFinite(values.clientY)) return;
     const owner = this.host.getOwner();
     if (!owner || owner.isDestroyed()) return;
     const content = owner.getContentBounds();
-    const clientX = values.clientX as number;
-    const clientY = values.clientY as number;
+    const clientX = (values.clientX as number) * rendererZoomFactor;
+    const clientY = (values.clientY as number) * rendererZoomFactor;
     if (clientX < 0 || clientY < 0 || clientX >= content.width || clientY >= content.height) return;
     this.beginOwnerSequence({ x: clientX, y: clientY });
   }
