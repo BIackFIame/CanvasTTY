@@ -4,7 +4,6 @@ import type { TerminalBackgroundId } from "../../../../shared/terminalBackground
 const AsciiTerminalBackground = lazy(() =>
   import("./AsciiTerminalBackground").then((m) => ({ default: m.AsciiTerminalBackground }))
 );
-import { attachTerminalTextBackdrop } from "./terminalTextBackdrop";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -500,7 +499,12 @@ function TerminalCardView({
     terminal.loadAddon(webLinksAddon);
     const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
-    const detachTextBackdrop = attachTerminalTextBackdrop(terminal, host);
+    let detachTextBackdrop = () => {};
+    if (hasAsciiBackground) {
+      import("./terminalTextBackdrop").then((m) => {
+        if (host.isConnected) detachTextBackdrop = m.attachTerminalTextBackdrop(terminal, host);
+      });
+    }
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
     pinnedInput.className = "terminal-card__pinned-input";

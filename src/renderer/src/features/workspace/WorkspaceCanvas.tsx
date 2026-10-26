@@ -1044,6 +1044,27 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
     isPixelSkinPackId(settings.canvasBackground) ? settings.canvasBackground : null
   )?.background;
 
+  const getTerminalBackground = (sessionId: string) => {
+    const o = settings.terminalBackgroundOverrides[sessionId];
+    return {
+      background: o?.terminalBackground ?? settings.terminalBackground,
+      backgroundBrightness: o?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness,
+      backgroundContrast: o?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast,
+      backgroundSaturation: o?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation,
+      backgroundPaused: (o?.terminalBackgroundPaused ?? settings.terminalBackgroundPaused)
+        || (settings.terminalBackgroundPauseInactive && activeSessionId !== sessionId),
+      backgroundSpeed: o?.terminalBackgroundSpeed ?? settings.terminalBackgroundSpeed,
+      backgroundScale: o?.terminalBackgroundScale ?? settings.terminalBackgroundScale,
+      backgroundOffsetX: o?.terminalBackgroundOffsetX ?? settings.terminalBackgroundOffsetX,
+      backgroundOffsetY: o?.terminalBackgroundOffsetY ?? settings.terminalBackgroundOffsetY,
+      backgroundReadability: o?.terminalBackgroundReadability ?? settings.terminalBackgroundReadability,
+      backgroundReadabilityStrength: o?.terminalBackgroundReadabilityStrength ?? settings.terminalBackgroundReadabilityStrength,
+      backgroundPauseOnOutput: o?.terminalBackgroundPauseOnOutput ?? settings.terminalBackgroundPauseOnOutput,
+      backgroundFocusDimming: o?.terminalBackgroundFocusDimming ?? settings.terminalBackgroundFocusDimming,
+      backgroundSynchronized: settings.terminalBackgroundSynchronized,
+    };
+  };
+
   return (
     <div
       ref={viewport}
@@ -1201,21 +1222,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
-              background={settings.terminalBackgroundOverrides[session.id]?.terminalBackground ?? settings.terminalBackground}
-              backgroundBrightness={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness}
-              backgroundContrast={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast}
-              backgroundSaturation={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation}
-              backgroundPaused={(settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundPaused ?? settings.terminalBackgroundPaused)
-                || (settings.terminalBackgroundPauseInactive && activeSessionId !== session.id)}
-              backgroundSpeed={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSpeed ?? settings.terminalBackgroundSpeed}
-              backgroundScale={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundScale ?? settings.terminalBackgroundScale}
-              backgroundOffsetX={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundOffsetX ?? settings.terminalBackgroundOffsetX}
-              backgroundOffsetY={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundOffsetY ?? settings.terminalBackgroundOffsetY}
-              backgroundReadability={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundReadability ?? settings.terminalBackgroundReadability}
-              backgroundReadabilityStrength={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundReadabilityStrength ?? settings.terminalBackgroundReadabilityStrength}
-              backgroundPauseOnOutput={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundPauseOnOutput ?? settings.terminalBackgroundPauseOnOutput}
-              backgroundFocusDimming={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundFocusDimming ?? settings.terminalBackgroundFocusDimming}
-              backgroundSynchronized={settings.terminalBackgroundSynchronized}
+              {...getTerminalBackground(session.id)}
               skinDetail={settings.terminalSkinDetail}
               camera={camera}
               stackIndex={canvasLayerZIndex(layerOrder, terminalLayerId(session.id))}
@@ -1409,21 +1416,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               locale={settings.locale}
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
-              background={settings.terminalBackgroundOverrides[session.id]?.terminalBackground ?? settings.terminalBackground}
-              backgroundBrightness={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness}
-              backgroundContrast={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast}
-              backgroundSaturation={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation}
-              backgroundPaused={(settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundPaused ?? settings.terminalBackgroundPaused)
-                || (settings.terminalBackgroundPauseInactive && activeSessionId !== session.id)}
-              backgroundSpeed={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSpeed ?? settings.terminalBackgroundSpeed}
-              backgroundScale={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundScale ?? settings.terminalBackgroundScale}
-              backgroundOffsetX={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundOffsetX ?? settings.terminalBackgroundOffsetX}
-              backgroundOffsetY={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundOffsetY ?? settings.terminalBackgroundOffsetY}
-              backgroundReadability={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundReadability ?? settings.terminalBackgroundReadability}
-              backgroundReadabilityStrength={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundReadabilityStrength ?? settings.terminalBackgroundReadabilityStrength}
-              backgroundPauseOnOutput={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundPauseOnOutput ?? settings.terminalBackgroundPauseOnOutput}
-              backgroundFocusDimming={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundFocusDimming ?? settings.terminalBackgroundFocusDimming}
-              backgroundSynchronized={settings.terminalBackgroundSynchronized}
+              {...getTerminalBackground(session.id)}
               skinDetail={settings.terminalSkinDetail}
               camera={FULLSCREEN_CAMERA}
               stackIndex={9999}
