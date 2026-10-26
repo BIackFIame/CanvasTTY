@@ -1,4 +1,4 @@
-# CanvasLink for Android (experimental alpha)
+# CanvasLink 1.0 for Android
 
 CanvasLink streams the **whole current CanvasTTY window** to an Android phone or
 tablet on the same private IPv4 LAN. Touch, terminal keyboard input and shortcuts
@@ -11,13 +11,15 @@ and Even G2 integration retain their separate pairing and permissions.
 
 ## Connect
 
-1. Install the [pinned Android alpha](https://github.com/teo-nex/CanvasLink#installation)
+1. Install [CanvasLink 1.0](https://github.com/howdeploy/CanvasTTY/releases/tag/canvaslink-v1.0.0)
    (Android 8+). **Settings → CanvasLink → Copy prompt for agent** copies USB/ADB
    installation instructions with the exact APK URL and checksum. Enable USB
    debugging and approve the RSA dialog on Android yourself. The agent installs
    on one selected device and preserves data; it must stop on signing conflicts.
-   The desktop must be built from this PR; the official stable release does not
-   contain this integration yet.
+   Use CanvasTTY 1.8.3 or newer. For an existing **CanvasLink DEV** installation,
+   choose `CanvasLink-1.0.0-dev.apk`; it preserves the DEV package ID and key.
+   Older alpha APKs can have incompatible signatures: stop on a signing conflict
+   and keep existing data. The DEV package can be installed alongside the alpha.
 2. Open Settings → CanvasLink on the desktop and choose **Enable access**.
 3. Open CanvasLink on Android, select the discovered computer and enter the six
    digits shown on the desktop. The code expires after two minutes and is used
@@ -35,6 +37,46 @@ The app distinguishes processed, pending and uncertain input. A disconnect does
 not automatically replay a command. Check the terminal before retrying uncertain
 input. Clipboard paste uses the Android clipboard; it does not read the desktop
 clipboard.
+
+## Local networks and VPNs
+
+Android selects a non-VPN Wi-Fi or Ethernet network with a route to the private
+computer address. A sole local network's IPv4 gateway can also reach neighbouring
+private subnets. HTTP signalling uses that network explicitly without a proxy;
+there is no cellular fallback. Android 13+ also restricts discovery to these
+networks; older versions retain system discovery and the manual address option.
+Process binding requests the local network for new WebView sockets, but WebRTC
+routing in the device's WebView must be verified on hardware. Changing networks
+closes the old input channel and retries signalling without replaying input.
+A changed client address may still require fresh pairing because sessions
+remain address-bound.
+
+On Linux, desktop discovery selects physical network interfaces, including
+bridges/VLANs linked to them. Other platforms filter common virtual adapter
+names; macOS retains native DNS-SD publication. Bonjour advertisements are sent
+on each selected LAN IPv4 interface and contain only its address. Multiple LAN
+addresses may appear as separate computer entries. If discovery is unavailable,
+use **Computer not found?** on Android and enter the computer's LAN IPv4 and port,
+for example `192.168.0.171:3499`.
+
+Pairing success does not mean video/control is connected. A connection attempt
+has a 30-second deadline; **Check connection** starts another attempt. Host capture
+or negotiation errors are reported to the phone instead of leaving it waiting.
+
+VPNs must permit local traffic, including mDNS and WebRTC traffic in addition to
+TCP 3499. A VPN kill switch or Android's **Block connections without VPN** can
+prevent direct LAN access; CanvasLink does not change those settings. Enable the
+VPN's local-network allowance or exclude CanvasLink where the VPN supports it.
+These changes do not establish compatibility with every VPN or WebView version.
+
+## Mobile interface
+
+The Android shell follows CanvasTTY's Sage tokens: graphite panels, sage actions,
+flat surfaces and short labels. Pairing is a compact form. During a session, only
+the terminal key row reserves space; connection state and diagnostics live in the
+session menu. Errors and delivery uncertainty remain visible when relevant.
+Button labels are not selectable. Pairing fields and diagnostic text still
+support selection; terminal gestures and native IME keep their own input path.
 
 ## Transport and boundaries
 
@@ -74,20 +116,30 @@ For the APK, install JDK 17 and Android SDK platform 35/build-tools 35.0.0, set
 npm run build:canvaslink:android
 ```
 
-Output: `integrations/canvaslink/dist/CanvasLink-debug.apk`. No Gradle or Android
+For a separate **CanvasLink DEV** installation that preserves an existing app,
+run `npm run build:canvaslink:android -- --dev`. This produces
+`integrations/canvaslink/dist/CanvasLink-1.0.0-dev.apk` with package ID
+`io.nexcore.canvaslink.dev`. Use the DEV app when testing modified source.
+
+Output: `integrations/canvaslink/dist/CanvasLink-1.0.0.apk` (or
+`CanvasLink-1.0.0-dev.apk` with `--dev`). No Gradle or Android
 Java dependencies are downloaded by the build script. A local development key
 is generated under the ignored `.runtime` directory. CI produces an APK artifact
 with an ephemeral development signature. Different builds can have different
 keys and may not install as an update over one another. Keep your existing app
 and its data until you have planned the transition.
 
-The separate community [CanvasLink distribution repository](https://github.com/teo-nex/CanvasLink)
-publishes a pinned alpha APK and bilingual installation prompts. Its APK is the
-verified CI payload re-signed with a persistent local distribution key; provenance,
-SHA-256 and the public certificate fingerprint are recorded there. No private
-signing key enters either repository. Source CI still produces ephemeral debug
-signatures; the distribution release is a separate maintained publication, not
-an official CanvasTTY release or automatic stable update channel.
+The original CanvasLink implementation and alpha distribution are by @teo-nex:
+[#166](https://github.com/howdeploy/CanvasTTY/pull/166) and the
+[community distribution repository](https://github.com/teo-nex/CanvasLink).
+CanvasLink 1.0 is distributed with this project using an owner-held persistent
+key. Its URL, checksum and public certificate fingerprint are pinned in
+`src/shared/canvasLinkInstall.ts`. The private key is never committed. CI APKs
+retain ephemeral signatures and are separate from the pinned release APK.
+
+Maintainer follow-ups add LAN/VPN routing, bounded negotiation and recovery,
+the CanvasTTY mobile shell, and versioned normal/DEV APKs. Original contributor
+commits are retained in the integration history.
 
 ## Quality and platform status
 

@@ -1,4 +1,4 @@
-name: CanvasLink alpha
+name: CanvasLink Android
 
 on:
   pull_request:
@@ -40,9 +40,9 @@ jobs:
           log-accepted-android-sdk-licenses: 'false'
       - run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
       - run: node integrations/canvaslink/scripts/build-android.cjs
-      - name: Upload alpha APK (ephemeral CI development signature)
+      - name: Upload APK (ephemeral CI signature; official releases use the owner key)
         uses: actions/upload-artifact@v4
         with:
-          name: CanvasLink-debug
-          path: integrations/canvaslink/dist/CanvasLink-debug.apk
+          name: CanvasLink-Android
+          path: integrations/canvaslink/dist/CanvasLink-*.apk
           retention-days: 30

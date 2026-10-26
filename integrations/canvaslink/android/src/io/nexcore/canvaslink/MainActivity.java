@@ -3,6 +3,12 @@ package io.nexcore.canvaslink;
 import android.app.Activity;
 import android.os.Bundle;
 import android.os.Build;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
+import android.net.LinkProperties;
+import android.net.RouteInfo;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
 import android.net.wifi.WifiManager;
@@ -35,12 +41,16 @@ public final class MainActivity extends Activity {
   private String base, id; private byte[] key; private long sent=0, received=0;
   private long reserved=0; private SessionVault vault;
   private ScheduledFuture<?> polling; private int errors=0; private long networkFailureAt=0;
+  private ConnectivityManager connectivity; private ConnectivityManager.NetworkCallback localNetworks;
+  private volatile Network localNetwork; private String localAddresses=""; private volatile boolean destroyed=false;
   volatile String acceptance = "", diagnostics = "{}";
   @Override public void onCreate(Bundle saved) {
     super.onCreate(saved);
-    getWindow().setStatusBarColor(0xff121814); getWindow().setNavigationBarColor(0xff121814);
+    connectivity=(ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+    watchLocalNetworks();
+    getWindow().setStatusBarColor(0xff353442); getWindow().setNavigationBarColor(0xff353442);
     web = new TerminalWebView(this); setContentView(web);
-    web.setBackgroundColor(0xff121814);
+    web.setBackgroundColor(0xff353442);
     WebSettings s=web.getSettings(); s.setJavaScriptEnabled(true); s.setDomStorageEnabled(false);
     s.setAllowFileAccess(false); s.setAllowContentAccess(false); s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
     s.setMediaPlaybackRequiresUserGesture(false); s.setSupportZoom(false);
@@ -66,12 +76,65 @@ public final class MainActivity extends Activity {
     web.loadUrl("https://appassets.androidplatform.net/client/index.html");
     nsd=(NsdManager)getSystemService(NSD_SERVICE);
     vault=new SessionVault(this);drafts=new SessionVault(this,"draft");
-    active=this;
+    synchronized(MainActivity.class){active=this;}
   }
   private static WebResourceResponse blocked() { return new WebResourceResponse("text/plain","UTF-8",403,"Blocked",Collections.emptyMap(),new ByteArrayInputStream(new byte[0])); }
   private void emit(String type, Object value) {
+    if(destroyed)return;
     JSONObject event=new JSONObject(); try { event.put("type",type); event.put("value",value); }catch(JSONException ignored){}
-    runOnUiThread(() -> web.evaluateJavascript("window.CanvasLink&&window.CanvasLink.receive("+event.toString()+")",null));
+    runOnUiThread(() -> {if(!destroyed)web.evaluateJavascript("window.CanvasLink&&window.CanvasLink.receive("+event.toString()+")",null);});
+  }
+  private void watchLocalNetworks(){
+    localNetworks=new ConnectivityManager.NetworkCallback(){
+      private void refresh(){if(!destroyed)network.execute(()->{if(base==null||id==null)return;try{selectLocalNetwork(new URL(base));}catch(Exception e){emit("network",e.getMessage());}});}
+      @Override public void onAvailable(Network value){refresh();}
+      @Override public void onCapabilitiesChanged(Network value,NetworkCapabilities capabilities){refresh();}
+      @Override public void onLinkPropertiesChanged(Network value,LinkProperties properties){refresh();}
+      @Override public void onLost(Network value){if(value.equals(localNetwork))emit("network-changed","offline");refresh();}
+    };
+    try{connectivity.registerNetworkCallback(localNetworkRequest(),localNetworks,ui);}
+    catch(SecurityException e){localNetworks=null;}
+  }
+  private NetworkRequest localNetworkRequest(){
+    return new NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+      .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET).addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build();
+  }
+  private synchronized Network selectLocalNetwork(URL url) throws Exception {
+    if(destroyed)throw new IOException("Приложение закрыто");
+    InetAddress address=InetAddress.getByName(url.getHost());
+    if(address.isLoopbackAddress())return null;
+    Network selected=null,fallback=null;String addresses="",fallbackAddresses="";int prefix=0,fallbacks=0;
+    for(Network candidate:connectivity.getAllNetworks()){
+      NetworkCapabilities capabilities=connectivity.getNetworkCapabilities(candidate);
+      if(capabilities==null||!capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN)||
+        !(capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)||capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)))continue;
+      LinkProperties properties=connectivity.getLinkProperties(candidate);if(properties==null)continue;
+      boolean defaultRoute=false;
+      for(RouteInfo route:properties.getRoutes()){
+        int bits=route.getDestination().getPrefixLength();
+        if(bits==0&&route.getDestination().getAddress() instanceof Inet4Address)defaultRoute=true;
+        if(bits>0&&(bits>prefix||bits==prefix&&candidate.equals(localNetwork))&&route.getDestination().contains(address)){
+          selected=candidate;prefix=bits;addresses=properties.getLinkAddresses().toString();
+        }
+      }
+      if(defaultRoute){fallbacks++;fallback=candidate;fallbackAddresses=properties.getLinkAddresses().toString();}
+    }
+    // A sole physical LAN can reach a neighbouring private subnet via its router.
+    if(selected==null&&fallbacks==1){selected=fallback;addresses=fallbackAddresses;}
+    if(selected==null){
+      if(localNetwork!=null){localNetwork=null;emit("network-changed","offline");}
+      // Keep the old process binding on loss: never fall back to cellular/VPN.
+      throw new IOException("Нет локального маршрута к ПК. Подключите устройства к одной сети Wi-Fi и разрешите доступ к локальной сети в VPN.");
+    }
+    if(!selected.equals(localNetwork)||!addresses.equals(localAddresses)){
+      if(localNetwork!=null)emit("network-changed","offline");
+      try{synchronized(MainActivity.class){if(destroyed||active!=this||!connectivity.bindProcessToNetwork(selected))throw new SecurityException();}}
+      catch(SecurityException e){throw new IOException("Не удалось выбрать локальную сеть. Разрешите CanvasLink доступ к локальной сети в настройках VPN.",e);}
+      localNetwork=selected;localAddresses=addresses;
+      // WebRTC runs in WebView; process binding is best effort for its sockets.
+      if(id!=null)emit("network-changed","ready");
+    }
+    return selected;
   }
   private String localBase(String host) throws Exception {
     if (!host.matches("[0-9.]+:[0-9]{1,5}")) throw new Exception("Нужен локальный IPv4-адрес и порт");
@@ -83,7 +146,8 @@ public final class MainActivity extends Activity {
     return "http://"+hp[0]+":"+p;
   }
   private JSONObject post(String route, JSONObject payload) throws Exception {
-    HttpURLConnection c=(HttpURLConnection)new URL(base+route).openConnection();
+    URL url=new URL(base+route);Network selected=selectLocalNetwork(url);
+    HttpURLConnection c=(HttpURLConnection)(selected==null?url.openConnection(Proxy.NO_PROXY):selected.openConnection(url,Proxy.NO_PROXY));
     c.setConnectTimeout(4000);c.setReadTimeout(5000);c.setInstanceFollowRedirects(false);
     c.setRequestMethod("POST");c.setRequestProperty("Content-Type","application/json");c.setDoOutput(true);
     byte[] bytes=payload.toString().getBytes(StandardCharsets.UTF_8);c.setFixedLengthStreamingMode(bytes.length);
@@ -94,7 +158,8 @@ public final class MainActivity extends Activity {
         byte[] buffer=new byte[4096];int n;while((n=in.read(buffer))!=-1){out.write(buffer,0,n);if(out.size()>150000)throw new Exception("Ответ слишком большой");}
         return new JSONObject(out.toString("UTF-8"));
       }
-    }finally{c.disconnect();}
+    }catch(IOException e){throw new IOException("Нет связи с ПК по локальной сети. Проверьте Wi-Fi и разрешение локальных подключений в VPN.",e);}
+    finally{c.disconnect();}
   }
   private JSONObject exchange(JSONObject value) throws Exception {
     if(id==null||key==null)throw new Exception("Нет сопряжения");
@@ -209,10 +274,14 @@ public final class MainActivity extends Activity {
       public void onServiceLost(NsdServiceInfo service){ui.post(()->{if(epoch!=discoveryEpoch)return;found.remove(service.getServiceName());resolving.removeIf(s->s.getServiceName().equals(service.getServiceName()));emit("lost",service.getServiceName());});}
       public void onServiceFound(NsdServiceInfo service){ui.post(()->{if(epoch!=discoveryEpoch||!service.getServiceName().startsWith("CanvasLink "))return;resolving.add(service);resolveNext(epoch);});}
     };
-    try{nsd.discoverServices("_canvaslink._tcp.",NsdManager.PROTOCOL_DNS_SD,discovery);}catch(Exception e){discovery=null;emit("discovery","unavailable");}
+    try{
+      if(Build.VERSION.SDK_INT>=33)nsd.discoverServices("_canvaslink._tcp.",NsdManager.PROTOCOL_DNS_SD,localNetworkRequest(),getMainExecutor(),discovery);
+      else nsd.discoverServices("_canvaslink._tcp.",NsdManager.PROTOCOL_DNS_SD,discovery);
+    }catch(Exception e){discovery=null;emit("discovery","unavailable");}
   }
   @Override protected void onDestroy(){
-    if(active==this)active=null;
+    synchronized(MainActivity.class){destroyed=true;if(active==this){active=null;connectivity.bindProcessToNetwork(null);}}
+    if(localNetworks!=null)try{connectivity.unregisterNetworkCallback(localNetworks);}catch(Exception ignored){}
     if(discovery!=null)try{nsd.stopServiceDiscovery(discovery);}catch(Exception ignored){}
     if(multicast!=null&&multicast.isHeld())multicast.release();
     discoveryEpoch++;ui.removeCallbacksAndMessages(null);storage.shutdown();network.shutdownNow();web.destroy();super.onDestroy();

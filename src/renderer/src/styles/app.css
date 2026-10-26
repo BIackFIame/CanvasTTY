@@ -5,6 +5,34 @@ body { background: #aaa7a2; user-select: none; }
 button, select, input { font: inherit; }
 button { border: 0; }
 
+/* Soft press from SL UI's everyday defaults source; retain CanvasTTY controls and icons. */
+:is(.settings-panel, .canvas-menu, .canvas-command-palette, .canvas-region-editor,
+  [role="dialog"], [role="menu"], .launch-dialog, .handoff-dialog, .terminal-link-dialog,
+  .terminal-card__menu, .terminal-card__actions, .browser-card__navigation,
+  .browser-card__popover, .browser-card__confirm, .browser-card__dialog, .browser-card__page-state,
+  .agent-chat-history, .home-editor-toolbar, .canvas-controls) button {
+  transition: background-color 180ms ease, color 180ms ease, border-color 180ms ease,
+    box-shadow 220ms ease, opacity 180ms ease,
+    transform 260ms cubic-bezier(.22, 1, .36, 1), scale 260ms cubic-bezier(.22, 1, .36, 1);
+}
+@media (prefers-reduced-motion: no-preference) {
+  :is(.settings-panel, .canvas-menu, .canvas-command-palette, .canvas-region-editor,
+    [role="dialog"], [role="menu"], .launch-dialog, .handoff-dialog, .terminal-link-dialog,
+    .terminal-card__menu, .terminal-card__actions, .browser-card__navigation,
+    .browser-card__popover, .browser-card__confirm, .browser-card__dialog, .browser-card__page-state,
+    .agent-chat-history, .home-editor-toolbar, .canvas-controls)
+    button:not(:disabled):not([aria-disabled="true"]):active {
+    scale: .98;
+    transition-duration: 100ms;
+  }
+  button :is(.ui-icon--reload, .ui-icon--reset) { transition: rotate 280ms cubic-bezier(.22, 1, .36, 1); }
+  @media (hover: hover) {
+    button:not(:disabled):not([aria-disabled="true"]):hover > .ui-icon--reload { rotate: 35deg; }
+    button:not(:disabled):not([aria-disabled="true"]):hover > .ui-icon--reset { rotate: -35deg; }
+  }
+}
+.button-with-icon { display: inline-flex; align-items: center; justify-content: center; gap: .55em; }
+
 .app { --titlebar-height: 44px; position: relative; width: 100%; height: 100%; color: var(--text); background: var(--canvas-bg); }
 .app__content { position: relative; height: calc(100% - var(--titlebar-height)); }
 .app--macos { --titlebar-height: 32px; }

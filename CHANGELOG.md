@@ -2,6 +2,16 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## 1.8.3
+
+- Added canvas Auto-sort by task, status, project or grid, with scoped movement and undo (#163, @BIackFIame).
+- Added animated ASCII terminal backgrounds, Fine Dots rendering, scene creation, presets and a quick-hide shortcut (#164, @CLOSETTTY).
+- Fixed native browser bounds and input coordinates at non-default renderer zoom (#165, @teo-nex).
+- Added CanvasLink 1.0 for Android: LAN window streaming, touch and terminal input, pairing and explicit revocation (#166, @teo-nex). Desktop access is off on startup.
+- Retained Codex prompt-delivery and account-scoped quota fixes already merged in #158 (@pepechka-kun).
+- Integration fixes preserve backgrounds across F8, prevent terminal glyph ghosting, keep zoomed-out cards opaque, repair background-settings scrolling, and add official reset/reload icons and button motion. CanvasLink gains LAN/VPN network selection, bounded reconnects without input replay, a CanvasTTY-style mobile shell and non-selectable controls.
+- Original contributor commits are preserved. Maintainer integration and follow-up patches are recorded separately; #159, #160, #161 and #162 are not included.
+
 ## 1.8.1
 
 - Fixed the Files reader rejecting all regular files on macOS: `/dev/fd` device paths are not treated as resolved file targets, and the opened file's identity is checked against its current path before reading. The 1.8.0 build was not published.

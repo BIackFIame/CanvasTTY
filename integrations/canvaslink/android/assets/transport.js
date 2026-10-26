@@ -1,6 +1,6 @@
 /* Public designer API v2. This file owns secure transport and delivery state. */
 (()=>{
- let pc,dc,video,paired=false,acceptPairing=true,move,moveFrame,peerEpoch=0,stats={},lastFrames=0,lastFrameAt=0,draftTouched=false;
+ let pc,dc,video,paired=false,acceptPairing=true,acceptOffers=false,move,moveFrame,peerEpoch=0,stats={},lastFrames=0,lastFrameAt=0,draftTouched=false,connectionTimer,retryTimer;
  const listeners=new Set(),computers=new Map();
  let state={version:2,connection:'idle',discovery:'searching',computers:[],computer:'',error:'',pending:0,delivery:null,stats:{},source:null,draft:''};
  const snapshot=()=>JSON.parse(JSON.stringify(state));
@@ -8,17 +8,30 @@
  const signal=message=>Native.signal(JSON.stringify(message));
  const delivery=new CanvasLinkDelivery.Delivery({channel:()=>dc,onChange:value=>{if(['pointer','scroll'].includes(value.kind)){state.pending=value.pending;return;}update({delivery:value,pending:value.pending});}});
  const raw=value=>{if(dc?.readyState==='open'&&dc.bufferedAmount<65536)dc.send(JSON.stringify(value));};
- function close(){peerEpoch++;if(moveFrame)cancelAnimationFrame(moveFrame);moveFrame=null;move=null;delivery.close();dc=null;const previous=pc;pc=null;previous?.close();stats={};lastFrames=0;lastFrameAt=0;window.CanvasLink.stats={};update({stats:{},source:null});if(video)video.srcObject=null;}
+ function stopWaiting(){clearTimeout(connectionTimer);connectionTimer=null;}
+ function waitForConnection(){
+   if(connectionTimer||!paired||document.hidden)return;
+   // Offers and polling retries share one deadline, so they cannot prolong it forever.
+   connectionTimer=setTimeout(()=>{connectionTimer=null;if(!paired||document.hidden)return;acceptOffers=false;close();update({connection:'reconnecting',error:'lan-connection-timeout'});},30000);
+ }
+ function connected(){stopWaiting();clearTimeout(retryTimer);retryTimer=null;update({connection:'connected',error:''});}
+ function close(){clearTimeout(retryTimer);retryTimer=null;peerEpoch++;if(moveFrame)cancelAnimationFrame(moveFrame);moveFrame=null;move=null;delivery.close();dc=null;const previous=pc;pc=null;previous?.close();stats={};lastFrames=0;lastFrameAt=0;window.CanvasLink.stats={};update({stats:{},source:null});if(video)video.srcObject=null;}
+ function retry(current){
+   if(current!==pc||!paired||document.hidden)return;
+   delivery.close();update({connection:'reconnecting'});waitForConnection();
+   clearTimeout(retryTimer);retryTimer=setTimeout(()=>{retryTimer=null;if(paired&&!document.hidden&&current===pc&&(current.connectionState!=='connected'||dc?.readyState!=='open'))signal({type:'ping'});},2500);
+ }
+ function resume(){if(!paired||document.hidden)return;stopWaiting();close();acceptOffers=true;update({connection:'reconnecting',error:''});waitForConnection();signal({type:'ping'});}
  async function offer(message){
-   close();update({connection:'connecting',error:''});
+   close();waitForConnection();update({connection:'connecting',error:''});
    const epoch=peerEpoch;
    try{
    const current=pc=new RTCPeerConnection({iceServers:[]});
    current.ontrack=event=>{if(current!==pc)return;if(video){video.srcObject=event.streams[0];video.play().catch(()=>{});}};
    current.ondatachannel=event=>{
      if(current!==pc)return;dc=event.channel;
-     dc.onopen=()=>{if(current===pc)update({connection:'connected',error:''});};
-     dc.onclose=()=>{if(current===pc){delivery.close();update({connection:'reconnecting'});}};
+     dc.onopen=()=>{if(current===pc)connected();};
+     dc.onclose=()=>retry(current);
      dc.onmessage=event=>{
        if(current!==pc||typeof event.data!=='string'||event.data.length>40000)return;
        let value;try{value=JSON.parse(event.data);}catch{return;}
@@ -30,24 +43,21 @@
    };
    current.onconnectionstatechange=()=>{
      if(current!==pc)return;
-     if(current.connectionState==='connected'&&dc?.readyState==='open')update({connection:'connected',error:''});
-     if(['failed','disconnected'].includes(current.connectionState)){
-       delivery.close();update({connection:'reconnecting'});
-       setTimeout(()=>{if(paired&&current===pc&&current.connectionState!=='connected')signal({type:'ping'});},2500);
-     }
+     if(current.connectionState==='connected'&&dc?.readyState==='open')connected();
+     if(['failed','disconnected'].includes(current.connectionState))retry(current);
    };
    await current.setRemoteDescription(message);if(current!==pc)return;
    const answer=await current.createAnswer();if(current!==pc)return;
    await current.setLocalDescription(answer);if(current!==pc)return;
    await new Promise((resolve,reject)=>{if(current.iceGatheringState==='complete')return resolve();const timer=setTimeout(()=>reject(Error('ice-timeout')),12000);current.onicegatheringstatechange=()=>{if(current.iceGatheringState==='complete'){clearTimeout(timer);resolve();}};});
    if(current===pc)signal({type:'answer',sdp:current.localDescription.sdp});
-   }catch(error){if(epoch===peerEpoch){close();update({connection:'error',error:error.message});}}
+   }catch(error){if(epoch===peerEpoch){acceptOffers=false;stopWaiting();close();update({connection:paired?'reconnecting':'error',error:error.message});}}
  }
  function connect({code,computerId,host}={}){
    const address=host||computers.get(computerId)?.host||(computers.size===1?[...computers.values()][0].host:'');
    if(!address){update({error:computers.size?'choose-computer':'computer-not-found'});return false;}
    if(!/^\d{6}$/.test(code||'')){update({error:'invalid-code'});return false;}
-   acceptPairing=true;update({connection:'pairing',computer:address,error:''});Native.connect(address,code);return true;
+   stopWaiting();close();paired=false;acceptOffers=false;acceptPairing=true;update({connection:'pairing',computer:address,error:''});Native.connect(address,code);return true;
  }
  function sendInput(input){
    if(input.type==='pointer'&&input.action==='move'){
@@ -60,11 +70,11 @@
  const api=window.CanvasLinkClient=Object.freeze({
    version:2,getState:snapshot,subscribe(listener){listeners.add(listener);listener(snapshot());return()=>listeners.delete(listener);},
    attachVideo(element){video=element;},connect,discover(){update({discovery:'searching'});Native.discover();},
-   disconnect(){acceptPairing=false;paired=false;close();Native.disconnect();update({connection:'idle'});},
+   disconnect(){acceptPairing=false;acceptOffers=false;paired=false;stopWaiting();close();Native.disconnect();update({connection:'idle',error:''});},
    sendInput,sendText(text){if(typeof text!=='string'||!text.length||text.length>8000)return Promise.reject(Error('invalid-text'));return sendInput({type:'text',text});},
    sendKey(key,modifiers=[]){return sendInput({type:'key',key,modifiers});},
    setDraft(text){draftTouched=true;state.draft=String(text).slice(0,8000);return Native.saveDraft(state.draft);},
-   hideKeyboard(){Native.hideKeyboard();},resume(){if(paired)signal({type:'ping'});}
+   hideKeyboard(){Native.hideKeyboard();},resume
  });
  window.CanvasLink={stats:{},fixture:null,connectForTest:(host,code)=>connect({host,code}),requestFixture:requestId=>raw({type:'stats',...(typeof requestId==='string'&&requestId.length<=80?{requestId}:{})}),receive(event){
    const value=event.value;
@@ -72,20 +82,24 @@
    if(event.type==='lost'){computers.delete(value);update({computers:[...computers.values()]});}
    if(event.type==='discovery')update({discovery:value});
    if(event.type==='draft'&&!draftTouched)update({draft:value||''});
-   if(event.type==='paired'){if(!acceptPairing)return;paired=true;update({connection:'connecting',computer:value.host,error:''});}
+   if(event.type==='paired'){if(!acceptPairing)return;stopWaiting();close();paired=true;acceptOffers=true;waitForConnection();update({connection:'connecting',computer:value.host,error:''});}
    if(event.type==='signal'){
      if(!paired||document.hidden)return;
-     if(value.type==='offer')void offer(value);
-     if(value.type==='disconnect'){close();update({connection:'reconnecting'});}
+     if(value.type==='offer'&&acceptOffers)void offer(value);
+     if(value.type==='disconnect'){acceptOffers=false;stopWaiting();close();update({connection:'reconnecting',error:value.reason==='host-connection-failed'?'host-connection-failed':state.error});}
    }
    if(event.type==='error')update({connection:paired?'reconnecting':'error',error:String(value)});
    if(event.type==='network')update({connection:paired?'reconnecting':'idle',error:String(value)});
+   if(event.type==='network-changed'){
+     acceptOffers=false;stopWaiting();close();
+     if(paired){update({connection:'reconnecting',error:value==='offline'?'lan-network-unavailable':''});if(value==='ready')resume();}
+   }
    // A reconnect ping sent while Wi-Fi is down cannot reach the host. Retry
    // only signalling once encrypted polling succeeds; input is never replayed.
-   if(event.type==='network-restored'&&paired&&!document.hidden&&state.connection!=='connected')signal({type:'ping'});
-   if(event.type==='disconnected'){paired=false;close();update({connection:'idle'});}
+   if(event.type==='network-restored'&&paired&&!document.hidden&&state.connection!=='connected'){acceptOffers=true;waitForConnection();signal({type:'ping'});}
+   if(event.type==='disconnected'){paired=false;acceptOffers=false;stopWaiting();close();update({connection:'idle'});}
  }};
- document.addEventListener('visibilitychange',()=>{if(!paired)return;if(document.hidden){signal({type:'disconnect'});close();update({connection:'suspended'});}else{update({connection:'reconnecting'});signal({type:'ping'});}});
+ document.addEventListener('visibilitychange',()=>{if(!paired)return;if(document.hidden){acceptOffers=false;stopWaiting();signal({type:'disconnect'});close();update({connection:'suspended'});}else resume();});
  setInterval(async()=>{
    const current=pc;if(!current)return;
    try{

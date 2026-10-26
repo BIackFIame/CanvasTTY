@@ -69,9 +69,9 @@ npm run dev
 
 The opt-in **Settings → Controls → Even G2** integration adapts CanvasTTY's terminal and AI-agent workflows to Even G2 glasses. Pair with six digits on the same local network, approve access on the computer, then read responses on the glasses HUD, dictate through local Nemotron speech recognition, and create, rename or close shared sessions. The companion includes a More agents picker and supports the desktop's provider list. Its source lives in `integrations/even-g2` and builds with the desktop. See [setup, distribution status and acceptance limits](docs/even-g2.md); a compatible public installer and Even Hub approval are still pending.
 
-## CanvasLink for Android (alpha)
+## CanvasLink 1.0 for Android
 
-**Settings → CanvasLink** streams the current CanvasTTY window to an Android phone or tablet on the same LAN, with touch, direct terminal keyboard input and a shortcut bar. Access starts off; pairing uses a short-lived six-digit code. The desktop host is integrated, with no separate application. See [setup, APK builds and platform limits](docs/canvaslink.md). The prototype has macOS/Android user acceptance; this source port remains experimental, with Windows/Linux device acceptance pending.
+**Settings → CanvasLink** streams the current CanvasTTY window to an Android phone or tablet on the same LAN, with touch, direct terminal keyboard input and a shortcut bar. Access starts off; pairing uses a short-lived six-digit code. The desktop host is integrated, with no separate application. See [setup, APK builds and platform limits](docs/canvaslink.md). Original CanvasLink implementation: @teo-nex (#166). The integrated LAN/VPN path has a Linux/Android user trial; final cross-platform device acceptance remains limited.
 
 ## Web companion
 

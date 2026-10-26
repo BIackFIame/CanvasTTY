@@ -847,6 +847,7 @@ export function SettingsPanel({
                 <button className="border-skin-choice terminal-background-reset" type="button"
                   disabled={appearance.terminalBackgroundContrast === 100 && appearance.terminalBackgroundSaturation === 100}
                   onClick={() => change({ terminalBackgroundContrast: 100, terminalBackgroundSaturation: 100 })}>
+                  <UiIcon name="reset" size="1.2em" />
                   {locale === "ru" ? "Сбросить контраст и насыщенность" : "Reset contrast and saturation"}
                 </button>
                 <h4 className="background-appearance-subheading">{locale === "ru" ? "Масштаб и положение" : "Scale and position"}</h4>
@@ -867,6 +868,7 @@ export function SettingsPanel({
                 <button className="border-skin-choice terminal-background-reset" type="button"
                   disabled={appearance.terminalBackgroundScale === 100 && appearance.terminalBackgroundOffsetX === 0 && appearance.terminalBackgroundOffsetY === 0}
                   onClick={() => change({ terminalBackgroundScale: 100, terminalBackgroundOffsetX: 0, terminalBackgroundOffsetY: 0 })}>
+                  <UiIcon name="reset" size="1.2em" />
                   {locale === "ru" ? "Сбросить масштаб и положение" : "Reset scale and position"}
                 </button>
                 <h4 className="background-appearance-subheading">{locale === "ru" ? "Воспроизведение" : "Playback"}</h4>
@@ -1160,7 +1162,7 @@ export function SettingsPanel({
                   })}
                   <CanvasMenuDivider />
                   <CanvasMenuRow
-                    icon="home"
+                    icon="reset"
                     muted
                     onClick={() => void onChange({ canvasLauncherItems: [...DEFAULT_CANVAS_LAUNCHER_ITEMS] })}
                   >{t(locale, "resetCanvasLauncher")}</CanvasMenuRow>

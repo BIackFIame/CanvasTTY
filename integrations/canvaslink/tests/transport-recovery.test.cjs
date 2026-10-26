@@ -1,13 +1,13 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
 const source=fs.readFileSync(path.join(__dirname,'../android/assets/transport.js'),'utf8');
 function client({remoteDescription}={}){
- const signals=[],sent=[],peers=[],intervals=[],events=new Map(),frames=new Map();let frameId=0;
+ const signals=[],sent=[],peers=[],intervals=[],events=new Map(),frames=new Map(),timers=new Set();let frameId=0;
  class Peer{
   constructor(){peers.push(this);this.connectionState='new';this.iceGatheringState='complete';}
   async setRemoteDescription(value){if(remoteDescription)await remoteDescription(value);} async createAnswer(){return {type:'answer',sdp:'local'};} async setLocalDescription(value){this.localDescription=value;} close(){this.closed=true;}
  }
- const context={window:{},document:{hidden:false,addEventListener:(type,handler)=>events.set(type,handler)},Native:{signal:json=>signals.push(JSON.parse(json)),disconnect(){},diagnostics(){},discover(){},restore(){},loadDraft(){}},CanvasLinkDelivery:{Delivery:class{close(){}send(value){sent.push(value);return Promise.resolve();}receive(){}}},RTCPeerConnection:Peer,setInterval:fn=>intervals.push(fn),setTimeout(){},requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId;},cancelAnimationFrame:id=>frames.delete(id),performance:{now:()=>1}};
- vm.runInNewContext(source,context);return {...context,signals,sent,peers,intervals,events,frames,receive:context.window.CanvasLink.receive,api:context.window.CanvasLinkClient};
+ const context={window:{},document:{hidden:false,addEventListener:(type,handler)=>events.set(type,handler)},Native:{signal:json=>signals.push(JSON.parse(json)),disconnect(){},diagnostics(){},discover(){},restore(){},loadDraft(){}},CanvasLinkDelivery:{Delivery:class{close(){}send(value){sent.push(value);return Promise.resolve();}receive(){}}},RTCPeerConnection:Peer,setInterval:fn=>intervals.push(fn),setTimeout(fn,delay){const timer={fn,delay};timers.add(timer);return timer;},clearTimeout:timer=>timers.delete(timer),requestAnimationFrame:fn=>{frames.set(++frameId,fn);return frameId;},cancelAnimationFrame:id=>frames.delete(id),performance:{now:()=>1}};
+ vm.runInNewContext(source,context);return {...context,signals,sent,peers,intervals,events,frames,timers,receive:context.window.CanvasLink.receive,api:context.window.CanvasLinkClient};
 }
 test('Successful encrypted polling after an outage retries signalling without replaying input',()=>{
  const c=client();c.receive({type:'paired',value:{host:'192.168.2.22:3497'}});c.receive({type:'network',value:'offline'});
@@ -75,4 +75,32 @@ test('A negotiation completing after disconnect sends no answer',async()=>{
  c.receive({type:'paired',value:{host:'local'}});c.receive({type:'signal',value:{type:'offer',sdp:'old'}});
  c.api.disconnect();resolveOld();await new Promise(resolve=>setImmediate(resolve));
  assert.deepEqual(c.signals,[]);assert.equal(c.api.getState().connection,'idle');
+});
+
+test('A connection deadline rejects late offers until an explicit retry',async()=>{
+ const c=client();c.receive({type:'paired',value:{host:'local'}});
+ const deadline=[...c.timers][0];assert.equal(deadline.delay,30000);
+ c.timers.delete(deadline);deadline.fn();
+ assert.equal(c.api.getState().connection,'reconnecting');assert.equal(c.api.getState().error,'lan-connection-timeout');
+ c.receive({type:'signal',value:{type:'offer',sdp:'late'}});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(c.peers.length,0);
+ c.receive({type:'signal',value:{type:'disconnect'}});assert.equal(c.api.getState().error,'lan-connection-timeout');
+ c.api.resume();assert.deepEqual(c.signals,[{type:'ping'}]);assert.equal(c.timers.size,1);
+});
+test('Replacing an offer retains the original deadline and connecting clears it',async()=>{
+ const c=client();c.receive({type:'paired',value:{host:'local'}});const deadline=[...c.timers][0];
+ c.receive({type:'signal',value:{type:'offer',sdp:'first'}});await new Promise(resolve=>setImmediate(resolve));
+ c.receive({type:'signal',value:{type:'offer',sdp:'second'}});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(c.timers.size,1);assert.equal([...c.timers][0],deadline);
+ c.peers[1].ondatachannel({channel:{readyState:'open'}});c.peers[1].connectionState='connected';c.peers[1].onconnectionstatechange();
+ assert.equal(c.api.getState().connection,'connected');assert.equal(c.timers.size,0);
+});
+test('A LAN network change closes the old peer and discards buffered pointer input',async()=>{
+ const c=client();c.receive({type:'paired',value:{host:'local'}});
+ c.receive({type:'signal',value:{type:'offer',sdp:'first'}});await new Promise(resolve=>setImmediate(resolve));
+ c.api.sendInput({type:'pointer',action:'move',x:.5,y:.5,button:0});
+ c.receive({type:'network-changed',value:'offline'});
+ assert.equal(c.peers[0].closed,true);assert.equal(c.frames.size,0);assert.equal(c.signals.filter(s=>s.type==='ping').length,0);
+ c.receive({type:'network-changed',value:'ready'});assert.equal(c.signals.filter(s=>s.type==='ping').length,1);
+ assert.deepEqual(c.sent,[]);
 });

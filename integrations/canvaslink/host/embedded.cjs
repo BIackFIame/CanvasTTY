@@ -2,6 +2,7 @@
 const {app,BrowserWindow,ipcMain,session,nativeImage}=require('electron');
 const http=require('node:http'),os=require('node:os'),path=require('node:path'),fs=require('node:fs');
 const {publish}=require('./discovery.cjs');
+const {lanAddresses:addresses}=require('./network.cjs');
 const {Pairing,privateAddress}=require('./security.cjs');
 const {InputQueue}=require('./input-queue.cjs');
 const {focusOwnedWindow}=require('./owned-focus.cjs');
@@ -24,7 +25,6 @@ function install({getWindow,glasses}={}){
   else{if(!enabled)throw Error('canvaslink-disabled');pairing.rotate();report={phase:'waiting',inputs:0,error:''};events({type:'state'});}
   return settingsSnapshot();
  }});
- const addresses=()=>Object.values(os.networkInterfaces()).flat().filter(i=>i.family==='IPv4'&&!i.internal&&privateAddress(i.address)).map(i=>i.address);
  const events=value=>{if(panel&&!panel.isDestroyed())panel.webContents.send('link:event',value);};
  const source=()=>({id:'embedded:'+target.id,name:target.getTitle(),pid:process.pid});
  const state=()=>{const [width,height]=target.getContentSize();return {pin:pairing.pin,expires:pairing.expires,addresses:addresses(),port,fixture:false,embedded:true,nativeCapture:true,captureMode,glassesSupported:!!glasses,width,height,source:target.getTitle(),connected:[...pairing.sessions.values()].map(s=>({id:s.id,name:s.name})),report};};

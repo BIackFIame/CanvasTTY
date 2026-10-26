@@ -300,7 +300,8 @@ function TerminalCardView({
   const hasAsciiBackground = background !== "none";
   const asciiBackgroundRef = useRef(hasAsciiBackground);
   asciiBackgroundRef.current = hasAsciiBackground;
-  const terminalColors = terminalTheme(palette, pixelSkinTheme, hasAsciiBackground);
+  // The card keeps its fill when summary mode hides the transparent terminal surface.
+  const terminalColors = terminalTheme(palette, pixelSkinTheme);
   const terminalBackground = terminalColors.background;
   const terminalForeground = terminalColors.foreground;
   const searchAddonRef = useRef<SearchAddon | null>(null);
@@ -501,12 +502,6 @@ function TerminalCardView({
     terminal.loadAddon(webLinksAddon);
     const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
-    let detachTextBackdrop = () => {};
-    if (hasAsciiBackground) {
-      import("./terminalTextBackdrop").then((m) => {
-        if (host.isConnected) detachTextBackdrop = m.attachTerminalTextBackdrop(terminal, host);
-      });
-    }
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
     pinnedInput.className = "terminal-card__pinned-input";
@@ -769,7 +764,6 @@ function TerminalCardView({
     return () => {
       // No refit on the way out: the card is going away, its PTY size must not change.
       fitRef.current = null;
-      detachTextBackdrop();
       restoreRendererTransition();
       unregisterWebgl();
       cancelAnimationFrame(frame);
@@ -799,6 +793,20 @@ function TerminalCardView({
       terminal.dispose();
     };
   }, [session.id]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const host = terminalHost.current;
+    if (!hasAsciiBackground || !terminal || !host) return;
+    let disposed = false;
+    let detach = () => {};
+    import("./terminalTextBackdrop").then((module) => {
+      if (!disposed && terminalRef.current === terminal && host.isConnected) {
+        detach = module.attachTerminalTextBackdrop(terminal, host);
+      }
+    });
+    return () => { disposed = true; detach(); };
+  }, [session.id, hasAsciiBackground]);
 
   useEffect(() => {
     const terminal = terminalRef.current;

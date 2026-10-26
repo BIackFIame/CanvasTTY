@@ -96,7 +96,7 @@ async function start(id) {
     const params = sender.getParameters();
     if (params.encodings?.length) { params.encodings[0].maxBitrate = 18000000; params.degradationPreference='maintain-resolution'; await sender.setParameters(params); }
     if(current())report('offered');
-  } catch (error) { if(!current()){captured?.getTracks().forEach(t=>t.stop());return;} $('error').textContent = error.message; report('capture-error', error.message); closePeer(); }
+  } catch (error) { if(!current()){captured?.getTracks().forEach(t=>t.stop());return;} $('error').textContent = error.message; report('capture-error', error.message); closePeer();await window.host.signal(id,{type:'disconnect',reason:'host-connection-failed'}).catch(()=>{}); }
 }
 $('refresh').onclick = async () => {
   try {

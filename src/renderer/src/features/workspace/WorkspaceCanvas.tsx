@@ -1506,7 +1506,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
       {homeEditing && (
         <div className="home-editor-toolbar" data-interactive="true">
           <strong>{t(settings.locale, "homeEditor")}</strong>
-          <button type="button" onClick={onResetHomeLayout}>{t(settings.locale, "resetHome")}</button>
+          <button className="button-with-icon" type="button" onClick={onResetHomeLayout}><UiIcon name="reset" size={15} />{t(settings.locale, "resetHome")}</button>
           <button className="home-editor-toolbar__done" type="button" disabled={!homeLayoutValid}
             title={homeLayoutValid ? undefined : t(settings.locale, "homeLayoutOutside")}
             onClick={onFinishHomeEdit}>{t(settings.locale, "doneEditing")}</button>

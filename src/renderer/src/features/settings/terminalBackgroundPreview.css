@@ -1,13 +1,13 @@
-.background-appearance-editor { min-width: 0; container-type: inline-size; margin: 1.6em 0; }
-.background-appearance-heading { position: sticky; top: -.35em; z-index: 3; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 1.5em; padding: .7em 0; background: var(--surface); border-bottom: 1px solid color-mix(in srgb, var(--text) 9%, transparent); }
+.background-appearance-editor { --background-editor-surface: color-mix(in srgb, var(--surface) 86%, #000); min-width: 0; container-type: inline-size; margin: 1.6em 0; padding: 1.25em; border: 1px solid color-mix(in srgb, var(--text) 10%, transparent); border-radius: 1em; background: var(--background-editor-surface); }
+.background-appearance-heading { position: sticky; top: -.35em; z-index: 3; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 1.5em; padding: .7em 0; background: var(--background-editor-surface); border-bottom: 1px solid color-mix(in srgb, var(--text) 9%, transparent); }
 .background-appearance-heading h3 { margin: 0; font-size: 1.15em; color: var(--text); }
 .background-appearance-description { max-width: 68ch; padding-top: .7em; }
 .background-appearance-navigation .segmented { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .background-appearance-navigation .segmented__button--active:hover { background: var(--primary); color: var(--text-dark); }
-.background-appearance-subheading { margin: 1.5em 0 .2em; font-size: .82em; color: var(--text-muted-on-dark); }
+.background-appearance-subheading { margin: 1.8em 0 .5em; font-size: .9em; font-weight: 700; color: var(--text); }
 .background-appearance-controls > .background-appearance-subheading:first-child { margin-top: 1.3em; }
 .background-appearance-editor > .setting-group--field:not(.setting-group--stacked) { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); }
-.background-appearance-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .65fr); gap: 1.2em; align-items: start; }
+.background-appearance-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, .65fr); gap: 1.5em; align-items: start; }
 .background-appearance-controls { min-width: 0; grid-column: 1; grid-row: 1; }
 .background-appearance-controls .setting-group--field { grid-template-columns: minmax(0, .8fr) minmax(0, 1.2fr); gap: .8em; }
 .background-appearance-controls .setting-group--stacked { grid-template-columns: minmax(0, 1fr); }
@@ -26,12 +26,11 @@
 .terminal-background-live-preview .terminal-background-action:disabled { opacity: .45; cursor: not-allowed; }
 @container (max-width: 680px) {
   .background-appearance-layout { display: flex; flex-direction: column; }
-  .terminal-background-live-preview { width: 100%; z-index: 2; box-shadow: 0 8px 12px rgb(0 0 0 / 15%); }
+  .terminal-background-live-preview { position: static; width: 100%; margin-top: 1em; }
   .terminal-background-live-preview__surface { width: min(100%, calc(20vh * var(--preview-aspect))); }
   .background-appearance-controls { width: 100%; }
 }
 @container (max-width: 440px) {
   .background-appearance-heading { grid-template-columns: minmax(0, 1fr); gap: .6em; }
-  .terminal-background-live-preview { top: 6.5em; }
   .background-appearance-editor > .setting-group--field:not(.setting-group--stacked) { grid-template-columns: minmax(0, 1fr); }
 }
