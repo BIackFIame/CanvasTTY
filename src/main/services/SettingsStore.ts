@@ -646,7 +646,7 @@ export function normalizeSettings(
     terminalBackground: isTerminalBackgroundId(source.terminalBackground)
       ? source.terminalBackground : fallback.terminalBackground ?? "none",
     terminalBackgroundBrightness: typeof source.terminalBackgroundBrightness === "number" && Number.isFinite(source.terminalBackgroundBrightness)
-      ? Math.min(100, Math.max(10, source.terminalBackgroundBrightness)) : fallback.terminalBackgroundBrightness ?? 45,
+      ? Math.min(100, Math.max(5, source.terminalBackgroundBrightness)) : fallback.terminalBackgroundBrightness ?? 45,
     terminalBackgroundContrast: typeof source.terminalBackgroundContrast === "number" && Number.isFinite(source.terminalBackgroundContrast)
       ? Math.min(200, Math.max(0, source.terminalBackgroundContrast)) : fallback.terminalBackgroundContrast ?? 100,
     terminalBackgroundSaturation: typeof source.terminalBackgroundSaturation === "number" && Number.isFinite(source.terminalBackgroundSaturation)

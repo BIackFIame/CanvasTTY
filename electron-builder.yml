@@ -73,7 +73,7 @@ electronFuses:
   enableNodeCliInspectArguments: false
   enableEmbeddedAsarIntegrityValidation: true
 extraResources:
-  - from: src/renderer/src/vendor/ascii-rest/LICENSE.txt
+  - from: node_modules/ascii.rest/LICENSE
     to: licenses/ascii-rest.txt
   - from: assets/mascot-pipeline
     to: mascot-pipeline

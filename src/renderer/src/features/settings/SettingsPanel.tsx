@@ -1,7 +1,6 @@
 import { EvenG2Controls } from "./EvenG2Controls";
 import { BackgroundAppearanceManager } from "./BackgroundAppearanceManager";
 import { TerminalBackgroundChoices } from "./TerminalBackgroundChoices";
-import { AnimatedBackgroundCreator } from "./AnimatedBackgroundCreator";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   AppSettings,
@@ -177,6 +176,8 @@ interface SettingsPanelProps {
   open: boolean;
   openUpdatesRequest: number;
   settings: AppSettings;
+  backgroundsSuspended?: boolean;
+  onToggleMomEntered?(): void;
   agentAvailability: AgentCliAvailability | null;
   onRecheckAgentClis(): Promise<void>;
   plugins: InstalledPlugin[];
@@ -214,6 +215,8 @@ export function SettingsPanel({
   open,
   openUpdatesRequest,
   settings,
+  backgroundsSuspended,
+  onToggleMomEntered,
   agentAvailability,
   onRecheckAgentClis,
   plugins,
@@ -786,7 +789,6 @@ export function SettingsPanel({
                   onDeletedChange={(terminalBackgroundDeleted) => void onChange({ terminalBackgroundDeleted })}
                   onChange={(terminalBackground) => change({ terminalBackground })}
                   onDisableAll={disableAll} />
-                <AnimatedBackgroundCreator locale={locale} />
                 <div style={{ marginTop: "14px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "12px", padding: "10px 14px", borderRadius: "6px", background: "var(--surface-soft)", border: "1px solid color-mix(in srgb, var(--text) 16%, transparent)" }}>
                   <div>
                     <strong style={{ fontSize: "12px", display: "block", color: "var(--text)" }}>
@@ -888,17 +890,12 @@ export function SettingsPanel({
                       {settings.shortcuts.momEntered || "F8"}
                     </span>
                     <button type="button" className="border-skin-choice" style={{ padding: "5px 14px", fontSize: "12px", cursor: "pointer" }}
-                      onClick={async () => {
-                        const hasAny = settings.terminalBackground !== "none" || Object.keys(settings.terminalBackgroundOverrides).length > 0;
-                        if (hasAny) {
-                          await onChange({ terminalBackground: "none", terminalBackgroundOverrides: {} });
-                        } else {
-                          await onChange({ terminalBackground: appearance.terminalBackground !== "none" ? appearance.terminalBackground : "matrix-rain" });
-                        }
+                      onClick={() => {
+                        onToggleMomEntered?.();
                       }}>
-                      {settings.terminalBackground === "none" && Object.keys(settings.terminalBackgroundOverrides).length === 0
-                        ? (locale === "ru" ? "Включить фоны обратно" : "Restore backgrounds")
-                        : (locale === "ru" ? "Скрыть все фоны сейчас" : "Hide all backgrounds now")}
+                      {backgroundsSuspended
+                        ? (locale === "ru" ? "Включить фоны обратно (F8)" : "Restore backgrounds (F8)")
+                        : (locale === "ru" ? "Скрыть все фоны сейчас (F8)" : "Hide all backgrounds now (F8)")}
                     </button>
                   </div>
                 </SettingGroup>

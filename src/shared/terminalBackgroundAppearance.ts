@@ -39,7 +39,7 @@ export function normalizeBackgroundAppearance(value: unknown): TerminalBackgroun
       ? Math.min(max, Math.max(min, source[key] as number)) : BACKGROUND_APPEARANCE_DEFAULTS[key] as number;
   return {
     terminalBackground: isTerminalBackgroundId(source.terminalBackground) ? source.terminalBackground : "none",
-    terminalBackgroundBrightness: number("terminalBackgroundBrightness", 10, 100),
+    terminalBackgroundBrightness: number("terminalBackgroundBrightness", 5, 100),
     terminalBackgroundContrast: number("terminalBackgroundContrast", 0, 200),
     terminalBackgroundSaturation: number("terminalBackgroundSaturation", 0, 200),
     terminalBackgroundSpeed: number("terminalBackgroundSpeed", .25, 2),

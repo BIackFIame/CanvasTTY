@@ -64,7 +64,16 @@ export function AsciiTerminalBackground({ scene, brightness, contrast, saturatio
     canvas.height = initialSize.height;
     const offscreen = canvas.transferControlToOffscreen();
     worker.postMessage({ type: "init", canvas: offscreen, scene, pixelRatio: initialSize.pixelRatio } satisfies BackgroundWorkerMessage, [offscreen]);
-    worker.onerror = (event) => console.warn("ASCII background worker failed", scene, event.message);
+    worker.onmessage = (event) => {
+      if (event.data?.type === "error") {
+        console.warn("ASCII background load failed:", scene, event.data.error);
+        canvas.style.display = "none";
+      }
+    };
+    worker.onerror = (event) => {
+      console.warn("ASCII background worker failed", scene, event.message);
+      canvas.style.display = "none";
+    };
     const reduced = matchMedia("(prefers-reduced-motion: reduce)");
     let visible = false;
     const run = (): void => {

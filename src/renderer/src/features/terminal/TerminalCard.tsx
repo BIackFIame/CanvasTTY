@@ -1,6 +1,9 @@
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, memo, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import type { TerminalBackgroundId } from "../../../../shared/terminalBackground";
-import { AsciiTerminalBackground } from "./AsciiTerminalBackground";
+
+const AsciiTerminalBackground = lazy(() =>
+  import("./AsciiTerminalBackground").then((m) => ({ default: m.AsciiTerminalBackground }))
+);
 import { attachTerminalTextBackdrop } from "./terminalTextBackdrop";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
@@ -458,7 +461,9 @@ function TerminalCardView({
       // into the pinned row below it.
       scrollOnUserInput: false,
       allowTransparency: true,
-      minimumContrastRatio: hasAsciiBackground ? 7 : 1,
+      minimumContrastRatio: hasAsciiBackground && backgroundReadability
+        ? Math.max(1, Math.min(7, Math.round((backgroundReadabilityStrength ?? 70) / 14)))
+        : 1,
       macOptionClickForcesSelection: copyOnSelectRef.current,
       altClickMovesCursor: !(copyOnSelectRef.current && window.canvasTTY.window.isMacOS),
       // Search decorations (highlighting every match and reporting the match
@@ -793,7 +798,9 @@ function TerminalCardView({
     const terminal = terminalRef.current;
     if (terminal) {
       terminal.options.theme = terminalTheme(palette, pixelSkinTheme, hasAsciiBackground);
-      terminal.options.minimumContrastRatio = hasAsciiBackground ? 7 : 1;
+      terminal.options.minimumContrastRatio = hasAsciiBackground && backgroundReadability
+        ? Math.max(1, Math.min(7, Math.round((backgroundReadabilityStrength ?? 70) / 14)))
+        : 1;
       terminal.refresh(0, terminal.rows - 1);
     }
   }, [palette, pixelSkinTheme, hasAsciiBackground, backgroundReadability, backgroundReadabilityStrength]);
@@ -806,7 +813,6 @@ function TerminalCardView({
   }, [copyOnSelect]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
-    if (asciiBackgroundRef.current) return false;
     if (webglAddonRef.current) return true;
     const transitionElement = beginRendererTransition(terminal);
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
@@ -866,8 +872,8 @@ function TerminalCardView({
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
     // Preserved WebGL frames blend transparent backgrounds over old glyphs; use xterm's DOM renderer for ASCII scenes.
-    webglContextPool().update(session.id, { eligible: !hasAsciiBackground && !summaryMode && webglScaleAllowed, focused });
-  }, [session.id, focused, summaryMode, webglScaleAllowed, hasAsciiBackground]);
+    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
@@ -1344,11 +1350,15 @@ function TerminalCardView({
         {!pixelControls && terminalActions}
       </header>
       <div className={`terminal-card__surface${hasAsciiBackground ? " terminal-card__surface--ascii" : ""}${hasAsciiBackground && backgroundReadability ? " terminal-card__surface--ascii-readable" : ""}`} data-suspended={!surfaceIsLive(lifecycle)} ref={terminalHost}>
-        {hasAsciiBackground && <AsciiTerminalBackground scene={background} brightness={backgroundBrightness} contrast={backgroundContrast} saturation={backgroundSaturation}
-          paused={backgroundPaused} speed={backgroundSpeed} scale={backgroundScale}
-          pauseOnOutput={backgroundPauseOnOutput} outputActivity={backgroundOutputActivity} synchronized={backgroundSynchronized}
-          focusDimming={backgroundFocusDimming} focused={focused}
-          offsetX={backgroundOffsetX} offsetY={backgroundOffsetY} live={surfaceIsLive(lifecycle)} />}
+        {hasAsciiBackground && (
+          <Suspense fallback={null}>
+            <AsciiTerminalBackground scene={background} brightness={backgroundBrightness} contrast={backgroundContrast} saturation={backgroundSaturation}
+              paused={backgroundPaused} speed={backgroundSpeed} scale={backgroundScale}
+              pauseOnOutput={backgroundPauseOnOutput} outputActivity={backgroundOutputActivity} synchronized={backgroundSynchronized}
+              focusDimming={backgroundFocusDimming} focused={focused}
+              offsetX={backgroundOffsetX} offsetY={backgroundOffsetY} live={surfaceIsLive(lifecycle)} />
+          </Suspense>
+        )}
       </div>
       {pixelSkinTheme && (
         <Canvas2DSkinView theme={pixelSkinTheme} status={session.status} artState={pixelArtState}

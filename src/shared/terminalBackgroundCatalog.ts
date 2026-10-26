@@ -1,34 +1,9 @@
-// Generated from https://ascii.rest/library.js on 2026-10-21.
 export const TERMINAL_BACKGROUND_CATALOG = [
-  {
-    "id": "a0",
-    "name": "a0",
-    "category": "companies",
-    "note": "the rounded a with a round hole, glinting now and then"
-  },
-  {
-    "id": "agentmail",
-    "name": "agentmail",
-    "category": "companies",
-    "note": "the agent in a brimmed hat, glinting now and then"
-  },
-  {
-    "id": "almalinux",
-    "name": "almalinux",
-    "category": "distros",
-    "note": "five coloured figures in a ring, scanned now and then"
-  },
   {
     "id": "alpine-dawn",
     "name": "alpine dawn",
     "category": "scenes",
     "note": "snow peaks catching first light above a still, misty mountain lake"
-  },
-  {
-    "id": "alpine-linux",
-    "name": "alpine linux",
-    "category": "distros",
-    "note": "the mountain in a hexagon, scanned now and then"
   },
   {
     "id": "analog-clock",
@@ -37,22 +12,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a round clock face showing the local time, seconds ticking"
   },
   {
-    "id": "apple",
-    "name": "apple",
-    "category": "companies",
-    "note": "the apple with a bite out of it, glinting now and then"
-  },
-  {
     "id": "aquarium",
     "name": "aquarium",
     "category": "creatures",
     "note": "fish swimming and turning in a tank, bubbles and weed"
-  },
-  {
-    "id": "arch-linux",
-    "name": "arch linux",
-    "category": "distros",
-    "note": "the blue arch, scanned now and then"
   },
   {
     "id": "aurora",
@@ -65,12 +28,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "aurora fjord",
     "category": "scenes",
     "note": "aurora curtains rippling over a still fjord, a cabin lit on the shore"
-  },
-  {
-    "id": "autumn",
-    "name": "autumn",
-    "category": "companies",
-    "note": "the leaf with a slash for its vein, glinting now and then"
   },
   {
     "id": "bar-chart",
@@ -121,12 +78,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a butterfly flapping and gliding along a wandering path"
   },
   {
-    "id": "c",
-    "name": "c",
-    "category": "logos",
-    "note": "a c on a blue hexagon, glinting now and then"
-  },
-  {
     "id": "calendar",
     "name": "calendar",
     "category": "ui",
@@ -157,12 +108,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a tabby asleep on its paws, breathing slowly"
   },
   {
-    "id": "centos",
-    "name": "centos",
-    "category": "distros",
-    "note": "four coloured squares in a star, scanned now and then"
-  },
-  {
     "id": "cherry-blossom",
     "name": "cherry blossom",
     "category": "nature",
@@ -175,40 +120,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "sand travelling to the nodal lines of a ringing plate"
   },
   {
-    "id": "clojure",
-    "name": "clojure",
-    "category": "logos",
-    "note": "a lambda in a green and blue circle, glinting now and then"
-  },
-  {
-    "id": "cloudflare",
-    "name": "cloudflare",
-    "category": "companies",
-    "note": "the orange cloud, glinting now and then"
-  },
-  {
-    "id": "coderabbit",
-    "name": "coderabbit",
-    "category": "companies",
-    "note": "the sitting rabbit in its orange disc, glinting now and then"
-  },
-  {
     "id": "coffee",
     "name": "coffee",
     "category": "objects",
     "note": "steam curling up from a cup of coffee on its saucer"
-  },
-  {
-    "id": "collabute",
-    "name": "collabute",
-    "category": "companies",
-    "note": "the disc shading white to black, in a black ring, glinting now and then"
-  },
-  {
-    "id": "command-code",
-    "name": "command code",
-    "category": "companies",
-    "note": "the command key in a rounded square, glinting now and then"
   },
   {
     "id": "contour-map",
@@ -217,28 +132,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "an island in contour lines, its hills slowly reshaping"
   },
   {
-    "id": "cpp",
-    "name": "c++",
-    "category": "logos",
-    "note": "c++ on a blue hexagon, glinting now and then"
-  },
-  {
     "id": "cpu-meters",
     "name": "cpu meters",
     "category": "data",
     "note": "htop-style core, memory and swap meters over a process list"
-  },
-  {
-    "id": "csharp",
-    "name": "c#",
-    "category": "logos",
-    "note": "c# on a purple hexagon, glinting now and then"
-  },
-  {
-    "id": "css",
-    "name": "css",
-    "category": "logos",
-    "note": "the blue shield with a 3, glinting now and then"
   },
   {
     "id": "cube",
@@ -247,34 +144,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a stippled hidden-line cube turning a quarter at a time"
   },
   {
-    "id": "dart",
-    "name": "dart",
-    "category": "logos",
-    "note": "the dart, in blue and teal, glinting now and then"
-  },
-  {
-    "id": "databuddy",
-    "name": "databuddy",
-    "category": "companies",
-    "note": "the databuddy bunny, glinting now and then"
-  },
-  {
-    "id": "debian",
-    "name": "debian",
-    "category": "distros",
-    "note": "the red swirl, scanned now and then"
-  },
-  {
     "id": "deep-reef",
     "name": "deep reef",
     "category": "scenes",
     "note": "light shafts, swaying kelp and a turning school of fish over a reef"
-  },
-  {
-    "id": "deepin",
-    "name": "deepin",
-    "category": "distros",
-    "note": "the swirl in a blue ring, scanned now and then"
   },
   {
     "id": "desert-night",
@@ -343,30 +216,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the moon slides over the sun; diamond ring, then corona"
   },
   {
-    "id": "elementary-os",
-    "name": "elementary os",
-    "category": "distros",
-    "note": "the e in a ring, scanned now and then"
-  },
-  {
-    "id": "elixir",
-    "name": "elixir",
-    "category": "logos",
-    "note": "the purple drop, glinting now and then"
-  },
-  {
-    "id": "elm",
-    "name": "elm",
-    "category": "logos",
-    "note": "seven tangram pieces in a square, glinting now and then"
-  },
-  {
-    "id": "endeavouros",
-    "name": "endeavouros",
-    "category": "distros",
-    "note": "the violet sail, scanned now and then"
-  },
-  {
     "id": "epicycles",
     "name": "epicycles",
     "category": "generative",
@@ -379,22 +228,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "spectrum bars bouncing to a beat, peak caps falling slowly"
   },
   {
-    "id": "erlang",
-    "name": "erlang",
-    "category": "logos",
-    "note": "the red e in brackets, glinting now and then"
-  },
-  {
     "id": "falling-sand",
     "name": "falling sand",
     "category": "physics",
     "note": "sand pouring into a heap, then draining through the shelf"
-  },
-  {
-    "id": "fedora",
-    "name": "fedora",
-    "category": "distros",
-    "note": "the f in its blue bubble, scanned now and then"
   },
   {
     "id": "fern",
@@ -475,12 +312,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "semicircle dial, the needle overshoots each new reading"
   },
   {
-    "id": "gentoo",
-    "name": "gentoo",
-    "category": "distros",
-    "note": "the lavender g, scanned now and then"
-  },
-  {
     "id": "glider-gun",
     "name": "glider gun",
     "category": "generative",
@@ -499,18 +330,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "three meshing gears turning, after glxgears"
   },
   {
-    "id": "go",
-    "name": "go",
-    "category": "logos",
-    "note": "go with its speed lines, glinting now and then"
-  },
-  {
-    "id": "greptile",
-    "name": "greptile",
-    "category": "companies",
-    "note": "the g folded into a cube, in green, glinting now and then"
-  },
-  {
     "id": "gyroscope",
     "name": "gyroscope",
     "category": "shapes",
@@ -521,12 +340,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "harmonograph",
     "category": "physics",
     "note": "a pen on two decaying pendulums winding a figure inward"
-  },
-  {
-    "id": "haskell",
-    "name": "haskell",
-    "category": "logos",
-    "note": "an angle, a lambda and an equals sign, glinting now and then"
   },
   {
     "id": "hawa-mahal",
@@ -553,18 +366,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "contribution calendar, a day at a time, weeks scrolling left"
   },
   {
-    "id": "helium",
-    "name": "helium",
-    "category": "companies",
-    "note": "the six-point asterisk, in blue, glinting now and then"
-  },
-  {
-    "id": "helmcode",
-    "name": "helmcode",
-    "category": "companies",
-    "note": "the helmcode hexagon in its violet, glinting now and then"
-  },
-  {
     "id": "hilbert-curve",
     "name": "hilbert curve",
     "category": "generative",
@@ -577,28 +378,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "sand running through the neck, then turned over"
   },
   {
-    "id": "html",
-    "name": "html",
-    "category": "logos",
-    "note": "the orange shield with a 5, glinting now and then"
-  },
-  {
     "id": "icosahedron",
     "name": "icosahedron",
     "category": "shapes",
     "note": "a wireframe icosahedron turning, its hidden edges dotted"
-  },
-  {
-    "id": "java",
-    "name": "java",
-    "category": "logos",
-    "note": "the steaming cup, glinting now and then"
-  },
-  {
-    "id": "javascript",
-    "name": "javascript",
-    "category": "logos",
-    "note": "js on a yellow square, glinting now and then"
   },
   {
     "id": "jellyfish",
@@ -607,40 +390,16 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a jellyfish pulsing upward, its tentacles trailing late"
   },
   {
-    "id": "julia",
-    "name": "julia",
-    "category": "logos",
-    "note": "three dots, green, red and purple, glinting now and then"
-  },
-  {
     "id": "julia-set",
     "name": "julia set",
     "category": "generative",
     "note": "a julia set changing shape as its constant c goes round"
   },
   {
-    "id": "kali-linux",
-    "name": "kali linux",
-    "category": "distros",
-    "note": "the blue dragon, scanned now and then"
-  },
-  {
-    "id": "keiki",
-    "name": "keiki",
-    "category": "companies",
-    "note": "the rocking horse, glinting now and then"
-  },
-  {
     "id": "kite",
     "name": "kite",
     "category": "objects",
     "note": "a diamond kite riding the wind, its string sagging in lulls"
-  },
-  {
-    "id": "kotlin",
-    "name": "kotlin",
-    "category": "logos",
-    "note": "the k, in violet and pink, glinting now and then"
   },
   {
     "id": "kyoto-dusk",
@@ -685,34 +444,16 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a forked bolt striking out of a storm cloud in the rain"
   },
   {
-    "id": "linux-mint",
-    "name": "linux mint",
-    "category": "distros",
-    "note": "lm in a green circle, scanned now and then"
-  },
-  {
     "id": "lorenz",
     "name": "lorenz attractor",
     "category": "physics",
     "note": "one lorenz trajectory looping both wings, older loops fading"
   },
   {
-    "id": "lua",
-    "name": "lua",
-    "category": "logos",
-    "note": "a planet and its moon, glinting now and then"
-  },
-  {
     "id": "mandelbrot",
     "name": "mandelbrot",
     "category": "generative",
     "note": "a slow zoom into seahorse valley and back out again"
-  },
-  {
-    "id": "manjaro",
-    "name": "manjaro",
-    "category": "distros",
-    "note": "three green blocks, scanned now and then"
   },
   {
     "id": "marine-drive",
@@ -737,12 +478,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "maze",
     "category": "generative",
     "note": "a maze carved by backtracking, then solved, then remade"
-  },
-  {
-    "id": "mintlify",
-    "name": "mintlify",
-    "category": "companies",
-    "note": "the leaf within a leaf, in mint green, glinting now and then"
   },
   {
     "id": "misty-forest",
@@ -781,46 +516,16 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a lighthouse turning its beam under moonlit clouds over a dark sea"
   },
   {
-    "id": "nixos",
-    "name": "nixos",
-    "category": "distros",
-    "note": "the snowflake of lambdas, scanned now and then"
-  },
-  {
     "id": "not-found",
     "name": "not found",
     "category": "ui",
     "note": "a block-letter 404 with a small ghost drifting beneath it"
   },
   {
-    "id": "ocaml",
-    "name": "ocaml",
-    "category": "logos",
-    "note": "the camel on an orange square, glinting now and then"
-  },
-  {
     "id": "ocean-sunset",
     "name": "ocean sunset",
     "category": "scenes",
     "note": "the sun sets past a pine headland, lit cloud, glitter on rolling sea"
-  },
-  {
-    "id": "omarchy",
-    "name": "omarchy",
-    "category": "distros",
-    "note": "the square o of brackets, in green, scanned now and then"
-  },
-  {
-    "id": "opensuse",
-    "name": "opensuse",
-    "category": "distros",
-    "note": "the green chameleon, scanned now and then"
-  },
-  {
-    "id": "orchid",
-    "name": "orchid",
-    "category": "companies",
-    "note": "the five-petal flower, glinting now and then"
   },
   {
     "id": "owl",
@@ -835,28 +540,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a row of pendulums drifting in and out of step, from above"
   },
   {
-    "id": "perl",
-    "name": "perl",
-    "category": "logos",
-    "note": "the onion, glinting now and then"
-  },
-  {
-    "id": "php",
-    "name": "php",
-    "category": "logos",
-    "note": "php in its purple oval, glinting now and then"
-  },
-  {
     "id": "planet",
     "name": "planet",
     "category": "space",
     "note": "a banded ringed planet turning, with shadows both ways"
-  },
-  {
-    "id": "planetscale",
-    "name": "planetscale",
-    "category": "companies",
-    "note": "the disc cut by two strokes, glinting now and then"
   },
   {
     "id": "plasma",
@@ -865,22 +552,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "soft interference blobs drifting and pulsing"
   },
   {
-    "id": "playstation",
-    "name": "playstation",
-    "category": "companies",
-    "note": "the p standing on a flat s, in blue, glinting now and then"
-  },
-  {
     "id": "plucked-string",
     "name": "plucked string",
     "category": "physics",
     "note": "a plucked string, slowed down, its harmonics fading"
-  },
-  {
-    "id": "polar",
-    "name": "polar",
-    "category": "companies",
-    "note": "the half star, bar and arc, glinting now and then"
   },
   {
     "id": "pond-ripples",
@@ -889,28 +564,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "raindrops opening rings that cross and fade on a pond"
   },
   {
-    "id": "pop-os",
-    "name": "pop!_os",
-    "category": "distros",
-    "note": "the p! in a teal circle, scanned now and then"
-  },
-  {
     "id": "progress-bar",
     "name": "progress bar",
     "category": "ui",
     "note": "five bar styles filling at uneven paces, percent at right"
-  },
-  {
-    "id": "python",
-    "name": "python",
-    "category": "logos",
-    "note": "two snakes, blue and yellow, glinting now and then"
-  },
-  {
-    "id": "r",
-    "name": "r",
-    "category": "logos",
-    "note": "a blue r over a grey ring, glinting now and then"
   },
   {
     "id": "radar",
@@ -931,34 +588,16 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "gray-scott spots and stripes dying back and growing out"
   },
   {
-    "id": "red-hat",
-    "name": "red hat",
-    "category": "distros",
-    "note": "the man in the red hat, scanned now and then"
-  },
-  {
     "id": "rocket",
     "name": "rocket",
     "category": "space",
     "note": "a rocket lifting off its pad at night, then landing back"
   },
   {
-    "id": "rocky-linux",
-    "name": "rocky linux",
-    "category": "distros",
-    "note": "the mountain in a green circle, scanned now and then"
-  },
-  {
     "id": "rotozoomer",
     "name": "rotozoomer",
     "category": "effects",
     "note": "a brick wall texture turning and zooming about the centre"
-  },
-  {
-    "id": "ruby",
-    "name": "ruby",
-    "category": "logos",
-    "note": "the cut red gem, glinting now and then"
   },
   {
     "id": "rule-30",
@@ -973,22 +612,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "ruled lines with a range rising from them, drifting forward"
   },
   {
-    "id": "rust",
-    "name": "rust",
-    "category": "logos",
-    "note": "the r in its cog, in ferris orange, glinting now and then"
-  },
-  {
     "id": "saptarishi",
     "name": "saptarishi",
     "category": "space",
     "note": "the big dipper at true positions in a twinkling sky"
-  },
-  {
-    "id": "scala",
-    "name": "scala",
-    "category": "logos",
-    "note": "the red spiral stair, glinting now and then"
   },
   {
     "id": "scramble",
@@ -1111,30 +738,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "the sun lifting off a sea horizon, its path glittering"
   },
   {
-    "id": "supabase",
-    "name": "supabase",
-    "category": "companies",
-    "note": "the green bolt, glinting now and then"
-  },
-  {
-    "id": "supermemory",
-    "name": "supermemory",
-    "category": "companies",
-    "note": "the two mirrored strokes, glinting now and then"
-  },
-  {
-    "id": "svelte",
-    "name": "svelte",
-    "category": "logos",
-    "note": "the orange ribbon folded round an s, glinting now and then"
-  },
-  {
-    "id": "swift",
-    "name": "swift",
-    "category": "logos",
-    "note": "the swift on an orange square, glinting now and then"
-  },
-  {
     "id": "synthwave",
     "name": "synthwave",
     "category": "effects",
@@ -1189,12 +792,6 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "flying down a tiled tube that bends and twists"
   },
   {
-    "id": "tux",
-    "name": "tux",
-    "category": "distros",
-    "note": "tux the penguin, scanned now and then"
-  },
-  {
     "id": "tv-static",
     "name": "tv static",
     "category": "effects",
@@ -1207,22 +804,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "a square ring twisted three quarters, so it has one face"
   },
   {
-    "id": "typescript",
-    "name": "typescript",
-    "category": "logos",
-    "note": "ts on a blue square, glinting now and then"
-  },
-  {
     "id": "typewriter",
     "name": "typewriter",
     "category": "type",
     "note": "phrases typed and deleted in turn behind a blinking cursor"
-  },
-  {
-    "id": "ubuntu",
-    "name": "ubuntu",
-    "category": "distros",
-    "note": "the circle of friends, in orange, scanned now and then"
   },
   {
     "id": "uptime-bar",
@@ -1237,22 +822,10 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "note": "dusk aarti on the ganga, lamps on the steps and diyas on the water"
   },
   {
-    "id": "vercel",
-    "name": "vercel",
-    "category": "companies",
-    "note": "the vercel triangle, glinting now and then"
-  },
-  {
     "id": "vinyl",
     "name": "vinyl",
     "category": "objects",
     "note": "a record turning under the tonearm, seen from above"
-  },
-  {
-    "id": "void-linux",
-    "name": "void linux",
-    "category": "distros",
-    "note": "the green ring, cut through, scanned now and then"
   },
   {
     "id": "voronoi",
@@ -1289,17 +862,5 @@ export const TERMINAL_BACKGROUND_CATALOG = [
     "name": "windmill",
     "category": "objects",
     "note": "four lattice sails turning on a dutch mill, clouds passing"
-  },
-  {
-    "id": "zig",
-    "name": "zig",
-    "category": "logos",
-    "note": "the slanted z in brackets, glinting now and then"
-  },
-  {
-    "id": "zorin-os",
-    "name": "zorin os",
-    "category": "distros",
-    "note": "the z in blue stripes, scanned now and then"
   }
 ] as const;

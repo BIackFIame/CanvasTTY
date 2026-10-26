@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { TerminalBackgroundPreview } from "./TerminalBackgroundPreview";
 import { SettingGroup, Segmented } from "./SettingsControls";
 import "./backgroundAppearanceManager.css";
@@ -25,16 +25,52 @@ export function BackgroundAppearanceManager({ settings, sessions, onChange, chil
   const overrideCount = Object.keys(settings.terminalBackgroundOverrides).length;
   const hasAnyBackground = settings.terminalBackground !== "none" || hasOverrides;
 
+  const pendingPatch = useRef<Partial<AppSettings> | null>(null);
+  const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flushSave = useCallback(() => {
+    if (debounceTimer.current) {
+      clearTimeout(debounceTimer.current);
+      debounceTimer.current = null;
+    }
+    if (pendingPatch.current) {
+      const p = pendingPatch.current;
+      pendingPatch.current = null;
+      void onChange(p).catch(() => setError(ru ? "Не удалось сохранить настройки." : "Could not save settings."));
+    }
+  }, [onChange, ru]);
+
+  useEffect(() => {
+    return () => {
+      flushSave();
+    };
+  }, [flushSave]);
+
   const save = async (patch: Partial<AppSettings>): Promise<boolean> => {
+    flushSave();
     try { await onChange(patch); setError(""); return true; }
     catch { setError(ru ? "Не удалось сохранить настройки." : "Could not save settings."); return false; }
   };
+
   const change = (patch: Partial<TerminalBackgroundAppearance>): void => {
-    void save(scope ? { terminalBackgroundOverrides: {
-      ...settings.terminalBackgroundOverrides, [scope]: { ...appearance, ...patch },
-    } } : patch);
+    const isImmediate = "terminalBackground" in patch || "terminalBackgroundPaused" in patch;
+    const nextSettingsPatch = scope ? {
+      terminalBackgroundOverrides: {
+        ...settings.terminalBackgroundOverrides, [scope]: { ...appearance, ...patch },
+      }
+    } : (patch as Partial<AppSettings>);
+
+    pendingPatch.current = { ...(pendingPatch.current ?? {}), ...nextSettingsPatch };
+
+    if (isImmediate) {
+      flushSave();
+    } else {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      debounceTimer.current = setTimeout(flushSave, 200);
+    }
   };
   const disableAll = (): void => {
+    flushSave();
     void save({
       terminalBackground: "none",
       terminalBackgroundOverrides: {},

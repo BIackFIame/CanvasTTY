@@ -28,9 +28,17 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 
 function draw(advance = true): void {
   if (!frame || (!ctx && !gpu)) return;
-  if (advance || text === undefined) text = frame(time, { paper: false, color });
-  if (gpu) gpu(text, color, pixelRatio, transform);
-  else if (ctx) drawAsciiFrame(ctx, text, piece.meta, color, pixelRatio, transform);
+  try {
+    if (advance || text === undefined) text = frame(time, { paper: false, color });
+    if (gpu) gpu(text, color, pixelRatio, transform);
+    else if (ctx) drawAsciiFrame(ctx, text, piece.meta, color, pixelRatio, transform);
+  } catch {
+    if (gpu) {
+      gpu = null;
+      ctx = canvas.getContext("2d", { alpha: false });
+      if (ctx && text) drawAsciiFrame(ctx, text, piece.meta, color, pixelRatio, transform);
+    }
+  }
 }
 
 function advanceTime(now: number): void {
@@ -67,8 +75,31 @@ self.onmessage = async ({ data }: MessageEvent<BackgroundWorkerMessage>): Promis
   if (data.type === "init") {
     canvas = data.canvas;
     pixelRatio = data.pixelRatio ?? 1;
-    piece = await import(`../../../../../node_modules/ascii.rest/dist/pieces/${data.scene}.js`);
-    gpu = createAsciiGpuRenderer(canvas, piece.meta);
+    try {
+      piece = await import(`ascii.rest/pieces/${data.scene}`);
+    } catch {
+      try {
+        piece = await import(`../../../../../node_modules/ascii.rest/dist/pieces/${data.scene}.js`);
+      } catch (err) {
+        if (typeof self.postMessage === "function") {
+          self.postMessage({ type: "error", error: err instanceof Error ? err.message : String(err) });
+        }
+        return;
+      }
+    }
+    if (typeof canvas.addEventListener === "function") {
+      canvas.addEventListener("webglcontextlost", (event) => {
+        event.preventDefault();
+        gpu = null;
+        ctx = canvas.getContext("2d", { alpha: false });
+        draw(false);
+      });
+    }
+    try {
+      gpu = createAsciiGpuRenderer(canvas, piece.meta);
+    } catch {
+      gpu = null;
+    }
     ctx = gpu ? null : canvas.getContext("2d", { alpha: false });
     frame = piece.default({ ...piece.meta.options });
     color = piece.meta.palette ? new Uint8Array((piece.meta.cols ?? 80) * (piece.meta.rows ?? 24)) : undefined;

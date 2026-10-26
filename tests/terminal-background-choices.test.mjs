@@ -48,7 +48,7 @@ test("the gallery renders only the selected category and opens on the current ba
     assert.equal((html.match(/<img /g) ?? []).length, pieces.length, "every idle card has an immediate poster");
     assert.doesNotMatch(html, /<canvas|terminal-ascii-background/, "idle cards do not create animation renderers");
     assert.doesNotMatch(html, /\stitle=|terminal-background-choice__original/, "cards have no tooltips or duplicate English subtitles");
-    assert.equal((html.match(/<option /g) ?? []).length, 16, "every category and favorites remain switchable");
+    assert.equal((html.match(/<option /g) ?? []).length, 13, "every category and favorites remain switchable");
     assert(html.includes(`value="${category}" selected=""`), category);
     assert.equal((html.match(/aria-pressed="true"/g) ?? []).length, 1, "only the selected background is highlighted");
     assert(html.includes("terminal-background-disable"), "turning the background off stays compact");
@@ -68,7 +68,7 @@ test("favorite controls are separate from selecting a scene and expose saved sta
   assert.doesNotMatch(html, /\stitle=/);
 });
 
-test("all 217 previews ship as valid local WebP posters", async () => {
+test("all 144 previews ship as valid local WebP posters", async () => {
   for (const { id } of TERMINAL_BACKGROUND_CATALOG) {
     const data = await readFile(new URL(`../src/renderer/src/assets/ascii-posters/${id}.webp`, import.meta.url));
     assert.equal(data.toString("ascii", 0, 4), "RIFF", id);
