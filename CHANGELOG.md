@@ -2,6 +2,14 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## 1.8.3.1 — evaluation hotfix
+
+Technical version: `1.8.3-hotfix.1`. This is a prerelease for manual evaluation.
+
+- Stop redundant scene work and camera drift when repeated zoom commands hit the 20% or 135% limit.
+- Stop blending old and new terminal character grids during DOM/WebGL switches. Keep the new screen hidden behind the snapshot until it is ready, including transparent themes, and restore it on every cleanup path.
+- The reported sustained 1 FPS and occasional crash were not reproduced in the bounded Linux probes; this release does not claim to resolve every performance issue.
+
 ## 1.8.3
 
 - Added canvas Auto-sort by task, status, project or grid, with scoped movement and undo (#163, @BIackFIame).
