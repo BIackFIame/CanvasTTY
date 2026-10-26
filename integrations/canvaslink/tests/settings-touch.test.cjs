@@ -19,9 +19,9 @@ test('Screen arrows, Enter, Esc and Ctrl work after selecting a nontext control'
  assert.deepEqual(keys.map(c=>c.key),['ArrowDown','Enter','Escape','c']);assert.deepEqual(keys[3].modifiers,['control']);
  assert.equal(await ui.page.evaluate(()=>__uiFixture.calls.filter(c=>c.type==='show-keyboard').length),0);
 });
-test('Ctrl+V remains visible without horizontal scrolling on a narrow phone',async t=>{
+test('Paste remains accessible without horizontal scrolling on a narrow phone',async t=>{
  const ui=await openUI({connected:true,width:320,height:640});t.after(()=>ui.browser.close());
- const r=await ui.page.locator('#paste').boundingBox();assert.ok(r.x>=0&&r.x+r.width<=320);assert.equal(await ui.page.locator('#paste').textContent(),'Ctrl+V');
+ const r=await ui.page.locator('#paste').boundingBox();assert.ok(r.x>=0&&r.x+r.width<=320);assert.match(await ui.page.locator('#paste').getAttribute('aria-label'),/Вставить.*без Enter/);
  await ui.page.locator('#paste').click();assert.match(await ui.page.locator('#input-status').textContent(),/коснитесь.*поля/);assert.equal(await ui.page.evaluate(()=>__uiFixture.calls.filter(c=>c.type==='input').length),0);
 });
 test('A Settings text field preserves context instead of terminal-style zoom',async t=>{
