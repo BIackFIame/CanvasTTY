@@ -1898,6 +1898,7 @@ export interface CanvasTTYApi {
     onStatus(listener: (status: UpdateStatus) => void): () => void;
   };
   evenG2: import('./evenG2.ts').EvenG2Api;
+  canvasLink: import('./canvasLink.ts').CanvasLinkApi;
   appVersion(): Promise<string>;
   clipboard: {
     readText(): Promise<string>;

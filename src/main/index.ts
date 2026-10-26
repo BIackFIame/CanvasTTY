@@ -101,6 +101,9 @@ import { mainWindowChromeOptions } from "./windowChrome";
 import { markMainBoot, mainBootMarks } from "./bootMarks";
 import { attachEditContextMenu } from "./editContextMenu";
 import { macApplicationMenuTemplate } from "./macApplicationMenu";
+import { configureCanvasLinkStartup, installCanvasLink } from "./services/canvasLink";
+
+configureCanvasLinkStartup(app);
 
 if (process.env.CANVASTTY_USER_DATA_DIR) {
   if (!isAbsolute(process.env.CANVASTTY_USER_DATA_DIR)) throw new Error("CANVASTTY_USER_DATA_DIR must be absolute");
@@ -1210,6 +1213,7 @@ function attentionStatusLabel(status: "needs_approval" | "failed", locale: Local
 }
 
 if (hasSingleInstanceLock) {
+  installCanvasLink(() => mainWindow);
   void app.whenReady()
     .then(() => {
       markMainBoot("appReady");

@@ -69,6 +69,10 @@ npm run dev
 
 The opt-in **Settings → Controls → Even G2** integration adapts CanvasTTY's terminal and AI-agent workflows to Even G2 glasses. Pair with six digits on the same local network, approve access on the computer, then read responses on the glasses HUD, dictate through local Nemotron speech recognition, and create, rename or close shared sessions. The companion includes a More agents picker and supports the desktop's provider list. Its source lives in `integrations/even-g2` and builds with the desktop. See [setup, distribution status and acceptance limits](docs/even-g2.md); a compatible public installer and Even Hub approval are still pending.
 
+## CanvasLink for Android (alpha)
+
+**Settings → CanvasLink** streams the current CanvasTTY window to an Android phone or tablet on the same LAN, with touch, direct terminal keyboard input and a shortcut bar. Access starts off; pairing uses a short-lived six-digit code. The desktop host is integrated, with no separate application. See [setup, APK builds and platform limits](docs/canvaslink.md). The prototype has macOS/Android user acceptance; this source port remains experimental, with Windows/Linux device acceptance pending.
+
 ## Web companion
 
 The opt-in [Web companion](docs/mobile-companion.md) shares selected sessions with Android, iOS, and desktop browsers through **Tailscale Serve HTTPS**, not Funnel. CanvasTTY binds its companion endpoint to `127.0.0.1:3481` in this mode; pair with a short-lived code and approve each browser on the desktop. Open **Settings → Controls → Web companion** for setup, grants, and revocation. End-to-end Tailscale Serve deployment on Windows, Linux, and macOS remains unverified.
