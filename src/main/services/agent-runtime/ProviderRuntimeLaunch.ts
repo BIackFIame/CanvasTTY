@@ -825,7 +825,7 @@ class KimiRuntimeHooks {
   }
 }
 
-class HermesRuntimeHooks {
+export class HermesRuntimeHooks {
   private cleaned = false;
   private readonly path: string;
   private readonly journalPath: string;
@@ -1027,11 +1027,11 @@ function mutateHermesHooks(raw: string, commands: Record<string, string[]>, remo
         isRecord(entry) && entry.command === command && entry.timeout === HOOK_TIMEOUT_SECONDS
       ))).map((command) => ({ command, timeout: HOOK_TIMEOUT_SECONDS }))];
     if (next.length > 0) document.setIn(["hooks", event], next);
-    else document.deleteIn(["hooks", event]);
+    else if (document.has("hooks") && document.hasIn(["hooks", event])) document.deleteIn(["hooks", event]);
   }
   const nextValue = document.toJS({ maxAliasCount: 100 }) as unknown;
   if (isRecord(nextValue) && isRecord(nextValue.hooks) && Object.keys(nextValue.hooks).length === 0) {
-    document.delete("hooks");
+    if (document.has("hooks")) document.delete("hooks");
   }
   return document.toString({ lineWidth: 0 });
 }

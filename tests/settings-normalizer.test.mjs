@@ -37,6 +37,23 @@ const fallback = {
   canvasBackground: "none",
   pattern: "dots",
   terminalBorderSkin: "classic",
+  terminalBackground: "none",
+  terminalBackgroundBrightness: 45,
+  terminalBackgroundContrast: 100,
+  terminalBackgroundSaturation: 100,
+  terminalBackgroundPaused: false,
+  terminalBackgroundSpeed: 1,
+  terminalBackgroundScale: 100,
+  terminalBackgroundOffsetX: 0,
+  terminalBackgroundOffsetY: 0,
+  terminalBackgroundReadability: true,
+  terminalBackgroundReadabilityStrength: 86,
+  terminalBackgroundPauseOnOutput: false,
+  terminalBackgroundSynchronized: false,
+  terminalBackgroundPauseInactive: false,
+  terminalBackgroundOverrides: {},
+  terminalBackgroundPresets: [],
+  terminalBackgroundFavorites: [],
   terminalSkinDetail: "detailed",
   terminalSkinAnimationEnabled: true,
   appSkin: "classic",
@@ -77,6 +94,108 @@ const fallback = {
   browserRestoreTabs: true,
   browserPauseHiddenTabs: true
 };
+
+test("persists ASCII scene settings and rejects invalid scene paths and brightness", () => {
+  const valid = normalizeSettings({ terminalBackground: "lantern-lake", terminalBackgroundBrightness: 70, terminalBackgroundPaused: true }, fallback);
+  assert.equal(valid.terminalBackground, "lantern-lake");
+  assert.equal(valid.terminalBackgroundBrightness, 70);
+  assert.equal(valid.terminalBackgroundPaused, true);
+  for (const value of ["../../remote", "https://example.com/art.js", null, 42]) {
+    assert.equal(normalizeSettings({ terminalBackground: value }, fallback).terminalBackground, "none");
+  }
+  assert.equal(normalizeSettings({ terminalBackgroundBrightness: Infinity }, fallback).terminalBackgroundBrightness, 45);
+  assert.equal(normalizeSettings({ terminalBackgroundBrightness: -20 }, fallback).terminalBackgroundBrightness, 10);
+  assert.equal(normalizeSettings({ terminalBackgroundBrightness: 150 }, fallback).terminalBackgroundBrightness, 100);
+  const legacy = normalizeSettings({}, fallback);
+  assert.equal(legacy.terminalBackground, "none");
+  assert.equal(legacy.terminalBackgroundPaused, false);
+  assert.equal(legacy.terminalBackgroundReadability, true);
+  assert.equal(normalizeSettings({ terminalBackgroundReadability: false }, fallback).terminalBackgroundReadability, false);
+  assert.equal(normalizeSettings({ terminalBackgroundReadability: true }, fallback).terminalBackgroundReadability, true);
+  assert.equal(normalizeSettings({ terminalBackgroundReadability: "off" }, fallback).terminalBackgroundReadability, true);
+});
+
+test("background scale and position validate old settings and persist independently of speed", async () => {
+  const defaults = normalizeSettings({}, fallback);
+  assert.equal(defaults.terminalBackgroundScale, 100);
+  assert.equal(defaults.terminalBackgroundOffsetX, 0);
+  assert.equal(defaults.terminalBackgroundOffsetY, 0);
+  const invalid = normalizeSettings({ terminalBackgroundScale: NaN, terminalBackgroundOffsetX: Infinity, terminalBackgroundOffsetY: "down" }, fallback);
+  assert.equal(invalid.terminalBackgroundScale, 100);
+  assert.equal(invalid.terminalBackgroundOffsetX, 0);
+  assert.equal(invalid.terminalBackgroundOffsetY, 0);
+  const clamped = normalizeSettings({ terminalBackgroundScale: 999, terminalBackgroundOffsetX: -99, terminalBackgroundOffsetY: 99 }, fallback);
+  assert.equal(clamped.terminalBackgroundScale, 300);
+  assert.equal(clamped.terminalBackgroundOffsetX, -50);
+  assert.equal(clamped.terminalBackgroundOffsetY, 50);
+  assert.equal(normalizeSettings({ terminalBackgroundScale: -1 }, fallback).terminalBackgroundScale, 25);
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-transform-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBackgroundScale: 175, terminalBackgroundOffsetX: -20, terminalBackgroundOffsetY: 15, terminalBackgroundSpeed: 0.5 });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.terminalBackgroundScale, 175);
+    assert.equal(restored.terminalBackgroundOffsetX, -20);
+    assert.equal(restored.terminalBackgroundOffsetY, 15);
+    await store.update({ terminalBackgroundScale: 100, terminalBackgroundOffsetX: 0, terminalBackgroundOffsetY: 0 });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBackgroundSpeed, 0.5);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("background speed defaults to 1x, clamps invalid input and survives restart while paused", async () => {
+  assert.equal(normalizeSettings({}, fallback).terminalBackgroundSpeed, 1);
+  for (const value of [NaN, Infinity, "fast", null]) {
+    assert.equal(normalizeSettings({ terminalBackgroundSpeed: value }, fallback).terminalBackgroundSpeed, 1);
+  }
+  assert.equal(normalizeSettings({ terminalBackgroundSpeed: -1 }, fallback).terminalBackgroundSpeed, 0.25);
+  assert.equal(normalizeSettings({ terminalBackgroundSpeed: 10 }, fallback).terminalBackgroundSpeed, 2);
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-speed-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBackgroundSpeed: 0.5, terminalBackgroundPaused: true });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.equal(restored.terminalBackgroundSpeed, 0.5);
+    assert.equal(restored.terminalBackgroundPaused, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("favorite backgrounds are validated, deduplicated and persist without changing the active scene", async () => {
+  assert.deepEqual(normalizeSettings({ terminalBackgroundFavorites: ["aurora-fjord", "none", "../../bad", "aurora-fjord", 1, "donut"] }, fallback).terminalBackgroundFavorites,
+    ["aurora-fjord", "donut"]);
+  assert.deepEqual(normalizeSettings({}, fallback).terminalBackgroundFavorites, []);
+  assert.deepEqual(normalizeSettings({ terminalBackgroundFavorites: "donut" }, fallback).terminalBackgroundFavorites, []);
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-favorites-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBackground: "aurora-fjord", terminalBackgroundFavorites: ["donut"] });
+    const restored = await new SettingsStore(dir, "en").load();
+    assert.deepEqual(restored.terminalBackgroundFavorites, ["donut"]);
+    assert.equal(restored.terminalBackground, "aurora-fjord");
+    await store.update({ terminalBackgroundFavorites: [] });
+    assert.deepEqual((await new SettingsStore(dir, "en").load()).terminalBackgroundFavorites, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("background readability survives reload and background changes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "canvastty-background-readability-"));
+  try {
+    const store = new SettingsStore(dir, "en");
+    await store.update({ terminalBackground: "aurora-fjord", terminalBackgroundReadability: false });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBackgroundReadability, false);
+    await store.update({ terminalBackground: "none" });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBackgroundReadability, false);
+    await store.update({ terminalBackgroundReadability: true });
+    assert.equal((await new SettingsStore(dir, "en").load()).terminalBackgroundReadability, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("keeps valid wheel, edge pan, zoom, and focus values", () => {
   const normalized = normalizeSettings(
@@ -1021,6 +1140,13 @@ test("both overrides accept zoom modifiers without swallowing ordinary shortcuts
   }, fallback);
   assert.equal(mouseBindings.canvasWheelOverride, "Mouse4");
   assert.equal(mouseBindings.canvasNavigationOverride, "Shift+Mouse5");
+});
+
+test("inactive background pause accepts booleans and preserves the saved fallback", () => {
+  assert.equal(normalizeSettings({ terminalBackgroundPauseInactive: true }, fallback).terminalBackgroundPauseInactive, true);
+  assert.equal(normalizeSettings({ terminalBackgroundPauseInactive: false }, { ...fallback, terminalBackgroundPauseInactive: true }).terminalBackgroundPauseInactive, false);
+  assert.equal(normalizeSettings({ terminalBackgroundPauseInactive: "true" }, fallback).terminalBackgroundPauseInactive, false);
+  assert.equal(normalizeSettings({}, { ...fallback, terminalBackgroundPauseInactive: true }).terminalBackgroundPauseInactive, true);
 });
 
 test("a saved edge pan preference survives normalization", () => {

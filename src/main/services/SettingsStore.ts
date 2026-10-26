@@ -2,6 +2,8 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isHomeMediaPath } from "./homeMedia.ts";
+import { normalizeBackgroundOverrides, normalizeBackgroundPresets } from "../../shared/terminalBackgroundAppearance.ts";
+import { isTerminalBackgroundId } from "../../shared/terminalBackground.ts";
 import type {
   AgentProviderId,
   AgentCliAvailability,
@@ -380,6 +382,25 @@ function createDefaults(systemLocale: string, platform: string): AppSettings {
     canvasBackground: "none",
     pattern: "dots",
     terminalBorderSkin: "classic",
+    terminalBackground: "none",
+    terminalBackgroundBrightness: 45,
+    terminalBackgroundContrast: 100,
+    terminalBackgroundSaturation: 100,
+    terminalBackgroundPaused: false,
+    terminalBackgroundSpeed: 1,
+    terminalBackgroundScale: 100,
+    terminalBackgroundOffsetX: 0,
+    terminalBackgroundOffsetY: 0,
+    terminalBackgroundReadability: true,
+    terminalBackgroundReadabilityStrength: 86,
+    terminalBackgroundPauseOnOutput: false,
+    terminalBackgroundFocusDimming: false,
+    terminalBackgroundSynchronized: false,
+    terminalBackgroundPauseInactive: false,
+    terminalBackgroundOverrides: {},
+    terminalBackgroundPresets: [],
+    terminalBackgroundFavorites: [],
+    terminalBackgroundDeleted: [],
     terminalSkinDetail: "detailed",
     terminalSkinAnimationEnabled: true,
     appSkin: "classic",
@@ -622,6 +643,45 @@ export function normalizeSettings(
     pattern: PATTERNS.has(source.pattern as CanvasPatternId)
       ? source.pattern as CanvasPatternId
       : fallback.pattern,
+    terminalBackground: isTerminalBackgroundId(source.terminalBackground)
+      ? source.terminalBackground : fallback.terminalBackground ?? "none",
+    terminalBackgroundBrightness: typeof source.terminalBackgroundBrightness === "number" && Number.isFinite(source.terminalBackgroundBrightness)
+      ? Math.min(100, Math.max(5, source.terminalBackgroundBrightness)) : fallback.terminalBackgroundBrightness ?? 45,
+    terminalBackgroundContrast: typeof source.terminalBackgroundContrast === "number" && Number.isFinite(source.terminalBackgroundContrast)
+      ? Math.min(200, Math.max(0, source.terminalBackgroundContrast)) : fallback.terminalBackgroundContrast ?? 100,
+    terminalBackgroundSaturation: typeof source.terminalBackgroundSaturation === "number" && Number.isFinite(source.terminalBackgroundSaturation)
+      ? Math.min(200, Math.max(0, source.terminalBackgroundSaturation)) : fallback.terminalBackgroundSaturation ?? 100,
+    terminalBackgroundPaused: typeof source.terminalBackgroundPaused === "boolean"
+      ? source.terminalBackgroundPaused : fallback.terminalBackgroundPaused ?? false,
+    terminalBackgroundSpeed: typeof source.terminalBackgroundSpeed === "number" && Number.isFinite(source.terminalBackgroundSpeed)
+      ? Math.min(2, Math.max(0.25, source.terminalBackgroundSpeed)) : fallback.terminalBackgroundSpeed ?? 1,
+    terminalBackgroundScale: typeof source.terminalBackgroundScale === "number" && Number.isFinite(source.terminalBackgroundScale)
+      ? Math.min(300, Math.max(25, source.terminalBackgroundScale)) : fallback.terminalBackgroundScale ?? 100,
+    terminalBackgroundOffsetX: typeof source.terminalBackgroundOffsetX === "number" && Number.isFinite(source.terminalBackgroundOffsetX)
+      ? Math.min(50, Math.max(-50, source.terminalBackgroundOffsetX)) : fallback.terminalBackgroundOffsetX ?? 0,
+    terminalBackgroundOffsetY: typeof source.terminalBackgroundOffsetY === "number" && Number.isFinite(source.terminalBackgroundOffsetY)
+      ? Math.min(50, Math.max(-50, source.terminalBackgroundOffsetY)) : fallback.terminalBackgroundOffsetY ?? 0,
+    terminalBackgroundReadability: typeof source.terminalBackgroundReadability === "boolean"
+      ? source.terminalBackgroundReadability : fallback.terminalBackgroundReadability ?? true,
+    terminalBackgroundReadabilityStrength: typeof source.terminalBackgroundReadabilityStrength === "number" && Number.isFinite(source.terminalBackgroundReadabilityStrength)
+      ? Math.min(100, Math.max(0, source.terminalBackgroundReadabilityStrength)) : fallback.terminalBackgroundReadabilityStrength ?? 86,
+    terminalBackgroundPauseOnOutput: typeof source.terminalBackgroundPauseOnOutput === "boolean"
+      ? source.terminalBackgroundPauseOnOutput : fallback.terminalBackgroundPauseOnOutput ?? false,
+    terminalBackgroundFocusDimming: typeof source.terminalBackgroundFocusDimming === "boolean"
+      ? source.terminalBackgroundFocusDimming : fallback.terminalBackgroundFocusDimming ?? false,
+    terminalBackgroundSynchronized: typeof source.terminalBackgroundSynchronized === "boolean"
+      ? source.terminalBackgroundSynchronized : fallback.terminalBackgroundSynchronized ?? false,
+    terminalBackgroundPauseInactive: typeof source.terminalBackgroundPauseInactive === "boolean"
+      ? source.terminalBackgroundPauseInactive : fallback.terminalBackgroundPauseInactive ?? false,
+    terminalBackgroundOverrides: normalizeBackgroundOverrides(source.terminalBackgroundOverrides ?? fallback.terminalBackgroundOverrides),
+    terminalBackgroundPresets: normalizeBackgroundPresets(source.terminalBackgroundPresets ?? fallback.terminalBackgroundPresets),
+    terminalBackgroundFavorites: Array.isArray(source.terminalBackgroundFavorites)
+      ? [...new Set(source.terminalBackgroundFavorites.filter((id: unknown): id is Exclude<AppSettings["terminalBackground"], "none"> =>
+        isTerminalBackgroundId(id) && id !== "none"))]
+      : fallback.terminalBackgroundFavorites ?? [],
+    terminalBackgroundDeleted: Array.isArray(source.terminalBackgroundDeleted)
+      ? source.terminalBackgroundDeleted.filter((id: unknown): id is string => typeof id === "string")
+      : fallback.terminalBackgroundDeleted ?? [],
     terminalBorderSkin: isTerminalBorderSkinId(source.terminalBorderSkin)
       ? source.terminalBorderSkin as TerminalBorderSkinId
       : fallback.terminalBorderSkin,

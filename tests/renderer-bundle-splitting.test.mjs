@@ -28,7 +28,7 @@ async function bundleApp() {
       write: true,
       metafile: true,
       logLevel: "silent",
-      loader: { ".svg": "text", ".css": "empty", ".png": "empty", ".ttf": "empty", ".woff2": "empty", ".ico": "empty" }
+      loader: { ".svg": "text", ".css": "empty", ".png": "empty", ".webp": "empty", ".ttf": "empty", ".woff2": "empty", ".ico": "empty" }
     });
     return metafile;
   } finally {
@@ -87,6 +87,5 @@ test("Settings and the launch/link dialogs are split out of the app's static imp
   assert.ok(
     eagerBytes < 1_700_000,
     `code statically reachable from App.js should stay bounded now that heavy UI loads on demand, got ${eagerBytes} bytes`
-
   );
 });
