@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+ <meta name="color-scheme" content="dark">
+ <title>CanvasLink</title>
+ <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- Official Lucide geometry; provenance and license: lucide-LICENSE.txt. -->
+<svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+ <defs>
+  <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/></symbol>
+  <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></symbol>
+  <symbol id="i-paste" viewBox="0 0 24 24"><path d="M11 14h10"/><path d="M16 4h2a2 2 0 0 1 2 2v1.344"/><path d="m17 18 4-4-4-4"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 1.793-1.113"/><rect x="8" y="2" width="8" height="4" rx="1"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></symbol>
+  <symbol id="i-loader" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+  <symbol id="i-enter" viewBox="0 0 24 24"><path d="M20 4v7a4 4 0 0 1-4 4H4"/><path d="m9 10-5 5 5 5"/></symbol>
+  <symbol id="i-delete" viewBox="0 0 24 24"><path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/></symbol>
+ </defs>
+</svg>
+<template id="computer-icon"><svg class="icon" aria-hidden="true"><use href="#i-window"/></svg></template>
+<template id="computer-check"><svg class="icon computer-check" aria-hidden="true"><use href="#i-check"/></svg></template>
+<div id="pairing" class="pairing-screen">
+ <header class="pair-header"><span class="brand">CanvasLink</span></header>
+ <main class="pair-card" aria-labelledby="pair-title">
+  <h1 id="pair-title">Подключение к CanvasTTY</h1>
+  <p class="subtle">Телефон и компьютер должны быть в одной локальной сети.</p>
+  <form id="pair-form" novalidate>
+   <div class="field-heading"><span id="computers-label">Компьютер</span><button id="rescan" type="button" class="icon-button" aria-label="Обновить поиск компьютеров" title="Обновить поиск"><svg class="icon" aria-hidden="true"><use href="#i-loader"/></svg></button></div>
+   <div id="computers" class="computers" role="group" aria-labelledby="computers-label"></div>
+   <p id="pair-status" class="hint" role="status">Ищем компьютер…</p>
+   <label class="field-label" for="pin">Код подключения</label>
+   <input id="pin" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="off" placeholder="000000" aria-describedby="pin-hint">
+   <p id="pin-hint" class="hint">CanvasTTY → Настройки → CanvasLink</p>
+   <button id="connect" type="submit" class="button primary"><span>Подключиться</span><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+   <p id="pair-error" class="error-message" role="alert"></p>
+   <details id="manual"><summary>Компьютер не находится?<svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></summary><p class="hint">Проверь локальную сеть или введи адрес компьютера.</p><label class="field-label" for="address">IP-адрес и порт</label><input id="address" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="192.168.0.10:3499"></details>
+  </form>
+ </main>
+</div>
+<main id="workspace" class="workspace" hidden>
+ <h1 class="sr-only">Рабочая область CanvasTTY</h1>
+ <div id="viewport" class="remote-viewport" tabindex="0" role="region" aria-label="Удалённое окно CanvasTTY" aria-describedby="gesture-hint">
+  <video id="video" autoplay playsinline muted aria-label="Изображение рабочего окна"></video>
+  <span id="local-cursor" class="local-cursor" hidden aria-hidden="true"><svg class="icon" viewBox="0 0 24 24"><use href="#i-focus"/></svg></span>
+  <div id="touch-feedback" class="touch-feedback" hidden aria-hidden="true"></div>
+  <span id="preedit" class="preedit" hidden aria-label="Набираемый текст"></span>
+  <div id="waiting" class="waiting"><svg class="icon" aria-hidden="true"><use href="#i-window"/></svg><h2 id="waiting-title">Открываем CanvasTTY</h2><p id="waiting-copy">Ожидаем изображение.</p><button id="resume" class="button primary" type="button" hidden>Проверить связь</button></div>
+  <p id="input-status" class="toast" role="status" hidden></p>
+  <p id="stream-error" class="toast error" role="alert" hidden></p>
+ </div>
+ <nav id="controls" class="keybar" aria-label="Управление терминалом">
+  <button id="menu-toggle" class="icon-button" aria-label="Меню сеанса" aria-haspopup="dialog"><svg class="icon" aria-hidden="true"><use href="#i-more"/></svg></button>
+  <button id="view-toggle" class="icon-button view-toggle" aria-label="Показать весь Canvas"><svg class="icon" aria-hidden="true"><use href="#i-focus"/></svg><span id="view-toggle-label" class="sr-only">Весь Canvas</span></button>
+  <button id="paste" class="icon-button" aria-label="Вставить текст с телефона без Enter" title="Вставить"><svg class="icon" aria-hidden="true"><use href="#i-paste"/></svg></button>
+  <div class="keys" role="group" aria-label="Клавиши терминала; прокрутка влево и вправо">
+   <button id="ctrl" aria-pressed="false">Ctrl</button>
+   <button data-key="c" data-control="1" aria-label="Ctrl+C — прервать команду">Ctrl+C</button>
+   <button data-key="Enter" class="enter-key" aria-label="Enter"><svg class="icon" aria-hidden="true"><use href="#i-enter"/></svg></button>
+   <button data-key="Escape">Esc</button><button data-key="Tab">Tab</button>
+   <button data-key="ArrowLeft" class="icon-button" aria-label="Стрелка влево"><svg class="icon direction-left" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+   <button data-key="ArrowDown" class="icon-button" aria-label="Стрелка вниз"><svg class="icon direction-down" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+   <button data-key="ArrowUp" class="icon-button" aria-label="Стрелка вверх"><svg class="icon direction-up" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+   <button data-key="ArrowRight" class="icon-button" aria-label="Стрелка вправо"><svg class="icon" aria-hidden="true"><use href="#i-arrow"/></svg></button>
+   <button data-key="Backspace" class="icon-button" aria-label="Удалить символ"><svg class="icon" aria-hidden="true"><use href="#i-delete"/></svg></button>
+  </div>
+  <button id="keyboard-toggle" class="icon-button" aria-pressed="false" aria-label="Как открыть клавиатуру"><svg class="icon" aria-hidden="true"><use href="#i-keyboard"/></svg></button>
+ </nav>
+</main>
+<dialog id="session-menu" class="sheet" aria-labelledby="menu-title">
+ <div class="sheet-heading"><h2 id="menu-title">Сеанс</h2><button id="menu-close" class="icon-button" aria-label="Закрыть меню"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+ <div id="connection-pill" class="connection-state"><span id="connection-status" role="status">Подключаем…</span></div>
+ <p id="gesture-hint" class="hint">Касание — клик. Два пальца — масштаб и обзор.</p>
+ <div class="menu-actions">
+  <button id="reset-view">Весь Canvas<svg class="icon" aria-hidden="true"><use href="#i-window"/></svg></button>
+  <button id="fit"><span>Масштаб</span><span id="zoom-label">100%</span></button>
+  <button id="mode" aria-pressed="false"><span>Управление</span><span id="mode-label">Касание</span></button>
+  <button id="diagnostics-toggle">Диагностика<svg class="icon" aria-hidden="true"><use href="#i-chevron"/></svg></button>
+  <button id="disconnect" class="danger">Отключиться</button>
+ </div>
+</dialog>
+<dialog id="diagnostics" class="sheet" aria-labelledby="diagnostics-title">
+ <div class="sheet-heading"><h2 id="diagnostics-title">Диагностика</h2><button id="diagnostics-close" class="icon-button" aria-label="Закрыть диагностику"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div>
+ <pre id="metrics"></pre><p class="hint">RTT — задержка канала управления.</p>
+</dialog>
+<dialog id="disconnect-dialog" class="sheet" aria-labelledby="disconnect-title">
+ <h2 id="disconnect-title">Завершить сеанс?</h2><p class="subtle">Терминалы останутся открыты на компьютере.</p>
+ <div class="sheet-actions"><button id="cancel-disconnect" class="button">Продолжить</button><button id="confirm-disconnect" class="button danger">Отключиться</button></div>
+</dialog>
+<script src="delivery.js"></script><script src="transport.js"></script><script src="direct-input.js"></script><script src="client.js"></script><script src="gestures.js"></script>
+</body>
+</html>

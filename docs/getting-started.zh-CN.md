@@ -33,6 +33,14 @@ npm run dev
 
 启动模式有 **Auto**（默认）、**Manual**、**Accept edits**、**Plan** 与 **Bypass**，只在对应 CLI 支持时提供；它们外面的防护层见[安装与安全](installing-and-security.zh-CN.md#智能体防护层)。在服务商支持的情况下，**Bypass**（YOLO）会关闭其安全确认提示，但仍处于基础防护与智能体隔离之内。对于 OpenCode，CanvasTTY 只在本次启动中添加 inline `permission: "allow"` override，并保留其余合并后的 OpenCode 配置；Hermes 接收原生 `--yolo`，Grok Build 接收原生 `--always-approve`，且都只作用于本次启动。CanvasTTY 会要求你为每个 CLI 确认一次，且不会交给子智能体；只在你愿意让智能体改动的目录中使用它。
 
+## 终端动画背景
+
+在 **Settings → Appearance → Terminal backgrounds** 中选择背景。要在 OpenCode 中显示动画，必须选择其系统主题：在 OpenCode 中输入 `/theme` 并选择 **system**。该主题使用终端默认背景；普通 OpenCode 主题会在动画上绘制自己的不透明背景。参见 [OpenCode 主题文档](https://docs.opencode.ai/docs/themes/)。
+
+对于会自行填充屏幕背景的其他 TUI 智能体，请在支持的情况下选择对应的系统主题、终端默认背景或透明模式。这是显示动画背景的条件，并非在 CanvasTTY 中正常运行智能体的要求。TUI 的面板、输入框和选中区域仍可能保留各自的背景。
+
+**Terminal backgrounds → Adjust → Text readability** 会在文字后面添加暗色衬底。如果动画上出现暗色条带，可降低 **Darkness behind text**，或关闭可读性选项进行比较。字符本身被截断或缺失并非预期效果。
+
 ## 终端输入与控制
 
 - 点击任意实时终端卡片即可选中并聚焦它。Input focus 与 selection 相互独立，因此未来加入 multi-selection 后仍能保持唯一明确的 keyboard 与 wheel 目标。

@@ -1,0 +1,7 @@
+const {test}=require('node:test'),assert=require('node:assert/strict');
+const {focusOwnedWindow}=require('../host/owned-focus.cjs');
+function fixture(){let tick=0,focused=false,active=true,requests=0,renderer=0;return {app:{focus(){requests++;}},target:{isDestroyed:()=>false,isMinimized:()=>false,isFocused:()=>focused,show(){},focus(){},webContents:{focus(){renderer++;}}},active:()=>active,now:()=>tick,wait:async ms=>{tick+=ms;if(tick>=60)focused=true;},revoke(){active=false;},get requests(){return requests;},get renderer(){return renderer;}};}
+test('Own window activation can settle asynchronously before renderer input is focused',async()=>{const f=fixture();await focusOwnedWindow(f);assert.equal(f.requests,1);assert.equal(f.renderer,1);});
+test('Revocation while awaiting activation cannot focus the input renderer',async()=>{const f=fixture();f.wait=async()=>{f.revoke();};await assert.rejects(focusOwnedWindow(f),/session-ended/);assert.equal(f.renderer,0);});
+test('An unactivatable own window fails within the bounded wait',async()=>{const f=fixture();let tick=0;f.now=()=>tick;f.wait=async ms=>{tick+=ms;};await assert.rejects(focusOwnedWindow({...f,timeout:40}),/canvas-focus-required/);assert.equal(f.renderer,0);assert.equal(f.requests,1);});
+test('A child-window resignation can be followed by another bounded own activation',async()=>{const f=fixture();let tick=0;f.now=()=>tick;f.target.isFocused=()=>f.requests>=2;f.wait=async ms=>{tick+=ms;};await focusOwnedWindow(f);assert.equal(f.requests,2);assert.equal(f.renderer,1);});

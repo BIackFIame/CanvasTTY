@@ -192,6 +192,7 @@ export interface ShortcutBindings {
   codexSubmitSuper: string;
   codexNewline: string;
   codexSelectAll: string;
+  momEntered: string;
 }
 
 export const DEFAULT_SHORTCUTS: ShortcutBindings = {
@@ -215,7 +216,8 @@ export const DEFAULT_SHORTCUTS: ShortcutBindings = {
   codexSubmitAlternate: "Ctrl+Enter",
   codexSubmitSuper: "Meta+Enter",
   codexNewline: "Shift+Enter",
-  codexSelectAll: "Ctrl+A"
+  codexSelectAll: "Ctrl+A",
+  momEntered: "F8"
 };
 
 export function keyboardPresetShortcuts(preset: Exclude<KeyboardPreset, "custom">): ShortcutBindings {
@@ -232,7 +234,7 @@ export function keyboardPresetShortcuts(preset: Exclude<KeyboardPreset, "custom"
 
 export function shortcutsShareContext(left: ShortcutAction, right: ShortcutAction): boolean {
   const terminal = (action: ShortcutAction) => action.startsWith("terminal") || action.startsWith("codex");
-  return left === "toggleDetail" || right === "toggleDetail" || terminal(left) === terminal(right);
+  return left === "toggleDetail" || right === "toggleDetail" || left === "momEntered" || right === "momEntered" || terminal(left) === terminal(right);
 }
 
 export const INITIAL_TERMINAL_COLS = 80;
@@ -498,6 +500,25 @@ export interface AppSettings {
   canvasBackground: CanvasBackgroundId;
   pattern: CanvasPatternId;
   terminalBorderSkin: TerminalBorderSkinId;
+  terminalBackground: import("./terminalBackground.ts").TerminalBackgroundId;
+  terminalBackgroundBrightness: number;
+  terminalBackgroundContrast: number;
+  terminalBackgroundSaturation: number;
+  terminalBackgroundPaused: boolean;
+  terminalBackgroundSpeed: number;
+  terminalBackgroundScale: number;
+  terminalBackgroundOffsetX: number;
+  terminalBackgroundOffsetY: number;
+  terminalBackgroundReadability: boolean;
+  terminalBackgroundReadabilityStrength: number;
+  terminalBackgroundPauseOnOutput: boolean;
+  terminalBackgroundFocusDimming: boolean;
+  terminalBackgroundSynchronized: boolean;
+  terminalBackgroundPauseInactive: boolean;
+  terminalBackgroundOverrides: Record<string, import("./terminalBackgroundAppearance.ts").TerminalBackgroundAppearance>;
+  terminalBackgroundPresets: import("./terminalBackgroundAppearance.ts").TerminalBackgroundPreset[];
+  terminalBackgroundFavorites: Exclude<import("./terminalBackground.ts").TerminalBackgroundId, "none">[];
+  terminalBackgroundDeleted: string[];
   terminalSkinDetail: PixelSkinPreferredDetail;
   terminalSkinAnimationEnabled: boolean;
   appSkin: AppSkinId;
@@ -1877,6 +1898,7 @@ export interface CanvasTTYApi {
     onStatus(listener: (status: UpdateStatus) => void): () => void;
   };
   evenG2: import('./evenG2.ts').EvenG2Api;
+  canvasLink: import('./canvasLink.ts').CanvasLinkApi;
   appVersion(): Promise<string>;
   clipboard: {
     readText(): Promise<string>;

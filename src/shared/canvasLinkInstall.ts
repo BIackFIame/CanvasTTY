@@ -1,0 +1,20 @@
+import type { LocaleId } from "./contracts";
+
+// Pinned owner-signed artifact. Never add pairing codes or runtime state here.
+export const CANVASLINK_ANDROID_RELEASE = {
+  version: "1.0.0",
+  versionCode: 100,
+  applicationId: "io.nexcore.canvaslink",
+  url: "https://github.com/howdeploy/CanvasTTY/releases/download/canvaslink-v1.0.0/CanvasLink-1.0.0.apk",
+  sha256: "296eb6f1f848fa50231494f4e5b64f2eec879e864e22fac86593cc4ac4dda690",
+  signerCertificateSha256: "4bdfa29b57e0d94488cd5a7af6ee6d687f3b9125f7fd094db4b2c6782ddb4357",
+  guideUrl: "https://github.com/howdeploy/CanvasTTY/blob/main/docs/canvaslink.md#connect",
+  guideRuUrl: "https://github.com/howdeploy/CanvasTTY/blob/main/docs/canvaslink.ru.md",
+} as const;
+
+export function canvasLinkInstallPrompt(locale: LocaleId): string {
+  const release = CANVASLINK_ANDROID_RELEASE;
+  const artifact = `CanvasLink ${release.version}; Android 8+; ${release.applicationId}; versionCode ${release.versionCode}\nAPK: ${release.url}\nSHA-256: ${release.sha256}\nSigning certificate SHA-256: ${release.signerCertificateSha256}`;
+  if (locale === "ru") return `Установи CanvasLink на мой Android по USB с этого компьютера. Нужна CanvasTTY 1.8.3 или новее с разделом Settings → CanvasLink.\n\n${artifact}\n\nИспользуй ADB. Если его нет, установи Google Android SDK Platform-Tools только из официального источника: https://developer.android.com/tools/releases/platform-tools. Выполни adb devices -l. Если устройств несколько, сначала уточни нужное; во всех командах указывай adb -s SERIAL. Если статус unauthorized, попроси меня подтвердить RSA-запрос на Android; не обходи его. USB-отладку включает владелец устройства.\n\nСкачай именно указанный APK и до установки проверь SHA-256. При несовпадении остановись. Если доступен apksigner, также проверь подпись и отпечаток сертификата. Установи через adb -s SERIAL install -r PATH_TO_APK, сохраняя данные. При несовместимой подписи или запрете понижения версии остановись и объясни причину. Не удаляй старое приложение, не очищай данные и не используй обходные флаги.\n\nПосле успешной установки открой adb -s SERIAL shell am start -n io.nexcore.canvaslink/.MainActivity. Проверь, что приложение запустилось. Для работы нужны одна локальная сеть и включённый доступ в Settings → CanvasLink на компьютере; затем компьютер выбирается в Android и вводится одноразовый код. USB нужен только для установки. Не меняй firewall и не открывай порты в Интернет, не перезапускай CanvasTTY с активными терминалами. Не отправляй код подключения или содержимое терминалов в чат. Сообщи результат установки и оставшиеся ручные шаги.\n\nИнструкция: ${release.guideRuUrl}`;
+  return `Install CanvasLink on my Android over USB from this computer. Use CanvasTTY 1.8.3 or newer with Settings → CanvasLink.\n\n${artifact}\n\nUse ADB. If missing, install Google Android SDK Platform-Tools only from the official source: https://developer.android.com/tools/releases/platform-tools. Run adb devices -l. If multiple devices are present, ask which one to use; specify adb -s SERIAL in every device command. For unauthorized status, ask me to approve the RSA dialog on Android; do not bypass it. The device owner enables USB debugging.\n\nDownload the exact APK above and verify its SHA-256 before installing. Stop on mismatch. If apksigner is available, also verify the signature and certificate fingerprint. Install with adb -s SERIAL install -r PATH_TO_APK, preserving data. Stop and explain incompatible signatures or version downgrade errors. Do not uninstall the existing app, clear data, or use bypass flags.\n\nAfter successful installation, launch adb -s SERIAL shell am start -n io.nexcore.canvaslink/.MainActivity and verify that the app started. Use the same local network and enable access under Settings → CanvasLink on the computer; select the computer in Android and enter the one-time code. USB is only needed for installation. Do not change the firewall, expose ports to the Internet, or restart CanvasTTY with active terminals. Do not send pairing codes or terminal contents to chat. Report installation results and remaining manual steps.\n\nGuide: ${release.guideUrl}`;
+}

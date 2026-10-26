@@ -32,13 +32,17 @@ import plusIcon from "../assets/icons/lucide/plus.svg";
 import paletteIcon from "../assets/icons/lucide/palette.svg";
 import pencilIcon from "../assets/icons/lucide/pencil.svg";
 import searchIcon from "../assets/icons/lucide/search.svg";
+import reloadIcon from "../assets/icons/lucide/rotate-cw.svg";
+import resetIcon from "../assets/icons/lucide/rotate-ccw.svg";
 import sendIcon from "../assets/icons/lucide/send.svg";
 import settingsIcon from "../assets/icons/lucide/settings.svg";
 import slidersHorizontalIcon from "../assets/icons/lucide/sliders-horizontal.svg";
 import stickyNoteIcon from "../assets/icons/lucide/sticky-note.svg";
 import terminalIcon from "../assets/icons/lucide/square-terminal.svg";
 import trashIcon from "../assets/icons/lucide/trash-2.svg";
+import undoIcon from "../assets/icons/lucide/undo-2.svg";
 import workingIcon from "../assets/icons/lucide/loader-circle.svg";
+import wrenchIcon from "../assets/icons/lucide/wrench.svg";
 import zoomInIcon from "../assets/icons/lucide/zoom-in.svg";
 import zoomOutIcon from "../assets/icons/lucide/zoom-out.svg";
 
@@ -62,6 +66,7 @@ export type UiIconName =
   | "bring-to-front"
   | "terminal"
   | "reload"
+  | "reset"
   | "arrow"
   | "chevron"
   | "download"
@@ -84,6 +89,8 @@ export type UiIconName =
   | "clipboard-paste"
   | "ellipsis"
   | "trash"
+  | "undo"
+  | "wrench"
   | "working"
   | "attention"
   | "error"
@@ -114,7 +121,8 @@ const ICONS: Record<UiIconName, string> = {
   browser: browserIcon,
   "bring-to-front": bringToFrontIcon,
   terminal: terminalIcon,
-  reload: workingIcon,
+  reload: reloadIcon,
+  reset: resetIcon,
   arrow: arrowIcon,
   chevron: chevronIcon,
   download: downloadIcon,
@@ -137,6 +145,8 @@ const ICONS: Record<UiIconName, string> = {
   "clipboard-paste": clipboardPasteIcon,
   ellipsis: ellipsisIcon,
   trash: trashIcon,
+  undo: undoIcon,
+  wrench: wrenchIcon,
   working: workingIcon,
   attention: attentionIcon,
   error: errorIcon,

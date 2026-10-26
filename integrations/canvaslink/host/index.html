@@ -1,0 +1,14 @@
+<!doctype html><html lang="ru"><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; media-src 'self' blob:; img-src 'self' data:; connect-src 'none'">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>CanvasLink</title>
+<link rel="stylesheet" href="style.css">
+<body><main>
+<header><span class="mark">C<span>↗</span></span><div><h1>CanvasLink</h1><p>Рабочее окно. На расстоянии касания.</p></div><span class="tag">LOCAL / 01</span></header>
+<nav id="device-tabs" hidden><button id="phone-tab">Телефон / планшет</button><button id="glasses-tab">Очки Even G2</button></nav><section id="glasses-panel" hidden><h2>Очки Even G2</h2><p>Отдельный код и выбранные в CanvasTTY разрешения для очков.</p><div id="glasses-code"></div><p id="glasses-status" role="status"></p><button id="glasses-begin">Получить код для очков</button><button id="glasses-cancel">Отменить код для очков</button></section><section id="phone-panel" class="pair"><div class="eyebrow">01 — ПОДКЛЮЧЕНИЕ ANDROID</div><div id="pin" aria-label="Код подключения">··· ···</div><div class="pair-foot"><span id="expiry">Подготовка…</span><button id="rotate">Новый код / отключить</button></div></section>
+<section id="source-section"><div class="eyebrow">02 — ОКНО ДЛЯ ПЕРЕДАЧИ</div><div class="row"><select id="source" aria-label="Окно CanvasTTY"><option>Нажмите «Найти»</option></select><button id="refresh">Найти</button></div><p class="hint">На macOS при первом запуске потребуется разрешение на запись экрана. Передаётся выбранное окно CanvasTTY.</p></section>
+<section><div class="eyebrow">03 — ПРЯМОЕ СОЕДИНЕНИЕ</div><div id="addresses" class="mono"></div><p class="hint">Откройте CanvasLink на Android, выберите компьютер и введите код. Оба устройства должны быть в одной локальной сети.</p></section>
+<div id="status" role="status">Ожидание планшета</div><div id="error" role="alert"></div>
+<section id="mac-permissions" hidden><div class="eyebrow">ДОСТУП MACOS</div><p id="permission-status" class="hint"></p><div class="row"><button id="screen-settings">Запись экрана</button><button id="input-settings">Управление</button></div><p class="hint">Включите CanvasLink в открывшемся списке. После выдачи доступа перезапустите только CanvasLink.</p></section>
+<canvas id="fixture" width="1280" height="800" hidden></canvas><video id="preview" muted autoplay hidden></video>
+<footer><span>CANVASTTY → ANDROID</span><span>Локально · Без облака</span></footer>
+</main><script src="frames.js"></script><script src="renderer.js"></script></body></html>

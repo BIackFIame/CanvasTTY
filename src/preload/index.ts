@@ -65,6 +65,10 @@ ipcRenderer.on(IPC.windowOpenUpdates, () => {
 });
 
 const api: CanvasTTYApi = {
+  canvasLink: {
+    state: () => ipcRenderer.invoke("canvaslink-settings:state"),
+    command: (action) => ipcRenderer.invoke("canvaslink-settings:command", action)
+  },
   mascots: {
     list: () => ipcRenderer.invoke(IPC.mascotsList),
     start: (image) => ipcRenderer.invoke(IPC.mascotsStart, image),

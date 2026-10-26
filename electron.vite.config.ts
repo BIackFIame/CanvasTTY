@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { cpSync, mkdirSync } from "node:fs";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 
@@ -11,7 +12,14 @@ export default defineConfig({
           || ""
       )
     },
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin(), {
+      name: "canvaslink-host-assets",
+      closeBundle() {
+        const destination = resolve("out/main/canvaslink/host");
+        mkdirSync(destination, { recursive: true });
+        cpSync(resolve("integrations/canvaslink/host"), destination, { recursive: true });
+      }
+    }],
     build: {
       rollupOptions: {
         input: resolve("src/main/index.ts")
@@ -37,6 +45,7 @@ export default defineConfig({
   renderer: {
     root: resolve("src/renderer"),
     plugins: [react()],
+    worker: { format: "es" },
     // electron-vite leaves every bundle unminified; the renderer's (React, xterm and the app, about 1.8 MB)
     // is parsed on every window load, so it is minified. Source maps stay off, as before.
     build: {

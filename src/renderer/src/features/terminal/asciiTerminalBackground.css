@@ -1,0 +1,59 @@
+.terminal-card__surface--ascii {
+  isolation: isolate;
+  background: #07090f !important;
+}
+
+.terminal-ascii-background {
+  color: var(--terminal-foreground, #f7f4ec);
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: #07090f;
+}
+
+.terminal-ascii-background canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  image-rendering: auto;
+}
+
+.terminal-card__surface--ascii .xterm-viewport {
+  background: transparent !important;
+}
+
+.terminal-ascii-text-backdrop {
+  display: none;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.terminal-card__surface--ascii-readable .terminal-ascii-text-backdrop {
+  display: block;
+}
+
+.terminal-card__surface--ascii-readable .xterm-rows > div > span,
+.terminal-card__surface--ascii-readable .terminal-card__pinned-input {
+  -webkit-text-stroke: 0.4px #02040a;
+  paint-order: stroke fill;
+  text-shadow: 0 0 1px #02040a, 0 0 2px #02040a,
+    0 0 4px #02040a, 0 1px 6px rgb(2 4 10 / 95%);
+}
+
+.terminal-card__surface--ascii .terminal-card__pinned-input {
+  background: transparent;
+  box-shadow: none;
+}
+
+.terminal-card__surface--ascii-readable .terminal-card__pinned-input-row > span {
+  background: rgb(2 4 10 / var(--terminal-text-backdrop-strength, 0.86));
+  border-radius: 3px;
+  box-shadow: 0 0 3px rgb(2 4 10 / var(--terminal-text-backdrop-strength, 0.86));
+}

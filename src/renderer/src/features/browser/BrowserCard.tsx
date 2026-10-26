@@ -568,7 +568,7 @@ export function BrowserCard({
           <UiIcon name="error" size={34} />
           <strong>{t(locale, "browserTabCrashed")}</strong>
           <small>{activeTab.crashState ?? t(locale, "browserActionFailed")}</small>
-          <button type="button" onClick={() => run(() => window.canvasTTY.browser.reload(activeTab.id))}>{t(locale, "reload")}</button>
+          <button className="button-with-icon" type="button" onClick={() => run(() => window.canvasTTY.browser.reload(activeTab.id))}><UiIcon name="reload" size={15} />{t(locale, "reload")}</button>
         </div>
       )}
 

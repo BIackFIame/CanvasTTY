@@ -443,7 +443,8 @@ export function EvenG2Controls({
                       ? t(locale, "evenG2AddressAvailable")
                       : t(locale, "evenG2ConnectThisComputerToWi")}
                 </span>
-                <button disabled={busy} onClick={() => void refresh()}>
+                <button className="button-with-icon" disabled={busy} onClick={() => void refresh()}>
+                  <UiIcon name="reload" size="1.2em" />
                   {t(locale, "evenG2Refresh")}
                 </button>
               </div>

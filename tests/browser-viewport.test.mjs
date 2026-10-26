@@ -1,10 +1,50 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  browserCanvasEventToCss,
   clipBrowserViewportBounds,
   normalizeBrowserViewportBounds,
   sameBrowserViewport
 } from "../src/main/services/browser/BrowserViewport.ts";
+
+test("renderer zoom converts CSS viewport and clip edges to native DIPs before rounding", () => {
+  const viewport = normalizeBrowserViewportBounds({
+    x: 10.4, y: 20.6, width: 100.2, height: 50.1, surface: "native", canvasScale: 0.5,
+    clipBounds: { x: 0.2, y: 12.2, width: 300.6, height: 200.4 }
+  }, 0.8);
+  assert.deepEqual(viewport, {
+    x: 8, y: 16, width: 81, height: 41, surface: "native", canvasScale: 0.4,
+    clipBounds: { x: 1, y: 10, width: 239, height: 160 }, showAgentPresence: false
+  });
+  assert.deepEqual(clipBrowserViewportBounds(viewport, { width: 100, height: 40 }), {
+    x: 8, y: 16, width: 81, height: 24
+  });
+});
+
+test("saved negative renderer zoom and enlarged renderer zoom scale the native page along with its slot", () => {
+  for (const zoom of [1.2 ** -0.5, 1.25]) {
+    const viewport = normalizeBrowserViewportBounds({
+      x: 200, y: 160, width: 420, height: 260, surface: "native", canvasScale: 1.4
+    }, zoom);
+    assert.equal(viewport.x, Math.floor(200 * zoom));
+    assert.equal(viewport.width, Math.ceil(620 * zoom) - Math.floor(200 * zoom));
+    assert.equal(viewport.canvasScale, 1.4 * zoom);
+    assert.equal(normalizeBrowserViewportBounds({
+      x: 0, y: 0, width: 420, height: 260, surface: "native"
+    }, zoom).canvasScale, zoom);
+  }
+  for (const zoom of [0, -1, Infinity, NaN]) {
+    assert.equal(normalizeBrowserViewportBounds({ x: 0, y: 0, width: 1, height: 1, surface: "native" }, zoom), null);
+  }
+});
+
+test("native pointer and wheel anchors return in renderer CSS pixels without changing wheel deltas", () => {
+  const event = { tabId: "tab", clientX: 250, clientY: 200, deltaX: 2, deltaY: 18, type: "down" };
+  assert.deepEqual(browserCanvasEventToCss(event, 1.25), {
+    ...event, clientX: 200, clientY: 160
+  });
+  assert.equal(event.clientX, 250);
+});
 
 test("browser viewport expands fractional edges instead of exposing compositor gaps", () => {
   assert.deepEqual(normalizeBrowserViewportBounds({
