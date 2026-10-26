@@ -48,6 +48,7 @@ function fixture({ render = true, reducedMotion = false } = {}) {
     }
   };
   const screen = {
+    style: { visibility: "inherit" },
     offsetLeft: 0,
     offsetTop: 0,
     checkVisibility() { return true; },
@@ -89,22 +90,22 @@ function fixture({ render = true, reducedMotion = false } = {}) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback();
   };
-  return { snapshot, document, start, cancel, advance, frame,
+  return { snapshot, screen, document, start, cancel, advance, frame,
     pending: () => timers.size + frames.size + renders.size,
     counts: () => ({ timers: timers.size, frames: frames.size, renders: renders.size }) };
 }
 
-test("a visible transition fades only after the new render and two paint frames", () => {
+test("the opaque snapshot is removed after the new render and two paint frames without blending text", () => {
   const h = fixture();
   h.start();
+  assert.equal(h.screen.style.visibility, "hidden", "the new renderer cannot show through a transparent snapshot");
   assert.equal(h.snapshot.animation, null);
   h.frame();
   assert.equal(h.snapshot.animation, null);
   h.frame();
-  assert.ok(h.snapshot.animation);
-  assert.equal(h.snapshot.isConnected, true);
-  h.snapshot.animation.onfinish();
+  assert.equal(h.snapshot.animation, null);
   assert.equal(h.snapshot.isConnected, false);
+  assert.equal(h.screen.style.visibility, "inherit");
   assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
 });
 
@@ -115,6 +116,7 @@ for (const render of [false, true]) {
     assert.equal(h.snapshot.isConnected, true);
     h.advance(1);
     assert.equal(h.snapshot.isConnected, false);
+    assert.equal(h.screen.style.visibility, "inherit");
     assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
     h.frame();
     assert.equal(h.snapshot.animation, null);
@@ -127,20 +129,33 @@ test("hiding the document removes the snapshot before any suspended frames or ti
   h.document.hidden = true;
   h.document.dispatchEvent(new Event("visibilitychange"));
   assert.equal(h.snapshot.isConnected, false);
+  assert.equal(h.screen.style.visibility, "inherit");
   assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
 });
 
-test("teardown cancels a pending render, frames and an active fade", () => {
-  for (const phase of ["render", "frame", "fade"]) {
+test("teardown cancels a pending render or frames and is harmless after paint", () => {
+  for (const phase of ["render", "frame", "paint"]) {
     const h = fixture({ render: phase !== "render" });
     h.start();
-    if (phase === "fade") { h.frame(); h.frame(); }
+    if (phase === "paint") { h.frame(); h.frame(); }
     h.cancel(); h.cancel();
     assert.equal(h.snapshot.isConnected, false);
+    assert.equal(h.screen.style.visibility, "inherit");
     assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
     if (h.snapshot.animation) assert.equal(h.snapshot.animation.canceled, true);
     h.advance(1_000); h.frame();
     assert.equal(h.snapshot.isConnected, false);
+    assert.equal(h.screen.style.visibility, "inherit");
+  }
+});
+
+test("40 renderer transitions leave no snapshots, animations or pending work", () => {
+  const h = fixture();
+  for (let cycle = 0; cycle < 40; cycle++) {
+    h.start(); h.frame(); h.frame();
+    assert.equal(h.snapshot.animation, null);
+    assert.equal(h.snapshot.isConnected, false);
+    assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
   }
 });
 

@@ -67,9 +67,11 @@ export function useCanvasWheelNavigation({
   const [panGesture] = useState(() => createGestureSettle(setWheelPanning));
 
   const zoomAt = useCallback((clientX: number, clientY: number, nextZoom: number): void => {
+    const camera = cameraRef.current;
+    // At a zoom limit, avoid re-rasterizing the scene or introducing sub-pixel camera drift.
+    if (nextZoom === camera.zoom) return;
     const bounds = viewport.current?.getBoundingClientRect();
     if (!bounds) return;
-    const camera = cameraRef.current;
     const localX = clientX - bounds.left;
     const localY = clientY - bounds.top;
     const worldX = (localX - camera.x) / camera.zoom;
@@ -124,9 +126,8 @@ export function useCanvasWheelNavigation({
       return;
     }
     flushPan();
-    markZoomGesture();
     zoomAccumulator.push({ clientX: event.clientX, clientY: event.clientY, factor: intent.factor });
-  }, [flushPan, markZoomGesture, panAccumulator, panGesture, zoomAccumulator]);
+  }, [flushPan, panAccumulator, panGesture, zoomAccumulator]);
 
   useEffect(() => () => {
     panAccumulator.dispose();
@@ -235,12 +236,14 @@ export function useCanvasWheelNavigation({
   useEffect(() => window.canvasTTY.browser.onCanvasWheel(applyCanvasWheel), [applyCanvasWheel]);
 
   const zoomBy = useCallback((factor: number): void => {
+    const nextZoom = clamp(cameraRef.current.zoom * factor, 0.2, 1.35);
+    if (nextZoom === cameraRef.current.zoom) return;
     const bounds = viewport.current?.getBoundingClientRect();
     if (!bounds) return;
     zoomAt(
       bounds.left + bounds.width / 2,
       bounds.top + bounds.height / 2,
-      clamp(cameraRef.current.zoom * factor, 0.2, 1.35)
+      nextZoom
     );
   }, [cameraRef, viewport, zoomAt]);
 
