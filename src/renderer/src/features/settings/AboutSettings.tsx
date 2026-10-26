@@ -1,9 +1,9 @@
 import appManifest from "../../../../../package.json";
 import type { LocaleId } from "../../../../shared/contracts";
-import { t, type TranslationKey } from "../../lib/i18n";
+import { aboutText, type AboutTextKey } from "./aboutText";
 import { DiagnosticSettings } from "./DiagnosticSettings";
 
-const FAQ: ReadonlyArray<readonly [TranslationKey, TranslationKey]> = [
+const FAQ: ReadonlyArray<readonly [AboutTextKey, AboutTextKey]> = [
   ["aboutFaqStatusQuestion", "aboutFaqStatusAnswer"],
   ["aboutFaqDataQuestion", "aboutFaqDataAnswer"],
   ["aboutFaqDisableQuestion", "aboutFaqDisableAnswer"],
@@ -19,17 +19,17 @@ export function AboutSettings({ locale }: { locale: LocaleId }): React.JSX.Eleme
           <strong>CanvasTTY</strong>
           <small>v{appManifest.version}</small>
         </span>
-        <p>{t(locale, "aboutDescription")}</p>
+        <p>{aboutText(locale, "aboutDescription")}</p>
       </header>
 
       <DiagnosticSettings locale={locale} />
 
       <div className="about-settings__faq">
-        <h3>{t(locale, "aboutFaq")}</h3>
+        <h3>{aboutText(locale, "aboutFaq")}</h3>
         {FAQ.map(([question, answer]) => (
           <details key={question}>
-            <summary>{t(locale, question)}</summary>
-            <p>{t(locale, answer)}</p>
+            <summary>{aboutText(locale, question)}</summary>
+            <p>{aboutText(locale, answer)}</p>
           </details>
         ))}
       </div>

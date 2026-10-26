@@ -104,7 +104,8 @@ test("Settings and the launch/link dialogs are split out of the app's static imp
 // must not appear in any chunk App.js loads at startup.
 const SETTINGS_ONLY_TEXT = [
   ["src/renderer/src/features/settings/canvasNavigationText.ts", "Wheel/pinch capture over widgets"],
-  ["src/renderer/src/features/plugins/PluginSettingsSection.tsx", "GitHub sign-in could not be cancelled"]
+  ["src/renderer/src/features/plugins/PluginSettingsSection.tsx", "GitHub sign-in could not be cancelled"],
+  ["src/renderer/src/features/settings/aboutText.ts", "How does CanvasTTY determine agent status?"]
 ];
 
 test("text that only Settings shows stays out of the startup bundle", async () => {
