@@ -71,6 +71,7 @@ import { fileCardToRootReference, isFileRootUsable } from "./features/files/file
 import { matchQuickOpen, toggleExpandedFolder } from "./features/files/fileTree";
 import type { FileSessionOption } from "./features/files/FileBrowserCard";
 import { GitRiskNotice } from "./features/terminal/GitRiskNotice";
+import { UsageHistoryPanel } from "./features/usage/UsageHistoryPanel";
 import { WorkspaceCanvas } from "./features/workspace/WorkspaceCanvas";
 import { createCameraStore } from "./features/workspace/cameraStore";
 import { isPixelSkinThemeId } from "./features/skins/skinCatalog";
@@ -126,8 +127,6 @@ const SettingsPanel = lazy(() =>
   import("./features/settings/SettingsPanel").then((module) => ({ default: module.SettingsPanel })));
 const ShortcutReference = lazy(() =>
   import("./components/ShortcutReference").then((module) => ({ default: module.ShortcutReference })));
-const UsageHistoryPanel = lazy(() =>
-  import("./features/usage/UsageHistoryPanel").then((module) => ({ default: module.UsageHistoryPanel })));
 
 const FALLBACK_SETTINGS: AppSettings = {
   locale: "ru",
@@ -2029,14 +2028,12 @@ export function App(): React.JSX.Element {
     <div ref={setOverlayHost} className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
       <TerminalBorderSkinStyleHost skinId={settings.terminalBorderSkin} />
       <TitleBar locale={settings.locale} windowState={windowState} onWindowStateChange={setWindowState} />
-      <Suspense fallback={null}>
-        <UsageHistoryPanel
-          locale={settings.locale}
-          open={usageHistoryOpen}
-          container={overlayHost}
-          onOpenChange={changeUsageHistoryOpen}
-        />
-      </Suspense>
+      <UsageHistoryPanel
+        locale={settings.locale}
+        open={usageHistoryOpen}
+        container={overlayHost}
+        onOpenChange={changeUsageHistoryOpen}
+      />
       <main className="app__content">
         {!ready && <div className="loading-screen"><span>{t(settings.locale, "loading")}</span></div>}
         {ready && <WorkspaceCanvas

@@ -4,7 +4,6 @@ import type { TerminalBackgroundId } from "../../../../shared/terminalBackground
 const AsciiTerminalBackground = lazy(() =>
   import("./AsciiTerminalBackground").then((m) => ({ default: m.AsciiTerminalBackground }))
 );
-import { attachTerminalTextBackdrop } from "./terminalTextBackdrop";
 import { summaryScaleForZoom, useCameraSelector, type CameraStore } from "../workspace/cameraStore";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
@@ -502,7 +501,12 @@ function TerminalCardView({
     terminal.loadAddon(webLinksAddon);
     const fileLinks = terminal.registerLinkProvider(terminalFileLinkProvider(terminal, openFile));
     terminal.open(host);
-    const detachTextBackdrop = attachTerminalTextBackdrop(terminal, host);
+    let detachTextBackdrop = () => {};
+    if (hasAsciiBackground) {
+      import("./terminalTextBackdrop").then((m) => {
+        if (host.isConnected) detachTextBackdrop = m.attachTerminalTextBackdrop(terminal, host);
+      });
+    }
     const screen = terminal.element?.querySelector<HTMLElement>(".xterm-screen");
     const pinnedInput = document.createElement("div");
     pinnedInput.className = "terminal-card__pinned-input";
@@ -815,6 +819,7 @@ function TerminalCardView({
   }, [copyOnSelect]);
 
   const enableWebgl = (terminal: Terminal): boolean => {
+    if (asciiBackgroundRef.current) return false;
     if (webglAddonRef.current) return true;
     const transitionElement = beginRendererTransition(terminal);
     // WebglAddon takes no transparency argument in 0.19.0: it reads the stored
