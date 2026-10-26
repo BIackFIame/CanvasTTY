@@ -239,6 +239,7 @@ async function assertBrowserRendererZoom(service: BrowserService, url: string): 
   const owner = BrowserWindow.getAllWindows().find((candidate) => candidate.getParentWindow() === null);
   if (!contents || !owner) throw new Error("Browser zoom smoke could not resolve its WebContents.");
   const initialZoom = owner.webContents.getZoomFactor();
+  let fixtureStyle: string | undefined;
   try {
     // Use the actual sandboxed preload/IPC bridge and a transformed DOM slot, as BrowserCard does.
     await owner.webContents.executeJavaScript(`
@@ -320,6 +321,8 @@ async function assertBrowserRendererZoom(service: BrowserService, url: string): 
       await waitForWheelIdle();
     }
     // Also let the real React card report its own rectangle when View > Zoom changes.
+    // Small CI displays otherwise hide the native page where the corner HUD overlaps this card.
+    fixtureStyle = await owner.webContents.insertCSS(".canvas-overlays { display: none !important; }");
     owner.webContents.setZoomFactor(1.2 ** -0.5);
     await owner.webContents.executeJavaScript(`
       document.getElementById('browser-zoom-smoke-slot')?.remove();
@@ -356,6 +359,7 @@ async function assertBrowserRendererZoom(service: BrowserService, url: string): 
     });
     console.log("CANVASTTY_BROWSER_ZOOM_SMOKE_READY");
   } finally {
+    if (fixtureStyle) await owner.webContents.removeInsertedCSS(fixtureStyle);
     owner.webContents.setZoomFactor(initialZoom);
     await owner.webContents.executeJavaScript(`
       document.getElementById('browser-zoom-smoke-slot')?.remove();
