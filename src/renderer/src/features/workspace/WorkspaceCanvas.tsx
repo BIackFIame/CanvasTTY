@@ -193,6 +193,7 @@ type RegionMovePreview = {
 
 interface WorkspaceCanvasProps {
   settings: AppSettings;
+  backgroundsSuspended?: boolean;
   /**
    * False for the first frame after startup: restored terminals (xterm), plugin canvas iframes and the browser card
    * mount right after that frame was painted, so HOME and the canvas show without waiting for them. Their layout
@@ -288,7 +289,7 @@ const FileBrowserCard = lazy(() => import("../files/FileBrowserCard").then((modu
 
 export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element {
   const {
-    settings, mediaData, sessions, limits, limitsLoadState, plugins, browser,
+    settings, backgroundsSuspended = false, mediaData, sessions, limits, limitsLoadState, plugins, browser,
     browserViewVisible, homeEditing, camera, onCameraChange, onGoHome,
     onOpenSettings, onOpenAgent, onOpenTerminal, onOpenBrowser, onOpenTerminalUrl, onFocusSession,
     activeSessionId, browserSelected, renamingSessionId, fullscreenSessionId, onToggleFullscreen, onSelectSession,
@@ -1235,6 +1236,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
               background={settings.terminalBackgroundOverrides[session.id]?.terminalBackground ?? settings.terminalBackground}
+              backgroundsSuspended={backgroundsSuspended}
               backgroundBrightness={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness}
               backgroundContrast={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast}
               backgroundSaturation={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation}
@@ -1443,6 +1445,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps): React.JSX.Element 
               palette={settings.palette}
               borderSkin={settings.terminalBorderSkin}
               background={settings.terminalBackgroundOverrides[session.id]?.terminalBackground ?? settings.terminalBackground}
+              backgroundsSuspended={backgroundsSuspended}
               backgroundBrightness={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundBrightness ?? settings.terminalBackgroundBrightness}
               backgroundContrast={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundContrast ?? settings.terminalBackgroundContrast}
               backgroundSaturation={settings.terminalBackgroundOverrides[session.id]?.terminalBackgroundSaturation ?? settings.terminalBackgroundSaturation}

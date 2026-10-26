@@ -1935,9 +1935,15 @@ export function App(): React.JSX.Element {
       if (shortcutReferenceOpen) return;
       if (handleMacNativeSelectAll(event, window.canvasTTY.window.isMacOS)) return;
       if (handoffRemarkIds !== null) return;
-      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (usageHistoryOpen) return;
       if (event.repeat || isShortcutCaptureTarget(event.target) || isRenameInputTarget(event.target)) return;
+      if (settings.shortcuts.momEntered && matchesShortcut(event, settings.shortcuts.momEntered)) {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleMomEntered();
+        return;
+      }
+      if (shouldKeepNativeKeyboardInput(event.target, window.canvasTTY.window.isMacOS, event)) return;
       if (matchesShortcut(event, settings.shortcuts.toggleFullscreen)) {
         event.preventDefault();
         event.stopPropagation();
@@ -1955,11 +1961,6 @@ export function App(): React.JSX.Element {
         event.stopPropagation();
         performShortcut("renameWindow");
         return;
-      }
-      if (settings.shortcuts.momEntered && matchesShortcut(event, settings.shortcuts.momEntered)) {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleMomEntered();
       }
     };
 
@@ -2014,7 +2015,6 @@ export function App(): React.JSX.Element {
     const available = new Set(AGENT_PROVIDERS.filter((provider) => agentAvailability?.[provider]));
     return {
       ...settings,
-      ...(backgroundsSuspended ? { terminalBackground: "none" as const, terminalBackgroundOverrides: {} } : {}),
       ...(homeEditDraft ? { homeGridSize: homeEditDraft.homeGridSize, homeLayout: homeEditDraft.homeLayout } : {}),
       homeLauncherProviders: settings.homeLauncherProviders.filter((provider) => available.has(provider)),
       homeLimitProviders: settings.homeLimitProviders.filter((provider) => available.has(provider)),
@@ -2023,7 +2023,7 @@ export function App(): React.JSX.Element {
         provider === "terminal" || provider === "note" || provider === "browser" || provider === "settings" || available.has(provider)
       ))
     };
-  }, [agentAvailability, backgroundsSuspended, homeEditDraft, settings]);
+  }, [agentAvailability, homeEditDraft, settings]);
 
   return (
     <div ref={setOverlayHost} className={rootClasses} style={rootStyle} data-app-skin={settings.appSkin}>
@@ -2042,6 +2042,7 @@ export function App(): React.JSX.Element {
         {ready && <WorkspaceCanvas
           surfacesMounted={surfacesMounted}
           settings={workspaceSettings}
+          backgroundsSuspended={backgroundsSuspended}
           mediaData={mediaData}
           sessions={sessions}
           limits={limits}

@@ -5,7 +5,7 @@ import type { TerminalBackgroundId } from "../../../../shared/terminalBackground
 import type { BackgroundWorkerMessage } from "./asciiBackground.worker";
 import "./asciiTerminalBackground.css";
 
-export function AsciiTerminalBackground({ scene, brightness, contrast, saturation, paused, speed, scale, offsetX, offsetY, live, pauseOnOutput, outputActivity, synchronized, viewport, focusDimming, focused }: {
+export function AsciiTerminalBackground({ scene, brightness, contrast, saturation, paused, speed, scale, offsetX, offsetY, live, pauseOnOutput, outputActivity, synchronized, viewport, focusDimming, focused, hidden = false }: {
   scene: Exclude<TerminalBackgroundId, "none">;
   brightness: number;
   contrast: number;
@@ -22,6 +22,7 @@ export function AsciiTerminalBackground({ scene, brightness, contrast, saturatio
   outputActivity: MutableRefObject<(() => void) | null>;
   focusDimming?: boolean;
   focused?: boolean;
+  hidden?: boolean;
 }): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null);
   const viewportRef = useRef(viewport);
@@ -118,7 +119,7 @@ export function AsciiTerminalBackground({ scene, brightness, contrast, saturatio
   useEffect(() => { updateSize.current?.(); }, [viewport?.width, viewport?.height]);
   const dimFactor = (focusDimming && focused) ? 0.35 : 1.0;
   const effectiveBrightness = Math.max(5, Math.min(100, Math.round(brightness * dimFactor)));
-  return <div ref={host} className="terminal-ascii-background" aria-hidden="true" style={{ opacity: effectiveBrightness / 100,
+  return <div ref={host} className="terminal-ascii-background" hidden={hidden} aria-hidden="true" style={{ opacity: effectiveBrightness / 100,
     filter: contrast === 100 && saturation === 100 ? undefined : `contrast(${contrast}%) saturate(${saturation}%)`,
     transition: focusDimming ? "opacity 0.25s ease" : undefined }} />;
 }

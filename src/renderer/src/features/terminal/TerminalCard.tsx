@@ -83,6 +83,7 @@ interface TerminalCardProps {
   palette: PaletteId;
   borderSkin: TerminalBorderSkinId;
   background: TerminalBackgroundId;
+  backgroundsSuspended?: boolean;
   backgroundBrightness: number;
   backgroundContrast: number;
   backgroundSaturation: number;
@@ -178,6 +179,7 @@ function TerminalCardView({
   shortcuts,
   borderSkin: selectedBorderSkin,
   background,
+  backgroundsSuspended = false,
   backgroundBrightness,
   backgroundContrast,
   backgroundSaturation,
@@ -872,8 +874,8 @@ function TerminalCardView({
     // The pool gives WebGL to on-screen cards in priority order. Above WEBGL_MAX_SCALE the canvas raster
     // would be an upscale, and in summary mode the terminal is not drawn, so those cards stay on DOM.
     // Preserved WebGL frames blend transparent backgrounds over old glyphs; use xterm's DOM renderer for ASCII scenes.
-    webglContextPool().update(session.id, { eligible: !summaryMode && webglScaleAllowed, focused });
-  }, [session.id, focused, summaryMode, webglScaleAllowed]);
+    webglContextPool().update(session.id, { eligible: !hasAsciiBackground && !summaryMode && webglScaleAllowed, focused });
+  }, [session.id, focused, summaryMode, webglScaleAllowed, hasAsciiBackground]);
 
   useEffect(() => {
     // Moving or resizing the card changes what it covers on screen.
@@ -1353,7 +1355,7 @@ function TerminalCardView({
         {hasAsciiBackground && (
           <Suspense fallback={null}>
             <AsciiTerminalBackground scene={background} brightness={backgroundBrightness} contrast={backgroundContrast} saturation={backgroundSaturation}
-              paused={backgroundPaused} speed={backgroundSpeed} scale={backgroundScale}
+              paused={backgroundPaused || backgroundsSuspended} hidden={backgroundsSuspended} speed={backgroundSpeed} scale={backgroundScale}
               pauseOnOutput={backgroundPauseOnOutput} outputActivity={backgroundOutputActivity} synchronized={backgroundSynchronized}
               focusDimming={backgroundFocusDimming} focused={focused}
               offsetX={backgroundOffsetX} offsetY={backgroundOffsetY} live={surfaceIsLive(lifecycle)} />
