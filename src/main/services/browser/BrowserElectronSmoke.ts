@@ -5,6 +5,7 @@ import { app, BrowserWindow, webContents } from "electron";
 import type { BrowserActor, BrowserCommand, BrowserElementRef, BrowserResult } from "../../../shared/contracts.ts";
 import type { BrowserService } from "../BrowserService.ts";
 import { BROWSER_CANVAS_WHEEL_IDLE_MS } from "./BrowserCanvasFreeze.ts";
+import { clipBrowserViewportBounds, normalizeBrowserViewportBounds } from "./BrowserViewport.ts";
 import {
   waitForBrowserSmokeWheelReady,
   runBrowserSmokeCleanup,
@@ -325,24 +326,33 @@ async function assertBrowserRendererZoom(service: BrowserService, url: string): 
       document.querySelector('.launcher-button--browser').click();
       void 0;
     `);
+    let cardObservation: unknown;
     await waitUntil(async () => {
       const rect = await owner.webContents.executeJavaScript(`
         (() => {
           const slot = document.querySelector('.browser-card__viewport');
           if (!slot) return null;
           const rect = slot.getBoundingClientRect();
-          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          const clip = slot.closest('.workspace').getBoundingClientRect();
+          return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+            clipBounds: { x: clip.x, y: clip.y, width: clip.width, height: clip.height } };
         })()
       `) as { x: number; y: number; width: number; height: number } | null;
       const clip = owner.contentView.children.find((view) => view.children.some(
         (child) => 'webContents' in child && child.webContents === contents
       ));
-      if (!rect || !clip) return false;
       const zoom = owner.webContents.getZoomFactor();
-      const actual = clip.getBounds();
-      return actual.x === Math.floor(rect.x * zoom) && actual.y === Math.floor(rect.y * zoom)
-        && actual.width === Math.ceil((rect.x + rect.width) * zoom) - actual.x
-        && actual.height === Math.ceil((rect.y + rect.height) * zoom) - actual.y;
+      // The matrix above checks zoom arithmetic independently; the real card also clips to its workspace.
+      const normalized = rect && normalizeBrowserViewportBounds({ ...rect, surface: "native" }, zoom);
+      const expected = normalized && clipBrowserViewportBounds(normalized, owner.getContentBounds());
+      const actual = clip?.getBounds();
+      cardObservation = { rect, zoom, expected, actual };
+      if (!expected || !actual) return false;
+      return Object.entries(expected).every(
+        ([key, value]) => actual[key as keyof typeof actual] === value
+      );
+    }).catch((cause) => {
+      throw new Error(`Real BrowserCard viewport mismatch: ${JSON.stringify(cardObservation)}`, { cause });
     });
     console.log("CANVASTTY_BROWSER_ZOOM_SMOKE_READY");
   } finally {
