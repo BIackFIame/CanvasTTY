@@ -6,6 +6,7 @@ import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
   minimapAreaForBounds,
+  minimapPixelArea,
   minimapEdgePointForBounds,
   minimapPointForBounds,
   minimapWorldBounds,
@@ -18,6 +19,20 @@ const home = {
   size: { width: 1_582, height: 1_062 }
 };
 const viewportSize = { width: 1_400, height: 820 };
+
+test("moving minimap rectangle edges stay on physical pixels at fractional display scales", () => {
+  for (const ratio of [1, 1.25, 1.5, 2]) {
+    for (let step = 0; step < 100; step++) {
+      const area = { x: 0.1 + step * 0.00037, y: 0.07 + step * 0.00019, width: 0.34, height: 0.46 };
+      const pixels = minimapPixelArea(area, ratio);
+      for (const edge of [pixels.x, pixels.y, pixels.x + pixels.width, pixels.y + pixels.height]) {
+        assert.ok(Math.abs(edge * ratio - Math.round(edge * ratio)) < 1e-9);
+      }
+      assert.ok(Math.abs(pixels.x - area.x * MINIMAP_SURFACE_SIZE.width) <= 0.5 / ratio + 1e-9);
+      assert.ok(Math.abs(pixels.width - area.width * MINIMAP_SURFACE_SIZE.width) <= 1 / ratio + 1e-9);
+    }
+  }
+});
 
 test("camera pan and zoom project proportionally into a supplied overview", () => {
   const initialViewport = cameraWorldViewport({ x: 0, y: 0, zoom: 1 }, viewportSize);

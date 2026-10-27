@@ -21,6 +21,7 @@ import {
   cameraWorldViewport,
   minimapCameraForPointerDrag,
   minimapAreaForBounds,
+  minimapPixelArea,
   MINIMAP_SURFACE_SIZE,
   minimapWorldBounds,
   minimapWorldPoint
@@ -270,11 +271,12 @@ function CanvasMinimapView({
 }
 
 function areaStyle(area: { x: number; y: number; width: number; height: number }): CSSProperties {
+  const pixels = minimapPixelArea(area, window.devicePixelRatio);
   return {
-    left: `${area.x * 100}%`,
-    top: `${area.y * 100}%`,
-    width: `${area.width * 100}%`,
-    height: `${area.height * 100}%`
+    left: pixels.x,
+    top: pixels.y,
+    width: pixels.width,
+    height: pixels.height
   };
 }
 

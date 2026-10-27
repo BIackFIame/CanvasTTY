@@ -48,7 +48,14 @@ function fixture({ render = true, reducedMotion = false } = {}) {
     }
   };
   const screen = {
-    style: { visibility: "inherit" },
+    style: {
+      opacity: "0.85",
+      get visibility() { return "inherit"; },
+      set visibility(value) {
+        // Browsers blur inputs whose ancestor becomes visibility:hidden.
+        if (value === "hidden") document.activeElement = null;
+      }
+    },
     offsetLeft: 0,
     offsetTop: 0,
     checkVisibility() { return true; },
@@ -67,6 +74,8 @@ function fixture({ render = true, reducedMotion = false } = {}) {
     onRender(callback) { renders.add(callback); return { dispose() { renders.delete(callback); } }; },
     refresh() { if (render) for (const callback of [...renders]) callback(); }
   };
+  const input = {};
+  document.activeElement = input;
   const { begin, reveal, cancel } = runInNewContext(stripTypeScriptTypes(`${transitionSource}
     ({ begin: beginRendererTransition, reveal: revealRendererTransition, cancel: restoreRendererTransition });`), {
     useRef: () => ({ current: null }), snapshot, terminal, window, document,
@@ -90,7 +99,7 @@ function fixture({ render = true, reducedMotion = false } = {}) {
     const pending = [...frames.values()]; frames.clear();
     for (const callback of pending) callback();
   };
-  return { snapshot, screen, document, start, cancel, advance, frame,
+  return { snapshot, screen, document, input, start, cancel, advance, frame,
     pending: () => timers.size + frames.size + renders.size,
     counts: () => ({ timers: timers.size, frames: frames.size, renders: renders.size }) };
 }
@@ -98,14 +107,14 @@ function fixture({ render = true, reducedMotion = false } = {}) {
 test("the opaque snapshot is removed after the new render and two paint frames without blending text", () => {
   const h = fixture();
   h.start();
-  assert.equal(h.screen.style.visibility, "hidden", "the new renderer cannot show through a transparent snapshot");
+  assert.equal(h.screen.style.opacity, "0", "the new renderer cannot show through a transparent snapshot");
   assert.equal(h.snapshot.animation, null);
   h.frame();
   assert.equal(h.snapshot.animation, null);
   h.frame();
   assert.equal(h.snapshot.animation, null);
   assert.equal(h.snapshot.isConnected, false);
-  assert.equal(h.screen.style.visibility, "inherit");
+  assert.equal(h.screen.style.opacity, "0.85");
   assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
 });
 
@@ -116,7 +125,7 @@ for (const render of [false, true]) {
     assert.equal(h.snapshot.isConnected, true);
     h.advance(1);
     assert.equal(h.snapshot.isConnected, false);
-    assert.equal(h.screen.style.visibility, "inherit");
+    assert.equal(h.screen.style.opacity, "0.85");
     assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
     h.frame();
     assert.equal(h.snapshot.animation, null);
@@ -129,7 +138,7 @@ test("hiding the document removes the snapshot before any suspended frames or ti
   h.document.hidden = true;
   h.document.dispatchEvent(new Event("visibilitychange"));
   assert.equal(h.snapshot.isConnected, false);
-  assert.equal(h.screen.style.visibility, "inherit");
+  assert.equal(h.screen.style.opacity, "0.85");
   assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
 });
 
@@ -140,12 +149,12 @@ test("teardown cancels a pending render or frames and is harmless after paint", 
     if (phase === "paint") { h.frame(); h.frame(); }
     h.cancel(); h.cancel();
     assert.equal(h.snapshot.isConnected, false);
-    assert.equal(h.screen.style.visibility, "inherit");
+    assert.equal(h.screen.style.opacity, "0.85");
     assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
     if (h.snapshot.animation) assert.equal(h.snapshot.animation.canceled, true);
     h.advance(1_000); h.frame();
     assert.equal(h.snapshot.isConnected, false);
-    assert.equal(h.screen.style.visibility, "inherit");
+    assert.equal(h.screen.style.opacity, "0.85");
   }
 });
 
@@ -156,6 +165,21 @@ test("40 renderer transitions leave no snapshots, animations or pending work", (
     assert.equal(h.snapshot.animation, null);
     assert.equal(h.snapshot.isConnected, false);
     assert.deepEqual(h.counts(), { timers: 0, frames: 0, renders: 0 });
+  }
+});
+
+test("renderer transitions preserve input focus on paint and timeout without stealing it back", () => {
+  for (const render of [false, true]) {
+    const h = fixture({ render });
+    h.start();
+    assert.equal(h.document.activeElement, h.input);
+    h.frame(); h.frame(); h.advance(250);
+    assert.equal(h.document.activeElement, h.input);
+    h.start();
+    const otherInput = {};
+    h.document.activeElement = otherInput;
+    h.frame(); h.frame(); h.advance(250);
+    assert.equal(h.document.activeElement, otherInput);
   }
 });
 

@@ -21,6 +21,16 @@ export interface NormalizedMinimapArea extends NormalizedMinimapPoint {
   height: number;
 }
 
+/** Snap both edges together so moving one-pixel borders stay on the device-pixel grid. */
+export function minimapPixelArea(area: NormalizedMinimapArea, pixelRatio = 1) {
+  const snap = (value: number): number => Math.round(value * pixelRatio) / pixelRatio;
+  const x = snap(area.x * MINIMAP_SURFACE_SIZE.width);
+  const y = snap(area.y * MINIMAP_SURFACE_SIZE.height);
+  const right = snap((area.x + area.width) * MINIMAP_SURFACE_SIZE.width);
+  const bottom = snap((area.y + area.height) * MINIMAP_SURFACE_SIZE.height);
+  return { x, y, width: right - x, height: bottom - y };
+}
+
 /**
  * Fit all supplied bounds with one scale for both axes and a padded perimeter.
  */

@@ -2,6 +2,16 @@
 
 [English](CHANGELOG.md) · [Русский](CHANGELOG.ru.md) · [简体中文](CHANGELOG.zh-CN.md)
 
+## 1.8.4
+
+- Carry forward the evaluation hotfix: avoid redundant work at zoom limits and prevent terminal text from overlapping during DOM/WebGL renderer changes.
+- Preserve every wheel event's pointer anchor and zoom limit when batching a burst into one camera update per frame. Direction reversals at a limit respond immediately, and newer direct navigation supersedes pending zoom.
+- Keep the canvas from scrolling back to a focused window while the user pans away.
+- Snap minimap rectangle edges to device pixels and use borders to avoid transient lines during movement.
+- Block Linux middle-button PRIMARY paste during canvas navigation while preserving explicit keyboard and context-menu paste. The guard is disabled on macOS and Windows.
+- Keep terminal input focused during renderer changes without taking focus back from another field.
+- CanvasLink remains at the signed 1.0 release; no Android code or pairing protocol changes are included.
+
 ## 1.8.3.1 — evaluation hotfix
 
 Technical version: `1.8.3-hotfix.1`. This is a prerelease for manual evaluation.

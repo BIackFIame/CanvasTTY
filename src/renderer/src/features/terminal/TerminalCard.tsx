@@ -310,7 +310,7 @@ function TerminalCardView({
   const rendererTransitionRef = useRef<{
     snapshot: HTMLElement;
     screen: HTMLElement;
-    visibility: string;
+    opacity: string;
     frame: number | null;
     render: { dispose(): void } | null;
     fallback: number | null;
@@ -325,7 +325,7 @@ function TerminalCardView({
     transition.visibilityCleanup?.();
     transition.render?.dispose();
     transition.snapshot.remove();
-    transition.screen.style.visibility = transition.visibility;
+    transition.screen.style.opacity = transition.opacity;
   };
   const beginRendererTransition = (terminal: Terminal): HTMLElement | null => {
     restoreRendererTransition();
@@ -360,8 +360,9 @@ function TerminalCardView({
       return null;
     }
     element.append(snapshot);
-    const visibility = screen.style.visibility;
-    screen.style.visibility = "hidden";
+    const opacity = screen.style.opacity;
+    // Keep xterm's input focused while hiding the replacement renderer behind the snapshot.
+    screen.style.opacity = "0";
     const onVisibilityChange = (): void => {
       if (document.hidden) restoreRendererTransition();
     };
@@ -369,7 +370,7 @@ function TerminalCardView({
     rendererTransitionRef.current = {
       snapshot,
       screen,
-      visibility,
+      opacity,
       frame: null,
       render: null,
       fallback: window.setTimeout(restoreRendererTransition, 250),
