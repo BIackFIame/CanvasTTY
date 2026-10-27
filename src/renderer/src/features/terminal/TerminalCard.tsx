@@ -309,10 +309,11 @@ function TerminalCardView({
   const fitRef = useRef<(() => void) | null>(null);
   const rendererTransitionRef = useRef<{
     snapshot: HTMLElement;
+    screen: HTMLElement;
+    opacity: string;
     frame: number | null;
     render: { dispose(): void } | null;
     fallback: number | null;
-    animation: Animation | null;
     visibilityCleanup: (() => void) | null;
   } | null>(null);
   const restoreRendererTransition = (): void => {
@@ -323,8 +324,8 @@ function TerminalCardView({
     if (transition.fallback !== null) window.clearTimeout(transition.fallback);
     transition.visibilityCleanup?.();
     transition.render?.dispose();
-    transition.animation?.cancel();
     transition.snapshot.remove();
+    transition.screen.style.opacity = transition.opacity;
   };
   const beginRendererTransition = (terminal: Terminal): HTMLElement | null => {
     restoreRendererTransition();
@@ -359,16 +360,20 @@ function TerminalCardView({
       return null;
     }
     element.append(snapshot);
+    const opacity = screen.style.opacity;
+    // Keep xterm's input focused while hiding the replacement renderer behind the snapshot.
+    screen.style.opacity = "0";
     const onVisibilityChange = (): void => {
       if (document.hidden) restoreRendererTransition();
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
     rendererTransitionRef.current = {
       snapshot,
+      screen,
+      opacity,
       frame: null,
       render: null,
       fallback: window.setTimeout(restoreRendererTransition, 250),
-      animation: null,
       visibilityCleanup: () => document.removeEventListener("visibilitychange", onVisibilityChange)
     };
     return snapshot;
@@ -376,26 +381,18 @@ function TerminalCardView({
   const revealRendererTransition = (terminal: Terminal, snapshot: HTMLElement): void => {
     const transition = rendererTransitionRef.current;
     if (!transition || transition.snapshot !== snapshot) return;
-    const fadeAfterPaint = (): void => {
+    const removeAfterPaint = (): void => {
       if (rendererTransitionRef.current !== transition) return;
       transition.frame = null;
-      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-        restoreRendererTransition();
-        return;
-      }
-      transition.animation = snapshot.animate([{ opacity: 1 }, { opacity: 0 }], {
-        duration: 180, easing: "ease-out", fill: "forwards"
-      });
-      transition.animation.onfinish = () => {
-        if (rendererTransitionRef.current === transition) restoreRendererTransition();
-      };
+      // Different renderer cell grids must never be blended into double text.
+      restoreRendererTransition();
     };
     const ready = (): void => {
       if (rendererTransitionRef.current !== transition || transition.frame !== null) return;
       transition.render?.dispose();
       transition.render = null;
       transition.frame = requestAnimationFrame(() => {
-        transition.frame = requestAnimationFrame(fadeAfterPaint);
+        transition.frame = requestAnimationFrame(removeAfterPaint);
       });
     };
     transition.render = terminal.onRender(ready);

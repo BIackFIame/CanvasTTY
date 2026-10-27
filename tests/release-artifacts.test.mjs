@@ -8,7 +8,7 @@ import test from "node:test";
 import YAML from "yaml";
 import manifest from "../package.json" with { type: "json" };
 
-test("release gate requires matching stable tag and complete update files", async () => {
+test("release gate requires the matching stable or hotfix tag and complete update files", async () => {
   const directory = await mkdtemp(join(tmpdir(), "canvastty-release-gate-"));
   const version = manifest.version;
   const files = [
@@ -28,12 +28,19 @@ test("release gate requires matching stable tag and complete update files", asyn
     assert.equal(run(`v${version}`).status, 0);
     assert.notEqual(run(`v${version}-beta.1`).status, 0);
     assert.notEqual(run("v9.9.9").status, 0);
+    assert.notEqual(run("v1.8.3.1").status, 0);
     await writeFile(join(directory, files[4]), "changed after metadata generation");
     assert.notEqual(run(`v${version}`).status, 0);
     await writeFile(join(directory, files[4]), "artifact");
     await rm(join(directory, files[3]));
     assert.notEqual(run(`v${version}`).status, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("evaluation releases are prereleases and never replace the latest stable release", async () => {
+  const workflow = YAML.parse(await readFile(new URL("../.github/workflows/release.yml", import.meta.url), "utf8"));
+  const publish = workflow.jobs.release.steps.find(step => step.name === "Create GitHub release").run;
+  assert.match(publish, /if \[\[ "\$\{GITHUB_REF_NAME\}" == \*-\* \]\]; then\s+args\+=\(--prerelease --latest=false\)/);
 });
 
 test("macOS CI can package pull requests without the release owner's key", async () => {

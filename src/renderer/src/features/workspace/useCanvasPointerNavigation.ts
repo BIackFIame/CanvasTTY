@@ -18,6 +18,7 @@ import {
   type CanvasMarqueeRect
 } from "./canvasSelectionGesture";
 import { EDGE_PAN_SPEEDS, createEdgePanLoop, edgePanVelocity } from "./edgePan";
+import { attachMiddleButtonPasteGuard } from "./middleButtonPaste";
 
 interface PanState {
   pointerId: number;
@@ -249,6 +250,11 @@ export function useCanvasPointerNavigation({
     window.addEventListener("blur", cancelPointerGesture);
     return () => window.removeEventListener("blur", cancelPointerGesture);
   }, [cancelPointerGesture]);
+
+  useEffect(() => {
+    const element = viewport.current;
+    if (element) return attachMiddleButtonPasteGuard(element, window.canvasTTY.window.platform);
+  }, [viewport]);
 
   useEffect(() => () => {
     edgePan.stop();
