@@ -13,12 +13,12 @@ export interface RafAccumulator<T> {
   dispose(): void;
 }
 
-export function createRafAccumulator<T>(
-  merge: (pending: T | null, next: T) => T,
+export function createRafAccumulator<T, Input = T>(
+  merge: (pending: T | null, next: Input) => T,
   commit: (value: T) => void,
   schedule: (callback: () => void) => number = requestAnimationFrame,
   cancel: (handle: number) => void = cancelAnimationFrame
-): RafAccumulator<T> {
+): RafAccumulator<Input> {
   let frame: number | null = null;
   let pending: T | null = null;
 
@@ -34,7 +34,7 @@ export function createRafAccumulator<T>(
   };
 
   return {
-    push(value: T): void {
+    push(value: Input): void {
       pending = merge(pending, value);
       if (frame === null) frame = schedule(flush);
     },

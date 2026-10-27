@@ -175,6 +175,6 @@ jobs:
             --generate-notes
           )
           if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
-            args+=(--prerelease)
+            args+=(--prerelease --latest=false)
           fi
           gh "${args[@]}"

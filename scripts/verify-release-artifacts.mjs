@@ -6,8 +6,8 @@ import YAML from "yaml";
 
 const [tag, directory = "release-artifacts"] = process.argv.slice(2);
 const manifest = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-if (!/^v\d+\.\d+\.\d+$/.test(tag ?? "") || tag.slice(1) !== manifest.version) {
-  throw new Error(`Release tag must equal package version v${manifest.version} and be stable`);
+if (!/^v\d+\.\d+\.\d+(?:-hotfix\.\d+)?$/.test(tag ?? "") || tag.slice(1) !== manifest.version) {
+  throw new Error(`Release tag must equal package version v${manifest.version} and be stable or a hotfix prerelease`);
 }
 const names = await readdir(resolve(directory));
 const version = manifest.version.replaceAll(".", "\\.");
@@ -65,4 +65,4 @@ if (!appcast.includes(`<sparkle:version>${manifest.version}</sparkle:version>`) 
     !appcast.includes("sparkle:edSignature=") || !appcast.includes("<!-- sparkle-signatures:")) {
   throw new Error("Mac appcast has no signed feed and archive entry for this version");
 }
-console.log(`Verified stable ${tag} release artifacts`);
+console.log(`Verified ${tag} release artifacts`);
